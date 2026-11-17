@@ -238,6 +238,7 @@ func TestAssertionFailures(t *testing.T) {
 		name    string
 		cse     Case
 		result  transport.CompleteResult
+		elapsed time.Duration
 		setupFn func(*Fixture)
 	}{
 		// Positive cases: conforming results return nil error
@@ -941,6 +942,104 @@ func TestAssertionFailures(t *testing.T) {
 				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
 			},
 		},
+
+		// Additional negative cases to verify specific assertions
+		{
+			name: "success: scrub count not 0",
+			cse:  Success,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      1,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+		},
+		{
+			name: "success: transport status not ok",
+			cse:  Success,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: "http_200",
+			},
+		},
+		{
+			name: "malformed_body: empty raw output",
+			cse:  MalformedBody,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusMalformedBody,
+			},
+		},
+		{
+			name: "malformed_body: non-empty text",
+			cse:  MalformedBody,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "error details",
+				Text:            "error message",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusMalformedBody,
+			},
+		},
+		{
+			name:    "deadline_exceeded: exceeded timeout bound",
+			cse:     DeadlineExceeded,
+			elapsed: 900 * time.Millisecond,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusTimeout,
+			},
+		},
+		{
+			name: "secret_echo: text contains secret (raw output correctly scrubbed)",
+			cse:  SecretEcho,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "Response with [REDACTED-SECRET] embedded",
+				Text:            "Response with test-secret embedded",
+				ScrubCount:      1,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				f.Secret = "test-secret"
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -949,7 +1048,11 @@ func TestAssertionFailures(t *testing.T) {
 			if tt.setupFn != nil {
 				tt.setupFn(&testFixture)
 			}
-			err := assertCase(tt.cse, req, tt.result, testFixture, 100*time.Millisecond)
+			elapsed := tt.elapsed
+			if elapsed == 0 {
+				elapsed = 100 * time.Millisecond
+			}
+			err := assertCase(tt.cse, req, tt.result, testFixture, elapsed)
 
 			// Positive cases should return nil
 			if strings.Contains(tt.name, "conforming") {
