@@ -25,28 +25,28 @@ func (s SecretRef) String() string {
 }
 
 type Participant struct {
-	ID            string        `toml:"id"`
-	Model         string        `toml:"model"`
-	Route         string        `toml:"route"` // "api" or "cli"
-	Endpoint      string        `toml:"endpoint"`
-	Binary        string        `toml:"binary"`
-	EligibleRoles []Role        `toml:"eligible_roles"`
-	Pool          string        `toml:"pool"`
+	ID            string `toml:"id"`
+	Model         string `toml:"model"`
+	Route         string `toml:"route"` // "api" or "cli"
+	Endpoint      string `toml:"endpoint"`
+	Binary        string `toml:"binary"`
+	EligibleRoles []Role `toml:"eligible_roles"`
+	Pool          string `toml:"pool"`
 }
 
 type EndpointProfile struct {
-	Name              string            `toml:"name"`
-	BaseURL           string            `toml:"base_url"`
-	Auth              *SecretRef        `toml:"auth"`
+	Name              string               `toml:"name"`
+	BaseURL           string               `toml:"base_url"`
+	Auth              *SecretRef           `toml:"auth"`
 	ExtraHeaders      map[string]SecretRef `toml:"extra_headers"`
-	DeclaredLocation  string            `toml:"declared_location"`  // "local", "lan", "corporate", "cloud"
-	DeclaredExecution string            `toml:"declared_execution"` // "local", "remote", "unknown"
-	DeclaredBilling   string            `toml:"declared_billing"`   // "none", "flat", "metered", "unknown"
-	NetworkDependency string            `toml:"network_dependency"` // "none", "vpn", "other"
-	Dialect           string            `toml:"dialect"`            // "chat_completions_v1"
-	MaxTokensField    string            `toml:"max_tokens_field"`   // "max_tokens", "max_completion_tokens", ""
-	Models            []string          `toml:"models"`
-	TermsNote         string            `toml:"terms_note"`
+	DeclaredLocation  string               `toml:"declared_location"`  // "local", "lan", "corporate", "cloud"
+	DeclaredExecution string               `toml:"declared_execution"` // "local", "remote", "unknown"
+	DeclaredBilling   string               `toml:"declared_billing"`   // "none", "flat", "metered", "unknown"
+	NetworkDependency string               `toml:"network_dependency"` // "none", "vpn", "other"
+	Dialect           string               `toml:"dialect"`            // "chat_completions_v1"
+	MaxTokensField    string               `toml:"max_tokens_field"`   // "max_tokens", "max_completion_tokens", ""
+	Models            []string             `toml:"models"`
+	TermsNote         string               `toml:"terms_note"`
 }
 
 type Preset struct {
@@ -56,16 +56,16 @@ type Preset struct {
 }
 
 type RoutingPolicy struct {
-	LocalOnly            bool     `toml:"local_only"`
-	AllowedDestinations  []string `toml:"allowed_destinations"`
+	LocalOnly           bool     `toml:"local_only"`
+	AllowedDestinations []string `toml:"allowed_destinations"`
 }
 
 type Roster struct {
-	DefaultPreset  string              `toml:"default_preset"`
-	Participants   []Participant       `toml:"participants"`
-	Endpoints      []EndpointProfile   `toml:"endpoints"`
-	Presets        map[string]Preset   `toml:"presets"`
-	Policy         RoutingPolicy       `toml:"policy"`
+	DefaultPreset string            `toml:"default_preset"`
+	Participants  []Participant     `toml:"participants"`
+	Endpoints     []EndpointProfile `toml:"endpoints"`
+	Presets       map[string]Preset `toml:"presets"`
+	Policy        RoutingPolicy     `toml:"policy"`
 }
 
 // String returns a string representation that never contains resolved secret values.

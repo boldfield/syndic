@@ -458,8 +458,7 @@ func TestRosterStringNoSecret(t *testing.T) {
 }
 
 func TestResolveEnv(t *testing.T) {
-	os.Setenv("TEST_SECRET", "test-value")
-	defer os.Unsetenv("TEST_SECRET")
+	t.Setenv("TEST_SECRET", "test-value")
 
 	value, err := resolveEnv("TEST_SECRET")
 	if err != nil {
@@ -520,8 +519,7 @@ func TestEnvFileResolver(t *testing.T) {
 	resolver := NewEnvFileResolver(dir)
 
 	// Test env resolver
-	os.Setenv("TEST_SECRET", "env-value")
-	defer os.Unsetenv("TEST_SECRET")
+	t.Setenv("TEST_SECRET", "env-value")
 
 	value, err := resolver.Resolve(SecretRef{Source: "env", Name: "TEST_SECRET"})
 	if err != nil {
@@ -548,8 +546,7 @@ func TestEnvFileResolver(t *testing.T) {
 
 func TestResolveWithSentinelString(t *testing.T) {
 	// This test verifies that fmt.Sprintf output never contains resolved secret values
-	os.Setenv("SENTINEL_SECRET", "SENTINEL_VALUE_12345")
-	defer os.Unsetenv("SENTINEL_SECRET")
+	t.Setenv("SENTINEL_SECRET", "SENTINEL_VALUE_12345")
 
 	dir := t.TempDir()
 	resolver := NewEnvFileResolver(dir)
@@ -686,6 +683,7 @@ func TestStressTest(t *testing.T) {
 			DeclaredLocation:  "local",
 			DeclaredExecution: "local",
 			DeclaredBilling:   "none",
+			NetworkDependency: "none",
 		}
 	}
 
@@ -708,5 +706,320 @@ func TestStressTest(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed > 100*time.Millisecond {
 		t.Logf("Validation took %v (may be slow)", elapsed)
+	}
+}
+
+func TestUnknownParticipantRoute(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "grpc", Endpoint: "", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for unknown route")
+	}
+	if !strings.Contains(err.Error(), "unknown route") {
+		t.Errorf("error doesn't mention unknown route: %v", err)
+	}
+}
+
+func TestEmptyParticipantRoute(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "", Endpoint: "", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty route")
+	}
+	if !strings.Contains(err.Error(), "unknown route") {
+		t.Errorf("error doesn't mention unknown route: %v", err)
+	}
+}
+
+func TestUnknownMaxTokensField(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", MaxTokensField: "bogus", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for unknown max_tokens_field")
+	}
+	if !strings.Contains(err.Error(), "unknown max_tokens_field") {
+		t.Errorf("error doesn't mention unknown max_tokens_field: %v", err)
+	}
+}
+
+func TestUnknownSecretSource(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Auth: &SecretRef{Source: "vault", Name: "key"}, Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for unknown secret source")
+	}
+	if !strings.Contains(err.Error(), "unknown source") {
+		t.Errorf("error doesn't mention unknown source: %v", err)
+	}
+}
+
+func TestEmptyDeclaredLocation(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "", Dialect: "chat_completions_v1", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty declared_location")
+	}
+	if !strings.Contains(err.Error(), "empty declared_location") {
+		t.Errorf("error doesn't mention empty declared_location: %v", err)
+	}
+}
+
+func TestEmptyDeclaredExecution(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", Dialect: "chat_completions_v1", DeclaredExecution: "", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty declared_execution")
+	}
+	if !strings.Contains(err.Error(), "empty declared_execution") {
+		t.Errorf("error doesn't mention empty declared_execution: %v", err)
+	}
+}
+
+func TestEmptyDeclaredBilling(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", Dialect: "chat_completions_v1", DeclaredExecution: "local", DeclaredBilling: "", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty declared_billing")
+	}
+	if !strings.Contains(err.Error(), "empty declared_billing") {
+		t.Errorf("error doesn't mention empty declared_billing: %v", err)
+	}
+}
+
+func TestEmptyNetworkDependency(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", Dialect: "chat_completions_v1", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: ""},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty network_dependency")
+	}
+	if !strings.Contains(err.Error(), "empty network_dependency") {
+		t.Errorf("error doesn't mention empty network_dependency: %v", err)
+	}
+}
+
+func TestEmptyDialect(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", Dialect: "", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty dialect")
+	}
+	if !strings.Contains(err.Error(), "empty dialect") {
+		t.Errorf("error doesn't mention empty dialect: %v", err)
+	}
+}
+
+func TestLocalOnlyRejectsNonLocalExecution(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+			{ID: "p2", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", DeclaredExecution: "remote", DeclaredBilling: "none", Dialect: "chat_completions_v1", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{"p2"}},
+		},
+		Policy: RoutingPolicy{LocalOnly: true},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for local_only rejecting non-local execution")
+	}
+	if !strings.Contains(err.Error(), "local_only policy rejects") {
+		t.Errorf("error doesn't mention local_only rejection: %v", err)
+	}
+}
+
+func TestLocalOnlyRejectsCloud(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+			{ID: "p2", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "cloud", DeclaredExecution: "local", DeclaredBilling: "none", Dialect: "chat_completions_v1", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{"p2"}},
+		},
+		Policy: RoutingPolicy{LocalOnly: true},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for local_only rejecting cloud endpoint")
+	}
+	if !strings.Contains(err.Error(), "local_only policy rejects") {
+		t.Errorf("error doesn't mention local_only rejection: %v", err)
+	}
+}
+
+func TestLocalOnlyRejectsLan(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+			{ID: "p2", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "lan", DeclaredExecution: "local", DeclaredBilling: "none", Dialect: "chat_completions_v1", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{"p2"}},
+		},
+		Policy: RoutingPolicy{LocalOnly: true},
+	}
+	err := roster.Validate()
+	if err != nil {
+		t.Errorf("LocalOnly should allow lan location: %v", err)
+	}
+}
+
+func TestAllowedDestinationsNonExistentWhenLocalOnly(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", Dialect: "chat_completions_v1", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+		Policy: RoutingPolicy{LocalOnly: true, AllowedDestinations: []string{"nonexistent"}},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for non-existent endpoint in allowed_destinations")
+	}
+	if !strings.Contains(err.Error(), "references non-existent endpoint") {
+		t.Errorf("error doesn't mention non-existent endpoint: %v", err)
+	}
+}
+
+func TestMeteredMessageIncludesCeiling(t *testing.T) {
+	roster := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "p1", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}, Pool: "p"},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", DeclaredBilling: "metered", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "p1", RequiredReviewers: []string{}},
+		},
+	}
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected error for metered billing")
+	}
+	errStr := err.Error()
+	if !strings.Contains(errStr, "metered") {
+		t.Errorf("error doesn't mention metered: %v", err)
+	}
+	if !strings.Contains(errStr, "spending ceiling") {
+		t.Errorf("error doesn't mention spending ceiling: %v", err)
+	}
+	if !strings.Contains(errStr, "alpha") {
+		t.Errorf("error doesn't mention alpha: %v", err)
 	}
 }

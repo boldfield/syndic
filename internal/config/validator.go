@@ -31,6 +31,11 @@ func (r *Roster) Validate() error {
 
 	// Validate participants
 	for _, p := range r.Participants {
+		// Validate route
+		if p.Route != "api" && p.Route != "cli" {
+			errs = append(errs, fmt.Errorf("participant %q has unknown route: %q", p.ID, p.Route))
+		}
+
 		// Check if participant references an endpoint that exists
 		if p.Route == "api" && p.Endpoint != "" && !seenEndpointNames[p.Endpoint] {
 			errs = append(errs, fmt.Errorf("participant %q references non-existent endpoint: %q", p.ID, p.Endpoint))
@@ -65,9 +70,10 @@ func (r *Roster) Validate() error {
 
 	// Validate endpoint profiles
 	for _, ep := range r.Endpoints {
-		// Validate declared location
-		if ep.DeclaredLocation != "" &&
-			ep.DeclaredLocation != "local" &&
+		// Validate declared location (required, not empty)
+		if ep.DeclaredLocation == "" {
+			errs = append(errs, fmt.Errorf("endpoint %q has empty declared_location", ep.Name))
+		} else if ep.DeclaredLocation != "local" &&
 			ep.DeclaredLocation != "lan" &&
 			ep.DeclaredLocation != "corporate" &&
 			ep.DeclaredLocation != "cloud" {
@@ -75,18 +81,20 @@ func (r *Roster) Validate() error {
 				ep.Name, ep.DeclaredLocation))
 		}
 
-		// Validate declared execution
-		if ep.DeclaredExecution != "" &&
-			ep.DeclaredExecution != "local" &&
+		// Validate declared execution (required, not empty)
+		if ep.DeclaredExecution == "" {
+			errs = append(errs, fmt.Errorf("endpoint %q has empty declared_execution", ep.Name))
+		} else if ep.DeclaredExecution != "local" &&
 			ep.DeclaredExecution != "remote" &&
 			ep.DeclaredExecution != "unknown" {
 			errs = append(errs, fmt.Errorf("endpoint %q has unknown declared_execution: %q",
 				ep.Name, ep.DeclaredExecution))
 		}
 
-		// Validate declared billing
-		if ep.DeclaredBilling != "" &&
-			ep.DeclaredBilling != "none" &&
+		// Validate declared billing (required, not empty)
+		if ep.DeclaredBilling == "" {
+			errs = append(errs, fmt.Errorf("endpoint %q has empty declared_billing", ep.Name))
+		} else if ep.DeclaredBilling != "none" &&
 			ep.DeclaredBilling != "flat" &&
 			ep.DeclaredBilling != "metered" &&
 			ep.DeclaredBilling != "unknown" {
@@ -94,24 +102,49 @@ func (r *Roster) Validate() error {
 				ep.Name, ep.DeclaredBilling))
 		}
 
-		// Validate network dependency
-		if ep.NetworkDependency != "" &&
-			ep.NetworkDependency != "none" &&
+		// Validate network dependency (required, not empty)
+		if ep.NetworkDependency == "" {
+			errs = append(errs, fmt.Errorf("endpoint %q has empty network_dependency", ep.Name))
+		} else if ep.NetworkDependency != "none" &&
 			ep.NetworkDependency != "vpn" &&
 			ep.NetworkDependency != "other" {
 			errs = append(errs, fmt.Errorf("endpoint %q has unknown network_dependency: %q",
 				ep.Name, ep.NetworkDependency))
 		}
 
-		// Validate dialect
-		if ep.Dialect != "" && ep.Dialect != "chat_completions_v1" {
+		// Validate dialect (required, not empty)
+		if ep.Dialect == "" {
+			errs = append(errs, fmt.Errorf("endpoint %q has empty dialect", ep.Name))
+		} else if ep.Dialect != "chat_completions_v1" {
 			errs = append(errs, fmt.Errorf("endpoint %q has unknown dialect: %q",
 				ep.Name, ep.Dialect))
 		}
 
+		// Validate max tokens field (optional, "" is allowed, but if set must be valid)
+		if ep.MaxTokensField != "" &&
+			ep.MaxTokensField != "max_tokens" &&
+			ep.MaxTokensField != "max_completion_tokens" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown max_tokens_field: %q",
+				ep.Name, ep.MaxTokensField))
+		}
+
+		// Validate secret refs
+		if ep.Auth != nil {
+			if ep.Auth.Source != "env" && ep.Auth.Source != "file" {
+				errs = append(errs, fmt.Errorf("endpoint %q auth has unknown source: %q",
+					ep.Name, ep.Auth.Source))
+			}
+		}
+		for headerName, secretRef := range ep.ExtraHeaders {
+			if secretRef.Source != "env" && secretRef.Source != "file" {
+				errs = append(errs, fmt.Errorf("endpoint %q extra_headers[%q] has unknown source: %q",
+					ep.Name, headerName, secretRef.Source))
+			}
+		}
+
 		// Check for metered billing
 		if ep.DeclaredBilling == "metered" {
-			errs = append(errs, fmt.Errorf("endpoint %q has metered billing; metered endpoints cannot be dispatched until the spending ceiling exists",
+			errs = append(errs, fmt.Errorf("endpoint %q has metered billing; metered endpoints cannot be dispatched until the spending ceiling exists and no ceiling is implemented in the alpha",
 				ep.Name))
 		}
 	}
@@ -203,6 +236,15 @@ func (r *Roster) Validate() error {
 		errs = append(errs, fmt.Errorf("default_preset %q must have mode review", r.DefaultPreset))
 	}
 
+	// Validate AllowedDestinations (always, not just for mixed policy)
+	seenAllowedDests := make(map[string]bool)
+	for _, dest := range r.Policy.AllowedDestinations {
+		seenAllowedDests[dest] = true
+		if !seenEndpointNames[dest] {
+			errs = append(errs, fmt.Errorf("allowed_destinations references non-existent endpoint: %q", dest))
+		}
+	}
+
 	// Validate LocalOnly policy
 	if r.Policy.LocalOnly {
 		for _, p := range r.Participants {
@@ -212,7 +254,7 @@ func (r *Roster) Validate() error {
 					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_location %q on participant %q",
 						p.Endpoint, ep.DeclaredLocation, p.ID))
 				}
-				if ep.DeclaredExecution != "local" && ep.DeclaredExecution != "" {
+				if ep.DeclaredExecution != "local" {
 					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_execution %q on participant %q",
 						p.Endpoint, ep.DeclaredExecution, p.ID))
 				}
@@ -222,14 +264,6 @@ func (r *Roster) Validate() error {
 
 	// Validate mixed policy (not LocalOnly)
 	if !r.Policy.LocalOnly {
-		seenAllowedDests := make(map[string]bool)
-		for _, dest := range r.Policy.AllowedDestinations {
-			seenAllowedDests[dest] = true
-			if !seenEndpointNames[dest] {
-				errs = append(errs, fmt.Errorf("allowed_destinations references non-existent endpoint: %q", dest))
-			}
-		}
-
 		// Check that every participant's endpoint that is corporate/cloud is in allowed destinations
 		for _, p := range r.Participants {
 			if p.Route == "api" && p.Endpoint != "" {

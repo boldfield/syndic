@@ -1,5 +1,17 @@
+# The syndic roster defines participants, endpoints, presets, and routing policies
+# for managing code review workflows across multiple LLM providers.
+
+# default_preset: the preset mode to use when no other is specified.
+# Must reference a preset with mode="review" (the shipped default is review-based).
 default_preset = "review"
 
+# participants: array of participants (authors and reviewers)
+# - id: unique identifier for this participant
+# - model: the LLM model this participant uses
+# - route: "api" (remote endpoint) or "cli" (local binary)
+# - endpoint: for api route, the name of the endpoint profile to use
+# - eligible_roles: ["author"] or ["reviewer"] or both
+# - pool: resource pool for scheduling
 [[participants]]
 id = "author"
 model = "llama2"
@@ -16,6 +28,15 @@ endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
 
+# endpoints: array of endpoint profiles describing remote LLM services
+# - name: unique identifier for this endpoint
+# - base_url: the service's base URL
+# - declared_location: "local", "lan", "corporate", or "cloud"
+# - declared_execution: "local", "remote", or "unknown"
+# - declared_billing: "none", "flat", "metered", or "unknown"
+# - network_dependency: "none", "vpn", or "other"
+# - dialect: "chat_completions_v1" (the OpenAI-compatible chat API)
+# - models: allowlist of model names this endpoint supports
 [[endpoints]]
 name = "local"
 base_url = "http://localhost:11434/v1"
@@ -26,6 +47,9 @@ network_dependency = "none"
 dialect = "chat_completions_v1"
 models = ["llama2"]
 
+# presets: named review configurations
+# - review: mode requires an author and one or more required reviewers
+# - solo: mode allows an author to work alone with no reviewers
 [presets.review]
 mode = "review"
 author = "author"
@@ -36,6 +60,9 @@ mode = "solo"
 author = "author"
 required_reviewers = []
 
+# policy: routing policy controlling which endpoints can be used
+# - local_only: when true, only endpoints with local execution are allowed
+# - allowed_destinations: when local_only=false, remote endpoints must be listed here
 [policy]
 local_only = true
 allowed_destinations = []

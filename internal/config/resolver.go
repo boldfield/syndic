@@ -27,10 +27,7 @@ func resolveFile(dir string, name string) (string, error) {
 	}
 
 	// Trim one trailing newline
-	result := string(content)
-	if strings.HasSuffix(result, "\n") {
-		result = result[:len(result)-1]
-	}
+	result := strings.TrimSuffix(string(content), "\n")
 
 	return result, nil
 }
