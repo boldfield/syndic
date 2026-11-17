@@ -145,7 +145,7 @@ END;
 
 -- Prevent setting attempts.raw_output twice
 CREATE TRIGGER attempts_raw_output_immutable BEFORE UPDATE OF raw_output ON attempts
-WHEN NEW.raw_output IS NOT NULL AND OLD.raw_output IS NOT NULL
+WHEN OLD.raw_output IS NOT NULL
 BEGIN
 	SELECT RAISE(ABORT, 'attempts.raw_output cannot be updated once set');
 END;

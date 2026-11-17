@@ -16,7 +16,11 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open failed: %v", err)
 	}
-	defer db1.Close()
+	defer func() {
+		if err := db1.Close(); err != nil {
+			t.Logf("failed to close db1: %v", err)
+		}
+	}()
 
 	// Verify tables exist by checking if we can insert into them
 	conn := db1.Conn()
@@ -34,7 +38,11 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Open failed: %v", err)
 	}
-	defer db2.Close()
+	defer func() {
+		if err := db2.Close(); err != nil {
+			t.Logf("failed to close db2: %v", err)
+		}
+	}()
 
 	var version1, version2 int
 	err = conn.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version1)
@@ -290,6 +298,43 @@ func TestRawOutputImmutability(t *testing.T) {
 	}
 }
 
+func TestRawOutputClearingPrevented(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Create attempt with raw_output
+	attemptID := "attempt-1"
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, raw_output)
+		VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed', 'first output')
+	`, attemptID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert attempt: %v", err)
+	}
+
+	// Try to clear raw_output
+	_, err = conn.Exec("UPDATE attempts SET raw_output = NULL WHERE id = ?", attemptID)
+	if err == nil {
+		t.Errorf("expected UPDATE to clear raw_output to fail, but succeeded")
+	}
+
+	// Verify value is still set
+	var output string
+	err = conn.QueryRow("SELECT raw_output FROM attempts WHERE id = ?", attemptID).Scan(&output)
+	if err != nil {
+		t.Fatalf("failed to query raw_output: %v", err)
+	}
+	if output != "first output" {
+		t.Errorf("raw_output was changed to %q", output)
+	}
+}
+
 func TestManifestImmutability(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -330,6 +375,34 @@ func TestForeignKeyConstraints(t *testing.T) {
 	`)
 	if err == nil {
 		t.Errorf("expected foreign key constraint to prevent insert, but succeeded")
+	}
+}
+
+func TestForeignKeyEnforcedOnNewConnection(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
+	}()
+
+	conn := db.Conn()
+
+	// Set MaxIdleConns to 0 to force a new connection on the next query
+	conn.SetMaxIdleConns(0)
+
+	// Try to insert attempt for non-existent turn on a new connection
+	_, err = conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at)
+		VALUES ('attempt-1', 'nonexistent-turn', 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP)
+	`)
+	if err == nil {
+		t.Errorf("expected foreign key constraint to prevent insert on new connection, but succeeded")
 	}
 }
 
@@ -387,7 +460,9 @@ func openTestDB(t *testing.T) (*journal.DB, func()) {
 		t.Fatalf("failed to open database: %v", err)
 	}
 	return db, func() {
-		db.Close()
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
 	}
 }
 

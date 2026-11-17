@@ -21,28 +21,20 @@ type DB struct {
 // migrations, and returns a handle. It enables WAL mode and foreign key
 // constraints. The caller must call Close on the returned DB.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path)
+	// Use DSN to enable WAL mode and foreign keys on all connections
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-
-	// Enable WAL mode for better concurrency
-	if _, err := sqlDB.Exec("PRAGMA journal_mode = WAL"); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("enable WAL mode: %w", err)
-	}
-
-	// Enable foreign key constraints
-	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	db := &DB{conn: sqlDB}
 
 	// Apply any pending migrations
 	if err := db.migrate(); err != nil {
-		sqlDB.Close()
+		if closeErr := sqlDB.Close(); closeErr != nil {
+			return nil, fmt.Errorf("migration failed: %w; close also failed: %w", err, closeErr)
+		}
 		return nil, err
 	}
 
@@ -112,13 +104,17 @@ func (db *DB) migrate() error {
 		}
 
 		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("execute migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+			}
 			return fmt.Errorf("execute migration %s: %w", mig.Name(), err)
 		}
 
 		// Record the applied migration
 		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("record migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+			}
 			return fmt.Errorf("record migration %s: %w", mig.Name(), err)
 		}
 
