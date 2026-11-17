@@ -24,7 +24,7 @@ Check with `shasum -a 256 docs/design/*.md`. The design is the hashed text.
 
 ## Status
 
-Design approved November 17, 2026. Milestone A (foundations) specified, not yet registered. No code.
+Design approved November 17, 2026. Milestone A (foundations) specified; Odonian project and design document registered, tasks not yet. No code.
 
 ## License
 

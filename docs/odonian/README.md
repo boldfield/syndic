@@ -8,7 +8,8 @@ This directory holds everything needed to register syndic in Odonian: the Projec
 2. **Project.** `project.json`.
 3. **Document.** `document.json`, with `commit` set to the hash of the commit that added the design docs. Capture the returned document UUID; every task needs it.
 4. **Tasks, batch by batch.** `milestone-a.md` lists the batches. Each batch is one `POST` with a JSON array. Within a batch, `key` values let later tasks depend on earlier ones. Across batches, `depends_on` must use the UUIDs returned by earlier posts, so record them.
-5. **Approval gate.** Brian approves each batch before it is posted. The standing rule is two or three tasks per batch. Do not post batch N+1 until batch N's tasks are merged or Brian says otherwise.
+5. **Promote.** Tasks are created in `backlog` and cannot be claimed until promoted: `POST /tasks/{id}/promote` for each, once Brian has approved the batch.
+6. **Approval gate.** Brian approves each batch before it is posted. The standing rule is two or three tasks per batch. Do not post batch N+1 until batch N's tasks are merged or Brian says otherwise.
 
 ## Files
 
@@ -16,7 +17,14 @@ This directory holds everything needed to register syndic in Odonian: the Projec
 - `document.json`: the design Document body. Fill in `commit`.
 - `milestone-a.md`: the batch plan, dependency graph and the reasoning behind the split.
 - `tasks/A-NN-*.md`: one file per task. The `spec` field for the API is the body of the file below the front matter, verbatim. Front matter holds the API fields.
-- `tasks/batch-1.json` and following: ready-to-post arrays assembled from the task files. `document_id` and cross-batch `depends_on` are placeholders to fill from earlier responses.
+- `tasks/batch-1.json` and following: ready-to-post arrays generated from the task files by `tasks/build-batches.py`. Regenerate rather than editing them by hand.
+
+## Registered identifiers
+
+- Repository: `github.com/boldfield/syndic`, design docs added in commit `0ca84df87d79079ac193ca53eadfef1fa0e11bdb`.
+- Project: `99942488-1ab4-49fa-a37b-faf2aa02158b`
+- Design Document: `052d82ca-4133-4520-bf4f-9609683da1f8`
+- Tasks: none registered yet.
 
 ## Model and review defaults
 

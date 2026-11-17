@@ -5,7 +5,7 @@ Usage: python3 build-batches.py [--document-id UUID] [--uuid A-01=UUID ...]
 
 Reads front matter (key, title, model, review_models, escalate, agent_merge,
 track, depends_on) and uses the body below the front matter as `spec`,
-verbatim. Writes batch-1.json .. batch-4.json next to this script.
+verbatim. Writes one batch-N.json per entry in BATCHES next to this script.
 
 Cross-batch depends_on entries become FILL_UUID_<key> placeholders unless a
 --uuid mapping is supplied. document_id is a placeholder unless --document-id
@@ -15,7 +15,14 @@ returned, so the next batch file is complete.
 import argparse, json, pathlib, re, sys
 
 HERE = pathlib.Path(__file__).parent
-BATCHES = [["A-01", "A-02"], ["A-03", "A-04"], ["A-05", "A-06"], ["A-07", "A-08"]]
+BATCHES = [
+    ["A-01", "A-02"],
+    ["A-03a", "A-04a"],
+    ["A-03b", "A-04b"],
+    ["A-03c", "A-05", "A-06"],
+    ["A-07a", "A-07b"],
+    ["A-08"],
+]
 
 
 def parse(path):

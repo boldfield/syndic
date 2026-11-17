@@ -6,7 +6,7 @@ review_models: [opus]
 escalate: true
 agent_merge: false
 track: build
-depends_on: [A-04]
+depends_on: [A-04b]
 ---
 
 ## Goal
@@ -15,28 +15,41 @@ An in-process `transport.Adapter` that can be scripted to produce every status a
 
 ## Design reference
 
-`docs/design/v3-delta-api-alpha.md` section 1 (contract) and section 4 item 9 (fake adapter drives every negative case). `docs/design/v2-candidate.md` section 10 (deterministic failure tests).
+`docs/design/v3-delta-api-alpha.md` section 1 (contract), section 4 item 9 (the fake adapter drives every negative case) and section 6 (verdict envelope text, for the fixtures). `docs/design/v2-candidate.md` section 10 (deterministic failure tests).
 
 ## Deliverables
 
-Package `internal/transport/fake`.
+Package `internal/transport/fake`. Standard library only. Do not change `internal/transport` or `internal/transport/contracttest`; if either is insufficient, stop and report.
 
-1. `Script`: an ordered list of `Step`s. Each `Step` says what the next `Complete` call returns: `Reply{Text, Status, NativeFinish, Identity, Delay}`, `Hang` (block until context cancelled, then `interrupted`), `Echo{Secret}` (returns body containing the given string, to exercise the scrub), `Error{TransportStatus}`, `WrongIdentity{Model}`.
-2. `New(script Script, opts ...Option) *Adapter` implementing `transport.Adapter`. Options: `WithIdentity(ModelIdentity)`, `WithCapabilities(CapabilityRecord)`, `WithSecrets([]string)` (the values the adapter pretends it resolved, so `Echo` steps get scrubbed exactly as a real adapter would).
-3. `Complete` consumes one step per call, applies `transport.Scrub` with the configured secrets, echoes the request envelope, and records the call (`Calls() []CompleteRequest`) so tests can assert what the engine sent, including the full message array.
-4. `Cancel` marks the current `Hang` step as cancelled; `ServerConfirmed` is `yes` for the fake, with an option to make it `unknown`.
-5. `Probe` returns the configured `CapabilityRecord`; `Usage` returns a counter or `ErrUsageUnavailable` per option.
-6. A `contracttest.Scenario` implementation so the A-04 harness runs against this adapter.
-7. Helper constructors for common scripts: `Approves(candidateHash, attemptID)` returning a well-formed VERDICT v1 approve block (format from delta section 6), `Blocks(...)`, `ProseApprove()` (the word "approve" with no envelope), `StaleHash()`, `ApproveWithChanges()`, `DoubleEnvelope()`, `EndVerdictInReason()`. These make milestone B's negative tests one-liners. The verdict text format is fixed by section 6; copy it exactly.
+1. A script: an ordered list of steps. Each step says what the next `Complete` call returns. Step kinds:
+   - reply: text, status, native finish reason, transport status, identity, reported model, optional delay;
+   - hang: block until the request deadline passes or `Cancel` is called for that attempt, then return `interrupted` with transport status `timeout` or `cancelled` respectively;
+   - echo: reply whose text contains a given string, to exercise the scrub.
+   A `Complete` call with the script exhausted returns status `error` and a transport status saying so; it never panics and never repeats a step.
+2. A constructor taking the script and options: the identity and reported model used when a step does not set them; the `CapabilityRecord` that `Probe` returns; the secret values the adapter pretends it resolved; whether `Cancel` reports server confirmation as `yes` (default) or `unknown`; whether `Usage` is available.
+3. `Complete` consumes one step per call, sets `RawOutput` and `Text` to the step's text after `transport.Scrub` with the configured secrets, copies the request envelope into the result, and records the request. A `Calls()` accessor returns every request received, in order, including the full message array, so tests can assert what the engine sent. Safe for concurrent use.
+4. `Cancel`, `Probe` and `Usage` per the options above.
+5. A `contracttest.Backend` implementation in this package's test file, arranging each case with a one-step script.
+6. Verdict fixture helpers, each returning reply text. The envelope format is fixed by delta section 6; copy it exactly.
+   - a well-formed approve, given candidate hash and attempt id;
+   - a well-formed block, given candidate hash, attempt id, block id, severity, evidence, remedy and reason;
+   - prose containing the word "approve" and no envelope;
+   - a well-formed approve echoing a different candidate hash than the one given;
+   - an otherwise well-formed envelope whose verdict is `approve-with-changes`;
+   - output containing two envelopes;
+   - a block whose reason contains a line that is exactly `END VERDICT`, followed by more text and a second `END VERDICT`.
+   These make milestone B's negative tests one-liners.
 
 ## Acceptance
 
-- `contracttest.Run` passes against the fake adapter for every case.
-- A test drives a script of all step kinds and asserts the sequence of statuses.
-- A test asserts `Hang` plus `Cancel` yields `interrupted` and that the adapter returns promptly.
-- A test asserts `Echo{Secret}` output is scrubbed and `ScrubCount == 1` when the secret is configured, and unscrubbed with count 0 when it is not (the fake must not scrub what it did not "resolve", mirroring the real contract).
-- Helper constructors produce text that round-trips through a minimal parser test here (find `VERDICT v1` … `END VERDICT`, check fields present). The real parser is milestone B; this is a smoke check that the fixtures are well-formed.
+- `contracttest.Run` passes against the fake backend for every case.
+- A test drives a script containing every step kind and asserts the sequence of statuses, then asserts the exhausted-script behaviour.
+- Hang plus `Cancel` yields `interrupted` with transport status `cancelled`, promptly. Hang with no cancel yields `interrupted` with `timeout` at the deadline.
+- An echo step is scrubbed with `ScrubCount` 1 when the echoed string is a configured secret, and returned unchanged with count 0 when it is not (the fake must not scrub what it did not "resolve", mirroring the real contract).
+- `Calls()` returns the exact message array passed to `Complete`.
+- Fixture smoke test: for the two well-formed helpers, the text between the first line that is exactly `VERDICT v1` and the first later line that is exactly `END VERDICT` contains each required field name from section 6 once. The real parser is milestone B; this only checks the fixtures are well-formed.
+- `go test -race` passes for this package.
 
 ## Out of scope
 
-Any HTTP. Any parsing beyond the smoke check. Deliberate-mode fixtures.
+Any HTTP. Any verdict parsing beyond the smoke check. Deliberate-mode fixtures.
