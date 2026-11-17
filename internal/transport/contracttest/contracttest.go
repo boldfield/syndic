@@ -2,6 +2,7 @@ package contracttest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -102,7 +103,7 @@ func Run(t *testing.T, backend Backend) {
 			}
 
 			// Call the appropriate assertion for this case
-			err = assertCase(t, cse, req, result, fixture, elapsed)
+			err = assertCase(cse, req, result, fixture, elapsed)
 			if err != nil {
 				t.Errorf("assertion failed: %v", err)
 			}
@@ -111,31 +112,31 @@ func Run(t *testing.T, backend Backend) {
 }
 
 // assertCase calls the appropriate assertion function for the case.
-func assertCase(t *testing.T, cse Case, req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+func assertCase(cse Case, req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
 	switch cse {
 	case Success:
-		return AssertSuccess(req, result, fixture)
+		return AssertSuccess(req, result, fixture, elapsed)
 	case DeadlineExceeded:
 		return AssertDeadlineExceeded(req, result, fixture, elapsed)
 	case MalformedBody:
-		return AssertMalformedBody(req, result, fixture)
+		return AssertMalformedBody(req, result, fixture, elapsed)
 	case ConnectionReset:
-		return AssertConnectionReset(req, result, fixture)
+		return AssertConnectionReset(req, result, fixture, elapsed)
 	case Truncated:
-		return AssertTruncated(req, result, fixture)
+		return AssertTruncated(req, result, fixture, elapsed)
 	case Refused:
-		return AssertRefused(req, result, fixture)
+		return AssertRefused(req, result, fixture, elapsed)
 	case AuthFailure:
-		return AssertAuthFailure(req, result, fixture)
+		return AssertAuthFailure(req, result, fixture, elapsed)
 	case ServerError:
-		return AssertServerError(req, result, fixture)
+		return AssertServerError(req, result, fixture, elapsed)
 	case IdentityMismatch:
-		return AssertIdentityMismatch(req, result, fixture)
+		return AssertIdentityMismatch(req, result, fixture, elapsed)
 	case RedirectOtherHost:
-		return AssertRedirectOtherHost(req, result, fixture)
+		return AssertRedirectOtherHost(req, result, fixture, elapsed)
 	case SecretEcho:
-		return AssertSecretEcho(req, result, fixture)
+		return AssertSecretEcho(req, result, fixture, elapsed)
 	default:
-		return nil
+		return fmt.Errorf("unknown case: %q", cse)
 	}
 }

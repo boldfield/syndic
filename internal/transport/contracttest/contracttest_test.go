@@ -156,12 +156,13 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 		secret := "test-secret-value"
 		responseWithSecret := "Response with " + secret + " embedded"
 		scrubbed := strings.ReplaceAll(responseWithSecret, secret, transport.ScrubMarker)
+		wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
 		return transport.CompleteResult{
 			Envelope:        req.Envelope,
 			RawOutput:       scrubbed,
 			Text:            scrubbed,
 			ScrubCount:      1,
-			Identity:        transport.NewUnknownIdentity(),
+			Identity:        wrongIdentity,
 			ReportedModel:   "contract-model",
 			Status:          transport.StatusComplete,
 			NativeFinish:    "stop",
@@ -186,15 +187,12 @@ type stubBackend struct{}
 
 func (b *stubBackend) Setup(t *testing.T, cse Case) Fixture {
 	secret := "test-secret-value"
-	if cse == SecretEcho {
-		// For secret_echo, we provide the secret to the fixture
-		// The stub adapter will embed it in the response
-	}
+	expectedIdentity := transport.NewUnknownIdentity()
 
 	return Fixture{
 		Adapter:  &stubAdapter{cse: cse},
 		Secret:   secret,
-		Expected: transport.Expected{Identity: transport.NewUnknownIdentity(), ReportedModel: "contract-model"},
+		Expected: transport.Expected{Identity: expectedIdentity, ReportedModel: "contract-model"},
 		PrimaryHits: func() int {
 			if cse == ServerError {
 				return 1
@@ -229,19 +227,24 @@ func TestAssertionFailures(t *testing.T) {
 	}
 
 	fixture := Fixture{
-		Adapter:  &stubAdapter{},
-		Secret:   "test-secret",
-		Expected: transport.Expected{Identity: transport.NewUnknownIdentity(), ReportedModel: "contract-model"},
+		Adapter:     &stubAdapter{},
+		Secret:      "test-secret",
+		Expected:    transport.Expected{Identity: transport.NewUnknownIdentity(), ReportedModel: "contract-model"},
+		PrimaryHits: func() int { return 1 },
+		ForeignHits: func() int { return 0 },
 	}
 
 	tests := []struct {
 		name     string
+		cse      Case
 		result   transport.CompleteResult
-		assertFn func(transport.CompleteRequest, transport.CompleteResult, Fixture) error
+		setupFn  func(*Fixture)
 		wantErr  bool
+		wantCase bool
 	}{
 		{
 			name: "success: wrong status",
+			cse:  Success,
 			result: transport.CompleteResult{
 				Envelope:        req.Envelope,
 				RawOutput:       "text",
@@ -253,11 +256,12 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			assertFn: AssertSuccess,
 			wantErr:  true,
+			wantCase: true,
 		},
 		{
 			name: "success: empty text",
+			cse:  Success,
 			result: transport.CompleteResult{
 				Envelope:        req.Envelope,
 				RawOutput:       "",
@@ -269,11 +273,29 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			assertFn: AssertSuccess,
 			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "deadline_exceeded: wrong status",
+			cse:  DeadlineExceeded,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusTimeout,
+			},
+			wantErr:  true,
+			wantCase: true,
 		},
 		{
 			name: "malformed_body: wrong transport status",
+			cse:  MalformedBody,
 			result: transport.CompleteResult{
 				Envelope:        req.Envelope,
 				RawOutput:       "text",
@@ -285,11 +307,80 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			assertFn: AssertMalformedBody,
 			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "connection_reset: wrong transport status",
+			cse:  ConnectionReset,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusTimeout,
+			},
+			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "truncated: empty native finish",
+			cse:  Truncated,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusTruncated,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "refused: empty native finish",
+			cse:  Refused,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusRefused,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "auth_failure: wrong transport status",
+			cse:  AuthFailure,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			wantErr:  true,
+			wantCase: true,
 		},
 		{
 			name: "server_error: wrong hit count",
+			cse:  ServerError,
 			result: transport.CompleteResult{
 				Envelope:        req.Envelope,
 				RawOutput:       "",
@@ -301,14 +392,52 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: "http_500",
 			},
-			assertFn: func(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
-				fixture.PrimaryHits = func() int { return 2 }
-				return AssertServerError(req, result, fixture)
+			setupFn: func(f *Fixture) {
+				f.PrimaryHits = func() int { return 2 }
 			},
-			wantErr: true,
+			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "identity_mismatch: check result not identity mismatch",
+			cse:  IdentityMismatch,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			wantErr:  true,
+			wantCase: true,
+		},
+		{
+			name: "redirect_other_host: foreign hits not 0",
+			cse:  RedirectOtherHost,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_301",
+			},
+			setupFn: func(f *Fixture) {
+				f.ForeignHits = func() int { return 1 }
+			},
+			wantErr:  true,
+			wantCase: true,
 		},
 		{
 			name: "secret_echo: secret not scrubbed",
+			cse:  SecretEcho,
 			result: transport.CompleteResult{
 				Envelope:        req.Envelope,
 				RawOutput:       "Response with test-secret embedded",
@@ -320,19 +449,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			assertFn: func(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
-				fixture.Secret = "test-secret"
-				return AssertSecretEcho(req, result, fixture)
+			setupFn: func(f *Fixture) {
+				f.Secret = "test-secret"
 			},
-			wantErr: true,
+			wantErr:  true,
+			wantCase: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.assertFn(req, tt.result, fixture)
+			testFixture := fixture
+			if tt.setupFn != nil {
+				tt.setupFn(&testFixture)
+			}
+			err := assertCase(tt.cse, req, tt.result, testFixture, 100*time.Millisecond)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("got error %v, want error %v", err != nil, tt.wantErr)
+			}
+			if tt.wantErr && tt.wantCase && err != nil {
+				if !strings.HasPrefix(err.Error(), string(tt.cse)+":") {
+					t.Errorf("error message %q doesn't start with case name %q", err.Error(), string(tt.cse)+":")
+				}
 			}
 		})
 	}

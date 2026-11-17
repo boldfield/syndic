@@ -10,7 +10,8 @@ import (
 )
 
 // AssertSuccess validates a successful completion.
-func AssertSuccess(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertSuccess(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("success: envelope mismatch")
 	}
@@ -43,14 +44,20 @@ func AssertDeadlineExceeded(req transport.CompleteRequest, result transport.Comp
 	if result.TransportStatus != transport.TransportStatusTimeout {
 		return fmt.Errorf("deadline_exceeded: transport status is %q, want timeout", result.TransportStatus)
 	}
-	if elapsed > 500*time.Millisecond+req.Deadline.Sub(time.Now().Add(-elapsed)) {
-		return fmt.Errorf("deadline_exceeded: took %v, want within %v + 500ms", elapsed, req.Deadline.Sub(time.Now().Add(-elapsed)))
+	const deadlineDuration = 300 * time.Millisecond
+	allowedDuration := deadlineDuration + 500*time.Millisecond
+	if elapsed > allowedDuration {
+		return fmt.Errorf("deadline_exceeded: took %v, want within %v", elapsed, allowedDuration)
+	}
+	if err := transport.CheckResult(req, result, fixture.Expected); err == nil {
+		return errors.New("deadline_exceeded: check result should fail")
 	}
 	return nil
 }
 
 // AssertMalformedBody validates a malformed body case.
-func AssertMalformedBody(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertMalformedBody(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("malformed_body: envelope mismatch")
 	}
@@ -73,7 +80,8 @@ func AssertMalformedBody(req transport.CompleteRequest, result transport.Complet
 }
 
 // AssertConnectionReset validates a connection reset case.
-func AssertConnectionReset(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertConnectionReset(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("connection_reset: envelope mismatch")
 	}
@@ -90,7 +98,8 @@ func AssertConnectionReset(req transport.CompleteRequest, result transport.Compl
 }
 
 // AssertTruncated validates a truncated case.
-func AssertTruncated(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertTruncated(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("truncated: envelope mismatch")
 	}
@@ -107,7 +116,8 @@ func AssertTruncated(req transport.CompleteRequest, result transport.CompleteRes
 }
 
 // AssertRefused validates a refused case.
-func AssertRefused(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertRefused(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("refused: envelope mismatch")
 	}
@@ -124,7 +134,8 @@ func AssertRefused(req transport.CompleteRequest, result transport.CompleteResul
 }
 
 // AssertAuthFailure validates an auth failure case.
-func AssertAuthFailure(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertAuthFailure(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("auth_failure: envelope mismatch")
 	}
@@ -141,7 +152,7 @@ func AssertAuthFailure(req transport.CompleteRequest, result transport.CompleteR
 }
 
 // AssertServerError validates a server error case.
-func AssertServerError(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertServerError(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
 	if result.Envelope != req.Envelope {
 		return errors.New("server_error: envelope mismatch")
 	}
@@ -151,10 +162,11 @@ func AssertServerError(req transport.CompleteRequest, result transport.CompleteR
 	if !strings.HasPrefix(result.TransportStatus, "http_5") {
 		return fmt.Errorf("server_error: transport status is %q, want http_5xx", result.TransportStatus)
 	}
-	if fixture.PrimaryHits != nil {
-		if primaryHits := fixture.PrimaryHits(); primaryHits != 1 {
-			return fmt.Errorf("server_error: primary hits is %d, want 1", primaryHits)
-		}
+	if fixture.PrimaryHits == nil {
+		return errors.New("server_error: primary hits hook required")
+	}
+	if primaryHits := fixture.PrimaryHits(); primaryHits != 1 {
+		return fmt.Errorf("server_error: primary hits is %d, want 1", primaryHits)
 	}
 	if err := transport.CheckResult(req, result, fixture.Expected); err == nil {
 		return errors.New("server_error: check result should fail")
@@ -163,31 +175,35 @@ func AssertServerError(req transport.CompleteRequest, result transport.CompleteR
 }
 
 // AssertIdentityMismatch validates an identity mismatch case.
-func AssertIdentityMismatch(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertIdentityMismatch(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("identity_mismatch: envelope mismatch")
 	}
 	if result.Status != transport.StatusComplete {
 		return fmt.Errorf("identity_mismatch: status is %q, want complete", result.Status)
 	}
-	if err := transport.CheckResult(req, result, fixture.Expected); err != transport.ErrIdentityMismatch {
+	err := transport.CheckResult(req, result, fixture.Expected)
+	if !errors.Is(err, transport.ErrIdentityMismatch) {
 		return fmt.Errorf("identity_mismatch: check result returned %v, want ErrIdentityMismatch", err)
 	}
 	return nil
 }
 
 // AssertRedirectOtherHost validates a redirect to other host case.
-func AssertRedirectOtherHost(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertRedirectOtherHost(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("redirect_other_host: envelope mismatch")
 	}
 	if result.Status != transport.StatusError {
 		return fmt.Errorf("redirect_other_host: status is %q, want error", result.Status)
 	}
-	if fixture.ForeignHits != nil {
-		if foreignHits := fixture.ForeignHits(); foreignHits != 0 {
-			return fmt.Errorf("redirect_other_host: foreign hits is %d, want 0", foreignHits)
-		}
+	if fixture.ForeignHits == nil {
+		return errors.New("redirect_other_host: foreign hits hook required")
+	}
+	if foreignHits := fixture.ForeignHits(); foreignHits != 0 {
+		return fmt.Errorf("redirect_other_host: foreign hits is %d, want 0", foreignHits)
 	}
 	if err := transport.CheckResult(req, result, fixture.Expected); err == nil {
 		return errors.New("redirect_other_host: check result should fail")
@@ -196,7 +212,8 @@ func AssertRedirectOtherHost(req transport.CompleteRequest, result transport.Com
 }
 
 // AssertSecretEcho validates that secrets are properly scrubbed.
-func AssertSecretEcho(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture) error {
+func AssertSecretEcho(req transport.CompleteRequest, result transport.CompleteResult, fixture Fixture, elapsed time.Duration) error {
+	_ = elapsed
 	if result.Envelope != req.Envelope {
 		return errors.New("secret_echo: envelope mismatch")
 	}
@@ -225,6 +242,10 @@ func AssertSecretEcho(req transport.CompleteRequest, result transport.CompleteRe
 	// Scrub count must be 1
 	if result.ScrubCount != 1 {
 		return fmt.Errorf("secret_echo: scrub count is %d, want 1", result.ScrubCount)
+	}
+
+	if err := transport.CheckResult(req, result, fixture.Expected); err == nil {
+		return errors.New("secret_echo: check result should fail")
 	}
 
 	return nil
