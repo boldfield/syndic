@@ -1,0 +1,41 @@
+default_preset = "review"
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2"]
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []

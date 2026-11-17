@@ -1,0 +1,251 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"slices"
+)
+
+func (r *Roster) Validate() error {
+	var errs []error
+
+	// Check for duplicate participant IDs
+	seenParticipantIDs := make(map[string]bool)
+	for _, p := range r.Participants {
+		if seenParticipantIDs[p.ID] {
+			errs = append(errs, fmt.Errorf("duplicate participant ID: %q", p.ID))
+		}
+		seenParticipantIDs[p.ID] = true
+	}
+
+	// Check for duplicate endpoint names
+	seenEndpointNames := make(map[string]bool)
+	endpointMap := make(map[string]EndpointProfile)
+	for _, ep := range r.Endpoints {
+		if seenEndpointNames[ep.Name] {
+			errs = append(errs, fmt.Errorf("duplicate endpoint name: %q", ep.Name))
+		}
+		seenEndpointNames[ep.Name] = true
+		endpointMap[ep.Name] = ep
+	}
+
+	// Validate participants
+	for _, p := range r.Participants {
+		// Check if participant references an endpoint that exists
+		if p.Route == "api" && p.Endpoint != "" && !seenEndpointNames[p.Endpoint] {
+			errs = append(errs, fmt.Errorf("participant %q references non-existent endpoint: %q", p.ID, p.Endpoint))
+		}
+
+		// Check api participant has endpoint
+		if p.Route == "api" && p.Endpoint == "" {
+			errs = append(errs, fmt.Errorf("api participant %q missing endpoint", p.ID))
+		}
+
+		// Check cli participant has binary
+		if p.Route == "cli" && p.Binary == "" {
+			errs = append(errs, fmt.Errorf("cli participant %q missing binary", p.ID))
+		}
+
+		// Check if model is in endpoint's allowlist
+		if p.Route == "api" && p.Endpoint != "" {
+			ep := endpointMap[p.Endpoint]
+			if len(ep.Models) > 0 && !slices.Contains(ep.Models, p.Model) {
+				errs = append(errs, fmt.Errorf("participant %q model %q not in endpoint %q allowlist",
+					p.ID, p.Model, p.Endpoint))
+			}
+		}
+
+		// Validate eligible roles
+		for _, role := range p.EligibleRoles {
+			if role != RoleAuthor && role != RoleReviewer {
+				errs = append(errs, fmt.Errorf("participant %q has unknown role: %q", p.ID, role))
+			}
+		}
+	}
+
+	// Validate endpoint profiles
+	for _, ep := range r.Endpoints {
+		// Validate declared location
+		if ep.DeclaredLocation != "" &&
+			ep.DeclaredLocation != "local" &&
+			ep.DeclaredLocation != "lan" &&
+			ep.DeclaredLocation != "corporate" &&
+			ep.DeclaredLocation != "cloud" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown declared_location: %q",
+				ep.Name, ep.DeclaredLocation))
+		}
+
+		// Validate declared execution
+		if ep.DeclaredExecution != "" &&
+			ep.DeclaredExecution != "local" &&
+			ep.DeclaredExecution != "remote" &&
+			ep.DeclaredExecution != "unknown" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown declared_execution: %q",
+				ep.Name, ep.DeclaredExecution))
+		}
+
+		// Validate declared billing
+		if ep.DeclaredBilling != "" &&
+			ep.DeclaredBilling != "none" &&
+			ep.DeclaredBilling != "flat" &&
+			ep.DeclaredBilling != "metered" &&
+			ep.DeclaredBilling != "unknown" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown declared_billing: %q",
+				ep.Name, ep.DeclaredBilling))
+		}
+
+		// Validate network dependency
+		if ep.NetworkDependency != "" &&
+			ep.NetworkDependency != "none" &&
+			ep.NetworkDependency != "vpn" &&
+			ep.NetworkDependency != "other" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown network_dependency: %q",
+				ep.Name, ep.NetworkDependency))
+		}
+
+		// Validate dialect
+		if ep.Dialect != "" && ep.Dialect != "chat_completions_v1" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown dialect: %q",
+				ep.Name, ep.Dialect))
+		}
+
+		// Check for metered billing
+		if ep.DeclaredBilling == "metered" {
+			errs = append(errs, fmt.Errorf("endpoint %q has metered billing; metered endpoints cannot be dispatched until the spending ceiling exists",
+				ep.Name))
+		}
+	}
+
+	// Validate presets
+	seenPresetNames := make(map[string]bool)
+	for name, preset := range r.Presets {
+		seenPresetNames[name] = true
+
+		// Check preset mode
+		if preset.Mode != "solo" && preset.Mode != "review" {
+			errs = append(errs, fmt.Errorf("preset %q has unknown mode: %q", name, preset.Mode))
+		}
+
+		// Check if author is in required reviewers
+		if slices.Contains(preset.RequiredReviewers, preset.Author) {
+			errs = append(errs, fmt.Errorf("preset %q: author %q is also in required reviewers",
+				name, preset.Author))
+		}
+
+		// Check review preset must have required reviewers
+		if preset.Mode == "review" && len(preset.RequiredReviewers) == 0 {
+			errs = append(errs, fmt.Errorf("preset %q: review mode must have required reviewers", name))
+		}
+
+		// Check solo preset must not have required reviewers
+		if preset.Mode == "solo" && len(preset.RequiredReviewers) > 0 {
+			errs = append(errs, fmt.Errorf("preset %q: solo mode must not have required reviewers", name))
+		}
+
+		// Validate that all preset participants exist
+		allPresetParticipants := []string{preset.Author}
+		allPresetParticipants = append(allPresetParticipants, preset.RequiredReviewers...)
+
+		for _, pID := range allPresetParticipants {
+			if !seenParticipantIDs[pID] {
+				errs = append(errs, fmt.Errorf("preset %q references non-existent participant: %q",
+					name, pID))
+			}
+		}
+
+		// Validate that preset participants are eligible for their roles
+		if preset.Mode == "review" {
+			// Author must be eligible for author role
+			for _, p := range r.Participants {
+				if p.ID == preset.Author {
+					if !slices.Contains(p.EligibleRoles, RoleAuthor) {
+						errs = append(errs, fmt.Errorf("preset %q: author %q is not eligible for author role",
+							name, preset.Author))
+					}
+					break
+				}
+			}
+
+			// All required reviewers must be eligible for reviewer role
+			for _, reviewerID := range preset.RequiredReviewers {
+				for _, p := range r.Participants {
+					if p.ID == reviewerID {
+						if !slices.Contains(p.EligibleRoles, RoleReviewer) {
+							errs = append(errs, fmt.Errorf("preset %q: reviewer %q is not eligible for reviewer role",
+								name, reviewerID))
+						}
+						break
+					}
+				}
+			}
+		}
+
+		if preset.Mode == "solo" {
+			// Author must be eligible for author role
+			for _, p := range r.Participants {
+				if p.ID == preset.Author {
+					if !slices.Contains(p.EligibleRoles, RoleAuthor) {
+						errs = append(errs, fmt.Errorf("preset %q: author %q is not eligible for author role",
+							name, preset.Author))
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Validate DefaultPreset
+	if r.DefaultPreset == "" {
+		errs = append(errs, fmt.Errorf("default_preset is empty"))
+	} else if !seenPresetNames[r.DefaultPreset] {
+		errs = append(errs, fmt.Errorf("default_preset references non-existent preset: %q", r.DefaultPreset))
+	} else if r.Presets[r.DefaultPreset].Mode != "review" {
+		errs = append(errs, fmt.Errorf("default_preset %q must have mode review", r.DefaultPreset))
+	}
+
+	// Validate LocalOnly policy
+	if r.Policy.LocalOnly {
+		for _, p := range r.Participants {
+			if p.Route == "api" && p.Endpoint != "" {
+				ep := endpointMap[p.Endpoint]
+				if ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud" {
+					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_location %q on participant %q",
+						p.Endpoint, ep.DeclaredLocation, p.ID))
+				}
+				if ep.DeclaredExecution != "local" && ep.DeclaredExecution != "" {
+					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_execution %q on participant %q",
+						p.Endpoint, ep.DeclaredExecution, p.ID))
+				}
+			}
+		}
+	}
+
+	// Validate mixed policy (not LocalOnly)
+	if !r.Policy.LocalOnly {
+		seenAllowedDests := make(map[string]bool)
+		for _, dest := range r.Policy.AllowedDestinations {
+			seenAllowedDests[dest] = true
+			if !seenEndpointNames[dest] {
+				errs = append(errs, fmt.Errorf("allowed_destinations references non-existent endpoint: %q", dest))
+			}
+		}
+
+		// Check that every participant's endpoint that is corporate/cloud is in allowed destinations
+		for _, p := range r.Participants {
+			if p.Route == "api" && p.Endpoint != "" {
+				ep := endpointMap[p.Endpoint]
+				if ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud" {
+					if !seenAllowedDests[p.Endpoint] {
+						errs = append(errs, fmt.Errorf("endpoint %q (declared_location %q) on participant %q must be in allowed_destinations",
+							p.Endpoint, ep.DeclaredLocation, p.ID))
+					}
+				}
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
