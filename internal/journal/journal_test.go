@@ -1,0 +1,412 @@
+package journal_test
+
+import (
+	"database/sql"
+	"testing"
+
+	"github.com/boldfield/syndic/internal/journal"
+)
+
+func TestOpenCreatesSchema(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	// First open should create the schema
+	db1, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open failed: %v", err)
+	}
+	defer db1.Close()
+
+	// Verify tables exist by checking if we can insert into them
+	conn := db1.Conn()
+	var count int
+	err = conn.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query tables: %v", err)
+	}
+	if count < 8 {
+		t.Fatalf("expected at least 8 tables, got %d", count)
+	}
+
+	// Second open on same file should succeed and not change schema version
+	db2, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open failed: %v", err)
+	}
+	defer db2.Close()
+
+	var version1, version2 int
+	err = conn.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version1)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+
+	conn2 := db2.Conn()
+	err = conn2.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version2)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+
+	if version1 != version2 {
+		t.Fatalf("schema version changed: %d -> %d", version1, version2)
+	}
+}
+
+func TestEnumCheckConstraints(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create a test run first
+	runID := "run-1"
+	_, err := conn.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash)
+		VALUES (?, '{}', 'hash')
+	`, runID)
+	if err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+
+	// Test turn mode enum
+	testCases := []struct {
+		name  string
+		query string
+		args  []interface{}
+		valid bool
+	}{
+		{"valid mode solo", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-1", runID, "solo"}, true},
+		{"valid mode review", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-2", runID, "review"}, true},
+		{"invalid mode", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-3", runID, "invalid"}, false},
+		{"valid terminal state approved", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-4", runID, "solo", "approved"}, true},
+		{"valid terminal state solo_complete", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-5", runID, "solo", "solo_complete"}, true},
+		{"invalid terminal state", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-6", runID, "solo", "invalid"}, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := conn.Exec(tc.query, tc.args...)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+}
+
+func TestAttemptEnumCheckConstraints(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	testCases := []struct {
+		name  string
+		state string
+		valid bool
+	}{
+		{"valid state pending", "pending", true},
+		{"valid state completed", "completed", true},
+		{"valid state unknown", "unknown", true},
+		{"invalid state", "invalid", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			attemptID := "attempt-" + tc.state
+			_, err := conn.Exec(`
+				INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+				VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, ?)
+			`, attemptID, turnID, tc.state)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Test status enum
+	statusTestCases := []struct {
+		name   string
+		status interface{}
+		valid  bool
+	}{
+		{"null status", nil, true},
+		{"valid status complete", "complete", true},
+		{"valid status truncated", "truncated", true},
+		{"valid status refused", "refused", true},
+		{"valid status interrupted", "interrupted", true},
+		{"valid status error", "error", true},
+		{"invalid status", "invalid", false},
+	}
+
+	for _, tc := range statusTestCases {
+		t.Run(tc.name, func(t *testing.T) {
+			attemptID := "attempt-status-" + t.Name()
+			var query string
+			var args []interface{}
+			if tc.status == nil {
+				query = `
+					INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, status)
+					VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed', NULL)
+				`
+				args = []interface{}{attemptID, turnID}
+			} else {
+				query = `
+					INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, status)
+					VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed', ?)
+				`
+				args = []interface{}{attemptID, turnID, tc.status}
+			}
+			_, err := conn.Exec(query, args...)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+}
+
+func TestImmutableTables(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Test messages immutability
+	messageID := "msg-1"
+	_, err := conn.Exec(`
+		INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length)
+		VALUES (?, ?, 'phase-1', 'sender-1', 'all', 1, 'test content', 'hash', 12)
+	`, messageID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
+
+	// Try to update message
+	_, err = conn.Exec("UPDATE messages SET content = ? WHERE id = ?", "new content", messageID)
+	if err == nil {
+		t.Errorf("expected UPDATE on messages to fail, but succeeded")
+	}
+
+	// Try to delete message
+	_, err = conn.Exec("DELETE FROM messages WHERE id = ?", messageID)
+	if err == nil {
+		t.Errorf("expected DELETE on messages to fail, but succeeded")
+	}
+
+	// Test candidates immutability
+	candidateID := "cand-1"
+	_, err = conn.Exec(`
+		INSERT INTO candidates (id, turn_id, content, content_hash)
+		VALUES (?, ?, 'test candidate', 'hash')
+	`, candidateID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert candidate: %v", err)
+	}
+
+	// Try to update candidate
+	_, err = conn.Exec("UPDATE candidates SET content = ? WHERE id = ?", "new candidate", candidateID)
+	if err == nil {
+		t.Errorf("expected UPDATE on candidates to fail, but succeeded")
+	}
+
+	// Try to delete candidate
+	_, err = conn.Exec("DELETE FROM candidates WHERE id = ?", candidateID)
+	if err == nil {
+		t.Errorf("expected DELETE on candidates to fail, but succeeded")
+	}
+
+	// Test events immutability
+	_, err = conn.Exec(`
+		INSERT INTO events (turn_id, event_type, data)
+		VALUES (?, 'dispatch', 'event data')
+	`, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	// Try to update event
+	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = 1", "new data")
+	if err == nil {
+		t.Errorf("expected UPDATE on events to fail, but succeeded")
+	}
+
+	// Try to delete event
+	_, err = conn.Exec("DELETE FROM events WHERE id = 1")
+	if err == nil {
+		t.Errorf("expected DELETE on events to fail, but succeeded")
+	}
+}
+
+func TestRawOutputImmutability(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Create attempt with raw_output
+	attemptID := "attempt-1"
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, raw_output)
+		VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed', 'first output')
+	`, attemptID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert attempt: %v", err)
+	}
+
+	// Try to set raw_output again
+	_, err = conn.Exec("UPDATE attempts SET raw_output = ? WHERE id = ?", "second output", attemptID)
+	if err == nil {
+		t.Errorf("expected UPDATE of raw_output to fail when already set, but succeeded")
+	}
+
+	// Verify original value is unchanged
+	var output string
+	err = conn.QueryRow("SELECT raw_output FROM attempts WHERE id = ?", attemptID).Scan(&output)
+	if err != nil {
+		t.Fatalf("failed to query raw_output: %v", err)
+	}
+	if output != "first output" {
+		t.Errorf("raw_output was changed to %q", output)
+	}
+}
+
+func TestManifestImmutability(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run
+	runID := "run-1"
+	_, err := conn.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash)
+		VALUES (?, '{}', 'hash1')
+	`, runID)
+	if err != nil {
+		t.Fatalf("failed to insert run: %v", err)
+	}
+
+	// Try to update manifest
+	_, err = conn.Exec("UPDATE runs SET manifest = ? WHERE id = ?", "{}", runID)
+	if err == nil {
+		t.Errorf("expected UPDATE of manifest to fail, but succeeded")
+	}
+
+	// Try to update manifest_hash
+	_, err = conn.Exec("UPDATE runs SET manifest_hash = ? WHERE id = ?", "hash2", runID)
+	if err == nil {
+		t.Errorf("expected UPDATE of manifest_hash to fail, but succeeded")
+	}
+}
+
+func TestForeignKeyConstraints(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Try to insert attempt for non-existent turn
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at)
+		VALUES ('attempt-1', 'nonexistent-turn', 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP)
+	`)
+	if err == nil {
+		t.Errorf("expected foreign key constraint to prevent insert, but succeeded")
+	}
+}
+
+func TestNullableFields(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Insert attempt and verify nullable fields
+	attemptID := "attempt-1"
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at)
+		VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP)
+	`, attemptID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert attempt: %v", err)
+	}
+
+	// Verify nullable fields are NULL
+	var (
+		status           sql.NullString
+		cancellationState string
+		quarantined      bool
+	)
+	err = conn.QueryRow(`
+		SELECT status, cancellation_state, quarantined FROM attempts WHERE id = ?
+	`, attemptID).Scan(&status, &cancellationState, &quarantined)
+	if err != nil {
+		t.Fatalf("failed to query attempt: %v", err)
+	}
+
+	if status.Valid {
+		t.Errorf("expected status to be NULL, got %q", status.String)
+	}
+	if cancellationState != "none" {
+		t.Errorf("expected cancellation_state to be 'none', got %q", cancellationState)
+	}
+	if quarantined {
+		t.Errorf("expected quarantined to be false")
+	}
+}
+
+// openTestDB opens a database in a temporary directory for testing
+func openTestDB(t *testing.T) (*journal.DB, func()) {
+	t.Helper()
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	return db, func() {
+		db.Close()
+	}
+}
+
+// setupTestData creates a run and turn for testing
+func setupTestData(t *testing.T, conn *sql.DB, runID, turnID string) {
+	t.Helper()
+	_, err := conn.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash)
+		VALUES (?, '{}', 'hash')
+	`, runID)
+	if err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+
+	_, err = conn.Exec(`
+		INSERT INTO turns (id, run_id, mode)
+		VALUES (?, ?, 'review')
+	`, turnID, runID)
+	if err != nil {
+		t.Fatalf("failed to create turn: %v", err)
+	}
+}
