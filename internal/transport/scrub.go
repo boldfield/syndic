@@ -1,16 +1,15 @@
 package transport
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // Scrub performs exact-match substitution of each non-empty secret with ScrubMarker.
 // Secrets are sorted by length (longest first) so a secret that is a prefix of another
 // is not left half-replaced.
 func Scrub(output string, secrets []string) (string, int) {
-	if len(secrets) == 0 {
-		return output, 0
-	}
-
-	// Filter out empty secrets and sort by length (longest first)
+	// Filter out empty secrets
 	filtered := make([]string, 0, len(secrets))
 	for _, s := range secrets {
 		if s != "" {
@@ -23,13 +22,12 @@ func Scrub(output string, secrets []string) (string, int) {
 	}
 
 	// Sort by length descending (longest first)
-	for i := 0; i < len(filtered); i++ {
-		for j := i + 1; j < len(filtered); j++ {
-			if len(filtered[j]) > len(filtered[i]) {
-				filtered[i], filtered[j] = filtered[j], filtered[i]
-			}
+	slices.SortFunc(filtered, func(a, b string) int {
+		if len(b) != len(a) {
+			return len(b) - len(a)
 		}
-	}
+		return 0
+	})
 
 	result := output
 	count := 0

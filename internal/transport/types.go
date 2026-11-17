@@ -11,11 +11,11 @@ import (
 type CompletionStatus string
 
 const (
-	StatusComplete   CompletionStatus = "complete"
-	StatusTruncated  CompletionStatus = "truncated"
-	StatusRefused    CompletionStatus = "refused"
+	StatusComplete    CompletionStatus = "complete"
+	StatusTruncated   CompletionStatus = "truncated"
+	StatusRefused     CompletionStatus = "refused"
 	StatusInterrupted CompletionStatus = "interrupted"
-	StatusError      CompletionStatus = "error"
+	StatusError       CompletionStatus = "error"
 )
 
 // Tri represents a three-valued logic state.
@@ -29,15 +29,15 @@ const (
 
 // Transport status constants for HTTP responses and states.
 const (
-	TransportStatusOK              = "ok"
-	TransportStatusUnauthorized    = "unauthorized"
+	TransportStatusOK               = "ok"
+	TransportStatusUnauthorized     = "unauthorized"
 	TransportStatusModelUnavailable = "model_unavailable"
-	TransportStatusUnreachable     = "unreachable"
-	TransportStatusTimeout         = "timeout"
-	TransportStatusReset           = "reset"
-	TransportStatusCancelled       = "cancelled"
-	TransportStatusMalformedBody   = "malformed_body"
-	TransportStatusBodyTooLarge    = "body_too_large"
+	TransportStatusUnreachable      = "unreachable"
+	TransportStatusTimeout          = "timeout"
+	TransportStatusReset            = "reset"
+	TransportStatusCancelled        = "cancelled"
+	TransportStatusMalformedBody    = "malformed_body"
+	TransportStatusBodyTooLarge     = "body_too_large"
 )
 
 // HTTPStatusString returns a transport status string for a non-2xx HTTP response code.
@@ -70,10 +70,10 @@ func NewUnknownIdentity() ModelIdentity {
 // NewDigestIdentity returns a digest identity. It returns an error if value is empty or equals requestedModel.
 func NewDigestIdentity(value, requestedModel string) (ModelIdentity, error) {
 	if value == "" {
-		return ModelIdentity{}, ErrIdentityMismatch
+		return ModelIdentity{}, ErrInvalidIdentity
 	}
 	if value == requestedModel {
-		return ModelIdentity{}, ErrIdentityMismatch
+		return ModelIdentity{}, ErrInvalidIdentity
 	}
 	return ModelIdentity{
 		Kind:  "digest",
@@ -84,10 +84,10 @@ func NewDigestIdentity(value, requestedModel string) (ModelIdentity, error) {
 // NewRevisionIdentity returns a revision identity. It returns an error if value is empty or equals requestedModel.
 func NewRevisionIdentity(value, requestedModel string) (ModelIdentity, error) {
 	if value == "" {
-		return ModelIdentity{}, ErrIdentityMismatch
+		return ModelIdentity{}, ErrInvalidIdentity
 	}
 	if value == requestedModel {
-		return ModelIdentity{}, ErrIdentityMismatch
+		return ModelIdentity{}, ErrInvalidIdentity
 	}
 	return ModelIdentity{
 		Kind:  "revision",
@@ -115,25 +115,25 @@ type AttemptEnvelope struct {
 
 // CompleteRequest is the input to the Complete adapter method.
 type CompleteRequest struct {
-	Envelope          AttemptEnvelope
-	Model             string
-	Messages          []Message
-	MaxOutputTokens   int
-	Deadline          time.Time
+	Envelope        AttemptEnvelope
+	Model           string
+	Messages        []Message
+	MaxOutputTokens int
+	Deadline        time.Time
 }
 
 // CompleteResult is the output of the Complete adapter method.
 type CompleteResult struct {
-	Envelope         AttemptEnvelope
-	RawOutput        string
-	Text             string
-	ScrubCount       int
-	Identity         ModelIdentity
-	ReportedModel    string
-	Status           CompletionStatus
-	NativeFinish     string
-	Usage            *Usage
-	TransportStatus  string
+	Envelope        AttemptEnvelope
+	RawOutput       string
+	Text            string
+	ScrubCount      int
+	Identity        ModelIdentity
+	ReportedModel   string
+	Status          CompletionStatus
+	NativeFinish    string
+	Usage           *Usage
+	TransportStatus string
 }
 
 // Usage records token usage information.
@@ -144,35 +144,37 @@ type Usage struct {
 
 // CancelStatus records the state of a cancellation request.
 type CancelStatus struct {
-	Requested      bool
+	Requested       bool
 	ServerConfirmed Tri
 }
 
 // CapabilityRecord records the capabilities of an endpoint and model.
 type CapabilityRecord struct {
-	Endpoint               string
-	Model                  string
-	AuthMode               string // "api-key", "subscription", "none", "unknown"
-	Identity               ModelIdentity
-	ReportedModel          string
-	ContextBound           *int
-	OutputBound            *int
-	Streaming              Tri
-	CancelObservable       Tri
-	UsageAvailable         Tri
-	ModelsEndpoint         Tri
-	ModelListed            Tri
-	SystemRoleHonored      Tri
+	Endpoint                 string
+	Model                    string
+	AuthMode                 string // "api-key", "subscription", "none", "unknown"
+	Identity                 ModelIdentity
+	ReportedModel            string
+	ContextBound             *int
+	OutputBound              *int
+	Streaming                Tri
+	CancelObservable         Tri
+	UsageAvailable           Tri
+	ModelsEndpoint           Tri
+	ModelListed              Tri
+	SystemRoleHonored        Tri
 	EligibleRequiredReviewer Tri
-	MaxTokensField         string
-	FinishReasons          map[string]CompletionStatus
-	OverLength             string // "errored", "both_markers_returned", "silent_truncation_likely", "not_run"
-	LatencyMillis          *int
-	ToolRestrictions       []string
-	ServerVersion          string
-	AdapterVersion         string
-	ObservedAt             time.Time
-	Raw                    json.RawMessage // local-only, never exported or committed
+	MaxTokensField           string
+	FinishReasons            map[string]CompletionStatus
+	OverLength               string // "errored", "both_markers_returned", "silent_truncation_likely", "not_run"
+	LatencyMillis            *int
+	ToolRestrictions         []string
+	ServerVersion            string
+	AdapterVersion           string
+	ObservedAt               time.Time
+	// Raw is the unredacted evidence from the probe. It is local-only and never
+	// exported or committed in a public form; it may contain sensitive server details.
+	Raw json.RawMessage
 }
 
 // Expected records what was expected for a participant at probe time.

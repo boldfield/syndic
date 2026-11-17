@@ -16,11 +16,6 @@ func CheckResult(req CompleteRequest, res CompleteResult, expected Expected) err
 	identityMatches := res.Identity == expected.Identity
 	reportedModelMatches := res.ReportedModel == expected.ReportedModel
 
-	// Special case: unknown identity equals unknown identity
-	if !identityMatches && res.Identity.Kind == "unknown" && expected.Identity.Kind == "unknown" {
-		identityMatches = true
-	}
-
 	if !identityMatches || !reportedModelMatches {
 		errs = append(errs, ErrIdentityMismatch)
 	}

@@ -25,12 +25,12 @@ func TestCheckResult(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		req         CompleteRequest
-		res         CompleteResult
-		expected    Expected
-		wantError   bool
-		wantErrors  []error
+		name       string
+		req        CompleteRequest
+		res        CompleteResult
+		expected   Expected
+		wantError  bool
+		wantErrors []error
 	}{
 		{
 			name: "clean result",
@@ -76,8 +76,8 @@ func TestCheckResult(t *testing.T) {
 				Status:          StatusComplete,
 				TransportStatus: TransportStatusOK,
 			},
-			expected:  expected,
-			wantError: true,
+			expected:   expected,
+			wantError:  true,
 			wantErrors: []error{ErrEnvelopeMismatch},
 		},
 		{
@@ -95,8 +95,8 @@ func TestCheckResult(t *testing.T) {
 				Status:          StatusComplete,
 				TransportStatus: TransportStatusOK,
 			},
-			expected:  expected,
-			wantError: true,
+			expected:   expected,
+			wantError:  true,
 			wantErrors: []error{ErrIdentityMismatch},
 		},
 		{
@@ -114,8 +114,8 @@ func TestCheckResult(t *testing.T) {
 				Status:          StatusComplete,
 				TransportStatus: TransportStatusOK,
 			},
-			expected:  expected,
-			wantError: true,
+			expected:   expected,
+			wantError:  true,
 			wantErrors: []error{ErrIdentityMismatch},
 		},
 		{
@@ -133,8 +133,8 @@ func TestCheckResult(t *testing.T) {
 				Status:          StatusTruncated,
 				TransportStatus: TransportStatusOK,
 			},
-			expected:  expected,
-			wantError: true,
+			expected:   expected,
+			wantError:  true,
 			wantErrors: []error{ErrStatusNotComplete},
 		},
 		{
@@ -159,8 +159,8 @@ func TestCheckResult(t *testing.T) {
 				Status:          StatusRefused,
 				TransportStatus: TransportStatusOK,
 			},
-			expected:  expected,
-			wantError: true,
+			expected:   expected,
+			wantError:  true,
 			wantErrors: []error{ErrEnvelopeMismatch, ErrIdentityMismatch, ErrStatusNotComplete},
 		},
 		{
@@ -203,7 +203,7 @@ func TestCheckResult(t *testing.T) {
 				Identity:      NewUnknownIdentity(),
 				ReportedModel: reportedModel,
 			},
-			wantError: true,
+			wantError:  true,
 			wantErrors: []error{ErrIdentityMismatch},
 		},
 	}
