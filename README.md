@@ -2,13 +2,10 @@
 
 A local chat and coding TUI where every turn is reviewed by independent AI participants before it is final. One participant authors, one or more reviewers approve or block the exact candidate by hash, and the human merges.
 
-## Start here
+## Documentation
 
-- `docs/HANDOFF.md`: what this is, what has been decided, what to do next. Read first.
-- `docs/design/`: the approved design, three layered documents with their voted SHA-256 identities.
-- `docs/odonian/`: Odonian Project and Document payloads and the milestone A task specs, ready to register in batches.
-- `docs/review/`: the peer review record for the current design revision.
-- `docs/evidence/`: redacted endpoint probe exports, added by the operator after milestone A.
+- `docs/design/`: the approved design, three layered documents with their SHA-256 identities.
+- `docs/evidence/`: redacted endpoint probe exports.
 
 ## Design identities
 
