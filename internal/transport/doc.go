@@ -16,5 +16,5 @@
 // Invariant this package cannot enforce:
 //   - A server may echo sensitive content other than the resolved secrets. That content
 //     is treated as potentially sensitive by the system: the raw output is local-only,
-//     never exported or committed in an unredacted form.
+//     never exported or committed.
 package transport

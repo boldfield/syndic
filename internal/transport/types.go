@@ -173,7 +173,7 @@ type CapabilityRecord struct {
 	AdapterVersion           string
 	ObservedAt               time.Time
 	// Raw is the unredacted evidence from the probe. It is local-only and never
-	// exported or committed in a public form; it may contain sensitive server details.
+	// exported or committed; it may contain sensitive server details.
 	Raw json.RawMessage
 }
 
