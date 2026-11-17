@@ -1,0 +1,6 @@
+{
+  "kind": "design",
+  "title": "syndic v3 delta: participant transport contract and API-only alpha (revision 3)",
+  "ref": "docs/design/v3-delta-api-alpha.md",
+  "commit": "FILL_WITH_COMMIT_THAT_ADDED_DOCS_DESIGN"
+}
