@@ -1,0 +1,36 @@
+# Go defaults
+*.o
+*.a
+*.so
+.DS_Store
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+bin/
+.venv
+venv/
+ENV/
+env/
+
+# Syndic specific
+*.sqlite
+*.db
+/evidence-raw/
+.env
