@@ -2,8 +2,6 @@
 
 A local chat and coding TUI where every turn is reviewed by independent AI participants before it is final. One participant authors, one or more reviewers approve or block the exact candidate by hash, and the human merges.
 
-This repository currently holds design documentation only. Code arrives through Odonian tasks; see `docs/HANDOFF.md`.
-
 ## Start here
 
 - `docs/HANDOFF.md`: what this is, what has been decided, what to do next. Read first.
@@ -28,4 +26,4 @@ Milestone A (foundations) is in progress.
 
 ## License
 
-Apache-2.0. `LICENSE` and `NOTICE` are added by task A-01.
+Apache-2.0.
