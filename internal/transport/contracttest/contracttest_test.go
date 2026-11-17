@@ -235,13 +235,187 @@ func TestAssertionFailures(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		cse      Case
-		result   transport.CompleteResult
-		setupFn  func(*Fixture)
-		wantErr  bool
-		wantCase bool
+		name    string
+		cse     Case
+		result  transport.CompleteResult
+		setupFn func(*Fixture)
 	}{
+		// Positive cases: conforming results return nil error
+		{
+			name: "success: conforming result",
+			cse:  Success,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+		},
+		{
+			name: "deadline_exceeded: conforming result",
+			cse:  DeadlineExceeded,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusTimeout,
+			},
+		},
+		{
+			name: "malformed_body: conforming result",
+			cse:  MalformedBody,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "error details",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusMalformedBody,
+			},
+		},
+		{
+			name: "connection_reset: conforming result",
+			cse:  ConnectionReset,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusReset,
+			},
+		},
+		{
+			name: "truncated: conforming result",
+			cse:  Truncated,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "partial output",
+				Text:            "partial output",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusTruncated,
+				NativeFinish:    "length",
+				TransportStatus: transport.TransportStatusOK,
+			},
+		},
+		{
+			name: "refused: conforming result",
+			cse:  Refused,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "refused",
+				Text:            "refused",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusRefused,
+				NativeFinish:    "content_filter",
+				TransportStatus: transport.TransportStatusOK,
+			},
+		},
+		{
+			name: "auth_failure: conforming result",
+			cse:  AuthFailure,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusUnauthorized,
+			},
+		},
+		{
+			name: "server_error: conforming result",
+			cse:  ServerError,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_500",
+			},
+		},
+		{
+			name: "identity_mismatch: conforming result",
+			cse:  IdentityMismatch,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
+			},
+		},
+		{
+			name: "redirect_other_host: conforming result",
+			cse:  RedirectOtherHost,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_301",
+			},
+		},
+		{
+			name: "secret_echo: conforming result",
+			cse:  SecretEcho,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "Response with [REDACTED-SECRET] embedded",
+				Text:            "Response with [REDACTED-SECRET] embedded",
+				ScrubCount:      1,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
+			},
+		},
+
+		// Negative cases: errors for each case
 		{
 			name: "success: wrong status",
 			cse:  Success,
@@ -256,8 +430,6 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
 		},
 		{
 			name: "success: empty text",
@@ -273,8 +445,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "success: envelope mismatch",
+			cse:  Success,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
 		},
 		{
 			name: "deadline_exceeded: wrong status",
@@ -290,8 +482,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusTimeout,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "deadline_exceeded: envelope mismatch",
+			cse:  DeadlineExceeded,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusTimeout,
+			},
 		},
 		{
 			name: "malformed_body: wrong transport status",
@@ -307,8 +519,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "malformed_body: envelope mismatch",
+			cse:  MalformedBody,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "error details",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusMalformedBody,
+			},
 		},
 		{
 			name: "connection_reset: wrong transport status",
@@ -324,8 +556,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusTimeout,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "connection_reset: envelope mismatch",
+			cse:  ConnectionReset,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusInterrupted,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusReset,
+			},
 		},
 		{
 			name: "truncated: empty native finish",
@@ -341,8 +593,43 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "truncated: wrong status (complete instead of truncated)",
+			cse:  Truncated,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "partial output",
+				Text:            "partial output",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "length",
+				TransportStatus: transport.TransportStatusOK,
+			},
+		},
+		{
+			name: "truncated: envelope mismatch",
+			cse:  Truncated,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "partial output",
+				Text:            "partial output",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusTruncated,
+				NativeFinish:    "length",
+				TransportStatus: transport.TransportStatusOK,
+			},
 		},
 		{
 			name: "refused: empty native finish",
@@ -358,8 +645,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "refused: envelope mismatch",
+			cse:  Refused,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "refused",
+				Text:            "refused",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusRefused,
+				NativeFinish:    "content_filter",
+				TransportStatus: transport.TransportStatusOK,
+			},
 		},
 		{
 			name: "auth_failure: wrong transport status",
@@ -370,13 +677,33 @@ func TestAssertionFailures(t *testing.T) {
 				Text:            "",
 				ScrubCount:      0,
 				Identity:        transport.NewUnknownIdentity(),
-				ReportedModel:   "",
+				ReportedModel:   "contract-model",
 				Status:          transport.StatusError,
 				NativeFinish:    "",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "auth_failure: envelope mismatch",
+			cse:  AuthFailure,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: transport.TransportStatusUnauthorized,
+			},
 		},
 		{
 			name: "server_error: wrong hit count",
@@ -387,7 +714,7 @@ func TestAssertionFailures(t *testing.T) {
 				Text:            "",
 				ScrubCount:      0,
 				Identity:        transport.NewUnknownIdentity(),
-				ReportedModel:   "",
+				ReportedModel:   "contract-model",
 				Status:          transport.StatusError,
 				NativeFinish:    "",
 				TransportStatus: "http_500",
@@ -395,8 +722,46 @@ func TestAssertionFailures(t *testing.T) {
 			setupFn: func(f *Fixture) {
 				f.PrimaryHits = func() int { return 2 }
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "server_error: nil primary hits hook",
+			cse:  ServerError,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_500",
+			},
+			setupFn: func(f *Fixture) {
+				f.PrimaryHits = nil
+			},
+		},
+		{
+			name: "server_error: envelope mismatch",
+			cse:  ServerError,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_500",
+			},
 		},
 		{
 			name: "identity_mismatch: check result not identity mismatch",
@@ -412,8 +777,28 @@ func TestAssertionFailures(t *testing.T) {
 				NativeFinish:    "stop",
 				TransportStatus: transport.TransportStatusOK,
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "identity_mismatch: envelope mismatch",
+			cse:  IdentityMismatch,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "text",
+				Text:            "text",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
 		},
 		{
 			name: "redirect_other_host: foreign hits not 0",
@@ -424,7 +809,7 @@ func TestAssertionFailures(t *testing.T) {
 				Text:            "",
 				ScrubCount:      0,
 				Identity:        transport.NewUnknownIdentity(),
-				ReportedModel:   "",
+				ReportedModel:   "contract-model",
 				Status:          transport.StatusError,
 				NativeFinish:    "",
 				TransportStatus: "http_301",
@@ -432,8 +817,46 @@ func TestAssertionFailures(t *testing.T) {
 			setupFn: func(f *Fixture) {
 				f.ForeignHits = func() int { return 1 }
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "redirect_other_host: nil foreign hits hook",
+			cse:  RedirectOtherHost,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_301",
+			},
+			setupFn: func(f *Fixture) {
+				f.ForeignHits = nil
+			},
+		},
+		{
+			name: "redirect_other_host: envelope mismatch",
+			cse:  RedirectOtherHost,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "http_301",
+			},
 		},
 		{
 			name: "secret_echo: secret not scrubbed",
@@ -451,9 +874,72 @@ func TestAssertionFailures(t *testing.T) {
 			},
 			setupFn: func(f *Fixture) {
 				f.Secret = "test-secret"
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
 			},
-			wantErr:  true,
-			wantCase: true,
+		},
+		{
+			name: "secret_echo: scrub count 0 with secret correctly scrubbed",
+			cse:  SecretEcho,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "Response with [REDACTED-SECRET] embedded",
+				Text:            "Response with [REDACTED-SECRET] embedded",
+				ScrubCount:      0,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
+			},
+		},
+		{
+			name: "secret_echo: check result passes (must fail)",
+			cse:  SecretEcho,
+			result: transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "Response with [REDACTED-SECRET] embedded",
+				Text:            "Response with [REDACTED-SECRET] embedded",
+				ScrubCount:      1,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				f.Secret = "test-secret"
+			},
+		},
+		{
+			name: "secret_echo: envelope mismatch",
+			cse:  SecretEcho,
+			result: transport.CompleteResult{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   "wrong",
+					TurnID:        "test",
+					Phase:         "test",
+					Epoch:         1,
+					AttemptID:     "test",
+					CandidateHash: "test",
+				},
+				RawOutput:       "Response with [REDACTED-SECRET] embedded",
+				Text:            "Response with [REDACTED-SECRET] embedded",
+				ScrubCount:      1,
+				Identity:        transport.NewUnknownIdentity(),
+				ReportedModel:   "contract-model",
+				Status:          transport.StatusComplete,
+				NativeFinish:    "stop",
+				TransportStatus: transport.TransportStatusOK,
+			},
+			setupFn: func(f *Fixture) {
+				wrongIdentity, _ := transport.NewDigestIdentity("wrong-digest", "contract-model")
+				f.Expected = transport.Expected{Identity: wrongIdentity, ReportedModel: "contract-model"}
+			},
 		},
 	}
 
@@ -464,13 +950,20 @@ func TestAssertionFailures(t *testing.T) {
 				tt.setupFn(&testFixture)
 			}
 			err := assertCase(tt.cse, req, tt.result, testFixture, 100*time.Millisecond)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("got error %v, want error %v", err != nil, tt.wantErr)
-			}
-			if tt.wantErr && tt.wantCase && err != nil {
-				if !strings.HasPrefix(err.Error(), string(tt.cse)+":") {
-					t.Errorf("error message %q doesn't start with case name %q", err.Error(), string(tt.cse)+":")
+
+			// Positive cases should return nil
+			if strings.Contains(tt.name, "conforming") {
+				if err != nil {
+					t.Errorf("conforming result should not error, got: %v", err)
 				}
+				return
+			}
+
+			// Negative cases should return an error with case name prefix
+			if err == nil {
+				t.Errorf("expected error for wrong result, got nil")
+			} else if !strings.HasPrefix(err.Error(), string(tt.cse)+":") {
+				t.Errorf("error message %q doesn't start with case name %q", err.Error(), string(tt.cse)+":")
 			}
 		})
 	}
