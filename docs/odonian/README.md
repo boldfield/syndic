@@ -24,7 +24,18 @@ This directory holds everything needed to register syndic in Odonian: the Projec
 - Repository: `github.com/boldfield/syndic`, design docs added in commit `0ca84df87d79079ac193ca53eadfef1fa0e11bdb`.
 - Project: `99942488-1ab4-49fa-a37b-faf2aa02158b`
 - Design Document: `052d82ca-4133-4520-bf4f-9609683da1f8`
-- Tasks: none registered yet.
+- Batch 1, registered and promoted 2026-11-17:
+  - A-01: `18b762b8-5ea4-457a-af1c-801776e8cb49`
+  - A-02: `02469888-0f1f-4f9c-be38-9f805934248b`
+
+Regenerate later batches with:
+
+```
+python3 docs/odonian/tasks/build-batches.py --document-id 052d82ca-4133-4520-bf4f-9609683da1f8 \
+  --uuid A-01=18b762b8-5ea4-457a-af1c-801776e8cb49 --uuid A-02=02469888-0f1f-4f9c-be38-9f805934248b
+```
+
+adding a `--uuid` for each task as it is registered.
 
 ## Model and review defaults
 

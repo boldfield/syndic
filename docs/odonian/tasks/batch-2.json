@@ -12,7 +12,7 @@
     "agent_merge": true,
     "track": "build",
     "depends_on": [
-      "FILL_UUID_A-01"
+      "18b762b8-5ea4-457a-af1c-801776e8cb49"
     ]
   },
   {
@@ -28,7 +28,7 @@
     "agent_merge": true,
     "track": "build",
     "depends_on": [
-      "FILL_UUID_A-01"
+      "18b762b8-5ea4-457a-af1c-801776e8cb49"
     ]
   }
 ]
