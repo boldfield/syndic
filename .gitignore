@@ -1,0 +1,17 @@
+# Go defaults
+*.exe
+*.exe~
+*.dll
+*.dylib
+*.test
+*.out
+*.so
+.DS_Store
+go.work
+go.work.sum
+
+# Syndic specific
+*.sqlite
+*.db
+/evidence-raw/
+.env
