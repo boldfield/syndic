@@ -4,7 +4,7 @@ title: "A-02: config: TOML roster, endpoint profiles, presets, secret references
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-01]
 ---

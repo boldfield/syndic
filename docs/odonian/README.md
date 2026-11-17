@@ -28,4 +28,4 @@ This directory holds everything needed to register syndic in Odonian: the Projec
 
 ## Model and review defaults
 
-Every task: `model: "haiku"`, `review_models: ["opus"]`, `escalate: true`, `agent_merge: false`, `track: "build"`. These are Brian's standing settings; they are in the task files for completeness, not because they vary.
+Every task: `model: "haiku"`, `review_models: ["opus"]`, `escalate: true`, `agent_merge: true`, `track: "build"`. `agent_merge` was `false` in the handoff; Brian changed it to `true` for all tasks on 2026-11-17, so a task that passes Opus review is merged without a human merge step. These are Brian's standing settings; they are in the task files for completeness, not because they vary.

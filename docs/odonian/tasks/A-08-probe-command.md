@@ -4,7 +4,7 @@ title: "A-08: syndic probe command"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-07a, A-07b, A-03b]
 ---

@@ -9,7 +9,7 @@
       "opus"
     ],
     "escalate": true,
-    "agent_merge": false,
+    "agent_merge": true,
     "track": "build",
     "depends_on": [
       "FILL_UUID_A-06"
@@ -25,7 +25,7 @@
       "opus"
     ],
     "escalate": true,
-    "agent_merge": false,
+    "agent_merge": true,
     "track": "build",
     "depends_on": [
       "FILL_UUID_A-04a",

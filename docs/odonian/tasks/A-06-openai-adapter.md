@@ -4,7 +4,7 @@ title: "A-06: OpenAI-compatible adapter: complete, cancel, usage"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-04b, A-02]
 ---

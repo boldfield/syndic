@@ -75,7 +75,7 @@ def main():
                 "model": meta.get("model", "haiku"),
                 "review_models": meta.get("review_models", ["opus"]),
                 "escalate": meta.get("escalate", True),
-                "agent_merge": meta.get("agent_merge", False),
+                "agent_merge": meta.get("agent_merge", True),
                 "track": meta.get("track", "build"),
                 "depends_on": deps,
             })

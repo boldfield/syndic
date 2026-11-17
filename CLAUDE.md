@@ -5,7 +5,7 @@ Read `docs/HANDOFF.md` before doing anything else. It explains the project, the 
 ## Hard rules
 
 - Design documents under `docs/design/` are not edited here. They are hash-bound peer-approved texts. If something cannot be built as written, add an entry to `docs/design/open-questions.md` and stop.
-- Implementation goes through Odonian: Haiku-sized tasks, `escalate: true`, independent Opus review, human merge. Do not implement milestone tasks directly in this checkout unless Brian explicitly asks for a spike, and label any spike as such.
+- Implementation goes through Odonian: Haiku-sized tasks, `escalate: true`, independent Opus review, `agent_merge: true` (Brian, 2026-11-17; this replaces the human merge step the handoff describes). Do not implement milestone tasks directly in this checkout unless Brian explicitly asks for a spike, and label any spike as such.
 - Task batches are registered two or three at a time, each batch after Brian approves it. `docs/odonian/` has the payloads and `docs/odonian/tasks/build-batches.py` regenerates them with real UUIDs.
 - Never commit a secret value, a raw probe record, or anything under a `--raw-dir`. `docs/evidence/` holds redacted exports only.
 - No task or spike calls a real model endpoint. Tests use the fake adapter and `httptest`.

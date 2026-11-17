@@ -4,7 +4,7 @@ title: "A-07b: evidence: redaction rule, redacted export, raw record writer"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-04a, A-02]
 ---

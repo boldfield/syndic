@@ -4,7 +4,7 @@ title: "A-03c: journal store: candidates, verdicts, blocks"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-03b]
 ---

@@ -4,7 +4,7 @@ title: "A-01: repository scaffold, CI and license"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: []
 ---

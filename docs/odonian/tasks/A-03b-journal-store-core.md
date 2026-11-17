@@ -4,7 +4,7 @@ title: "A-03b: journal store: runs, turns, messages, attempts, events, recovery"
 model: haiku
 review_models: [opus]
 escalate: true
-agent_merge: false
+agent_merge: true
 track: build
 depends_on: [A-03a]
 ---
