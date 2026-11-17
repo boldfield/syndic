@@ -428,9 +428,9 @@ func TestNullableFields(t *testing.T) {
 
 	// Verify nullable fields are NULL
 	var (
-		status           sql.NullString
+		status            sql.NullString
 		cancellationState string
-		quarantined      bool
+		quarantined       bool
 	)
 	err = conn.QueryRow(`
 		SELECT status, cancellation_state, quarantined FROM attempts WHERE id = ?
