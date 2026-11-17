@@ -450,6 +450,232 @@ func TestNullableFields(t *testing.T) {
 	}
 }
 
+func TestMissingEnumCheckConstraints(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Test attempts.cancellation_state enum
+	cancellationStateTests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"valid none", "none", true},
+		{"valid requested", "requested", true},
+		{"valid confirmed", "confirmed", true},
+		{"valid unknown", "unknown", true},
+		{"invalid state", "invalid", false},
+	}
+
+	for _, tc := range cancellationStateTests {
+		t.Run("cancellation_state_"+tc.name, func(t *testing.T) {
+			attemptID := "attempt-cancel-" + tc.value
+			_, err := conn.Exec(`
+				INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, cancellation_state)
+				VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'pending', ?)
+			`, attemptID, turnID, tc.value)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Create an attempt for verdict tests
+	attemptID := "attempt-for-verdicts"
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed')
+	`, attemptID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert attempt for verdict tests: %v", err)
+	}
+
+	// Test verdicts.parsed_verdict enum
+	parsedVerdictTests := []struct {
+		name  string
+		value interface{}
+		valid bool
+	}{
+		{"null parsed_verdict", nil, true},
+		{"valid approve", "approve", true},
+		{"valid block", "block", true},
+		{"invalid verdict", "invalid", false},
+	}
+
+	for _, tc := range parsedVerdictTests {
+		t.Run("parsed_verdict_"+tc.name, func(t *testing.T) {
+			verdictID := "verdict-" + tc.name
+			var query string
+			var args []interface{}
+			if tc.value == nil {
+				query = `
+					INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, validation_status)
+					VALUES (?, ?, 'hash', NULL, 'valid')
+				`
+				args = []interface{}{verdictID, attemptID}
+			} else {
+				query = `
+					INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, validation_status)
+					VALUES (?, ?, 'hash', ?, 'valid')
+				`
+				args = []interface{}{verdictID, attemptID, tc.value}
+			}
+			_, err := conn.Exec(query, args...)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Test verdicts.validation_status enum
+	validationStatusTests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"valid valid", "valid", true},
+		{"valid rejected", "rejected", true},
+		{"valid malformed", "malformed", true},
+		{"valid revision_request", "revision_request", true},
+		{"invalid status", "invalid", false},
+	}
+
+	for _, tc := range validationStatusTests {
+		t.Run("validation_status_"+tc.name, func(t *testing.T) {
+			verdictID := "verdict-val-" + tc.value
+			_, err := conn.Exec(`
+				INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+				VALUES (?, ?, 'hash', ?)
+			`, verdictID, attemptID, tc.value)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Test verdicts.severity enum (nullable)
+	verdictSeverityTests := []struct {
+		name  string
+		value interface{}
+		valid bool
+	}{
+		{"null severity", nil, true},
+		{"valid low", "low", true},
+		{"valid medium", "medium", true},
+		{"valid high", "high", true},
+		{"invalid severity", "invalid", false},
+	}
+
+	for _, tc := range verdictSeverityTests {
+		t.Run("verdict_severity_"+tc.name, func(t *testing.T) {
+			verdictID := "verdict-sev-" + tc.name
+			var query string
+			var args []interface{}
+			if tc.value == nil {
+				query = `
+					INSERT INTO verdicts (id, attempt_id, candidate_hash, severity, validation_status)
+					VALUES (?, ?, 'hash', NULL, 'valid')
+				`
+				args = []interface{}{verdictID, attemptID}
+			} else {
+				query = `
+					INSERT INTO verdicts (id, attempt_id, candidate_hash, severity, validation_status)
+					VALUES (?, ?, 'hash', ?, 'valid')
+				`
+				args = []interface{}{verdictID, attemptID, tc.value}
+			}
+			_, err := conn.Exec(query, args...)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Create a verdict for block tests
+	verdictID := "verdict-for-blocks"
+	_, err = conn.Exec(`
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, 'hash', 'valid')
+	`, verdictID, attemptID)
+	if err != nil {
+		t.Fatalf("failed to insert verdict for block tests: %v", err)
+	}
+
+	// Test blocks.severity enum
+	blockSeverityTests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"valid low", "low", true},
+		{"valid medium", "medium", true},
+		{"valid high", "high", true},
+		{"invalid severity", "invalid", false},
+	}
+
+	for _, tc := range blockSeverityTests {
+		t.Run("block_severity_"+tc.name, func(t *testing.T) {
+			blockID := "block-sev-" + tc.value
+			_, err := conn.Exec(`
+				INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state)
+				VALUES (?, ?, 'hash', ?, 'evidence', 'remedy', 'open')
+			`, blockID, verdictID, tc.value)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+
+	// Test blocks.state enum
+	blockStateTests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{"valid open", "open", true},
+		{"valid withdrawn", "withdrawn", true},
+		{"valid overridden", "overridden", true},
+		{"invalid state", "invalid", false},
+	}
+
+	for _, tc := range blockStateTests {
+		t.Run("block_state_"+tc.name, func(t *testing.T) {
+			blockID := "block-state-" + tc.value
+			_, err := conn.Exec(`
+				INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state)
+				VALUES (?, ?, 'hash', 'low', 'evidence', 'remedy', ?)
+			`, blockID, verdictID, tc.value)
+			if tc.valid && err != nil {
+				t.Errorf("expected valid insert to succeed, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected invalid insert to fail, but succeeded")
+			}
+		})
+	}
+}
+
 // openTestDB opens a database in a temporary directory for testing
 func openTestDB(t *testing.T) (*journal.DB, func()) {
 	t.Helper()
