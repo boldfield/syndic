@@ -627,19 +627,19 @@ func TestVerdictFixtureSmokeTest(t *testing.T) {
 	attemptID := "test-attempt"
 
 	testCases := []struct {
-		name       string
-		verdict    string
-		shouldPass bool
+		name           string
+		verdict        string
+		requiredFields []string
 	}{
 		{
-			name:       "well-formed approve",
-			verdict:    VerdictApprove(hash, attemptID),
-			shouldPass: true,
+			name:           "well-formed approve",
+			verdict:        VerdictApprove(hash, attemptID),
+			requiredFields: []string{"candidate", "attempt", "verdict", "reason"},
 		},
 		{
-			name:       "well-formed block",
-			verdict:    VerdictBlock(hash, attemptID, "b1", "high", "evidence", "remedy", "reason"),
-			shouldPass: true,
+			name:           "well-formed block",
+			verdict:        VerdictBlock(hash, attemptID, "b1", "high", "evidence", "remedy", "reason"),
+			requiredFields: []string{"candidate", "attempt", "verdict", "reason", "severity", "block_id", "evidence", "remedy"},
 		},
 	}
 
@@ -647,39 +647,74 @@ func TestVerdictFixtureSmokeTest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := strings.Split(tc.verdict, "\n")
 			var verdictStart, verdictEnd int
-			verdictCount := 0
 
+			// Find exact VERDICT v1 line
 			for i, line := range lines {
 				if line == "VERDICT v1" {
-					verdictCount++
-					if verdictCount == 1 {
-						verdictStart = i
-					}
-				}
-				if line == "END VERDICT" {
-					verdictEnd = i
+					verdictStart = i
 					break
 				}
 			}
 
-			if verdictCount > 1 {
-				t.Errorf("multiple VERDICT v1 markers found")
+			// Find exact END VERDICT line after VERDICT v1
+			found := false
+			for i := verdictStart + 1; i < len(lines); i++ {
+				if lines[i] == "END VERDICT" {
+					verdictEnd = i
+					found = true
+					break
+				}
 			}
 
-			if verdictStart > 0 && verdictEnd > verdictStart {
-				content := strings.Join(lines[verdictStart+1:verdictEnd], "\n")
-				hasCandidate := strings.Contains(content, "candidate:")
-				hasAttempt := strings.Contains(content, "attempt:")
-				hasVerdict := strings.Contains(content, "verdict:")
-				hasReason := strings.Contains(content, "reason:")
+			if verdictStart < 0 || !found {
+				t.Fatal("no exact VERDICT v1 or END VERDICT line found")
+			}
 
-				if !hasCandidate || !hasAttempt || !hasVerdict || !hasReason {
-					t.Errorf("missing required fields in envelope: candidate=%v attempt=%v verdict=%v reason=%v",
-						hasCandidate, hasAttempt, hasVerdict, hasReason)
+			// Check each required field appears exactly once
+			for _, field := range tc.requiredFields {
+				count := 0
+				for i := verdictStart + 1; i < verdictEnd; i++ {
+					if strings.HasPrefix(lines[i], field+":") {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("field %q appears %d times, expected exactly 1", field, count)
 				}
 			}
 		})
 	}
+
+	// Test VerdictBlockWithEndMarker has exact END VERDICT markers
+	t.Run("block with end marker", func(t *testing.T) {
+		verdict := VerdictBlockWithEndMarker(hash, attemptID)
+		lines := strings.Split(verdict, "\n")
+
+		var firstEnd, secondEnd int
+		foundVerdictStart := false
+		foundFirstEnd := false
+
+		for i, line := range lines {
+			if line == "VERDICT v1" && !foundVerdictStart {
+				foundVerdictStart = true
+			} else if line == "END VERDICT" && foundVerdictStart && !foundFirstEnd {
+				firstEnd = i
+				foundFirstEnd = true
+			} else if line == "END VERDICT" && foundFirstEnd {
+				secondEnd = i
+				break
+			}
+		}
+
+		if !foundVerdictStart || !foundFirstEnd || secondEnd == 0 {
+			t.Fatal("block with end marker does not have exactly two END VERDICT markers")
+		}
+
+		// Verify text exists between the two END VERDICT markers
+		if firstEnd+1 >= secondEnd {
+			t.Error("no text between first and second END VERDICT markers")
+		}
+	})
 }
 
 // TestRaceCondition tests concurrent access safety.
