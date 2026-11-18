@@ -93,50 +93,7 @@ func TestFrameAtMaxSize(t *testing.T) {
 	// Frame structure: {"v":1,"id":"...","type":"...","body":"..."}
 	// We need to construct a body such that the entire frame is exactly MaxFrameBytes long
 
-	// First, build a template frame and marshal it to see the base size
-	template := Frame{
-		V:    1,
-		ID:   "x",
-		Type: "content",
-		Body: json.RawMessage(`""`),
-	}
-	templateJSON, _ := json.Marshal(template)
-	templateWithNewline := len(templateJSON) + 1 // +1 for newline
-
-	// Now we need to adjust the body content to make the total exactly MaxFrameBytes
-	// Calculate how much space we have for padding
-	paddingNeeded := MaxFrameBytes - templateWithNewline
-
-	// Create a body that when marshaled will fit exactly
-	// We'll use a simple string with enough characters
-	padding := strings.Repeat("a", paddingNeeded)
-	exactFrame := Frame{
-		V:    1,
-		ID:   "x",
-		Type: "content",
-		Body: json.RawMessage(fmt.Sprintf(`"%s"`, padding)),
-	}
-
-	// Verify the encoded length is exactly MaxFrameBytes
-	encoded, _ := json.Marshal(exactFrame)
-	encoded = append(encoded, '\n')
-
-	if len(encoded) != MaxFrameBytes {
-		// Adjust if needed
-		if len(encoded) > MaxFrameBytes {
-			// Remove characters from padding until we fit exactly
-			diff := len(encoded) - MaxFrameBytes
-			adjustedPadding := strings.Repeat("a", paddingNeeded-diff)
-			exactFrame = Frame{
-				V:    1,
-				ID:   "x",
-				Type: "content",
-				Body: json.RawMessage(fmt.Sprintf(`"%s"`, adjustedPadding)),
-			}
-			encoded, _ = json.Marshal(exactFrame)
-			encoded = append(encoded, '\n')
-		}
-	}
+	exactFrame, _ := buildExactFrame(t)
 
 	// Write the exact-sized frame - should succeed
 	var buf1 bytes.Buffer
@@ -149,12 +106,8 @@ func TestFrameAtMaxSize(t *testing.T) {
 	}
 
 	// Now test one byte over - should fail and write nothing
-	overFrame := Frame{
-		V:    1,
-		ID:   "y",
-		Type: "content",
-		Body: json.RawMessage(fmt.Sprintf(`"%s"`, strings.Repeat("a", paddingNeeded+1))),
-	}
+	overFrame := exactFrame
+	overFrame.Body = json.RawMessage(`"` + strings.Repeat("a", len(exactFrame.Body)-1) + `"`)
 
 	var buf2 bytes.Buffer
 	w2 := NewWriter(&buf2)
@@ -210,43 +163,7 @@ func TestReaderExactMaxSize(t *testing.T) {
 	// Create a valid JSON frame that is exactly MaxFrameBytes long (including newline)
 	// This should be read successfully
 
-	// Create a minimal frame and pad it to exactly MaxFrameBytes
-	template := Frame{
-		V:    1,
-		ID:   "x",
-		Type: "content",
-		Body: json.RawMessage(`""`),
-	}
-	templateJSON, _ := json.Marshal(template)
-	templateWithNewline := len(templateJSON) + 1
-
-	paddingNeeded := MaxFrameBytes - templateWithNewline
-	padding := strings.Repeat("a", paddingNeeded)
-	exactFrame := Frame{
-		V:    1,
-		ID:   "x",
-		Type: "content",
-		Body: json.RawMessage(fmt.Sprintf(`"%s"`, padding)),
-	}
-
-	encoded, _ := json.Marshal(exactFrame)
-	encoded = append(encoded, '\n')
-
-	// If not exactly MaxFrameBytes, adjust
-	if len(encoded) != MaxFrameBytes {
-		if len(encoded) > MaxFrameBytes {
-			diff := len(encoded) - MaxFrameBytes
-			adjustedPadding := strings.Repeat("a", paddingNeeded-diff)
-			exactFrame = Frame{
-				V:    1,
-				ID:   "x",
-				Type: "content",
-				Body: json.RawMessage(fmt.Sprintf(`"%s"`, adjustedPadding)),
-			}
-			encoded, _ = json.Marshal(exactFrame)
-			encoded = append(encoded, '\n')
-		}
-	}
+	_, encoded := buildExactFrame(t)
 
 	r := NewReader(bytes.NewReader(encoded))
 	f, err := r.Read()
@@ -905,7 +822,10 @@ func TestNewError(t *testing.T) {
 }
 
 func TestNewEvent(t *testing.T) {
-	body, _ := json.Marshal(EvEngineStarted{RunID: "run-123"})
+	body, err := json.Marshal(EvEngineStarted{RunID: "run-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 
 	f := NewEvent(100, EventKindEngineStarted, now, body)
@@ -998,4 +918,26 @@ func TestFrameOmitEmpty(t *testing.T) {
 	if _, ok := m["body"]; ok {
 		t.Error("Nil body should be omitted")
 	}
+}
+
+// buildExactFrame returns a frame whose encoded line, including the newline,
+// is exactly MaxFrameBytes long, together with that encoded line.
+func buildExactFrame(t *testing.T) (Frame, []byte) {
+	t.Helper()
+	f := Frame{V: 1, ID: "x", Type: "content", Body: json.RawMessage(`""`)}
+	base, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := MaxFrameBytes - (len(base) + 1)
+	f.Body = json.RawMessage(`"` + strings.Repeat("a", pad) + `"`)
+	enc, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc = append(enc, '\n')
+	if len(enc) != MaxFrameBytes {
+		t.Fatalf("encoded length %d, want %d", len(enc), MaxFrameBytes)
+	}
+	return f, enc
 }
