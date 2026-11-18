@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -99,41 +100,104 @@ func (db *DB) migrate() error {
 		}
 
 		// Migration 004 recreates the runs table with a CHECK constraint,
-		// which requires temporarily disabling foreign key constraints at the connection level
+		// which requires temporarily disabling foreign key constraints.
+		// Use a pinned connection to ensure PRAGMA and transaction use the same connection.
 		if version == 4 {
-			if _, err := db.conn.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+			pinned, err := db.conn.Conn(context.Background())
+			if err != nil {
+				return fmt.Errorf("acquire pinned connection for migration %s: %w", mig.Name(), err)
+			}
+			defer pinned.Close()
+
+			// Disable foreign keys on this connection
+			if _, err := pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = OFF"); err != nil {
 				return fmt.Errorf("disable foreign keys for migration %s: %w", mig.Name(), err)
 			}
-			defer func() {
-				// Re-enable foreign keys after migration 004
-				if _, err := db.conn.Exec("PRAGMA foreign_keys = ON"); err != nil {
-					fmt.Printf("warning: failed to re-enable foreign keys: %v\n", err)
+
+			// Begin transaction on the pinned connection
+			tx, err := pinned.BeginTx(context.Background(), nil)
+			if err != nil {
+				// Try to re-enable foreign keys before returning error
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("begin transaction for migration %s: %w", mig.Name(), err)
+			}
+
+			// Execute migration SQL
+			if _, err := tx.Exec(string(content)); err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+					return fmt.Errorf("execute migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
 				}
-			}()
-		}
-
-		tx, err := db.conn.Begin()
-		if err != nil {
-			return fmt.Errorf("begin transaction for migration %s: %w", mig.Name(), err)
-		}
-
-		if _, err := tx.Exec(string(content)); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				return fmt.Errorf("execute migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("execute migration %s: %w", mig.Name(), err)
 			}
-			return fmt.Errorf("execute migration %s: %w", mig.Name(), err)
-		}
 
-		// Record the applied migration
-		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				return fmt.Errorf("record migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+			// Record the applied migration
+			if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+					return fmt.Errorf("record migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+				}
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("record migration %s: %w", mig.Name(), err)
 			}
-			return fmt.Errorf("record migration %s: %w", mig.Name(), err)
-		}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", mig.Name(), err)
+			// Check foreign key integrity before commit
+			rows, err := tx.Query("PRAGMA foreign_key_check")
+			if err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+					return fmt.Errorf("check foreign keys for migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+				}
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("check foreign keys for migration %s: %w", mig.Name(), err)
+			}
+			if rows.Next() {
+				rows.Close()
+				if rbErr := tx.Rollback(); rbErr != nil {
+					pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+					return fmt.Errorf("migration %s violates foreign key constraints; rollback also failed: %w", mig.Name(), rbErr)
+				}
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("migration %s violates foreign key constraints", mig.Name())
+			}
+			rows.Close()
+
+			// Commit transaction
+			if err := tx.Commit(); err != nil {
+				pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON")
+				return fmt.Errorf("commit migration %s: %w", mig.Name(), err)
+			}
+
+			// Re-enable foreign keys immediately after migration 004
+			if _, err := pinned.ExecContext(context.Background(), "PRAGMA foreign_keys = ON"); err != nil {
+				return fmt.Errorf("re-enable foreign keys for migration %s: %w", mig.Name(), err)
+			}
+		} else {
+			// Standard migration path for non-004 migrations
+			tx, err := db.conn.Begin()
+			if err != nil {
+				return fmt.Errorf("begin transaction for migration %s: %w", mig.Name(), err)
+			}
+
+			if _, err := tx.Exec(string(content)); err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					return fmt.Errorf("execute migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+				}
+				return fmt.Errorf("execute migration %s: %w", mig.Name(), err)
+			}
+
+			// Record the applied migration
+			if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
+				if rbErr := tx.Rollback(); rbErr != nil {
+					return fmt.Errorf("record migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
+				}
+				return fmt.Errorf("record migration %s: %w", mig.Name(), err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit migration %s: %w", mig.Name(), err)
+			}
 		}
 	}
 
