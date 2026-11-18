@@ -274,6 +274,46 @@ func TestAttemptDeadlineOnHang(t *testing.T) {
 	}
 }
 
+// The turn timer fires at the deadline recorded at submit, even when time
+// passes between computing that deadline and arming the timer.
+func TestTurnTimerFiresAtRecordedDeadline(t *testing.T) {
+	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
+	h := enginetest.New(t, schedRoster("100s", "100s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
+	// The submit transaction takes 30s of fake time.
+	h.Engine.SetPayloadHook(func(kind string, payload any) any {
+		if kind == wire.EventKindTurnSubmitted {
+			h.Clock.Advance(30 * time.Second)
+		}
+		return payload
+	})
+	reply, err := h.Engine.Submit(soloReq("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCount(t, h, wire.EventKindAttemptBegun, 1)
+	attemptID := attemptsOf(h, reply.TurnID, "author")[0]
+	row, err := h.Store.GetTurn(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := start.Add(100 * time.Second); row.TurnDeadline == nil || !row.TurnDeadline.Equal(want) {
+		t.Fatalf("turn deadline = %v, want %v", row.TurnDeadline, want)
+	}
+
+	h.Clock.Advance(69 * time.Second)
+	if row, err := h.Store.GetTurn(reply.TurnID); err != nil || row.TerminalState != "" {
+		t.Fatalf("turn ended early: %+v, err %v", row, err)
+	}
+	h.Clock.Advance(1 * time.Second)
+	wantEnd(t, h, reply.TurnID, engine.StateIncomplete, "deadline:turn")
+
+	if _, err := h.Adapters["author"].Cancel(context.Background(), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	waitParticipantState(t, h, "author", engine.ParticipantIdle)
+}
+
 func TestAttemptDeadlineClampedToTurn(t *testing.T) {
 	h := enginetest.New(t, schedRoster("80s", "100s", []reviewer{{"r1", "p"}}, nil, ""), approvers("r1"))
 	start := h.Clock.Now()

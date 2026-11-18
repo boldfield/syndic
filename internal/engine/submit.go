@@ -199,7 +199,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		pending:         map[string]time.Time{},
 	}
 	e.open = t
-	e.armTurn(t, turn)
+	e.armTurn(t)
 	go e.runTurn(t)
 
 	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName}

@@ -153,9 +153,11 @@ func (e *Engine) attemptDeadline(t *openTurn) time.Time {
 	return deadline
 }
 
-// armTurn starts the turn's deadline timer and its once-a-second report. e.mu
-// is held.
-func (e *Engine) armTurn(t *openTurn, d time.Duration) {
+// armTurn starts the turn's deadline timer and its once-a-second report. The
+// timer fires at the turn's recorded deadline, however long ago that was set.
+// e.mu is held.
+func (e *Engine) armTurn(t *openTurn) {
+	d := t.turnDeadline.Sub(e.clock.Now())
 	t.stopTurn = e.clock.AfterFunc(d, func() { e.onTurnDeadline(t) })
 	t.stopTick = e.clock.AfterFunc(tickInterval, func() { e.onTick(t) })
 }
