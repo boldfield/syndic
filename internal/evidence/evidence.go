@@ -124,6 +124,28 @@ func extractHostPort(baseURL string) (host, port string, err error) {
 	return host, port, nil
 }
 
+// writeExclusive writes data to a file at path with exclusive creation (0600 permissions).
+// If the write or close fails, the file is removed to avoid leaving partial files.
+func writeExclusive(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if _, err := file.Write(data); err != nil {
+		os.Remove(path)
+		return err
+	}
+
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+
+	return nil
+}
+
 // WriteRaw writes the complete record as JSON to a file.
 func WriteRaw(record transport.CapabilityRecord, dir string) (string, error) {
 	// Create directory if it doesn't exist
@@ -140,14 +162,8 @@ func WriteRaw(record transport.CapabilityRecord, dir string) (string, error) {
 		return "", err
 	}
 
-	// Open file with O_EXCL to prevent overwriting
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	if _, err := file.Write(data); err != nil {
+	// Write with exclusive creation
+	if err := writeExclusive(filePath, data); err != nil {
 		return "", err
 	}
 
@@ -170,14 +186,8 @@ func WriteExport(export Export, dir string) (string, error) {
 		return "", err
 	}
 
-	// Open file with O_EXCL to prevent overwriting
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	if _, err := file.Write(data); err != nil {
+	// Write with exclusive creation
+	if err := writeExclusive(filePath, data); err != nil {
 		return "", err
 	}
 
