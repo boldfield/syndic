@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1103,5 +1104,512 @@ func BenchmarkComplete(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = adapter.Complete(context.Background(), req)
+	}
+}
+
+// Test Probe with fully cooperative server
+// Test Probe table test for various server behaviors
+func TestProbeBehaviorTable(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupServer    func(*testing.T, *http.ServeMux) string
+		expectedFields map[string]any
+	}{
+		{
+			name: "models_404",
+			setupServer: func(t *testing.T, m *http.ServeMux) string {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{Message: ChoiceMessage{Content: "test"}, FinishReason: "stop"},
+						},
+						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+				return ""
+			},
+			expectedFields: map[string]any{
+				"ModelsEndpoint": transport.TriNo,
+			},
+		},
+		{
+			name: "max_tokens_fallback",
+			setupServer: func(t *testing.T, m *http.ServeMux) string {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				callCount := 0
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					callCount++
+					var reqBody map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+					if _, ok := reqBody["max_tokens"]; ok {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = w.Write([]byte(`{"error": "max_tokens not supported"}`))
+						return
+					}
+
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{Message: ChoiceMessage{Content: "test"}, FinishReason: "stop"},
+						},
+						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+				return ""
+			},
+			expectedFields: map[string]any{
+				"MaxTokensField": "max_completion_tokens",
+			},
+		},
+		{
+			name: "no_usage_block",
+			setupServer: func(t *testing.T, m *http.ServeMux) string {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{Message: ChoiceMessage{Content: "test"}, FinishReason: "stop"},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+				return ""
+			},
+			expectedFields: map[string]any{
+				"UsageAvailable": transport.TriNo,
+			},
+		},
+		{
+			name: "system_role_ignored",
+			setupServer: func(t *testing.T, m *http.ServeMux) string {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{Message: ChoiceMessage{Content: "Response ignored system role"}, FinishReason: "stop"},
+						},
+						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+				return ""
+			},
+			expectedFields: map[string]any{
+				"SystemRoleHonored": transport.TriNo,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			tt.setupServer(t, mux)
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			profile := config.EndpointProfile{
+				Name:           "test",
+				BaseURL:        server.URL,
+				Auth:           nil,
+				ExtraHeaders:   map[string]config.SecretRef{},
+				Dialect:        "chat_completions_v1",
+				MaxTokensField: "",
+			}
+
+			adapter := New(profile, &mockResolver{})
+			record, err := adapter.Probe(context.Background(), "test", "test-model")
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for field, expectedVal := range tt.expectedFields {
+				switch field {
+				case "ModelsEndpoint":
+					if record.ModelsEndpoint != expectedVal {
+						t.Errorf("%s: got %q, want %q", field, record.ModelsEndpoint, expectedVal)
+					}
+				case "MaxTokensField":
+					if record.MaxTokensField != expectedVal {
+						t.Errorf("%s: got %q, want %q", field, record.MaxTokensField, expectedVal)
+					}
+				case "UsageAvailable":
+					if record.UsageAvailable != expectedVal {
+						t.Errorf("%s: got %q, want %q", field, record.UsageAvailable, expectedVal)
+					}
+				case "SystemRoleHonored":
+					if record.SystemRoleHonored != expectedVal {
+						t.Errorf("%s: got %q, want %q", field, record.SystemRoleHonored, expectedVal)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Test Probe error cases
+func TestProbeErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupServer func() string
+		expectedErr error
+	}{
+		{
+			name: "unauthorized",
+			setupServer: func() string {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusUnauthorized)
+				}))
+				return server.URL
+			},
+			expectedErr: transport.ErrUnauthorized,
+		},
+		{
+			name: "model_unavailable",
+			setupServer: func() string {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/models" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				return server.URL
+			},
+			expectedErr: transport.ErrModelUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverURL := tt.setupServer()
+			server, _ := http.NewRequest("GET", serverURL, nil)
+			_ = server
+
+			profile := config.EndpointProfile{
+				Name:           "test",
+				BaseURL:        serverURL,
+				Auth:           nil,
+				ExtraHeaders:   map[string]config.SecretRef{},
+				Dialect:        "chat_completions_v1",
+				MaxTokensField: "max_tokens",
+			}
+
+			adapter := New(profile, &mockResolver{})
+			_, err := adapter.Probe(context.Background(), "test", "test-model")
+
+			if err == nil {
+				t.Errorf("expected error %v, got nil", tt.expectedErr)
+			} else if !errors.Is(err, tt.expectedErr) {
+				t.Errorf("got error %v, want %v", err, tt.expectedErr)
+			}
+		})
+	}
+}
+
+// Test Probe with bearer token scrubbing
+func TestProbeSecretScrubbing(t *testing.T) {
+	secret := "super-secret-token-12345"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Content: "Response contains " + secret,
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Secret", secret)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "",
+	}
+
+	resolver := &mockResolver{secret: secret}
+	adapter := New(profile, resolver)
+
+	record, err := adapter.Probe(context.Background(), "test", "test-model")
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rawStr := string(record.Raw)
+	if strings.Contains(rawStr, secret) {
+		t.Errorf("Raw record contains unredacted secret")
+	}
+	if !strings.Contains(rawStr, "Response contains") {
+		t.Errorf("Raw record does not contain the echoed response: %s", rawStr)
+	}
+	var steps map[string]map[string]any
+	if err := json.Unmarshal(record.Raw, &steps); err != nil {
+		t.Fatalf("Raw is not a JSON object: %v", err)
+	}
+	for _, k := range []string{"models", "max_tokens", "system_role", "over_length"} {
+		if _, ok := steps[k]; !ok {
+			t.Errorf("Raw missing step %q: %s", k, rawStr)
+		}
+	}
+}
+
+// Test Probe with over-length disabled option
+func TestProbeOverLengthDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Content: "PING response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "",
+	}
+
+	adapter := New(profile, &mockResolver{})
+
+	opts := ProbeOptions{
+		Timeout:           10 * time.Second,
+		DisableOverLength: true,
+		AssumedContextLen: 131072,
+	}
+
+	record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", opts)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if record.OverLength != "not_run" {
+		t.Errorf("OverLength: got %q, want not_run when disabled", record.OverLength)
+	}
+}
+
+// Test Probe with over-length markers
+func TestProbeOverLengthMarkers(t *testing.T) {
+	tests := []struct {
+		name              string
+		setupServer       func(*http.ServeMux)
+		expectedOverLengt string
+	}{
+		{
+			name: "both_markers_returned",
+			setupServer: func(m *http.ServeMux) {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					var reqBody map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+					messages, ok := reqBody["messages"].([]any)
+					var requestContent string
+					if ok && len(messages) > 0 {
+						msg, _ := messages[len(messages)-1].(map[string]any)
+						requestContent, _ = msg["content"].(string)
+					}
+
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{
+								Message: ChoiceMessage{
+									Content: "Found markers: " + requestContent,
+								},
+								FinishReason: "stop",
+							},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+			},
+			expectedOverLengt: "both_markers_returned",
+		},
+		{
+			name: "head_marker_only",
+			setupServer: func(m *http.ServeMux) {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					var reqBody map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+					messages, ok := reqBody["messages"].([]any)
+					if ok && len(messages) > 0 {
+						msg, _ := messages[len(messages)-1].(map[string]any)
+						content, _ := msg["content"].(string)
+						headMarker := strings.Split(content, "x")[0]
+
+						resp := ResponseBody{
+							Model: "test-model",
+							Choices: []ChoiceBody{
+								{
+									Message: ChoiceMessage{
+										Content: "Found head marker: " + headMarker,
+									},
+									FinishReason: "stop",
+								},
+							},
+						}
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(resp)
+						return
+					}
+
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{
+								Message: ChoiceMessage{
+									Content: "No markers in response",
+								},
+								FinishReason: "stop",
+							},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+			},
+			expectedOverLengt: "silent_truncation_likely",
+		},
+		{
+			name: "no_markers",
+			setupServer: func(m *http.ServeMux) {
+				m.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNotFound)
+				})
+				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					resp := ResponseBody{
+						Model: "test-model",
+						Choices: []ChoiceBody{
+							{
+								Message: ChoiceMessage{
+									Content: "Response without markers",
+								},
+								FinishReason: "stop",
+							},
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(resp)
+				})
+			},
+			expectedOverLengt: "silent_truncation_likely",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			tt.setupServer(mux)
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			profile := config.EndpointProfile{
+				Name:           "test",
+				BaseURL:        server.URL,
+				Auth:           nil,
+				ExtraHeaders:   map[string]config.SecretRef{},
+				Dialect:        "chat_completions_v1",
+				MaxTokensField: "",
+			}
+
+			adapter := New(profile, &mockResolver{})
+			record, err := adapter.Probe(context.Background(), "test", "test-model")
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if record.OverLength != tt.expectedOverLengt {
+				t.Errorf("OverLength: got %q, want %q", record.OverLength, tt.expectedOverLengt)
+			}
+
+			if record.OverLength == "silent_truncation_likely" && record.EligibleRequiredReviewer != transport.TriNo {
+				t.Errorf("EligibleRequiredReviewer should be TriNo when OverLength is silent_truncation_likely, got %q", record.EligibleRequiredReviewer)
+			}
+		})
+	}
+}
+
+// Test Probe endpoint name validation
+func TestProbeEndpointMismatch(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:           "myendpoint",
+		BaseURL:        "http://localhost:8000",
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{})
+	_, err := adapter.Probe(context.Background(), "differentendpoint", "test-model")
+
+	if err == nil {
+		t.Errorf("expected error for endpoint mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("error should mention endpoint mismatch, got: %v", err)
 	}
 }
