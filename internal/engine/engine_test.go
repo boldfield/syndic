@@ -605,7 +605,11 @@ func TestProvisional(t *testing.T) {
 }
 
 func TestReviewPresetPlaceholder(t *testing.T) {
-	h := enginetest.New(t, enginetest.RosterTOML, nil)
+	script := map[string][]fake.Step{
+		"author":   {enginetest.Reply("the answer")},
+		"reviewer": {enginetest.VerdictApproveFromRequest()},
+	}
+	h := enginetest.New(t, enginetest.RosterTOML, script)
 	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
 	if err != nil {
 		t.Fatal(err)
@@ -613,16 +617,22 @@ func TestReviewPresetPlaceholder(t *testing.T) {
 	if reply.Preset != "review" {
 		t.Fatalf("preset = %q", reply.Preset)
 	}
-	h.WaitTurnState(reply.TurnID, engine.StateIncomplete)
+	h.WaitTurnState(reply.TurnID, "approved")
 	last := lastTurnState(t, h, reply.TurnID)
-	if last.Reason == nil || *last.Reason != "author_failed:not_implemented" {
+	if last.Reason == nil || *last.Reason != "all_approved" {
 		t.Fatalf("last = %+v", last)
 	}
-	if got := h.TurnStates(reply.TurnID); len(got) != 2 || got[0] != engine.StateSubmitted {
-		t.Fatalf("turn states = %v", got)
+	if got := h.TurnStates(reply.TurnID); got[0] != engine.StateSubmitted {
+		t.Fatalf("first turn state = %q, want %q", got[0], engine.StateSubmitted)
 	}
-	if n := countEvents(h, wire.EventKindAttemptBegun); n != 0 {
-		t.Fatalf("attempt_begun events = %d", n)
+	if n := countEvents(h, wire.EventKindAttemptBegun); n != 2 {
+		t.Fatalf("attempt_begun events = %d, want 2", n)
+	}
+	if n := countEvents(h, wire.EventKindCandidateFrozen); n != 1 {
+		t.Fatalf("candidate_frozen events = %d, want 1", n)
+	}
+	if n := countEvents(h, wire.EventKindVerdictRecorded); n != 1 {
+		t.Fatalf("verdict_recorded events = %d, want 1", n)
 	}
 	turn, err := h.Store.GetTurn(reply.TurnID)
 	if err != nil || turn.Epoch != 1 {

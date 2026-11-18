@@ -155,6 +155,23 @@ func Reply(text string) fake.Step {
 	}
 }
 
+// VerdictApproveFromRequest creates a step that generates an approval verdict
+// based on the request's envelope (candidate hash and attempt id).
+func VerdictApproveFromRequest() fake.Step {
+	return fake.Step{
+		Kind: fake.StepKindReply,
+		BuildFunc: func(req transport.CompleteRequest) fake.Step {
+			verdict := fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			return fake.Step{
+				Kind:            fake.StepKindReply,
+				Text:            verdict,
+				Status:          transport.StatusComplete,
+				TransportStatus: transport.TransportStatusOK,
+			}
+		},
+	}
+}
+
 // New writes rosterTOML to a temporary file, opens a temporary journal,
 // seeds a usable probe record for every participant (except those passed to
 // SkipProbe), builds one fake adapter per participant from scripts, starts

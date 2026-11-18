@@ -3,14 +3,18 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
+	"sync"
 	"time"
 
 	"github.com/boldfield/syndic/internal/budget"
+	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -18,13 +22,14 @@ import (
 // goroutine and holds the engine mutex only around journal transactions and
 // the in-memory state they change, never across the adapter call.
 func (e *Engine) runTurn(t *openTurn) {
-	if t.mode != modeSolo {
-		// Review mode is the next task; until then it ends right after
-		// turn_state{submitted}.
-		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"not_implemented")
-		return
+	if t.mode == modeSolo {
+		e.runTurnSolo(t)
+	} else {
+		e.runTurnReview(t)
 	}
+}
 
+func (e *Engine) runTurnSolo(t *openTurn) {
 	req, attemptID, err := e.dispatchAuthor(t)
 	if err != nil {
 		// Nothing was written for the dispatch; end the turn so the engine
@@ -42,6 +47,25 @@ func (e *Engine) runTurn(t *openTurn) {
 		}
 	}
 	e.completeAuthor(t, attemptID, req, res)
+}
+
+func (e *Engine) runTurnReview(t *openTurn) {
+	req, attemptID, err := e.dispatchAuthor(t)
+	if err != nil {
+		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+		return
+	}
+
+	res, err := e.adapterFor(t.author).Complete(context.Background(), req)
+	if err != nil {
+		res = transport.CompleteResult{
+			Envelope:        req.Envelope,
+			Status:          transport.StatusError,
+			TransportStatus: "adapter_error:" + err.Error(),
+		}
+	}
+
+	e.completeAuthorReview(t, attemptID, req, res)
 }
 
 func (e *Engine) adapterFor(id string) transport.Adapter {
@@ -221,6 +245,104 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	e.open = nil
 }
 
+// completeAuthorReview runs accept, gate and reviewer dispatch for the author's result.
+func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult) {
+	e.mu.Lock()
+
+	expected := e.built.Participants[t.author].Expected
+	manifestHash := e.manifestHash
+
+	e.mu.Unlock()
+
+	gate := transport.CheckResult(req, res, expected)
+
+	var authorOutput string
+	var candidateHash string
+	quarantined := false
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
+			RawScrubbed:     res.RawOutput,
+			ScrubCount:      res.ScrubCount,
+			Identity:        identityString(res.Identity),
+			Status:          string(res.Status),
+			NativeFinish:    res.NativeFinish,
+			TransportStatus: res.TransportStatus,
+		})
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			quarantined = true
+			return nil
+		}
+
+		var usage *wire.ReportedUsage
+		if res.Usage != nil {
+			if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
+				return err
+			}
+			promptTokens, completionTokens := int64(res.Usage.Prompt), int64(res.Usage.Completion)
+			usage = &wire.ReportedUsage{PromptTokens: &promptTokens, CompletionTokens: &completionTokens}
+		}
+		if gate != nil {
+			if err := tx.SetAttemptGate(attemptID, gate.Error()); err != nil {
+				return err
+			}
+		}
+		if err := emit(t.id, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+			AttemptID:       attemptID,
+			Status:          string(res.Status),
+			ScrubCount:      res.ScrubCount,
+			TransportStatus: res.TransportStatus,
+			Usage:           usage,
+		}); err != nil {
+			return err
+		}
+		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+			Participant: t.author,
+			State:       ParticipantIdle,
+		}); err != nil {
+			return err
+		}
+
+		if gate != nil {
+			return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+		}
+
+		authorOutput = res.RawOutput
+		hash, err := hashCandidate(manifestHash, t.id, attemptID, res.RawOutput)
+		if err != nil {
+			return err
+		}
+		candidateHash = hash
+
+		_, err = tx.FreezeCandidate(t.id, res.RawOutput, hash)
+		if err != nil {
+			return err
+		}
+		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{
+			TurnID:        t.id,
+			CandidateHash: hash,
+		}); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if quarantined {
+		return
+	}
+	if err != nil {
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		return
+	}
+
+	delete(e.running, t.author)
+
+	reviewers := t.eff.Preset.RequiredReviewers
+	dispatchReviewers(e, t, candidateHash, authorOutput, reviewers)
+}
+
 // finishTurn ends a turn that has no result to record.
 func (e *Engine) finishTurn(t *openTurn, state, reason string) {
 	e.mu.Lock()
@@ -270,4 +392,344 @@ func identityString(id transport.ModelIdentity) string {
 		return id.Kind
 	}
 	return id.Kind + ":" + id.Value
+}
+
+func hashCandidate(manifestHash, turnID, authorAttemptID, authorOutput string) (string, error) {
+	return candidate.Hash(candidate.Identity{
+		ManifestHash:    manifestHash,
+		TurnID:          turnID,
+		AuthorAttemptID: authorAttemptID,
+		Content:         []byte(authorOutput),
+		EvidenceIDs:     nil,
+	})
+}
+
+// dispatchReviewers dispatches all required reviewers in parallel goroutines.
+func dispatchReviewers(e *Engine, t *openTurn, candidateHash, authorOutput string, reviewers []string) {
+	var wg sync.WaitGroup
+	wg.Add(len(reviewers))
+
+	for _, reviewerID := range reviewers {
+		go func(revID string) {
+			defer wg.Done()
+			e.dispatchReviewerOnce(t, revID, candidateHash, authorOutput)
+		}(reviewerID)
+	}
+
+	wg.Wait()
+}
+
+// dispatchReviewerOnce dispatches a single reviewer.
+func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, authorOutput string) {
+	var delimiter string
+	var req transport.CompleteRequest
+	var attemptID string
+
+	e.mu.Lock()
+	mp := e.built.Participants[reviewerID]
+	var p config.Participant
+	for _, candidate := range e.roster.Participants {
+		if candidate.ID == reviewerID {
+			p = candidate
+			break
+		}
+	}
+	maxOut := budget.ClampOutput(*t.eff.Budgets.ReviewerMaxOutputTokens, mp.OutputBound)
+	deadline := e.clock.Now().UTC().Add(t.attemptDeadline)
+	if t.turnDeadline.Before(deadline) {
+		deadline = t.turnDeadline
+	}
+
+	genDelimiter := func(rand io.Reader) (string, error) {
+		return prompt.NewDelimiter(rand)
+	}
+
+	for {
+		var err error
+		delimiter, err = genDelimiter(e.rand)
+		if err != nil {
+			e.mu.Unlock()
+			e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+			return
+		}
+
+		err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+			turn, err := tx.GetTurn(t.id)
+			if err != nil {
+				return err
+			}
+
+			attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
+				TurnID:          t.id,
+				Participant:     reviewerID,
+				Phase:           "review",
+				Epoch:           turn.Epoch,
+				Deadline:        &deadline,
+				MaxOutputTokens: maxOut,
+				Delimiter:       delimiter,
+			})
+			if err != nil {
+				return err
+			}
+
+			reviewInput := prompt.ReviewInput{
+				Request:       t.input,
+				Candidate:     authorOutput,
+				CandidateHash: candidateHash,
+				AttemptID:     attemptID,
+				Delimiter:     delimiter,
+			}
+			msgs, err := prompt.Reviewer(reviewInput)
+			if err != nil {
+				if err == prompt.ErrDelimiterCollision {
+					return fmt.Errorf("delimiter_collision")
+				}
+				return err
+			}
+
+			req = transport.CompleteRequest{
+				Envelope: transport.AttemptEnvelope{
+					Participant:   reviewerID,
+					TurnID:        t.id,
+					Phase:         "review",
+					Epoch:         turn.Epoch,
+					AttemptID:     attemptID,
+					CandidateHash: candidateHash,
+				},
+				Model:           p.Model,
+				Messages:        msgs,
+				MaxOutputTokens: maxOut,
+				Deadline:        deadline,
+			}
+
+			if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
+				AttemptID:       attemptID,
+				Participant:     reviewerID,
+				Phase:           "review",
+				Epoch:           int64(turn.Epoch),
+				Deadline:        deadline.Format(time.RFC3339Nano),
+				MaxOutputTokens: int64(maxOut),
+			}); err != nil {
+				return err
+			}
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+				Participant: reviewerID,
+				State:       ParticipantRunning,
+			}); err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			if err.Error() == "delimiter_collision" {
+				continue
+			}
+			e.mu.Unlock()
+			e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+			return
+		}
+		break
+	}
+	e.mu.Unlock()
+
+	e.running[reviewerID] = true
+	res, err := e.adapterFor(reviewerID).Complete(context.Background(), req)
+	if err != nil {
+		res = transport.CompleteResult{
+			Envelope:        req.Envelope,
+			Status:          transport.StatusError,
+			TransportStatus: "adapter_error:" + err.Error(),
+		}
+	}
+	e.completeReviewerResult(t, reviewerID, attemptID, req, res, candidateHash)
+}
+
+// completeReviewerResult processes a reviewer's result.
+func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, candidateHash string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	expected := e.built.Participants[reviewerID].Expected
+
+	var quarantined bool
+	var approved bool
+	var blockOpened bool
+	var revisionRequested bool
+	var failed bool
+
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
+			RawScrubbed:     res.RawOutput,
+			ScrubCount:      res.ScrubCount,
+			Identity:        identityString(res.Identity),
+			Status:          string(res.Status),
+			NativeFinish:    res.NativeFinish,
+			TransportStatus: res.TransportStatus,
+		})
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			quarantined = true
+			return emit(t.id, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+				AttemptID:       attemptID,
+				Status:          string(res.Status),
+				ScrubCount:      res.ScrubCount,
+				TransportStatus: res.TransportStatus,
+			})
+		}
+
+		var usage *wire.ReportedUsage
+		if res.Usage != nil {
+			if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
+				return err
+			}
+			promptTokens, completionTokens := int64(res.Usage.Prompt), int64(res.Usage.Completion)
+			usage = &wire.ReportedUsage{PromptTokens: &promptTokens, CompletionTokens: &completionTokens}
+		}
+
+		gate := transport.CheckResult(req, res, expected)
+		if gate != nil {
+			if err := tx.SetAttemptGate(attemptID, gate.Error()); err != nil {
+				return err
+			}
+			if err := emit(t.id, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+				AttemptID:       attemptID,
+				Status:          string(res.Status),
+				ScrubCount:      res.ScrubCount,
+				TransportStatus: res.TransportStatus,
+				Usage:           usage,
+			}); err != nil {
+				return err
+			}
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+				Participant: reviewerID,
+				State:       ParticipantIdle,
+			}); err != nil {
+				return err
+			}
+			failed = true
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":gate:identity mismatch")
+		}
+
+		vd := verdict.Parse(res.RawOutput, candidateHash, attemptID)
+
+		if err := tx.SetAttemptCommentary(attemptID, vd.Commentary); err != nil {
+			return err
+		}
+
+		validationStatus := string(vd.Classification)
+		verdictID, err := tx.RecordVerdict(attemptID, candidateHash, vd.Verdict.Decision, vd.Verdict.Reason, validationStatus)
+		if err != nil {
+			return err
+		}
+
+		if err := emit(t.id, wire.EventKindVerdictRecorded, wire.EvVerdictRecorded{
+			VerdictID:        verdictID,
+			AttemptID:        attemptID,
+			Parsed:           true,
+			ValidationStatus: validationStatus,
+		}); err != nil {
+			return err
+		}
+
+		if err := emit(t.id, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+			AttemptID:       attemptID,
+			Status:          string(res.Status),
+			ScrubCount:      res.ScrubCount,
+			TransportStatus: res.TransportStatus,
+			Usage:           usage,
+		}); err != nil {
+			return err
+		}
+
+		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+			Participant: reviewerID,
+			State:       ParticipantIdle,
+		}); err != nil {
+			return err
+		}
+
+		switch vd.Classification {
+		case verdict.Valid:
+			if vd.Verdict.Decision == "approve" {
+				approved = true
+				allApprov, err := allReviewersApproved(tx, t.id, candidateHash, t.eff.Preset.RequiredReviewers)
+				if err != nil {
+					return err
+				}
+				if allApprov {
+					return endTurnIn(tx, emit, t.id, StateApproved, "all_approved")
+				}
+			} else if vd.Verdict.Decision == "block" {
+				blockID, err := tx.OpenBlockFor(verdictID, vd.Verdict.BlockID, candidateHash, vd.Verdict.Severity, vd.Verdict.Evidence, vd.Verdict.Remedy)
+				if err != nil {
+					return err
+				}
+				if err := emit(t.id, wire.EventKindBlockOpened, wire.EvBlockOpened{
+					BlockID:  blockID,
+					Severity: vd.Verdict.Severity,
+				}); err != nil {
+					return err
+				}
+				blockOpened = true
+				return endTurnIn(tx, emit, t.id, StateIncomplete, "block:"+blockID)
+			}
+		case verdict.RevisionRequest:
+			revisionRequested = true
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "revision_request:"+reviewerID)
+		case verdict.Rejected:
+			failed = true
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":rejected")
+		case verdict.Malformed:
+			failed = true
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "malformed_twice:"+reviewerID)
+		}
+
+		return nil
+	})
+
+	if quarantined {
+		return
+	}
+	if err != nil {
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		return
+	}
+
+	delete(e.running, reviewerID)
+	if approved || blockOpened || revisionRequested || failed {
+		e.open = nil
+	}
+}
+
+// allReviewersApproved checks if all required reviewers have approved the candidate.
+func allReviewersApproved(tx *journal.Tx, turnID, candidateHash string, reviewers []string) (bool, error) {
+	verdicts, err := tx.ListVerdicts(turnID)
+	if err != nil {
+		return false, err
+	}
+
+	reviewerApprovals := make(map[string]bool)
+	for _, v := range verdicts {
+		if v.CandidateHash != candidateHash || v.ValidationStatus != string(verdict.Valid) || v.Parsed != "approve" {
+			continue
+		}
+
+		attempt, err := tx.GetAttempt(v.AttemptID)
+		if err != nil {
+			return false, err
+		}
+
+		reviewerApprovals[attempt.Participant] = true
+	}
+
+	for _, revID := range reviewers {
+		if !reviewerApprovals[revID] {
+			return false, nil
+		}
+	}
+	return true, nil
 }

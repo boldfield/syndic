@@ -31,6 +31,7 @@ const (
 	StateAuthorDispatched = "author_dispatched"
 	StateSoloComplete     = "solo_complete"
 	StateIncomplete       = "incomplete"
+	StateApproved         = "approved"
 )
 
 // Participant states.

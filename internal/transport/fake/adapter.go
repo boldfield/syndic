@@ -34,6 +34,7 @@ type Step struct {
 	EchoedString       string
 	Err                error
 	Usage              *transport.Usage
+	BuildFunc          func(req transport.CompleteRequest) Step
 }
 
 // CompleteCall records a single Complete call with all its details.
@@ -124,6 +125,13 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	step := a.script[a.current]
 	a.current++
 
+	a.mu.Unlock()
+
+	// If the step has a BuildFunc, call it to generate the final step from the request.
+	if step.BuildFunc != nil {
+		step = step.BuildFunc(req)
+	}
+
 	identity := step.Identity
 	if identity == (transport.ModelIdentity{}) {
 		identity = a.defaultIdentity
@@ -133,8 +141,6 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	if reportedModel == "" {
 		reportedModel = a.defaultReportedModel
 	}
-
-	a.mu.Unlock()
 
 	switch step.Kind {
 	case StepKindReply:
