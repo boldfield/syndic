@@ -46,6 +46,119 @@ var probeMarkerSeq atomic.Int64
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
+// calibrationText is a fixed 4096-byte text used for token calibration.
+// It contains a mix of English prose, source code, and multi-byte UTF-8 characters.
+const calibrationText = `The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.
+How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.
+
+func fibonacci(n int) int {
+	if n <= 1 {
+		return n
+	}
+	return fibonacci(n-1) + fibonacci(n-2)
+}
+
+class HelloWorld {
+	public static void main(String[] args) {
+		System.out.println("Hello, World!");
+		System.out.println("The number of arguments: " + args.length);
+	}
+}
+
+SELECT user_id, COUNT(*) as count FROM events GROUP BY user_id ORDER BY count DESC LIMIT 10;
+INSERT INTO users (name, email) VALUES ('Alice Johnson', 'alice@example.com');
+UPDATE products SET price = price * 1.1 WHERE category = 'electronics';
+DELETE FROM logs WHERE created_at < NOW() - INTERVAL '30 days';
+
+Document processing in natural language requires careful tokenization.
+The tokenizer must handle punctuation, whitespace, and special characters correctly.
+Unicode normalization ensures consistent representation across different platforms.
+
+Multi-byte UTF-8 characters: café, naïve, résumé, cliché, façade, élève, 🚀, 🎉, 🌟, ✨, ⚡.
+
+Configuration example:
+server:
+  host: localhost
+  port: 8080
+  ssl: true
+  timeout: 30s
+database:
+  url: postgresql://user:pass@localhost:5432/mydb
+  pool_size: 20
+  max_connections: 100
+
+The Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt
+ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco
+laboris nisi ut aliquip ex ea commodo consequat.
+
+API Response Example:
+{
+  "status": "success",
+  "data": {
+    "id": "12345",
+    "name": "John Doe",
+    "email": "john@example.com",
+    "roles": ["admin", "user"],
+    "last_login": "2024-11-18T10:30:00Z"
+  },
+  "timestamp": "2024-11-18T10:35:45Z"
+}
+
+Performance considerations for token estimation:
+- Accurate tokenization is essential for cost estimation
+- Different models use different tokenizers
+- UTF-8 multi-byte characters affect token counts
+- Whitespace handling varies by tokenizer implementation
+
+Error handling pattern:
+try {
+	const result = await fetchData(url);
+	processResult(result);
+} catch (error) {
+	logger.error('Request failed', { error, url });
+	handleError(error);
+} finally {
+	cleanup();
+}
+
+The evolution of programming languages has been marked by increasing abstraction levels.
+Assembly gave way to procedural languages, which gave way to object-oriented design.
+Now we see functional programming paradigms gaining prominence in modern development.
+
+Mathematical expressions: x² + y² = r², ∫₀^∞ e^(-x²) dx = √π/2, ∮ F·ds = ∬(∇×F)·dA
+
+Network protocol overview:
+TCP/IP provides reliable, ordered delivery of data.
+UDP offers faster, connectionless communication without guarantees.
+QUIC combines advantages of both TCP and UDP.
+
+International characters: 日本語, 中文, 한국어, Русский, العربية, עברית, Ελληνικά.
+
+Code review checklist:
+✓ All tests pass
+✓ Code follows style guidelines
+✓ Documentation is updated
+✓ No hardcoded secrets or passwords
+✓ Performance impact assessed
+✓ Backward compatibility maintained
+
+Another paragraph about the importance of proper encoding and character handling.
+The transition from ASCII to Unicode was a major milestone in computing history.
+Today, UTF-8 has become the dominant encoding for web and application development.
+
+Regular expression patterns:
+Email: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+Phone: ^\+?1?\d{9,15}$
+URL: ^https?://[^\s/$.?#].[^\s]*$
+
+The future of artificial intelligence includes better tokenization methods that can handle
+complex multilingual text more efficiently. This will improve both accuracy and performance
+in natural language processing applications across diverse languages and scripts.
+
+Summary: This calibration text is designed for token calibration. It includes code, prose,
+UTF-8 chars, and mathematical expressions to represent typical API documentation content used
+in natural language processing for token estimation and cost prediction accuracy assurance. 123456789012345678901234567890xyz`
+
 func New(profile config.EndpointProfile, resolver config.SecretResolver) *Adapter {
 	baseURL, _ := url.Parse(profile.BaseURL)
 	profileHost := ""
@@ -93,9 +206,10 @@ func NewWithOptions(profile config.EndpointProfile, resolver config.SecretResolv
 }
 
 type ProbeOptions struct {
-	Timeout           time.Duration
-	DisableOverLength bool
-	AssumedContextLen int
+	Timeout            time.Duration
+	DisableOverLength  bool
+	DisableCalibration bool
+	AssumedContextLen  int
 }
 
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
@@ -226,6 +340,10 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
 	}
 
+	if !opts.DisableCalibration {
+		a.probeCalibration(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout)
+	}
+
 	if len(probeFinishReasons) > 0 {
 		record.FinishReasons = probeFinishReasons
 	}
@@ -252,6 +370,25 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 func recordRawStep(rawSteps map[string]any, step, path string, statusCode int, headers http.Header, body []byte) {
 	entry := map[string]any{
 		"path": path,
+	}
+	if statusCode != 0 {
+		entry["status"] = statusCode
+		if headers != nil {
+			entry["headers"] = headers
+		}
+		if body != nil {
+			entry["body"] = string(body)
+		}
+	}
+	rawSteps[step] = entry
+}
+
+func recordRawStepWithRequest(rawSteps map[string]any, step, path string, statusCode int, headers http.Header, body []byte, requestBody []byte) {
+	entry := map[string]any{
+		"path": path,
+	}
+	if requestBody != nil {
+		entry["request"] = string(requestBody)
 	}
 	if statusCode != 0 {
 		entry["status"] = statusCode
@@ -467,9 +604,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	result.Status = mapFinishReason(finishReason)
 
 	if respData.Usage != nil {
-		result.Usage = &transport.Usage{
-			Prompt:     respData.Usage.PromptTokens,
-			Completion: respData.Usage.CompletionTokens,
+		result.Usage = &transport.Usage{}
+		if respData.Usage.PromptTokens != nil {
+			result.Usage.Prompt = *respData.Usage.PromptTokens
+		}
+		if respData.Usage.CompletionTokens != nil {
+			result.Usage.Completion = *respData.Usage.CompletionTokens
 		}
 		a.mu.Lock()
 		a.lastUsage = &transport.Usage{
@@ -535,8 +675,8 @@ type ChoiceMessage struct {
 }
 
 type UsageData struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
 }
 
 func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointProfile) map[string]any {
@@ -961,6 +1101,103 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	if finishReason != "" {
 		finishReasons[finishReason] = mapFinishReason(finishReason)
 	}
+}
+
+func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration) {
+	endpoint := baseURL.JoinPath("/chat/completions")
+
+	maxTokensField := record.MaxTokensField
+	if maxTokensField == "" {
+		maxTokensField = "max_tokens"
+	}
+
+	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
+	recordRawStepWithRequest(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody)
+
+	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
+	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
+
+	if baselineErr != nil || calibrationErr != nil || baselineStatusCode == 0 || calibrationStatusCode == 0 {
+		record.Calibration.Available = false
+		return
+	}
+
+	if baselineStatusCode < 200 || baselineStatusCode >= 300 {
+		record.Calibration.Available = false
+		return
+	}
+
+	if calibrationStatusCode < 200 || calibrationStatusCode >= 300 {
+		record.Calibration.Available = false
+		return
+	}
+
+	var baselineData ResponseBody
+	if err := json.Unmarshal(baselineBody, &baselineData); err != nil || baselineData.Usage == nil || baselineData.Usage.PromptTokens == nil {
+		record.Calibration.Available = false
+		return
+	}
+
+	var calibrationData ResponseBody
+	if err := json.Unmarshal(calibrationBody, &calibrationData); err != nil || calibrationData.Usage == nil || calibrationData.Usage.PromptTokens == nil {
+		record.Calibration.Available = false
+		return
+	}
+
+	baselineTokens := *baselineData.Usage.PromptTokens
+	calibrationTokens := *calibrationData.Usage.PromptTokens
+
+	if calibrationTokens <= baselineTokens {
+		record.Calibration.Available = false
+		return
+	}
+
+	record.Calibration.Available = true
+	record.Calibration.BaselinePromptTokens = baselineTokens
+	record.Calibration.ObservedPromptTokens = calibrationTokens
+	record.Calibration.BytesPerToken = float64(len([]byte(calibrationText))) / float64(calibrationTokens-baselineTokens)
+}
+
+func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, timeout time.Duration, secrets *[]string) (int, http.Header, []byte, []byte, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	messages := []MessageInput{
+		{Role: "user", Content: messageContent},
+	}
+
+	requestBody := map[string]any{
+		"model":        model,
+		"messages":     messages,
+		"stream":       false,
+		maxTokensField: 1,
+	}
+
+	bodyBytes, _ := json.Marshal(requestBody)
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := a.addProbeAuth(httpReq, secrets); err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+
+	defer func() { _ = httpResp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
+	if err != nil {
+		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, err
+	}
+
+	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil
 }
 
 // addProbeAuth sets auth headers and appends every secret value resolved for
