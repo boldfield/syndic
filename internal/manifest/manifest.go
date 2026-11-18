@@ -53,13 +53,20 @@ type Built struct {
 // Build constructs an engine run manifest from the roster and probe records.
 func Build(in Input) (Built, error) {
 	participants := make(map[string]Participant)
+	probeManifests := make(map[string]*evidence.ProbeManifest)
 
 	for _, p := range in.Roster.Participants {
-		participant := buildParticipant(in, p)
+		participant, probeManifest, err := buildParticipant(in, p)
+		if err != nil {
+			return Built{}, err
+		}
 		participants[p.ID] = participant
+		if probeManifest != nil {
+			probeManifests[p.ID] = probeManifest
+		}
 	}
 
-	manifestJSON, rosterHash, rosterFileSHA256, err := buildManifestJSON(in, participants)
+	manifestJSON, rosterHash, rosterFileSHA256, err := buildManifestJSON(in, participants, probeManifests)
 	if err != nil {
 		return Built{}, err
 	}
@@ -73,48 +80,45 @@ func Build(in Input) (Built, error) {
 }
 
 // buildParticipant constructs a Participant from a roster entry and probe records.
-func buildParticipant(in Input, rosterParticipant config.Participant) Participant {
+// It returns the participant, the parsed probe manifest (if usable), and an error.
+func buildParticipant(in Input, rosterParticipant config.Participant) (Participant, *evidence.ProbeManifest, error) {
 	p := Participant{
 		ID: rosterParticipant.ID,
 	}
 
 	endpoint := findEndpoint(in.Roster, rosterParticipant.Endpoint)
 	if endpoint == nil {
-		p.Detail = "endpoint_not_found"
-		return p
+		return Participant{}, nil, fmt.Errorf("endpoint %q not found", rosterParticipant.Endpoint)
 	}
 
 	record, found, err := in.Store.LatestProbeRecord(endpoint.Name, rosterParticipant.Model)
 	if err != nil {
-		p.Detail = "probe_record_error"
-		return p
+		return Participant{}, nil, fmt.Errorf("lookup probe record for %s/%s: %w", endpoint.Name, rosterParticipant.Model, err)
 	}
 
 	if !found {
 		p.Detail = "no_record"
-		return p
+		return p, nil, nil
 	}
 
 	probeManifest, hasFingerprint, err := evidence.ParseProbeManifest(record.Manifest)
 	if err != nil {
-		p.Detail = "probe_parse_error"
-		return p
+		return Participant{}, nil, fmt.Errorf("parse probe manifest for %s/%s: %w", endpoint.Name, rosterParticipant.Model, err)
 	}
 
 	if !hasFingerprint {
 		p.Detail = "no_fingerprint"
-		return p
+		return p, nil, nil
 	}
 
 	currentFingerprint, err := evidence.ConfigFingerprint(*endpoint, rosterParticipant.Model, in.AdapterVersion(rosterParticipant))
 	if err != nil {
-		p.Detail = "fingerprint_error"
-		return p
+		return Participant{}, nil, fmt.Errorf("compute fingerprint for %s/%s: %w", endpoint.Name, rosterParticipant.Model, err)
 	}
 
 	if probeManifest.ConfigFingerprint != currentFingerprint {
 		p.Detail = "fingerprint_mismatch"
-		return p
+		return p, nil, nil
 	}
 
 	p.Usable = true
@@ -137,8 +141,13 @@ func buildParticipant(in Input, rosterParticipant config.Participant) Participan
 		p.OutputBound = probeManifest.Export.OutputBound
 	}
 
+	calibrationSafety := 0.75
+	if in.Roster.Budgets.CalibrationSafety != nil {
+		calibrationSafety = *in.Roster.Budgets.CalibrationSafety
+	}
+
 	if probeManifest.Calibration.Available {
-		bytesPerToken := probeManifest.Calibration.BytesPerToken * 0.75
+		bytesPerToken := probeManifest.Calibration.BytesPerToken * calibrationSafety
 		p.BytesPerToken = &bytesPerToken
 		p.BytesPerTokenSource = "probe"
 	} else if rosterParticipant.BytesPerToken != nil {
@@ -146,7 +155,7 @@ func buildParticipant(in Input, rosterParticipant config.Participant) Participan
 		p.BytesPerTokenSource = "roster"
 	}
 
-	return p
+	return p, &probeManifest, nil
 }
 
 // findEndpoint finds an endpoint profile by name.
@@ -160,7 +169,7 @@ func findEndpoint(roster *config.Roster, name string) *config.EndpointProfile {
 }
 
 // buildManifestJSON builds the canonical manifest JSON with sorted keys.
-func buildManifestJSON(in Input, participants map[string]Participant) (json.RawMessage, string, string, error) {
+func buildManifestJSON(in Input, participants map[string]Participant, probeManifests map[string]*evidence.ProbeManifest) (json.RawMessage, string, string, error) {
 	rosterFileSHA256 := hashBytes(in.RosterFile)
 
 	rosterMap, err := rosterToMap(in.Roster)
@@ -173,23 +182,17 @@ func buildManifestJSON(in Input, participants map[string]Participant) (json.RawM
 
 	for id, p := range participants {
 		if p.Usable {
-			record, found, err := in.Store.LatestProbeRecord(findEndpointNameForParticipant(in.Roster, id), findModelForParticipant(in.Roster, id))
-			if err != nil || !found {
-				continue
-			}
-			probeManifest, _, err := evidence.ParseProbeManifest(record.Manifest)
-			if err != nil {
-				continue
-			}
-			probeData, err := json.Marshal(probeManifest)
-			if err != nil {
-				continue
-			}
-			probeRecords[id] = json.RawMessage(probeData)
+			if probeManifest, ok := probeManifests[id]; ok {
+				probeData, err := json.Marshal(probeManifest)
+				if err != nil {
+					return nil, "", "", fmt.Errorf("marshal probe manifest for %s: %w", id, err)
+				}
+				probeRecords[id] = json.RawMessage(probeData)
 
-			expectedMap[id] = map[string]interface{}{
-				"identity":       p.Expected.Identity,
-				"reported_model": p.Expected.ReportedModel,
+				expectedMap[id] = map[string]interface{}{
+					"identity":       p.Expected.Identity,
+					"reported_model": p.Expected.ReportedModel,
+				}
 			}
 		}
 	}
@@ -210,7 +213,10 @@ func buildManifestJSON(in Input, participants map[string]Participant) (json.RawM
 		return nil, "", "", fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	rosterHash := computeRosterHash(rosterMap)
+	rosterHash, err := computeRosterHash(rosterMap)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("compute roster hash: %w", err)
+	}
 
 	return json.RawMessage(manifestJSON), rosterHash, rosterFileSHA256, nil
 }
@@ -443,6 +449,18 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 				qMap["budgets"] = bMap
 			}
 		}
+		if qp.EligibleRequestCategories != nil {
+			qMap["eligible_request_categories"] = qp.EligibleRequestCategories
+		}
+		if qp.ProtectedPaths != nil {
+			qMap["protected_paths"] = qp.ProtectedPaths
+		}
+		if qp.RequiredReviewTriggers != nil {
+			qMap["required_review_triggers"] = qp.RequiredReviewTriggers
+		}
+		if qp.OutputEscalationRules != nil {
+			qMap["output_escalation_rules"] = qp.OutputEscalationRules
+		}
 		quick[name] = qMap
 	}
 	roMap["quick"] = quick
@@ -452,29 +470,12 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 	return roMap, nil
 }
 
-// findEndpointNameForParticipant finds the endpoint name for a participant.
-func findEndpointNameForParticipant(roster *config.Roster, participantID string) string {
-	for _, p := range roster.Participants {
-		if p.ID == participantID {
-			return p.Endpoint
-		}
-	}
-	return ""
-}
-
-// findModelForParticipant finds the model for a participant.
-func findModelForParticipant(roster *config.Roster, participantID string) string {
-	for _, p := range roster.Participants {
-		if p.ID == participantID {
-			return p.Model
-		}
-	}
-	return ""
-}
-
 // canonicalJSON marshals an object to canonical JSON with sorted keys at every level.
 func canonicalJSON(v interface{}) ([]byte, error) {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
 	var obj interface{}
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, err
@@ -498,10 +499,16 @@ func encodeCanonical(v interface{}) ([]byte, error) {
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			keyBytes, _ := json.Marshal(k)
+			keyBytes, err := json.Marshal(k)
+			if err != nil {
+				return nil, err
+			}
 			buf.Write(keyBytes)
 			buf.WriteString(":")
-			valBytes, _ := encodeCanonical(val[k])
+			valBytes, err := encodeCanonical(val[k])
+			if err != nil {
+				return nil, err
+			}
 			buf.Write(valBytes)
 		}
 		buf.WriteString("}")
@@ -514,7 +521,10 @@ func encodeCanonical(v interface{}) ([]byte, error) {
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			itemBytes, _ := encodeCanonical(item)
+			itemBytes, err := encodeCanonical(item)
+			if err != nil {
+				return nil, err
+			}
 			buf.Write(itemBytes)
 		}
 		buf.WriteString("]")
@@ -526,10 +536,13 @@ func encodeCanonical(v interface{}) ([]byte, error) {
 }
 
 // computeRosterHash computes the SHA-256 hash of the roster member.
-func computeRosterHash(roster map[string]interface{}) string {
-	data, _ := canonicalJSON(roster)
+func computeRosterHash(roster map[string]interface{}) (string, error) {
+	data, err := canonicalJSON(roster)
+	if err != nil {
+		return "", err
+	}
 	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
+	return hex.EncodeToString(hash[:]), nil
 }
 
 // hashBytes computes SHA-256 hash of bytes.
