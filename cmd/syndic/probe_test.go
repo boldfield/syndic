@@ -170,6 +170,17 @@ required_reviewers = ["reviewer"]
 		t.Fatal("export contains sentinel value from test server")
 	}
 
+	// Verify raw record contains the sentinel
+	rawPath := filepath.Join(rawDir, rawFiles[0].Name())
+	rawData, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("failed to read raw record: %v", err)
+	}
+
+	if !strings.Contains(string(rawData), sentinelValue) {
+		t.Fatal("raw record should contain sentinel value from test server")
+	}
+
 	// Verify journal has one run and one probe_completed event
 	db, err := journal.Open(journalPath)
 	if err != nil {
@@ -351,7 +362,7 @@ required_reviewers = ["reviewer"]
 	}
 	os.Stderr = oldStderr
 	if _, err := io.Copy(&stderr, r); err != nil {
-		t.Logf("failed to copy from pipe: %v", err)
+		t.Fatalf("failed to copy from pipe: %v", err)
 	}
 
 	if exitCode != 3 {
@@ -636,7 +647,7 @@ required_reviewers = ["reviewer"]
 	}
 	os.Stderr = oldStderr
 	if _, err := io.Copy(&stderr, r); err != nil {
-		t.Logf("failed to copy from pipe: %v", err)
+		t.Fatalf("failed to copy from pipe: %v", err)
 	}
 
 	if exitCode != 3 {
@@ -740,7 +751,7 @@ required_reviewers = ["reviewer"]
 	}
 	os.Stderr = oldStderr
 	if _, err := io.Copy(&stderr, r); err != nil {
-		t.Logf("failed to copy from pipe: %v", err)
+		t.Fatalf("failed to copy from pipe: %v", err)
 	}
 
 	if exitCode != 4 {
@@ -800,10 +811,156 @@ declared_location = "mars"
 	}
 	os.Stderr = oldStderr
 	if _, err := io.Copy(&stderr, r); err != nil {
-		t.Logf("failed to copy from pipe: %v", err)
+		t.Fatalf("failed to copy from pipe: %v", err)
 	}
 
 	if exitCode != 2 {
 		t.Fatalf("expected exit code 2, got %d, stderr: %s", exitCode, stderr.String())
+	}
+}
+
+func TestProbeJournalParentDirDoesNotExist(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "nonexistent", "subdir", "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server that behaves like an OpenAI-compatible endpoint
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "chatcmpl-123",
+				"object":  "chat.completion",
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	output, _ := io.ReadAll(r)
+	outputStr := string(output)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Check that exactly one file was written to each directory
+	rawFiles, err := os.ReadDir(rawDir)
+	if err != nil {
+		t.Fatalf("failed to read raw dir: %v", err)
+	}
+	if len(rawFiles) != 1 {
+		t.Fatalf("expected 1 raw file, got %d", len(rawFiles))
+	}
+
+	exportFiles, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("failed to read export dir: %v", err)
+	}
+	if len(exportFiles) != 1 {
+		t.Fatalf("expected 1 export file, got %d", len(exportFiles))
+	}
+
+	// Verify journal was created and has the data
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runCount int
+	if err := db.Conn().QueryRow("SELECT COUNT(*) FROM runs").Scan(&runCount); err != nil {
+		t.Fatalf("failed to query runs: %v", err)
+	}
+	if runCount != 1 {
+		t.Fatalf("expected 1 run, got %d", runCount)
 	}
 }

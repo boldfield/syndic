@@ -88,11 +88,8 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		AssumedContextLen: *contextTokens,
 	}
 
-	// Run probe
-	ctx, cancel := context.WithTimeout(context.Background(), probeOpts.Timeout)
-	defer cancel()
-
-	record, err := adapter.ProbeWithOptions(ctx, *endpointName, *modelName, probeOpts)
+	// Run probe with per-request timeouts, not an outer deadline
+	record, err := adapter.ProbeWithOptions(context.Background(), *endpointName, *modelName, probeOpts)
 	if err != nil {
 		exitCode := getOperationalErrorCode(err)
 		if exitCode == 3 {
@@ -123,13 +120,23 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 1
 	}
 
+	// Create journal parent directory
+	if err := os.MkdirAll(filepath.Dir(jnl), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to create journal directory: %v\n", err)
+		return 1
+	}
+
 	// Open journal and create run
 	db, err := journal.Open(jnl)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to open journal: %v\n", err)
 		return 1
 	}
-	defer db.Close()
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: close journal: %v\n", cerr)
+		}
+	}()
 
 	store := journal.NewStore(db)
 
