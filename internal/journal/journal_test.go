@@ -655,20 +655,21 @@ func TestMissingEnumCheckConstraints(t *testing.T) {
 		name  string
 		value string
 		valid bool
+		hash  interface{}
 	}{
-		{"valid open", "open", true},
-		{"valid withdrawn", "withdrawn", true},
-		{"valid overridden", "overridden", true},
-		{"invalid state", "invalid", false},
+		{"valid open", "open", true, nil},
+		{"valid withdrawn", "withdrawn", true, "withdrawn_hash"},
+		{"valid overridden", "overridden", true, nil},
+		{"invalid state", "invalid", false, nil},
 	}
 
 	for _, tc := range blockStateTests {
 		t.Run("block_state_"+tc.name, func(t *testing.T) {
 			blockID := "block-state-" + tc.value
 			_, err := conn.Exec(`
-				INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state)
-				VALUES (?, ?, 'hash', 'low', 'evidence', 'remedy', ?)
-			`, blockID, verdictID, tc.value)
+				INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+				VALUES (?, ?, 'hash', 'low', 'evidence', 'remedy', ?, ?)
+			`, blockID, verdictID, tc.value, tc.hash)
 			if tc.valid && err != nil {
 				t.Errorf("expected valid insert to succeed, got error: %v", err)
 			}
@@ -679,7 +680,7 @@ func TestMissingEnumCheckConstraints(t *testing.T) {
 	}
 }
 
-func TestFreshDBSchemaVersion2(t *testing.T) {
+func TestFreshDBSchemaVersion3(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := tempDir + "/test.db"
 	db, err := journal.Open(dbPath)
@@ -698,8 +699,8 @@ func TestFreshDBSchemaVersion2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 2 {
-		t.Errorf("expected schema version 2, got %d", version)
+	if version != 3 {
+		t.Errorf("expected schema version 3, got %d", version)
 	}
 }
 
@@ -753,11 +754,11 @@ func TestForeignKeyConstraintWithNullableTurnID(t *testing.T) {
 	}
 }
 
-func TestUpgradePathV1ToV2(t *testing.T) {
+func TestUpgradePathV2ToV3(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := tempDir + "/test.db"
 
-	// Create v1 database manually
+	// Create v2 database manually
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("failed to open sqlite: %v", err)
@@ -780,7 +781,7 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to create schema_version table: %v", err)
 	}
 
-	// Read and apply migration 001
+	// Read and apply migrations 001 and 002
 	migration001Content, err := os.ReadFile("migrations/001_init.sql")
 	if err != nil {
 		t.Fatalf("failed to read migration 001: %v", err)
@@ -791,10 +792,20 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to apply migration 001: %v", err)
 	}
 
-	// Record version 1 in schema_version
-	_, err = conn.Exec("INSERT INTO schema_version (version) VALUES (1)")
+	migration002Content, err := os.ReadFile("migrations/002_events_nullable_turn_id.sql")
 	if err != nil {
-		t.Fatalf("failed to record schema version 1: %v", err)
+		t.Fatalf("failed to read migration 002: %v", err)
+	}
+
+	_, err = conn.Exec(string(migration002Content))
+	if err != nil {
+		t.Fatalf("failed to apply migration 002: %v", err)
+	}
+
+	// Record version 2 in schema_version
+	_, err = conn.Exec("INSERT INTO schema_version (version) VALUES (1), (2)")
+	if err != nil {
+		t.Fatalf("failed to record schema versions: %v", err)
 	}
 
 	// Insert test run
@@ -809,34 +820,28 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to insert turn: %v", err)
 	}
 
-	// Insert two events
-	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'event1', 'data1')")
+	// Insert test attempt and verdict
+	_, err = conn.Exec("INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state) VALUES ('attempt-1', 'turn-1', 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed')")
 	if err != nil {
-		t.Fatalf("failed to insert event 1: %v", err)
+		t.Fatalf("failed to insert attempt: %v", err)
 	}
 
-	var event1ID int64
-	err = conn.QueryRow("SELECT id FROM events WHERE event_type = 'event1'").Scan(&event1ID)
+	_, err = conn.Exec("INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status) VALUES ('verdict-1', 'attempt-1', 'hash', 'valid')")
 	if err != nil {
-		t.Fatalf("failed to get event1 id: %v", err)
+		t.Fatalf("failed to insert verdict: %v", err)
 	}
 
-	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'event2', 'data2')")
+	// Insert one open block
+	_, err = conn.Exec("INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state) VALUES ('block-1', 'verdict-1', 'hash', 'low', 'evidence', 'remedy', 'open')")
 	if err != nil {
-		t.Fatalf("failed to insert event 2: %v", err)
-	}
-
-	var event2ID int64
-	err = conn.QueryRow("SELECT id FROM events WHERE event_type = 'event2'").Scan(&event2ID)
-	if err != nil {
-		t.Fatalf("failed to get event2 id: %v", err)
+		t.Fatalf("failed to insert block: %v", err)
 	}
 
 	if err := conn.Close(); err != nil {
 		t.Fatalf("failed to close connection: %v", err)
 	}
 
-	// Now open with journal.Open which applies migrations
+	// Now open with journal.Open which applies migration 003
 	db, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("failed to open database with journal: %v", err)
@@ -849,56 +854,52 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 
 	conn = db.Conn()
 
-	// Check schema version is 2
+	// Check schema version is 3
 	var version int
 	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version)
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 2 {
-		t.Errorf("expected schema version 2 after upgrade, got %d", version)
+	if version != 3 {
+		t.Errorf("expected schema version 3 after upgrade, got %d", version)
 	}
 
-	// Check events still exist with same IDs, event types, and data
-	var id int64
-	var eventType, data string
-	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'event1'").Scan(&id, &eventType, &data)
+	// Check that the block still exists with null withdrawn_against_hash and other fields unchanged
+	var blockID string
+	var state string
+	var withdrawnHash interface{}
+	var verdictID string
+	var candidateHash string
+	var severity string
+	var evidence string
+	var remedy string
+	err = conn.QueryRow("SELECT id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash FROM blocks WHERE id = 'block-1'").Scan(&blockID, &verdictID, &candidateHash, &severity, &evidence, &remedy, &state, &withdrawnHash)
 	if err != nil {
-		t.Fatalf("failed to query event1: %v", err)
+		t.Fatalf("failed to query block: %v", err)
 	}
-	if id != event1ID {
-		t.Errorf("event1 id changed from %d to %d", event1ID, id)
+	if blockID != "block-1" {
+		t.Errorf("expected block id 'block-1', got %q", blockID)
 	}
-	if eventType != "event1" {
-		t.Errorf("expected event_type 'event1', got %q", eventType)
+	if verdictID != "verdict-1" {
+		t.Errorf("expected verdict_id 'verdict-1', got %q", verdictID)
 	}
-	if data != "data1" {
-		t.Errorf("expected data 'data1', got %q", data)
+	if candidateHash != "hash" {
+		t.Errorf("expected candidate_hash 'hash', got %q", candidateHash)
 	}
-
-	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'event2'").Scan(&id, &eventType, &data)
-	if err != nil {
-		t.Fatalf("failed to query event2: %v", err)
+	if severity != "low" {
+		t.Errorf("expected severity 'low', got %q", severity)
 	}
-	if id != event2ID {
-		t.Errorf("event2 id changed from %d to %d", event2ID, id)
+	if evidence != "evidence" {
+		t.Errorf("expected evidence 'evidence', got %q", evidence)
 	}
-	if eventType != "event2" {
-		t.Errorf("expected event_type 'event2', got %q", eventType)
+	if remedy != "remedy" {
+		t.Errorf("expected remedy 'remedy', got %q", remedy)
 	}
-	if data != "data2" {
-		t.Errorf("expected data 'data2', got %q", data)
+	if state != "open" {
+		t.Errorf("expected block state 'open', got %q", state)
 	}
-
-	// Check that UPDATE and DELETE still fail on the upgraded path
-	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = ?", "new data", event1ID)
-	if err == nil {
-		t.Errorf("expected UPDATE on events to fail on upgraded path, but succeeded")
-	}
-
-	_, err = conn.Exec("DELETE FROM events WHERE id = ?", event1ID)
-	if err == nil {
-		t.Errorf("expected DELETE on events to fail on upgraded path, but succeeded")
+	if withdrawnHash != nil {
+		t.Errorf("expected withdrawn_against_hash to be null, got %v", withdrawnHash)
 	}
 }
 
@@ -1108,6 +1109,250 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		if entry1["type"] != entry2["type"] || entry1["name"] != entry2["name"] || entry1["sql"] != entry2["sql"] {
 			t.Errorf("sqlite_master entry %d changed: %v -> %v", i, entry1, entry2)
 		}
+	}
+}
+
+func TestUpgradePathV1ToV2(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	// Create v1 database manually
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+
+	// Enable foreign keys
+	_, err = conn.Exec("PRAGMA foreign_keys = ON")
+	if err != nil {
+		t.Fatalf("failed to enable foreign keys: %v", err)
+	}
+
+	// Create schema_version table
+	_, err = conn.Exec(`
+		CREATE TABLE schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		t.Fatalf("failed to create schema_version table: %v", err)
+	}
+
+	// Apply migration 001
+	migration001Content, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("failed to read migration 001: %v", err)
+	}
+
+	_, err = conn.Exec(string(migration001Content))
+	if err != nil {
+		t.Fatalf("failed to apply migration 001: %v", err)
+	}
+
+	// Record version 1
+	_, err = conn.Exec("INSERT INTO schema_version (version) VALUES (1)")
+	if err != nil {
+		t.Fatalf("failed to record schema version: %v", err)
+	}
+
+	// Insert test run and turn
+	_, err = conn.Exec("INSERT INTO runs (id, manifest, manifest_hash) VALUES ('run-1', '{}', 'hash')")
+	if err != nil {
+		t.Fatalf("failed to insert run: %v", err)
+	}
+
+	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
+	if err != nil {
+		t.Fatalf("failed to insert turn: %v", err)
+	}
+
+	// Insert test event at v1
+	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'test_event', 'event data')")
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	var eventID1 int64
+	var eventType1, data1 string
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'test_event'").Scan(&eventID1, &eventType1, &data1)
+	if err != nil {
+		t.Fatalf("failed to query event: %v", err)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("failed to close connection: %v", err)
+	}
+
+	// Now open with journal.Open which applies migrations 002 and 003
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database with journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
+	}()
+
+	conn = db.Conn()
+
+	// Check schema version is 3
+	var version int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("expected schema version 3 after upgrade, got %d", version)
+	}
+
+	// Check that the event still exists with original data preserved
+	var eventID2 int64
+	var eventType2, data2 string
+	var turnID interface{}
+	err = conn.QueryRow("SELECT id, turn_id, event_type, data FROM events WHERE event_type = 'test_event'").Scan(&eventID2, &turnID, &eventType2, &data2)
+	if err != nil {
+		t.Fatalf("failed to query event after upgrade: %v", err)
+	}
+	if eventID2 != eventID1 {
+		t.Errorf("expected event id %d, got %d", eventID1, eventID2)
+	}
+	if turnID != "turn-1" {
+		t.Errorf("expected turn_id 'turn-1', got %v", turnID)
+	}
+	if eventType2 != eventType1 {
+		t.Errorf("expected event_type %q, got %q", eventType1, eventType2)
+	}
+	if data2 != data1 {
+		t.Errorf("expected data %q, got %q", data1, data2)
+	}
+
+	// Test immutability triggers still work after migration
+	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = ?", "new data", eventID2)
+	if err == nil {
+		t.Errorf("expected UPDATE on events to fail after migration, but succeeded")
+	}
+
+	_, err = conn.Exec("DELETE FROM events WHERE id = ?", eventID2)
+	if err == nil {
+		t.Errorf("expected DELETE on events to fail after migration, but succeeded")
+	}
+}
+
+func TestWithdrawnAgainstHashConstraint(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Insert attempt and verdict
+	attemptID := "attempt-1"
+	_, err := conn.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed')
+	`, attemptID, turnID)
+	if err != nil {
+		t.Fatalf("failed to insert attempt: %v", err)
+	}
+
+	verdictID := "verdict-1"
+	_, err = conn.Exec(`
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, 'hash', 'valid')
+	`, verdictID, attemptID)
+	if err != nil {
+		t.Fatalf("failed to insert verdict: %v", err)
+	}
+
+	// Test 1: withdrawn block with null hash should fail
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-withdrawn-null', ?, 'hash', 'low', 'evidence', 'remedy', 'withdrawn', NULL)
+	`, verdictID)
+	if err == nil {
+		t.Error("expected INSERT of withdrawn block with null hash to fail, but succeeded")
+	}
+
+	// Test 2: withdrawn block with hash should succeed
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-withdrawn-hash', ?, 'hash', 'low', 'evidence', 'remedy', 'withdrawn', 'withdrawn_hash')
+	`, verdictID)
+	if err != nil {
+		t.Errorf("expected INSERT of withdrawn block with hash to succeed, got error: %v", err)
+	}
+
+	// Test 3: open block with null hash should succeed
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-open-null', ?, 'hash', 'low', 'evidence', 'remedy', 'open', NULL)
+	`, verdictID)
+	if err != nil {
+		t.Errorf("expected INSERT of open block with null hash to succeed, got error: %v", err)
+	}
+
+	// Test 4: open block with hash should fail
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-open-hash', ?, 'hash', 'low', 'evidence', 'remedy', 'open', 'some_hash')
+	`, verdictID)
+	if err == nil {
+		t.Error("expected INSERT of open block with hash to fail, but succeeded")
+	}
+
+	// Test 5: overridden block with null hash should succeed
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-overridden-null', ?, 'hash', 'low', 'evidence', 'remedy', 'overridden', NULL)
+	`, verdictID)
+	if err != nil {
+		t.Errorf("expected INSERT of overridden block with null hash to succeed, got error: %v", err)
+	}
+
+	// Test 6: overridden block with hash should fail
+	_, err = conn.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash)
+		VALUES ('block-overridden-hash', ?, 'hash', 'low', 'evidence', 'remedy', 'overridden', 'some_hash')
+	`, verdictID)
+	if err == nil {
+		t.Error("expected INSERT of overridden block with hash to fail, but succeeded")
+	}
+
+	// Test 7: UPDATE withdrawn block to have null hash should fail
+	_, err = conn.Exec(`
+		UPDATE blocks SET withdrawn_against_hash = NULL WHERE id = 'block-withdrawn-hash'
+	`)
+	if err == nil {
+		t.Error("expected UPDATE of withdrawn block to null hash to fail, but succeeded")
+	}
+
+	// Test 8: UPDATE open block to have hash should fail
+	_, err = conn.Exec(`
+		UPDATE blocks SET withdrawn_against_hash = 'some_hash' WHERE id = 'block-open-null'
+	`)
+	if err == nil {
+		t.Error("expected UPDATE of open block to have hash to fail, but succeeded")
+	}
+
+	// Test 9: UPDATE block to withdrawn without hash should fail
+	_, err = conn.Exec(`
+		UPDATE blocks SET state = 'withdrawn', withdrawn_against_hash = NULL WHERE id = 'block-open-null'
+	`)
+	if err == nil {
+		t.Error("expected UPDATE block to withdrawn with null hash to fail, but succeeded")
+	}
+
+	// Test 10: UPDATE block to withdrawn with hash should succeed
+	_, err = conn.Exec(`
+		UPDATE blocks SET state = 'withdrawn', withdrawn_against_hash = 'new_hash' WHERE id = 'block-open-null'
+	`)
+	if err != nil {
+		t.Errorf("expected UPDATE block to withdrawn with hash to succeed, got error: %v", err)
 	}
 }
 
