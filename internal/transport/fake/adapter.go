@@ -188,30 +188,17 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	case StepKindError:
 		return transport.CompleteResult{
-			Envelope:        req.Envelope,
-			RawOutput:       "",
-			Text:            "",
-			ScrubCount:      0,
-			Identity:        identity,
-			ReportedModel:   reportedModel,
-			Status:          transport.StatusError,
-			NativeFinish:    "",
-			TransportStatus: "",
-			Usage:           step.Usage,
+			Envelope: req.Envelope,
 		}, step.Err
 
 	case StepKindNotSent:
+		if step.Err == nil {
+			return transport.CompleteResult{
+				Envelope: req.Envelope,
+			}, transport.ErrNotSent
+		}
 		return transport.CompleteResult{
-			Envelope:        req.Envelope,
-			RawOutput:       "",
-			Text:            "",
-			ScrubCount:      0,
-			Identity:        identity,
-			ReportedModel:   reportedModel,
-			Status:          transport.StatusError,
-			NativeFinish:    "",
-			TransportStatus: "",
-			Usage:           step.Usage,
+			Envelope: req.Envelope,
 		}, fmt.Errorf("%w: %w", transport.ErrNotSent, step.Err)
 
 	case StepKindHang:

@@ -41,9 +41,6 @@ type Adapter struct {
 // AdapterVersion identifies this adapter in capability records.
 const AdapterVersion = "openai-v1"
 
-// adapterVersion is deprecated; use AdapterVersion instead.
-const adapterVersion = AdapterVersion
-
 // probeMarkerSeq keeps head and tail markers unique even on a coarse clock.
 var probeMarkerSeq atomic.Int64
 
@@ -143,7 +140,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		LatencyMillis:            nil,
 		ToolRestrictions:         []string{"no tool definitions sent"},
 		ServerVersion:            "unknown",
-		AdapterVersion:           adapterVersion,
+		AdapterVersion:           AdapterVersion,
 		ObservedAt:               time.Now(),
 		Raw:                      json.RawMessage("{}"),
 	}
