@@ -2,6 +2,8 @@ package budget
 
 import (
 	"math"
+	"math/big"
+	"strconv"
 
 	"github.com/boldfield/syndic/internal/transport"
 )
@@ -13,48 +15,50 @@ type Overheads struct {
 	RequestTokens int
 }
 
-// ceilSafe rounds a float up to the nearest integer, snapping to the nearest integer
-// when the result is within ULP-scale floating-point error of an integer
-// (to avoid floating-point errors that round mathematically integral results up by one).
-// Uses a tolerance proportional to the magnitude to handle ULPs correctly.
-func ceilSafe(x float64) int {
-	r := math.Round(x)
-	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * abs(r).
-	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
-	// This catches products like 100*1.1=110.00000000000001 but rejects genuinely
-	// fractional values like 1.0000000005 and large-magnitude fractions like
-	// 10,000,000.000005 (error 5e-6 >> tolerance 1e-8).
-	// A positive x never snaps to zero: it must ceil to at least one.
-	if r >= 1 && math.Abs(x-r) < math.Abs(r)*1e-15 {
-		return int(r)
+// decimalRat returns the exact rational value of the shortest decimal string
+// that round-trips to x (so 1.1 is 11/10, not its binary approximation).
+// Arithmetic on these values is exact, so a product that is mathematically an
+// integer in decimal never rounds by one, and adjacent representable
+// fractional inputs are never swallowed by a tolerance.
+func decimalRat(x float64) *big.Rat {
+	if math.IsNaN(x) || math.IsInf(x, 0) {
+		panic("budget: value must be finite")
 	}
-	return int(math.Ceil(x))
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(x, 'g', -1, 64))
+	if !ok {
+		panic("budget: cannot represent value")
+	}
+	return r
 }
 
-// floorSafe rounds a float down to the nearest integer, snapping to the nearest integer
-// when the result is within ULP-scale floating-point error of an integer
-// (to avoid floating-point errors that round mathematically integral results down by one).
-// Uses a tolerance proportional to the magnitude to handle ULPs correctly.
-//
-// scale is the magnitude of the inputs that produced x. Representation error in
-// a product like b*(1-m) is bounded by about b*epsilon, not by the size of the
-// result, so the tolerance follows scale rather than x.
-func floorSafe(x, scale float64) int {
-	r := math.Round(x)
-	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r), scale).
-	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
-	// This catches products like 1000*0.1=100.0 but rejects genuinely fractional values
-	// like 0.9999999995 and large-magnitude near-integer values like 9,999,999.999995
-	// (distance to the nearest integer is 5e-6, well above the tolerance 1e-8 at magnitude 10M).
-	if math.Abs(x-r) < math.Max(1.0, math.Max(math.Abs(r), scale))*1e-15 {
-		return int(r)
+// ratCeil returns ceil(r).
+func ratCeil(r *big.Rat) int {
+	q := new(big.Int).Div(r.Num(), r.Denom()) // floor for a positive denominator
+	if !r.IsInt() {
+		q.Add(q, big.NewInt(1))
 	}
-	return int(math.Floor(x))
+	return int(q.Int64())
+}
+
+// ratFloor returns floor(r).
+func ratFloor(r *big.Rat) int {
+	return int(new(big.Int).Div(r.Num(), r.Denom()).Int64())
+}
+
+// ceilMul returns ceil(n × rate) exactly.
+func ceilMul(n int, rate float64) int {
+	return ratCeil(new(big.Rat).Mul(big.NewRat(int64(n), 1), decimalRat(rate)))
+}
+
+// ceilDiv returns ceil(n / rate) exactly.
+func ceilDiv(n int, rate float64) int {
+	return ratCeil(new(big.Rat).Quo(big.NewRat(int64(n), 1), decimalRat(rate)))
 }
 
 // AdmissionTokens computes the token count for messages using an admission bound formula.
 // It calculates: sum of (ceil(len(content in bytes) × tokensPerByteMax) + MessageTokens) + RequestTokens.
 // Panics if tokensPerByteMax is not greater than zero (including NaN).
+// Float arguments are taken at their shortest decimal form and must be finite.
 func AdmissionTokens(msgs []transport.Message, tokensPerByteMax float64, o Overheads) int {
 	if !(tokensPerByteMax > 0) {
 		panic("tokensPerByteMax must be greater than zero")
@@ -63,7 +67,7 @@ func AdmissionTokens(msgs []transport.Message, tokensPerByteMax float64, o Overh
 	sum := 0
 	for _, msg := range msgs {
 		bytes := len(msg.Content)
-		sum += ceilSafe(float64(bytes)*tokensPerByteMax) + o.MessageTokens
+		sum += ceilMul(bytes, tokensPerByteMax) + o.MessageTokens
 	}
 	return sum + o.RequestTokens
 }
@@ -79,7 +83,7 @@ func EstimateTokens(msgs []transport.Message, bytesPerToken float64, o Overheads
 	sum := 0
 	for _, msg := range msgs {
 		bytes := len(msg.Content)
-		sum += ceilSafe(float64(bytes)/bytesPerToken) + o.MessageTokens
+		sum += ceilDiv(bytes, bytesPerToken) + o.MessageTokens
 	}
 	return sum + o.RequestTokens
 }
@@ -94,7 +98,8 @@ func EffectiveBytesPerToken(calibrated float64, calibrationSafety float64) float
 // UsableBound computes the usable context bound given a context margin.
 // It calculates: floor(contextBound × (1 - contextMargin)).
 func UsableBound(contextBound int, contextMargin float64) int {
-	return floorSafe(float64(contextBound)*(1-contextMargin), float64(contextBound))
+	f := new(big.Rat).Sub(big.NewRat(1, 1), decimalRat(contextMargin))
+	return ratFloor(f.Mul(f, big.NewRat(int64(contextBound), 1)))
 }
 
 // Fits determines whether admission tokens plus max output tokens fit within the usable bound.
@@ -119,5 +124,5 @@ func StandInBytes(maxOutputTokens int, bytesPerToken float64) int {
 		panic("bytesPerToken must be greater than zero")
 	}
 
-	return ceilSafe(float64(maxOutputTokens) * bytesPerToken)
+	return ceilMul(maxOutputTokens, bytesPerToken)
 }

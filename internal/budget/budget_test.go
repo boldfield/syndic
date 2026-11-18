@@ -481,3 +481,38 @@ func TestTinyPositiveCeilsToOne(t *testing.T) {
 		t.Errorf("StandInBytes = %d, want 1", got)
 	}
 }
+
+func TestAdjacentFloatsAreNotSwallowed(t *testing.T) {
+	msg := []transport.Message{{Role: "user", Content: "x"}}
+	if got := AdmissionTokens(msg, math.Nextafter(1, 2), Overheads{}); got != 2 {
+		t.Errorf("AdmissionTokens = %d, want 2", got)
+	}
+	if got := EstimateTokens(msg, math.Nextafter(1, 0), Overheads{}); got != 2 {
+		t.Errorf("EstimateTokens = %d, want 2", got)
+	}
+	if got := StandInBytes(1, math.Nextafter(1, 2)); got != 2 {
+		t.Errorf("StandInBytes = %d, want 2", got)
+	}
+	if got := UsableBound(10_000_000, 5e-16); got != 9_999_999 {
+		t.Errorf("UsableBound = %d, want 9999999", got)
+	}
+}
+
+func TestDecimalIntegralProducts(t *testing.T) {
+	msg := []transport.Message{{Role: "user", Content: string(make([]byte, 100))}}
+	if got := AdmissionTokens(msg, 1.1, Overheads{}); got != 110 {
+		t.Errorf("AdmissionTokens = %d, want 110", got)
+	}
+	if got := StandInBytes(100, 0.07); got != 7 {
+		t.Errorf("StandInBytes = %d, want 7", got)
+	}
+	for _, c := range []struct {
+		b    int
+		m    float64
+		want int
+	}{{1000, 0.9, 100}, {100, 0.9, 10}, {10000, 0.9461, 539}, {100000, 0.9471, 5290}, {100000, 0.9999, 10}, {330000, 0.9451, 18117}} {
+		if got := UsableBound(c.b, c.m); got != c.want {
+			t.Errorf("UsableBound(%d,%v) = %d, want %d", c.b, c.m, got, c.want)
+		}
+	}
+}
