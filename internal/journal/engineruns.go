@@ -70,7 +70,7 @@ func (tx *Tx) LatestProbeRecord(endpointName, model string) (ProbeRecord, bool, 
 		SELECT id, created_at, manifest
 		FROM runs
 		WHERE kind = 'probe'
-		ORDER BY created_at DESC, id DESC
+		ORDER BY created_at DESC, rowid DESC
 	`)
 	if err != nil {
 		return ProbeRecord{}, false, fmt.Errorf("query probe runs: %w", err)
@@ -93,10 +93,10 @@ func (tx *Tx) LatestProbeRecord(endpointName, model string) (ProbeRecord, bool, 
 		// Try bare format first: {endpoint_name, model, ...}
 		var bareExport map[string]interface{}
 		if err := json.Unmarshal(manifest, &bareExport); err == nil {
-			if ep, ok := bareExport["endpoint_name"].(string); ok {
+			if ep, ok := bareExport["endpoint_name"].(string); ok && ep != "" {
 				matchesEndpoint = (ep == endpointName)
 			}
-			if m, ok := bareExport["model"].(string); ok {
+			if m, ok := bareExport["model"].(string); ok && m != "" {
 				matchesModel = (m == model)
 			}
 		}
@@ -121,7 +121,7 @@ func (tx *Tx) LatestProbeRecord(endpointName, model string) (ProbeRecord, bool, 
 			} `json:"export"`
 		}
 		if err := json.Unmarshal(manifest, &wrapped); err == nil {
-			if wrapped.Export.EndpointName == endpointName && wrapped.Export.Model == model {
+			if wrapped.Export.EndpointName != "" && wrapped.Export.Model != "" && wrapped.Export.EndpointName == endpointName && wrapped.Export.Model == model {
 				createdAt, err := parseTime(createdAtStr)
 				if err != nil {
 					return ProbeRecord{}, false, fmt.Errorf("parse created_at: %w", err)
@@ -170,12 +170,12 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 
 	var deadlineStr *string
 	if !p.TurnDeadline.IsZero() {
-		ds := p.TurnDeadline.Format(time.RFC3339)
+		ds := p.TurnDeadline.Format(time.RFC3339Nano)
 		deadlineStr = &ds
 	}
 
 	var budgetJSONStr *string
-	if p.BudgetJSON != nil && len(p.BudgetJSON) > 0 {
+	if len(p.BudgetJSON) > 0 {
 		s := string(p.BudgetJSON)
 		budgetJSONStr = &s
 	}
@@ -219,22 +219,39 @@ func (s *Store) GetTurn(turnID string) (*TurnRow, error) {
 
 // GetTurn retrieves a turn by ID within a transaction.
 func (tx *Tx) GetTurn(turnID string) (*TurnRow, error) {
+	row, err := tx.getTurnByID(turnID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("turn not found")
+		}
+		return nil, err
+	}
+	return row, nil
+}
+
+// getTurnByID is an unexported helper that retrieves a turn row by ID.
+func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 	var row TurnRow
 	var deadlineStr sql.NullString
 	var terminalState sql.NullString
 	var terminalReason sql.NullString
+	var submissionID sql.NullString
+	var submissionHash sql.NullString
+	var phaseAtCancel sql.NullString
+	var preset sql.NullString
+	var quickProfile sql.NullString
+	var candidateID sql.NullString
+	var attemptDeadlineMS sql.NullInt64
+	var turnDeadlineMS sql.NullInt64
 	var budgetJSONStr sql.NullString
 
 	if err := tx.tx.QueryRow(`
 		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json
 		FROM turns WHERE id = ?
 	`, turnID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &row.SubmissionID, &row.SubmissionHash, &row.Epoch, &row.PhaseAtCancel, &row.Preset, &row.QuickProfile, &row.CandidateID, &row.AttemptDeadlineMS, &row.TurnDeadlineMS, &budgetJSONStr,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr,
 	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("turn not found")
-		}
-		return nil, fmt.Errorf("query turn: %w", err)
+		return nil, err
 	}
 
 	if deadlineStr.Valid {
@@ -251,6 +268,38 @@ func (tx *Tx) GetTurn(turnID string) (*TurnRow, error) {
 
 	if terminalReason.Valid {
 		row.TerminalReason = terminalReason.String
+	}
+
+	if submissionID.Valid {
+		row.SubmissionID = submissionID.String
+	}
+
+	if submissionHash.Valid {
+		row.SubmissionHash = submissionHash.String
+	}
+
+	if phaseAtCancel.Valid {
+		row.PhaseAtCancel = phaseAtCancel.String
+	}
+
+	if preset.Valid {
+		row.Preset = preset.String
+	}
+
+	if quickProfile.Valid {
+		row.QuickProfile = quickProfile.String
+	}
+
+	if candidateID.Valid {
+		row.CandidateID = candidateID.String
+	}
+
+	if attemptDeadlineMS.Valid {
+		row.AttemptDeadlineMS = attemptDeadlineMS.Int64
+	}
+
+	if turnDeadlineMS.Valid {
+		row.TurnDeadlineMS = turnDeadlineMS.Int64
 	}
 
 	if budgetJSONStr.Valid {
@@ -272,37 +321,36 @@ func (s *Store) FindSubmission(submissionID string) (turn *TurnRow, found bool, 
 
 // FindSubmission finds a turn by its submission_id within a transaction.
 func (tx *Tx) FindSubmission(submissionID string) (*TurnRow, bool, error) {
-	row, err := tx.GetTurnBySubmissionID(submissionID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	return row, true, nil
-}
-
-// GetTurnBySubmissionID retrieves a turn by its submission_id.
-func (tx *Tx) GetTurnBySubmissionID(submissionID string) (*TurnRow, error) {
 	var row TurnRow
 	var deadlineStr sql.NullString
 	var terminalState sql.NullString
 	var terminalReason sql.NullString
+	var submissionID_ sql.NullString
+	var submissionHash sql.NullString
+	var phaseAtCancel sql.NullString
+	var preset sql.NullString
+	var quickProfile sql.NullString
+	var candidateID sql.NullString
+	var attemptDeadlineMS sql.NullInt64
+	var turnDeadlineMS sql.NullInt64
 	var budgetJSONStr sql.NullString
 
 	if err := tx.tx.QueryRow(`
 		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json
 		FROM turns WHERE submission_id = ?
 	`, submissionID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &row.SubmissionID, &row.SubmissionHash, &row.Epoch, &row.PhaseAtCancel, &row.Preset, &row.QuickProfile, &row.CandidateID, &row.AttemptDeadlineMS, &row.TurnDeadlineMS, &budgetJSONStr,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID_, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr,
 	); err != nil {
-		return nil, err
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query turn by submission_id: %w", err)
 	}
 
 	if deadlineStr.Valid {
 		t, err := parseTime(deadlineStr.String)
 		if err != nil {
-			return nil, fmt.Errorf("parse whole_turn_deadline: %w", err)
+			return nil, false, fmt.Errorf("parse whole_turn_deadline: %w", err)
 		}
 		row.TurnDeadline = &t
 	}
@@ -315,11 +363,43 @@ func (tx *Tx) GetTurnBySubmissionID(submissionID string) (*TurnRow, error) {
 		row.TerminalReason = terminalReason.String
 	}
 
+	if submissionID_.Valid {
+		row.SubmissionID = submissionID_.String
+	}
+
+	if submissionHash.Valid {
+		row.SubmissionHash = submissionHash.String
+	}
+
+	if phaseAtCancel.Valid {
+		row.PhaseAtCancel = phaseAtCancel.String
+	}
+
+	if preset.Valid {
+		row.Preset = preset.String
+	}
+
+	if quickProfile.Valid {
+		row.QuickProfile = quickProfile.String
+	}
+
+	if candidateID.Valid {
+		row.CandidateID = candidateID.String
+	}
+
+	if attemptDeadlineMS.Valid {
+		row.AttemptDeadlineMS = attemptDeadlineMS.Int64
+	}
+
+	if turnDeadlineMS.Valid {
+		row.TurnDeadlineMS = turnDeadlineMS.Int64
+	}
+
 	if budgetJSONStr.Valid {
 		row.BudgetJSON = json.RawMessage(budgetJSONStr.String)
 	}
 
-	return &row, nil
+	return &row, true, nil
 }
 
 // OpenTurns returns IDs of turns whose terminal_state is null, oldest first.
@@ -336,7 +416,7 @@ func (s *Store) OpenTurns() ([]string, error) {
 // OpenTurns returns IDs of turns whose terminal_state is null, oldest first.
 func (tx *Tx) OpenTurns() ([]string, error) {
 	rows, err := tx.tx.Query(`
-		SELECT id FROM turns WHERE terminal_state IS NULL ORDER BY created_at ASC
+		SELECT id FROM turns WHERE terminal_state IS NULL ORDER BY rowid ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query open turns: %w", err)
