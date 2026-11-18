@@ -697,6 +697,12 @@ func (e *Engine) endTurnWithError(turnID, attemptID, reason string) {
 			Reason: &reason,
 		})
 	})
+
+	// Clear the open turn
+	e.mu.Lock()
+	e.openTurnID = ""
+	e.mu.Unlock()
+
 	if err != nil {
 		return
 	}
