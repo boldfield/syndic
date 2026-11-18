@@ -1236,3 +1236,45 @@ func TestContentShortFinalPageAfterFullPages(t *testing.T) {
 		t.Fatalf("expected error when the final page falls short and then empties")
 	}
 }
+
+func TestCancelDuringBlockedWrite(t *testing.T) {
+	cliConn, srvConn := net.Pipe()
+	defer func() { _ = srvConn.Close() }()
+	c := &Client{
+		conn:      cliConn,
+		reader:    wire.NewReader(cliConn),
+		writer:    wire.NewWriter(cliConn),
+		writeSem:  make(chan struct{}, 1),
+		pending:   make(map[string]chan result),
+		eventWake: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+	}
+	go c.readLoop()
+	defer func() { _ = c.Close() }()
+
+	// Nothing reads srvConn, so the first write blocks.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		_, err := c.Status(ctx1)
+		first <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// A second call waits for the write slot and must honour its context.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel2()
+	if _, err := c.Status(ctx2); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting for write slot: want deadline exceeded, got %v", err)
+	}
+
+	cancel1()
+	select {
+	case err := <-first:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked write: want canceled, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Status did not return after cancel during blocked write")
+	}
+}

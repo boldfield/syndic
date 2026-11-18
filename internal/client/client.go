@@ -22,10 +22,11 @@ type Client struct {
 	reader *wire.Reader
 	hello  wire.HelloReply
 
-	// writeMu serialises frame writes. It is never held while waiting for
+	// writeSem serialises frame writes. It is never held while waiting for
 	// anything but the write itself, so Close can always unblock it.
-	writeMu sync.Mutex
-	writer  *wire.Writer
+	// It is a one-slot semaphore so waiting for it can honour a context.
+	writeSem chan struct{}
+	writer   *wire.Writer
 
 	// mu guards closed, closeErr and pending. A pending request is completed
 	// by whoever removes it from the map, so each is completed exactly once.
@@ -64,6 +65,7 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 		conn:      conn,
 		reader:    wire.NewReader(conn),
 		writer:    wire.NewWriter(conn),
+		writeSem:  make(chan struct{}, 1),
 		pending:   make(map[string]chan result),
 		eventWake: make(chan struct{}, 1),
 		done:      make(chan struct{}),
@@ -451,9 +453,30 @@ func (c *Client) doRequest(ctx context.Context, typ string, body any) ([]byte, e
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	c.writeMu.Lock()
-	err = c.writer.Write(req)
-	c.writeMu.Unlock()
+	// Take the write slot, honouring ctx.
+	select {
+	case c.writeSem <- struct{}{}:
+	case <-ctx.Done():
+		c.abandon(id, ch)
+		return nil, ctx.Err()
+	case <-c.done:
+		c.abandon(id, ch)
+		return nil, ErrClosed
+	}
+	// The write runs in its own goroutine, which keeps the slot until it ends,
+	// so frames stay serialised even when this call gives up on a blocked write.
+	werr := make(chan error, 1)
+	go func() {
+		err := c.writer.Write(req)
+		<-c.writeSem
+		werr <- err
+	}()
+	select {
+	case err = <-werr:
+	case <-ctx.Done():
+		c.abandon(id, ch)
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		wrapped := fmt.Errorf("%w: write request: %v", ErrClosed, err)
 		c.shutdown(wrapped)
@@ -465,15 +488,20 @@ func (c *Client) doRequest(ctx context.Context, typ string, body any) ([]byte, e
 	case res := <-ch:
 		return res.body, res.err
 	case <-ctx.Done():
-		c.mu.Lock()
-		_, still := c.pending[id]
-		delete(c.pending, id)
-		c.mu.Unlock()
-		if !still {
-			// Completed concurrently; the buffered result is ours to drop.
-			<-ch
-		}
+		c.abandon(id, ch)
 		return nil, ctx.Err()
+	}
+}
+
+// abandon drops a registered request whose caller gave up.
+func (c *Client) abandon(id string, ch chan result) {
+	c.mu.Lock()
+	_, still := c.pending[id]
+	delete(c.pending, id)
+	c.mu.Unlock()
+	if !still {
+		// Completed concurrently; the buffered result is ours to drop.
+		<-ch
 	}
 }
 
