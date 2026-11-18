@@ -476,8 +476,10 @@ func canonicalJSON(v interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var obj interface{}
-	if err := json.Unmarshal(data, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
 		return nil, err
 	}
 	return encodeCanonical(obj)
