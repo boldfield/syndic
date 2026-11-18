@@ -2,7 +2,11 @@ package wire
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
+	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,40 +40,135 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFrameAtMaxSize(t *testing.T) {
-	// Test a valid frame with reasonable size
+func TestFrameRoundTripWithLargeBody(t *testing.T) {
+	// Test round-trip with a large non-trivial body
+	// Create a large encoded binary content (like a content page)
+	largeData := make([]byte, 100000)
+	for i := range largeData {
+		largeData[i] = byte(i % 256)
+	}
+	encodedData := EncodePage(largeData)
+
+	reply := ContentReply{
+		Ref:    "test-ref",
+		Offset: 0,
+		Data:   encodedData,
+		Total:  int64(len(largeData)),
+		SHA256: "abc123",
+	}
+
 	f := Frame{
-		ID:   "id",
-		Type: "test",
-		Body: json.RawMessage(`{"data":"test"}`),
+		V:    1,
+		ID:   "large-test",
+		Type: "content",
+	}
+	var err error
+	f.Body, err = json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Failed to marshal reply: %v", err)
 	}
 
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
-
-	err := w.Write(f)
-	if err != nil {
-		t.Fatalf("Failed to write frame: %v", err)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Write failed: %v", err)
 	}
 
-	// Verify the frame was written
-	if buf.Len() == 0 {
-		t.Error("No bytes written")
+	r := NewReader(&buf)
+	f2, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	if f2.V != 1 || f2.ID != "large-test" || f2.Type != "content" {
+		t.Errorf("Frame mismatch: %+v vs %+v", f, f2)
+	}
+	if !bytes.Equal(f2.Body, f.Body) {
+		t.Errorf("Body mismatch in length: %d vs %d", len(f2.Body), len(f.Body))
 	}
 }
 
+func TestFrameAtMaxSize(t *testing.T) {
+	// Create a frame that will fit exactly at the boundary
+	// Start with a frame that should fit
+	f := Frame{
+		ID:   "test-id",
+		Type: "content",
+		Body: json.RawMessage(`{"ref":"test"}`),
+	}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Failed to write small frame: %v", err)
+	}
+	smallSize := buf.Len()
+
+	// Now create a frame that is too large - over MaxFrameBytes
+	// Create padding to make the frame exceed MaxFrameBytes
+	oversizePadding := make([]byte, MaxFrameBytes)
+	for i := range oversizePadding {
+		oversizePadding[i] = 'x'
+	}
+
+	f.Body = json.RawMessage(fmt.Sprintf(`{"data":"%s"}`, string(oversizePadding)))
+	var buf2 bytes.Buffer
+	w2 := NewWriter(&buf2)
+
+	if err := w2.Write(f); err != ErrFrameTooLarge {
+		t.Errorf("Expected ErrFrameTooLarge for oversized frame, got %v", err)
+	}
+	if buf2.Len() != 0 {
+		t.Error("Bytes should not be written for oversized frame")
+	}
+
+	if smallSize == 0 {
+		t.Error("Small frame should have written something")
+	}
+}
+
+type boundedCountingReader struct {
+	r     io.Reader
+	count int
+	limit int
+}
+
+func (bcr *boundedCountingReader) Read(p []byte) (int, error) {
+	if bcr.count >= bcr.limit {
+		return 0, io.EOF
+	}
+	maxRead := bcr.limit - bcr.count
+	if len(p) > maxRead {
+		p = p[:maxRead]
+	}
+	n, err := bcr.r.Read(p)
+	bcr.count += n
+	return n, err
+}
+
 func TestReaderLargeLine(t *testing.T) {
-	// Create a 2 MiB line
-	line := make([]byte, 2*1024*1024)
+	// Create a 2 MiB line and track consumption
+	twoMiB := 2 * 1024 * 1024
+	line := make([]byte, twoMiB)
 	for i := range line {
 		line[i] = 'x'
 	}
 	line = append(line, '\n')
 
-	r := NewReader(bytes.NewReader(line))
+	// Wrapped reader that tracks bytes read and limits them to ~1.1 MiB
+	cr := &boundedCountingReader{
+		r:     bytes.NewReader(line),
+		limit: MaxFrameBytes + 1024*100,
+	}
+
+	r := NewReader(cr)
 	_, err := r.Read()
 	if err != ErrFrameTooLarge {
 		t.Errorf("Expected ErrFrameTooLarge, got %v", err)
+	}
+
+	if cr.count > MaxFrameBytes+1024*100 {
+		t.Errorf("Reader consumed too much: %d bytes (should be <= ~1.1 MiB)", cr.count)
 	}
 
 	// Reader should be marked as unusable
@@ -152,12 +251,28 @@ func TestContentPageEncoding(t *testing.T) {
 		Total:  int64(len(raw)),
 		SHA256: "fake",
 	}
-	frame, _ := NewReply("test", reply)
-	fullEncoded, _ := json.Marshal(frame)
+	frame, err := NewReply("test", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+	fullEncoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
 	fullEncoded = append(fullEncoded, '\n')
 
 	if len(fullEncoded) > 512*1024 {
 		t.Errorf("Frame size %d exceeds 512 KiB limit", len(fullEncoded))
+	}
+
+	// Test encoding through Writer
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(frame); err != nil {
+		t.Fatalf("Writer.Write failed: %v", err)
+	}
+	if buf.Len() > 512*1024 {
+		t.Errorf("Written frame size %d exceeds 512 KiB limit", buf.Len())
 	}
 }
 
@@ -171,6 +286,23 @@ func TestDecodePage(t *testing.T) {
 	}
 	if !bytes.Equal(raw, decoded) {
 		t.Error("Invalid UTF-8 not preserved")
+	}
+}
+
+func TestDecodePageRandomBytes(t *testing.T) {
+	// Test with random bytes including invalid UTF-8
+	raw := make([]byte, 10000)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("Failed to generate random bytes: %v", err)
+	}
+
+	encoded := EncodePage(raw)
+	decoded, err := DecodePage(encoded)
+	if err != nil {
+		t.Fatalf("Failed to decode random bytes: %v", err)
+	}
+	if !bytes.Equal(raw, decoded) {
+		t.Error("Random bytes round-trip failed")
 	}
 }
 
@@ -324,18 +456,49 @@ func TestSubmitReplyJSON(t *testing.T) {
 		t.Fatalf("Failed to marshal: %v", err)
 	}
 
-	// Check that field names match the design
-	if !strings.Contains(string(data), "turn_id") {
-		t.Error("Missing turn_id field")
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
 	}
-	if !strings.Contains(string(data), "preset") {
-		t.Error("Missing preset field")
+
+	expectedKeys := map[string]bool{
+		"turn_id":          true,
+		"preset":           true,
+		"quick_profile":    true,
+		"estimated_tokens": true,
 	}
-	if !strings.Contains(string(data), "quick_profile") {
-		t.Error("Missing quick_profile field")
+
+	// Check exact key set
+	if len(m) != len(expectedKeys) {
+		t.Errorf("SubmitReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
 	}
-	if !strings.Contains(string(data), "estimated_tokens") {
-		t.Error("Missing estimated_tokens field")
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in SubmitReply: %s", key)
+		}
+	}
+}
+
+func TestSubmitRequestWithoutPreset(t *testing.T) {
+	// Test that SubmitRequest without preset marshals without the preset field
+	req := SubmitRequest{
+		SubmissionID: "sub-123",
+		Input:        "test input",
+		// Preset is omitted
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if _, ok := m["preset"]; ok {
+		t.Error("Empty preset should be omitted from JSON")
 	}
 }
 
@@ -351,7 +514,9 @@ func TestStatusReplyJSON(t *testing.T) {
 	}
 
 	var m map[string]interface{}
-	json.Unmarshal(data, &m)
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
 
 	expectedKeys := map[string]bool{
 		"run_id":                true,
@@ -369,9 +534,13 @@ func TestStatusReplyJSON(t *testing.T) {
 		"engine_started_at":     true,
 	}
 
-	for key := range expectedKeys {
-		if _, ok := m[key]; !ok {
-			t.Errorf("Missing key in StatusReply: %s", key)
+	// Check exact key set
+	if len(m) != len(expectedKeys) {
+		t.Errorf("StatusReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in StatusReply: %s", key)
 		}
 	}
 }
@@ -392,7 +561,9 @@ func TestHelloReplyJSON(t *testing.T) {
 	}
 
 	var m map[string]interface{}
-	json.Unmarshal(data, &m)
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
 
 	expectedKeys := map[string]bool{
 		"engine_version": true,
@@ -403,9 +574,13 @@ func TestHelloReplyJSON(t *testing.T) {
 		"manifest_hash":  true,
 	}
 
-	for key := range expectedKeys {
-		if _, ok := m[key]; !ok {
-			t.Errorf("Missing key in HelloReply: %s", key)
+	// Check exact key set
+	if len(m) != len(expectedKeys) {
+		t.Errorf("HelloReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in HelloReply: %s", key)
 		}
 	}
 }
@@ -427,7 +602,9 @@ func TestEvEngineStartedJSON(t *testing.T) {
 	}
 
 	var m map[string]interface{}
-	json.Unmarshal(data, &m)
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
 
 	expectedKeys := map[string]bool{
 		"run_id":             true,
@@ -439,9 +616,13 @@ func TestEvEngineStartedJSON(t *testing.T) {
 		"unprobed":           true,
 	}
 
-	for key := range expectedKeys {
-		if _, ok := m[key]; !ok {
-			t.Errorf("Missing key in EvEngineStarted: %s", key)
+	// Check exact key set
+	if len(m) != len(expectedKeys) {
+		t.Errorf("EvEngineStarted has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in EvEngineStarted: %s", key)
 		}
 	}
 }
@@ -487,7 +668,9 @@ func TestNewRequest(t *testing.T) {
 	}
 
 	var decoded SubmitRequest
-	json.Unmarshal(f.Body, &decoded)
+	if err := json.Unmarshal(f.Body, &decoded); err != nil {
+		t.Fatalf("Failed to unmarshal request body: %v", err)
+	}
 	if decoded.SubmissionID != "sub-123" {
 		t.Error("Request body not encoded correctly")
 	}
@@ -507,6 +690,15 @@ func TestNewReply(t *testing.T) {
 	if f.ID != "id-1" || f.Type != "reply" {
 		t.Errorf("Reply frame incorrect: %+v", f)
 	}
+
+	// Verify body unmarshals correctly
+	var decoded SubmitReply
+	if err := json.Unmarshal(f.Body, &decoded); err != nil {
+		t.Fatalf("Failed to unmarshal reply body: %v", err)
+	}
+	if decoded.TurnID != "turn-123" || decoded.Preset != "review" {
+		t.Error("Reply body not decoded correctly")
+	}
 }
 
 func TestNewError(t *testing.T) {
@@ -525,7 +717,9 @@ func TestNewError(t *testing.T) {
 	}
 
 	var decoded Error
-	json.Unmarshal(f.Body, &decoded)
+	if err := json.Unmarshal(f.Body, &decoded); err != nil {
+		t.Fatalf("Failed to unmarshal error body: %v", err)
+	}
 	if decoded.Code != ErrorCodeBusy {
 		t.Error("Error not encoded correctly")
 	}
@@ -554,10 +748,12 @@ func TestConcurrentWrite(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(id int) {
 			f := Frame{
-				ID:   "id" + string(rune(id)),
+				ID:   "id-" + strconv.Itoa(id),
 				Type: "test",
 			}
-			w.Write(f)
+			if err := w.Write(f); err != nil {
+				t.Errorf("Write failed: %v", err)
+			}
 			done <- true
 		}(i)
 	}

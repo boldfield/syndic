@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type Frame struct {
 }
 
 type Writer struct {
+	mu       sync.Mutex
 	w        io.Writer
 	observer func(int)
 }
@@ -37,6 +39,8 @@ func NewWriter(w io.Writer) *Writer {
 }
 
 func (w *Writer) SetObserver(fn func(encodedLen int)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.observer = fn
 }
 
@@ -53,6 +57,9 @@ func (w *Writer) Write(f Frame) error {
 	if len(data) > MaxFrameBytes {
 		return ErrFrameTooLarge
 	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	if _, err := w.w.Write(data); err != nil {
 		return err
@@ -71,7 +78,7 @@ type Reader struct {
 }
 
 func NewReader(r io.Reader) *Reader {
-	return &Reader{r: bufio.NewReader(r)}
+	return &Reader{r: bufio.NewReaderSize(r, MaxFrameBytes+1)}
 }
 
 func (r *Reader) Read() (Frame, error) {
@@ -245,10 +252,11 @@ type Pool struct {
 }
 
 type QuickProfile struct {
-	Name             string `json:"name"`
-	Preset           string `json:"preset"`
-	Drafts           bool   `json:"drafts"`
-	DefinitionSHA256 string `json:"definition_sha256"`
+	Name             string          `json:"name"`
+	Preset           string          `json:"preset"`
+	Drafts           bool            `json:"drafts"`
+	Budgets          json.RawMessage `json:"budgets,omitempty"`
+	DefinitionSHA256 string          `json:"definition_sha256"`
 }
 
 type StatusReply struct {
@@ -516,6 +524,7 @@ type EvOverride struct {
 
 // String constants for request types
 const (
+	RequestHello       = "hello"
 	RequestStatus      = "status"
 	RequestSubmit      = "submit"
 	RequestCancel      = "cancel"
