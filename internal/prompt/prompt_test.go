@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -44,6 +45,25 @@ func TestNewDelimiter(t *testing.T) {
 	_, err = NewDelimiter(errReader)
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("expected error to be propagated, got %v", err)
+	}
+
+	// Test that two calls with crypto/rand.Reader produce different results
+	d1, err1 := NewDelimiter(rand.Reader)
+	if err1 != nil {
+		t.Fatalf("unexpected error with crypto/rand.Reader: %v", err1)
+	}
+	d2, err2 := NewDelimiter(rand.Reader)
+	if err2 != nil {
+		t.Fatalf("unexpected error with crypto/rand.Reader: %v", err2)
+	}
+	if d1 == d2 {
+		t.Errorf("two calls to NewDelimiter with crypto/rand.Reader should produce different delimiters")
+	}
+	if len(d1) != 32 || len(d2) != 32 {
+		t.Errorf("delimiter should be 32 characters, got %d and %d", len(d1), len(d2))
+	}
+	if d1 != strings.ToLower(d1) || d2 != strings.ToLower(d2) {
+		t.Errorf("delimiter should be lowercase hex")
 	}
 }
 
@@ -269,6 +289,23 @@ func TestRepair(t *testing.T) {
 	}
 	if !strings.Contains(messages[0].Content, repairAttemptID) {
 		t.Errorf("system message should contain repair attempt ID")
+	}
+
+	// Verify that Repair system message equals Reviewer system message with repairAttemptID
+	reviewerWithRepairID, _ := Reviewer(ReviewInput{
+		Request:       original.Request,
+		Candidate:     original.Candidate,
+		CandidateHash: original.CandidateHash,
+		AttemptID:     repairAttemptID,
+		Delimiter:     original.Delimiter,
+	})
+	if messages[0].Content != reviewerWithRepairID[0].Content {
+		t.Errorf("repair system message should equal reviewer system message with repair attempt ID substituted")
+	}
+
+	// Verify original attempt id does not appear in repair system message
+	if strings.Contains(messages[0].Content, original.AttemptID) {
+		t.Errorf("repair system message should not contain original attempt ID")
 	}
 }
 
@@ -570,6 +607,24 @@ func TestEnvelopeFormatVerbatim(t *testing.T) {
 	}
 	if !strings.Contains(systemContent, "END VERDICT") {
 		t.Errorf("system message should contain 'END VERDICT'")
+	}
+}
+
+func TestEnvelopeFormatExact(t *testing.T) {
+	// EnvelopeFormat must match the exact design specification from v3 delta section 6
+	expectedFormat := `VERDICT v1
+candidate: <hash supplied by the engine>
+attempt: <attempt id supplied by the engine>
+verdict: approve | block
+severity: low | medium | high        (block only)
+block_id: <reviewer-chosen short id>  (block only)
+evidence: <what in the candidate the block rests on, one or more lines>  (block only)
+remedy: <what change would withdraw the block, one or more lines>  (block only)
+reason: <free text, one or more lines>
+END VERDICT`
+
+	if EnvelopeFormat != expectedFormat {
+		t.Errorf("EnvelopeFormat does not match the design specification.\nExpected:\n%s\n\nGot:\n%s", expectedFormat, EnvelopeFormat)
 	}
 }
 
