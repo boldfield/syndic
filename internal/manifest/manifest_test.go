@@ -538,7 +538,11 @@ func TestBuild_ExpectedValues(t *testing.T) {
 		Pools:         map[string]config.Pool{},
 	}
 
-	createTestProbeRun(t, store, "ep1", "m1", 0)
+	seedIdentity, err := transport.NewDigestIdentity("sha256:abcdef0123456789", "m1")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	createTestProbeRunWithIdentity(t, store, "ep1", "m1", seedIdentity)
 
 	in := Input{
 		Store:          store,
@@ -563,8 +567,12 @@ func TestBuild_ExpectedValues(t *testing.T) {
 	if p.Expected.ReportedModel != "test-model" {
 		t.Errorf("expected reported model test-model, got %q", p.Expected.ReportedModel)
 	}
-	if p.Expected.Identity.Kind == "" {
-		t.Error("expected identity should be set")
+	wantIdentity, err := transport.NewDigestIdentity("sha256:abcdef0123456789", "m1")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if p.Expected.Identity != wantIdentity {
+		t.Errorf("expected identity %+v, got %+v", wantIdentity, p.Expected.Identity)
 	}
 
 	var manifest_out map[string]interface{}
@@ -582,8 +590,12 @@ func TestBuild_ExpectedValues(t *testing.T) {
 	if expectedObj["reported_model"] != "test-model" {
 		t.Errorf("expected reported_model test-model, got %v", expectedObj["reported_model"])
 	}
-	if expectedObj["identity"] == nil {
-		t.Error("expected identity should be in manifest")
+	idObj, ok := expectedObj["identity"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected identity should be in manifest")
+	}
+	if idObj["Kind"] != string(wantIdentity.Kind) || idObj["Value"] != wantIdentity.Value {
+		t.Errorf("manifest identity = %v, want %+v", idObj, wantIdentity)
 	}
 }
 
@@ -1099,6 +1111,12 @@ func TestBuild_SecretReferenceSafety(t *testing.T) {
 		Pools:         map[string]config.Pool{},
 	}
 
+	const sentinel = "RESOLVED_SECRET_VALUE"
+	t.Setenv("TEST_API_KEY", sentinel)
+	if got, err := config.NewEnvFileResolver("").Resolve(*roster.Endpoints[0].Auth); err != nil || got != sentinel {
+		t.Fatalf("resolver precondition: got %q, err %v", got, err)
+	}
+
 	createTestProbeRun(t, store, "ep1", "m1", 0)
 
 	in := Input{
@@ -1123,8 +1141,7 @@ func TestBuild_SecretReferenceSafety(t *testing.T) {
 		t.Error("manifest should contain the secret reference name 'env:TEST_API_KEY'")
 	}
 
-	// Verify it doesn't contain a sentinel value that might be used by a resolver
-	if strings.Contains(manifestStr, "RESOLVED_SECRET_VALUE") {
+	if strings.Contains(manifestStr, sentinel) {
 		t.Error("manifest should not contain resolved secret values")
 	}
 }
@@ -1190,6 +1207,42 @@ func createTestProbeRun(t *testing.T, store *journal.Store, endpoint, model stri
 
 	_, _, err = store.CreateRun(data)
 	if err != nil {
+		t.Fatalf("failed to create probe run: %v", err)
+	}
+}
+
+func createTestProbeRunWithIdentity(t *testing.T, store *journal.Store, endpoint, model string, id transport.ModelIdentity) {
+	t.Helper()
+	profile := config.EndpointProfile{Name: endpoint, BaseURL: "http://test"}
+	export := evidence.Export{
+		Redacted:                 true,
+		RedactionRule:            "redaction/v1",
+		EndpointName:             endpoint,
+		DeclaredLocation:         "local",
+		DeclaredExecution:        "local",
+		DeclaredBilling:          "none",
+		NetworkDependency:        "none",
+		Model:                    model,
+		AuthMode:                 "api-key",
+		Identity:                 id,
+		ReportedModel:            "test-model",
+		Streaming:                transport.TriUnknown,
+		CancelObservable:         transport.TriUnknown,
+		UsageAvailable:           transport.TriUnknown,
+		ModelsEndpoint:           transport.TriUnknown,
+		ModelListed:              transport.TriUnknown,
+		SystemRoleHonored:        transport.TriUnknown,
+		EligibleRequiredReviewer: transport.TriUnknown,
+	}
+	m, err := evidence.NewProbeManifest(export, profile, model, "1.0", transport.Calibration{})
+	if err != nil {
+		t.Fatalf("failed to create probe manifest: %v", err)
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+	if _, _, err := store.CreateRun(data); err != nil {
 		t.Fatalf("failed to create probe run: %v", err)
 	}
 }
