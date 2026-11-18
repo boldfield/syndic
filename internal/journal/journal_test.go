@@ -1013,7 +1013,12 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 			"sql":  sql.String,
 		})
 	}
-	eventsMasterRows1.Close()
+	if err := eventsMasterRows1.Err(); err != nil {
+		t.Fatalf("failed to iterate sqlite_master rows: %v", err)
+	}
+	if err := eventsMasterRows1.Close(); err != nil {
+		t.Fatalf("failed to close sqlite_master rows: %v", err)
+	}
 
 	if err := db1.Close(); err != nil {
 		t.Fatalf("failed to close database: %v", err)
@@ -1063,7 +1068,12 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 			"sql":  sql.String,
 		})
 	}
-	eventsMasterRows2.Close()
+	if err := eventsMasterRows2.Err(); err != nil {
+		t.Fatalf("failed to iterate sqlite_master rows: %v", err)
+	}
+	if err := eventsMasterRows2.Close(); err != nil {
+		t.Fatalf("failed to close sqlite_master rows: %v", err)
+	}
 
 	if err := db2.Close(); err != nil {
 		t.Fatalf("failed to close database: %v", err)
