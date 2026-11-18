@@ -64,7 +64,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			quarantined = true
 			return nil
 		}
-		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate); err != nil {
+		if err := recordCompletion(e, tx, emit, t.id, t.author, attemptID, res, gate); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -93,6 +93,15 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		return false
 	}
 	delete(e.running, t.author)
+
+	// Release the pool slot for the author.
+	authorConfig := e.participantConfig(t.author)
+	poolName := authorConfig.Pool
+	if poolName == "" {
+		poolName = "default"
+	}
+	e.scheduler.ReleaseSlot(poolName)
+
 	if quarantined {
 		return false
 	}
@@ -107,39 +116,111 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	return true
 }
 
-// runReviewers begins an attempt for every required reviewer, then calls
-// them all at once, each on its own goroutine, and returns without waiting.
+// runReviewers begins an attempt for every required reviewer, respecting pool concurrency.
+// Reviewers are dispatched immediately up to pool limits, and queued if pools are full.
 func (e *Engine) runReviewers(t *openTurn) {
 	ds, ok := e.dispatchReviewers(t)
 	if !ok {
 		return
 	}
 	for _, d := range ds {
-		go func() {
+		go func(d reviewerDispatch) {
 			res := e.complete(d.participant, d.req)
-			e.completeReviewer(t, d, res)
-		}()
+			e.completeReviewerAndCheckQueue(t, d, res)
+		}(d)
 	}
 }
 
-// dispatchReviewers begins the attempts. turn_state{reviewers_dispatched}
-// commits with the last of them, so it precedes every reviewer result.
+// dispatchReviewers begins the attempts, respecting pool concurrency.
+// Reviewers that exceed pool concurrency are queued with no attempt row.
 func (e *Engine) dispatchReviewers(t *openTurn) ([]reviewerDispatch, bool) {
 	ds := make([]reviewerDispatch, 0, len(t.required))
+
 	for i, id := range t.required {
-		d, err := e.beginReviewer(t, id, i == len(t.required)-1)
-		if err != nil {
-			e.mu.Lock()
-			for _, begun := range ds {
-				delete(e.running, begun.participant)
-			}
-			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
-			e.mu.Unlock()
-			return nil, false
+		isLast := i == len(t.required)-1
+		p := e.participantConfig(id)
+		poolName := p.Pool
+		if poolName == "" {
+			poolName = "default"
 		}
-		ds = append(ds, d)
+
+		e.mu.Lock()
+		canDispatch := e.scheduler.TryDispatch(id, poolName)
+		e.mu.Unlock()
+
+		if canDispatch {
+			d, err := e.beginReviewer(t, id, false)
+			if err != nil {
+				e.mu.Lock()
+				for _, begun := range ds {
+					delete(e.running, begun.participant)
+				}
+				e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+				e.mu.Unlock()
+				return nil, false
+			}
+			ds = append(ds, d)
+		} else {
+			e.mu.Lock()
+			if err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				return e.emitParticipantState(id, ParticipantQueued, emit)
+			}); err != nil {
+				e.mu.Unlock()
+				return nil, false
+			}
+			e.scheduler.QueueReviewer(id, t.id, poolName, isLast)
+			e.mu.Unlock()
+		}
 	}
+
+	e.mu.Lock()
+	if err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateReviewersDispatched})
+	}); err != nil {
+		e.mu.Unlock()
+		return nil, false
+	}
+	e.mu.Unlock()
 	return ds, true
+}
+
+// completeReviewerAndCheckQueue handles reviewer completion and processes pool queue.
+func (e *Engine) completeReviewerAndCheckQueue(t *openTurn, d reviewerDispatch, res transport.CompleteResult) {
+	e.completeReviewer(t, d, res)
+
+	p := e.participantConfig(d.participant)
+	poolName := p.Pool
+	if poolName == "" {
+		poolName = "default"
+	}
+
+	e.mu.Lock()
+	e.scheduler.ReleaseSlot(poolName)
+
+	// Check if there are queued reviewers for this pool.
+	queued, ok := e.scheduler.DequeueReviewer(poolName)
+	currentTurn := e.open
+	e.mu.Unlock()
+
+	if ok && currentTurn != nil && currentTurn.id == queued.turnID {
+		// Dispatch the queued reviewer for the current turn.
+		d2, err := e.beginReviewer(currentTurn, queued.participant, queued.emitTurnState)
+		if err == nil {
+			e.mu.Lock()
+			if err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				return e.emitParticipantState(queued.participant, ParticipantRunning, emit)
+			}); err != nil {
+				e.mu.Unlock()
+				return
+			}
+			e.mu.Unlock()
+
+			go func() {
+				res := e.complete(d2.participant, d2.req)
+				e.completeReviewerAndCheckQueue(currentTurn, d2, res)
+			}()
+		}
+	}
 }
 
 // beginReviewer records the request message and the attempt for one
@@ -214,10 +295,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		}); err != nil {
 			return err
 		}
-		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-			Participant: id,
-			State:       ParticipantRunning,
-		}); err != nil {
+		if err := e.emitParticipantState(id, ParticipantRunning, emit); err != nil {
 			return err
 		}
 		if last {
@@ -352,10 +430,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	}); err != nil {
 		return nil, err
 	}
-	if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-		Participant: originalDispatch.participant,
-		State:       ParticipantRunning,
-	}); err != nil {
+	if err := e.emitParticipantState(originalDispatch.participant, ParticipantRunning, emit); err != nil {
 		return nil, err
 	}
 	return &reviewerDispatch{
@@ -402,9 +477,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if err := emitCompleted(emit, t.id, d.attemptID, res, nil); err != nil {
 				return err
 			}
-			return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: d.participant, State: ParticipantIdle})
+			return e.emitParticipantState(d.participant, ParticipantIdle, emit)
 		}
-		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate); err != nil {
+		if err := recordCompletion(e, tx, emit, t.id, d.participant, d.attemptID, res, gate); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -527,7 +602,7 @@ func outputOf(res transport.CompleteResult) journal.AttemptOutput {
 
 // recordCompletion stores usage and the gate error of an accepted result and
 // emits attempt_completed and the participant going idle.
-func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error) error {
+func recordCompletion(e *Engine, tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error) error {
 	var usage *wire.ReportedUsage
 	if res.Usage != nil {
 		if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
@@ -544,7 +619,7 @@ func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemp
 	if err := emitCompleted(emit, turnID, attemptID, res, usage); err != nil {
 		return err
 	}
-	return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
+	return e.emitParticipantState(participant, ParticipantIdle, emit)
 }
 
 func emitCompleted(emit hub.Emit, turnID, attemptID string, res transport.CompleteResult, usage *wire.ReportedUsage) error {

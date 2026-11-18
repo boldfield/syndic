@@ -38,9 +38,15 @@ const (
 
 // Participant states.
 const (
-	ParticipantIdle     = "idle"
-	ParticipantRunning  = "running"
-	ParticipantUnprobed = "unprobed"
+	ParticipantIdle         = "idle"
+	ParticipantQueued       = "queued"
+	ParticipantRunning      = "running"
+	ParticipantUnprobed     = "unprobed"
+	ParticipantUnreachable  = "unreachable"
+	ParticipantUnauthorized = "unauthorized"
+	ParticipantUnavailable  = "model_unavailable"
+	ParticipantUnknown      = "unknown"
+	ParticipantCancelling   = "cancelling"
 )
 
 // Attempt phases and message senders.
@@ -123,6 +129,7 @@ type Engine struct {
 	startedAt    time.Time
 	open         *openTurn
 	running      map[string]bool
+	scheduler    *Scheduler
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -264,6 +271,17 @@ func (e *Engine) Start() error {
 		return err
 	}
 
+	// Initialize scheduler with pool configuration from roster.
+	poolNames := make(map[string]bool)
+	for _, p := range roster.Participants {
+		poolNames[p.Pool] = true
+	}
+	names := make([]string, 0, len(poolNames))
+	for name := range poolNames {
+		names = append(names, name)
+	}
+	scheduler := NewScheduler(roster, nil, names)
+
 	e.roster = roster
 	e.rosterAbs = path
 	e.adapters = adapters
@@ -272,6 +290,7 @@ func (e *Engine) Start() error {
 	e.manifestHash = manifestHash
 	e.runFirstSeq = firstSeq
 	e.startedAt = startedAt
+	e.scheduler = scheduler
 	e.started = true
 	return nil
 }
@@ -313,6 +332,54 @@ func (e *Engine) Hello() wire.HelloReply {
 		RosterHash:    e.built.RosterHash,
 		ManifestHash:  e.manifestHash,
 	}
+}
+
+// emitParticipantState emits a participant_state event via the hub.
+func (e *Engine) emitParticipantState(participant, state string, emit hub.Emit) error {
+	if e.scheduler == nil {
+		return nil
+	}
+	return e.scheduler.SetParticipantState(participant, state, emit)
+}
+
+// setAttemptDeadlineTimer registers a deadline timer for an attempt.
+func (e *Engine) setAttemptDeadlineTimer(attemptID string, cancel func() bool) {
+	if e.scheduler == nil {
+		return
+	}
+	e.scheduler.SetAttemptDeadlineTimer(attemptID, cancel)
+}
+
+// setTurnDeadlineTimer registers a deadline timer for a turn.
+func (e *Engine) setTurnDeadlineTimer(cancel func() bool) {
+	if e.scheduler == nil {
+		return
+	}
+	e.scheduler.SetTurnDeadlineTimer(cancel)
+}
+
+// clearDeadlineTimer clears a registered attempt deadline timer.
+func (e *Engine) clearDeadlineTimer(attemptID string) {
+	if e.scheduler == nil {
+		return
+	}
+	e.scheduler.ClearDeadlineTimer(attemptID)
+}
+
+// clearTurnDeadlineTimer clears the turn deadline timer.
+func (e *Engine) clearTurnDeadlineTimer() {
+	if e.scheduler == nil {
+		return
+	}
+	e.scheduler.ClearTurnDeadlineTimer()
+}
+
+// clearAllDeadlines clears all timers.
+func (e *Engine) clearAllDeadlines() {
+	if e.scheduler == nil {
+		return
+	}
+	e.scheduler.ClearAllDeadlines()
 }
 
 // Cancel is implemented by a later task.

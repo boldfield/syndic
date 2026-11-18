@@ -60,6 +60,15 @@ func (e *Engine) adapterFor(id string) transport.Adapter {
 // turn to author_dispatched, all in one transaction.
 func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string, error) {
 	e.mu.Lock()
+
+	// Consume a pool slot for the author.
+	authorConfig := e.participantConfig(t.author)
+	poolName := authorConfig.Pool
+	if poolName == "" {
+		poolName = "default"
+	}
+	e.scheduler.TryDispatch(t.author, poolName)
+
 	defer e.mu.Unlock()
 
 	mp := e.built.Participants[t.author]
@@ -120,10 +129,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		}); err != nil {
 			return err
 		}
-		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-			Participant: t.author,
-			State:       ParticipantRunning,
-		}); err != nil {
+		if err := e.emitParticipantState(t.author, ParticipantRunning, emit); err != nil {
 			return err
 		}
 		if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateAuthorDispatched}); err != nil {
@@ -202,10 +208,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		}); err != nil {
 			return err
 		}
-		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-			Participant: t.author,
-			State:       ParticipantIdle,
-		}); err != nil {
+		if err := e.emitParticipantState(t.author, ParticipantIdle, emit); err != nil {
 			return err
 		}
 		if gate == nil {
@@ -224,6 +227,14 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		return
 	}
 	delete(e.running, t.author)
+
+	// Release the pool slot for the author.
+	p := e.participantConfig(t.author)
+	poolName := p.Pool
+	if poolName == "" {
+		poolName = "default"
+	}
+	e.scheduler.ReleaseSlot(poolName)
 	e.open = nil
 }
 
