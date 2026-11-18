@@ -44,14 +44,20 @@ func Resolve(getenv func(string) string, homeDir string) (Paths, error) {
 		tried = append(tried, fmt.Sprintf("<homeDir>/.local/state/syndic (%s)", homeDir))
 	}
 
-	for _, p := range paths {
+	for i, p := range paths {
 		parent := filepath.Dir(p)
-		if err := os.MkdirAll(parent, 0755); err != nil {
-			continue
-		}
 
 		fi, err := os.Stat(parent)
-		if err != nil || !fi.IsDir() {
+		if err != nil {
+			// For XDG paths, skip if parent doesn't exist. For homeDir fallback (last candidate),
+			// create the parent directories.
+			if i < len(paths)-1 {
+				continue
+			}
+			if err := os.MkdirAll(parent, 0755); err != nil {
+				continue
+			}
+		} else if !fi.IsDir() {
 			continue
 		}
 
@@ -79,11 +85,13 @@ func Resolve(getenv func(string) string, homeDir string) (Paths, error) {
 
 // isWritable returns nil if the directory is writable, an error otherwise.
 func isWritable(dir string) error {
-	f, err := os.Open(dir)
+	f, err := os.CreateTemp(dir, ".check-")
 	if err != nil {
 		return err
 	}
-	f.Close()
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
 	return nil
 }
 
@@ -128,13 +136,14 @@ func Acquire(path string, now time.Time) (*Lock, error) {
 
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 
 		if err == syscall.EWOULDBLOCK {
 			holder, readErr := ReadHolder(path)
 			if readErr == nil {
 				return nil, &HeldError{Holder: holder}
 			}
+			// ReadHolder failure is acceptable; return a zero Holder since the lock is held.
 			return nil, &HeldError{Holder: Holder{}}
 		}
 
@@ -142,7 +151,7 @@ func Acquire(path string, now time.Time) (*Lock, error) {
 	}
 
 	if err := f.Truncate(0); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("truncate lock file: %w", err)
 	}
 
@@ -197,7 +206,7 @@ func ReadHolder(path string) (Holder, error) {
 }
 
 // RemoveStaleSocket removes the socket file if it exists.
-// The caller must hold the lock; document that.
+// The caller must hold the engine lock; otherwise it may remove a live engine's socket.
 func RemoveStaleSocket(p Paths) error {
 	err := os.Remove(p.Socket)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

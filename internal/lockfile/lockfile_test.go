@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -165,6 +164,62 @@ func TestResolveEmptyEnv(t *testing.T) {
 	}
 }
 
+func TestResolveMissingRuntimeDirSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingRuntimeDir := filepath.Join(tmpDir, "missing-run")
+	stateDir := filepath.Join(tmpDir, "state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	getenv := func(name string) string {
+		switch name {
+		case "XDG_RUNTIME_DIR":
+			return missingRuntimeDir
+		case "XDG_STATE_HOME":
+			return stateDir
+		}
+		return ""
+	}
+
+	paths, err := Resolve(getenv, "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if paths.Dir != filepath.Join(stateDir, "syndic") {
+		t.Errorf("Dir mismatch: got %q, want %q", paths.Dir, filepath.Join(stateDir, "syndic"))
+	}
+
+	// Ensure the missing runtime path was not created
+	if _, err := os.Stat(missingRuntimeDir); err == nil {
+		t.Fatal("Missing runtime dir should not have been created")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Unexpected error checking missing runtime dir: %v", err)
+	}
+}
+
+func TestResolveXDGStateHomeUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	getenv := func(name string) string {
+		return ""
+	}
+
+	paths, err := Resolve(getenv, homeDir)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if paths.Dir != filepath.Join(homeDir, ".local", "state", "syndic") {
+		t.Errorf("Dir mismatch: got %q, want %q", paths.Dir, filepath.Join(homeDir, ".local", "state", "syndic"))
+	}
+}
+
 func TestAcquireAndReadHolder(t *testing.T) {
 	tmpDir := t.TempDir()
 	lockPath := filepath.Join(tmpDir, "test.lock")
@@ -174,7 +229,11 @@ func TestAcquireAndReadHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
-	defer lock.Release()
+	defer func() {
+		if err := lock.Release(); err != nil {
+			t.Errorf("Release failed: %v", err)
+		}
+	}()
 
 	holder, err := ReadHolder(lockPath)
 	if err != nil {
@@ -199,7 +258,11 @@ func TestAcquireSecondFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("First Acquire failed: %v", err)
 	}
-	defer lock1.Release()
+	defer func() {
+		if err := lock1.Release(); err != nil {
+			t.Errorf("Release failed: %v", err)
+		}
+	}()
 
 	_, err = Acquire(lockPath, now)
 	if err == nil {
@@ -238,7 +301,9 @@ func TestReleaseAndAcquireAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Second Acquire after Release failed: %v", err)
 	}
-	lock2.Release()
+	if err := lock2.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
 }
 
 func TestStaleLockCanBeAcquired(t *testing.T) {
@@ -251,19 +316,18 @@ func TestStaleLockCanBeAcquired(t *testing.T) {
 		t.Fatalf("First Acquire failed: %v", err)
 	}
 
-	fd := int(lock1.file.Fd())
-
-	if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
-		t.Fatalf("Unlock failed: %v", err)
+	// Close the descriptor without unlocking to simulate a stale lock.
+	if err := lock1.file.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
 	}
-
-	lock1.file.Close()
 
 	lock2, err := Acquire(lockPath, now)
 	if err != nil {
 		t.Fatalf("Acquire stale lock failed: %v", err)
 	}
-	defer lock2.Release()
+	if err := lock2.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
 }
 
 func TestRemoveStaleSocket(t *testing.T) {
@@ -315,7 +379,11 @@ func TestLockFileMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire failed: %v", err)
 	}
-	defer lock.Release()
+	defer func() {
+		if err := lock.Release(); err != nil {
+			t.Errorf("Release failed: %v", err)
+		}
+	}()
 
 	fi, err := os.Stat(lockPath)
 	if err != nil {
