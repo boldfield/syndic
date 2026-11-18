@@ -39,6 +39,7 @@ type probeServer struct {
 	echoAuthInResponse       bool // when true, echo Authorization header in response for calibration requests
 	omitBaselinePromptTokens bool // when true, omit prompt_tokens from baseline response usage
 	omitTextPromptTokens     bool // when true, omit prompt_tokens from calibration text response usage
+	truncateCalibrationText  bool // when true, the calibration text response is cut short after its headers
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
 }
@@ -98,6 +99,15 @@ func (p *probeServer) handler() http.Handler {
 			reqCopy := req
 			p.calibrationRequests = append(p.calibrationRequests, &reqCopy)
 			p.mu.Unlock()
+		}
+
+		if isCalibrationText && p.truncateCalibrationText {
+			if conn, buf, err := w.(http.Hijacker).Hijack(); err == nil {
+				_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"usage\":")
+				_ = buf.Flush()
+				_ = conn.Close()
+			}
+			return
 		}
 
 		// Handle calibration-specific error responses
@@ -641,26 +651,18 @@ func TestCalibrationMissingTextPromptTokens(t *testing.T) {
 	}
 }
 
-// failingReader returns valid data until the read limit is exceeded, then returns an error.
-type failingReader struct {
-	data      []byte
-	failAfter int
-	read      int
-}
+func TestCalibrationResponseReadFailure(t *testing.T) {
+	p := &probeServer{truncateCalibrationText: true}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
 
-func (r *failingReader) Read(p []byte) (n int, err error) {
-	if r.read >= r.failAfter {
-		return 0, errors.New("simulated read error")
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatalf("probe should still succeed: %v", err)
 	}
-	remaining := r.failAfter - r.read
-	if len(p) > remaining {
-		p = p[:remaining]
+	if rec.Calibration != (transport.Calibration{}) {
+		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)
 	}
-	n = copy(p, r.data[r.read:])
-	r.read += n
-	if r.read >= r.failAfter && r.read < len(r.data) {
-		// Next read will fail
-		return n, nil
-	}
-	return n, nil
 }

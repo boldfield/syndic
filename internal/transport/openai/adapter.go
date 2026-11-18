@@ -603,10 +603,13 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	result.Status = mapFinishReason(finishReason)
 
-	if respData.Usage != nil && respData.Usage.PromptTokens != nil && respData.Usage.CompletionTokens != nil {
-		result.Usage = &transport.Usage{
-			Prompt:     *respData.Usage.PromptTokens,
-			Completion: *respData.Usage.CompletionTokens,
+	if respData.Usage != nil {
+		result.Usage = &transport.Usage{}
+		if respData.Usage.PromptTokens != nil {
+			result.Usage.Prompt = *respData.Usage.PromptTokens
+		}
+		if respData.Usage.CompletionTokens != nil {
+			result.Usage.Completion = *respData.Usage.CompletionTokens
 		}
 		a.mu.Lock()
 		a.lastUsage = &transport.Usage{
@@ -1189,9 +1192,9 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 
 	defer func() { _ = httpResp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
 	if err != nil {
-		return 0, nil, nil, nil, err
+		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, err
 	}
 
 	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil
