@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,14 @@ import (
 	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
 )
+
+type reviewerSetup struct {
+	reviewerID string
+	delimiter  string
+	attemptID  string
+	req        transport.CompleteRequest
+	err        error
+}
 
 // runTurn carries a submitted turn to a terminal state. It runs on its own
 // goroutine and holds the engine mutex only around journal transactions and
@@ -413,24 +423,35 @@ func hashCandidate(manifestHash, turnID, authorAttemptID, authorOutput string) (
 }
 
 // dispatchReviewers dispatches all required reviewers in parallel goroutines.
+// It first begins all attempts, emits turn_state{reviewers_dispatched},
+// then launches the adapter calls.
 func dispatchReviewers(e *Engine, t *openTurn, candidateHash, authorOutput string, reviewers []string) {
-	var wgDispatch sync.WaitGroup
-	wgDispatch.Add(len(reviewers))
-	readyCh := make(chan struct{}, len(reviewers))
+	// First pass: begin all attempts inside transactions.
+	setupCh := make(chan reviewerSetup, len(reviewers))
+	var wgSetup sync.WaitGroup
+	wgSetup.Add(len(reviewers))
 
 	for _, reviewerID := range reviewers {
 		go func(revID string) {
-			defer wgDispatch.Done()
-			e.dispatchReviewerOnce(t, revID, candidateHash, authorOutput, readyCh)
+			defer wgSetup.Done()
+			e.dispatchReviewerSetup(t, revID, candidateHash, authorOutput, setupCh)
 		}(reviewerID)
 	}
 
-	// Wait for all reviewers to be dispatched (ready).
-	for i := 0; i < len(reviewers); i++ {
-		<-readyCh
+	wgSetup.Wait()
+	close(setupCh)
+
+	// Check for setup errors and collect results.
+	var setups []reviewerSetup
+	for setup := range setupCh {
+		if setup.err != nil {
+			e.finishTurn(t, StateIncomplete, "reviewer_failed:"+setup.reviewerID+":error")
+			return
+		}
+		setups = append(setups, setup)
 	}
 
-	// All reviewers have been dispatched; emit the turn state event.
+	// All attempts are begun; emit the turn state event.
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{
 			TurnID: t.id,
@@ -439,18 +460,37 @@ func dispatchReviewers(e *Engine, t *openTurn, candidateHash, authorOutput strin
 	})
 	if err != nil {
 		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+		return
 	}
 
-	wgDispatch.Wait()
+	// Now launch the adapter calls in parallel.
+	var wgAdapters sync.WaitGroup
+	wgAdapters.Add(len(setups))
+	for _, setup := range setups {
+		go func(s reviewerSetup) {
+			defer wgAdapters.Done()
+			res, err := e.adapterFor(s.reviewerID).Complete(context.Background(), s.req)
+			if err != nil {
+				res = transport.CompleteResult{
+					Envelope:        s.req.Envelope,
+					Status:          transport.StatusError,
+					TransportStatus: "adapter_error:" + err.Error(),
+				}
+			}
+			e.completeReviewerResult(t, s.reviewerID, s.attemptID, s.req, res, candidateHash)
+		}(setup)
+	}
+	wgAdapters.Wait()
 }
 
-// dispatchReviewerOnce dispatches a single reviewer.
-func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, authorOutput string, readyCh chan struct{}) {
-	var delimiter string
-	var req transport.CompleteRequest
-	var attemptID string
+// dispatchReviewerSetup begins a reviewer's attempt and builds the request,
+// returning the setup data or an error. It does not call the adapter.
+func (e *Engine) dispatchReviewerSetup(t *openTurn, reviewerID, candidateHash, authorOutput string, setupCh chan reviewerSetup) {
+	setup := reviewerSetup{reviewerID: reviewerID}
 
 	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	mp := e.built.Participants[reviewerID]
 	var p config.Participant
 	for _, candidate := range e.roster.Participants {
@@ -470,13 +510,18 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 	}
 
 	for {
+		var delimiter string
 		var err error
 		delimiter, err = genDelimiter(e.rand)
 		if err != nil {
-			e.mu.Unlock()
-			e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+			setup.err = err
+			setupCh <- setup
 			return
 		}
+
+		var attemptID string
+		var msgs []transport.Message
+		var msgBytes []byte
 
 		err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 			turn, err := tx.GetTurn(t.id)
@@ -504,15 +549,27 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 				AttemptID:     attemptID,
 				Delimiter:     delimiter,
 			}
-			msgs, err := prompt.Reviewer(reviewInput)
-			if err != nil {
-				if err == prompt.ErrDelimiterCollision {
+			var err2 error
+			msgs, err2 = prompt.Reviewer(reviewInput)
+			if err2 != nil {
+				if errors.Is(err2, prompt.ErrDelimiterCollision) {
 					return fmt.Errorf("delimiter_collision")
 				}
-				return err
+				return err2
 			}
 
-			msgID, sum, size, err := tx.AppendMessage(t.id, "review", "system", []string{reviewerID}, []byte(t.input), nil)
+			// Build the complete reviewer request message for the journal.
+			// This includes the system prompt plus the user message with the candidate.
+			msgBuilder := strings.Builder{}
+			for _, m := range msgs {
+				if msgBuilder.Len() > 0 {
+					msgBuilder.WriteString("\n---\n")
+				}
+				msgBuilder.WriteString(m.Content)
+			}
+			msgBytes = []byte(msgBuilder.String())
+
+			msgID, sum, size, err := tx.AppendMessage(t.id, "review", "system", []string{reviewerID}, msgBytes, nil)
 			if err != nil {
 				return err
 			}
@@ -525,21 +582,6 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 				ByteLen: int64(size),
 			}); err != nil {
 				return err
-			}
-
-			req = transport.CompleteRequest{
-				Envelope: transport.AttemptEnvelope{
-					Participant:   reviewerID,
-					TurnID:        t.id,
-					Phase:         "review",
-					Epoch:         turn.Epoch,
-					AttemptID:     attemptID,
-					CandidateHash: candidateHash,
-				},
-				Model:           p.Model,
-				Messages:        msgs,
-				MaxOutputTokens: maxOut,
-				Deadline:        deadline,
 			}
 
 			if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
@@ -566,27 +608,43 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 			if err.Error() == "delimiter_collision" {
 				continue
 			}
-			e.mu.Unlock()
-			e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+			setup.err = err
+			setupCh <- setup
 			return
 		}
-		break
-	}
 
-	e.running[reviewerID] = true
-	e.mu.Unlock()
+		e.running[reviewerID] = true
 
-	readyCh <- struct{}{}
-
-	res, err := e.adapterFor(reviewerID).Complete(context.Background(), req)
-	if err != nil {
-		res = transport.CompleteResult{
-			Envelope:        req.Envelope,
-			Status:          transport.StatusError,
-			TransportStatus: "adapter_error:" + err.Error(),
+		setup.attemptID = attemptID
+		setup.delimiter = delimiter
+		setup.req = transport.CompleteRequest{
+			Envelope: transport.AttemptEnvelope{
+				Participant:   reviewerID,
+				TurnID:        t.id,
+				Phase:         "review",
+				Epoch:         0, // Will be set properly in the tx
+				AttemptID:     attemptID,
+				CandidateHash: candidateHash,
+			},
+			Model:           p.Model,
+			Messages:        msgs,
+			MaxOutputTokens: maxOut,
+			Deadline:        deadline,
 		}
+
+		// Need to get the epoch from the turn again.
+		e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+			turn, err := tx.GetTurn(t.id)
+			if err != nil {
+				return err
+			}
+			setup.req.Envelope.Epoch = turn.Epoch
+			return nil
+		})
+
+		setupCh <- setup
+		return
 	}
-	e.completeReviewerResult(t, reviewerID, attemptID, req, res, candidateHash)
 }
 
 // completeReviewerResult processes a reviewer's result.
@@ -654,7 +712,8 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 				return err
 			}
 			failed = true
-			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":"+fmt.Sprintf("gate:%v", gate))
+			statusReason := authorFailedStatus(res, gate)
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":"+statusReason)
 		}
 
 		vd := verdict.Parse(res.Text, candidateHash, attemptID)
@@ -699,12 +758,12 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 		case verdict.Valid:
 			switch vd.Verdict.Decision {
 			case "approve":
-				approved = true
 				allApprov, err := allReviewersApproved(tx, t.id, candidateHash, t.eff.Preset.RequiredReviewers)
 				if err != nil {
 					return err
 				}
 				if allApprov {
+					approved = true
 					return endTurnIn(tx, emit, t.id, StateApproved, "all_approved")
 				}
 			case "block":
@@ -744,6 +803,7 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 	}
 
 	delete(e.running, reviewerID)
+	// Clear e.open when the turn reaches a terminal state.
 	if approved || blockOpened || revisionRequested || failed {
 		e.open = nil
 	}
