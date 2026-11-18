@@ -19,12 +19,13 @@ type Overheads struct {
 // Uses a tolerance proportional to the magnitude to handle ULPs correctly.
 func ceilSafe(x float64) int {
 	r := math.Round(x)
-	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r)).
+	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * abs(r).
 	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
 	// This catches products like 100*1.1=110.00000000000001 but rejects genuinely
 	// fractional values like 1.0000000005 and large-magnitude fractions like
 	// 10,000,000.000005 (error 5e-6 >> tolerance 1e-8).
-	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-15 {
+	// A positive x never snaps to zero: it must ceil to at least one.
+	if r >= 1 && math.Abs(x-r) < math.Abs(r)*1e-15 {
 		return int(r)
 	}
 	return int(math.Ceil(x))
@@ -40,7 +41,7 @@ func ceilSafe(x float64) int {
 // result, so the tolerance follows scale rather than x.
 func floorSafe(x, scale float64) int {
 	r := math.Round(x)
-	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r)).
+	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r), scale).
 	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
 	// This catches products like 1000*0.1=100.0 but rejects genuinely fractional values
 	// like 0.9999999995 and large-magnitude near-integer values like 9,999,999.999995

@@ -468,3 +468,16 @@ func TestStandInBytesPanic(t *testing.T) {
 func intPtr(v int) *int {
 	return &v
 }
+
+func TestTinyPositiveCeilsToOne(t *testing.T) {
+	msg := []transport.Message{{Role: "user", Content: "x"}}
+	if got := AdmissionTokens(msg, 5e-16, Overheads{}); got != 1 {
+		t.Errorf("AdmissionTokens = %d, want 1", got)
+	}
+	if got := EstimateTokens(msg, 2e15, Overheads{}); got != 1 {
+		t.Errorf("EstimateTokens = %d, want 1", got)
+	}
+	if got := StandInBytes(1, 5e-16); got != 1 {
+		t.Errorf("StandInBytes = %d, want 1", got)
+	}
+}
