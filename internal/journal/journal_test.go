@@ -428,9 +428,9 @@ func TestNullableFields(t *testing.T) {
 
 	// Verify nullable fields are NULL
 	var (
-		status           sql.NullString
+		status            sql.NullString
 		cancellationState string
-		quarantined      bool
+		quarantined       bool
 	)
 	err = conn.QueryRow(`
 		SELECT status, cancellation_state, quarantined FROM attempts WHERE id = ?
@@ -673,6 +673,357 @@ func TestMissingEnumCheckConstraints(t *testing.T) {
 				t.Errorf("expected invalid insert to fail, but succeeded")
 			}
 		})
+	}
+}
+
+func TestFreshDBSchemaVersion2(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
+	}()
+
+	conn := db.Conn()
+	var version int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 2 {
+		t.Errorf("expected schema version 2, got %d", version)
+	}
+}
+
+func TestNullTurnIDInsert(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Insert event with NULL turn_id
+	_, err := conn.Exec(`
+		INSERT INTO events (event_type, data)
+		VALUES ('probe_complete', 'probe data')
+	`)
+	if err != nil {
+		t.Errorf("expected NULL turn_id insert to succeed, got error: %v", err)
+	}
+
+	// Verify the event was inserted
+	var eventType string
+	err = conn.QueryRow("SELECT event_type FROM events WHERE turn_id IS NULL").Scan(&eventType)
+	if err != nil {
+		t.Errorf("failed to query inserted event: %v", err)
+	}
+	if eventType != "probe_complete" {
+		t.Errorf("expected event_type 'probe_complete', got %q", eventType)
+	}
+}
+
+func TestForeignKeyConstraintWithNullableTurnID(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Try to insert event with invalid turn_id
+	_, err := conn.Exec(`
+		INSERT INTO events (turn_id, event_type, data)
+		VALUES ('nonexistent-turn', 'some_event', 'data')
+	`)
+	if err == nil {
+		t.Errorf("expected foreign key constraint to prevent insert, but succeeded")
+	}
+
+	// Verify event was not inserted
+	var count int
+	err = conn.QueryRow("SELECT COUNT(*) FROM events WHERE turn_id = 'nonexistent-turn'").Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query events: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no events with invalid turn_id, got %d", count)
+	}
+}
+
+func TestUpgradePathV1ToV2(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	// Create v1 database manually
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+
+	// Enable foreign keys
+	_, err = conn.Exec("PRAGMA foreign_keys = ON")
+	if err != nil {
+		t.Fatalf("failed to enable foreign keys: %v", err)
+	}
+
+	// Apply migration 001
+	migration001 := `
+	-- Turn table with mode and terminal_state enums
+	CREATE TABLE turns (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL,
+		mode TEXT NOT NULL CHECK(mode IN ('solo', 'review')),
+		terminal_state TEXT CHECK(terminal_state IN ('approved', 'solo_complete', NULL)),
+		FOREIGN KEY (run_id) REFERENCES runs(id)
+	);
+
+	CREATE TABLE events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		turn_id TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		data TEXT,
+		FOREIGN KEY (turn_id) REFERENCES turns(id)
+	);
+
+	CREATE TRIGGER events_update_prevented BEFORE UPDATE ON events
+	BEGIN
+		SELECT RAISE(ABORT, 'events table is immutable');
+	END;
+
+	CREATE TRIGGER events_delete_prevented BEFORE DELETE ON events
+	BEGIN
+		SELECT RAISE(ABORT, 'events table is immutable');
+	END;
+
+	CREATE TABLE runs (
+		id TEXT PRIMARY KEY,
+		manifest TEXT NOT NULL,
+		manifest_hash TEXT NOT NULL
+	);
+
+	CREATE TABLE schema_version (
+		version INTEGER PRIMARY KEY
+	);
+
+	INSERT INTO schema_version (version) VALUES (1);
+	`
+
+	_, err = conn.Exec(migration001)
+	if err != nil {
+		t.Fatalf("failed to apply migration 001: %v", err)
+	}
+
+	// Insert test run
+	_, err = conn.Exec("INSERT INTO runs (id, manifest, manifest_hash) VALUES ('run-1', '{}', 'hash')")
+	if err != nil {
+		t.Fatalf("failed to insert run: %v", err)
+	}
+
+	// Insert test turn
+	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
+	if err != nil {
+		t.Fatalf("failed to insert turn: %v", err)
+	}
+
+	// Insert two events
+	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'event1', 'data1')")
+	if err != nil {
+		t.Fatalf("failed to insert event 1: %v", err)
+	}
+
+	var event1ID int64
+	err = conn.QueryRow("SELECT id FROM events WHERE event_type = 'event1'").Scan(&event1ID)
+	if err != nil {
+		t.Fatalf("failed to get event1 id: %v", err)
+	}
+
+	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'event2', 'data2')")
+	if err != nil {
+		t.Fatalf("failed to insert event 2: %v", err)
+	}
+
+	var event2ID int64
+	err = conn.QueryRow("SELECT id FROM events WHERE event_type = 'event2'").Scan(&event2ID)
+	if err != nil {
+		t.Fatalf("failed to get event2 id: %v", err)
+	}
+
+	conn.Close()
+
+	// Now open with journal.Open which applies migrations
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database with journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
+	}()
+
+	conn = db.Conn()
+
+	// Check schema version is 2
+	var version int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 2 {
+		t.Errorf("expected schema version 2 after upgrade, got %d", version)
+	}
+
+	// Check events still exist with same IDs, event types, and data
+	var id int64
+	var eventType, data string
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'event1'").Scan(&id, &eventType, &data)
+	if err != nil {
+		t.Fatalf("failed to query event1: %v", err)
+	}
+	if id != event1ID {
+		t.Errorf("event1 id changed from %d to %d", event1ID, id)
+	}
+	if eventType != "event1" {
+		t.Errorf("expected event_type 'event1', got %q", eventType)
+	}
+	if data != "data1" {
+		t.Errorf("expected data 'data1', got %q", data)
+	}
+
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'event2'").Scan(&id, &eventType, &data)
+	if err != nil {
+		t.Fatalf("failed to query event2: %v", err)
+	}
+	if id != event2ID {
+		t.Errorf("event2 id changed from %d to %d", event2ID, id)
+	}
+	if eventType != "event2" {
+		t.Errorf("expected event_type 'event2', got %q", eventType)
+	}
+	if data != "data2" {
+		t.Errorf("expected data 'data2', got %q", data)
+	}
+}
+
+func TestEventsImmutabilityAfterMigration(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Insert event with NULL turn_id
+	_, err := conn.Exec(`
+		INSERT INTO events (event_type, data)
+		VALUES ('probe_complete', 'probe data')
+	`)
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	var eventID int64
+	err = conn.QueryRow("SELECT id FROM events WHERE turn_id IS NULL").Scan(&eventID)
+	if err != nil {
+		t.Fatalf("failed to get event id: %v", err)
+	}
+
+	// Try to update event
+	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = ?", "new data", eventID)
+	if err == nil {
+		t.Errorf("expected UPDATE on events to fail, but succeeded")
+	}
+
+	// Try to delete event
+	_, err = conn.Exec("DELETE FROM events WHERE id = ?", eventID)
+	if err == nil {
+		t.Errorf("expected DELETE on events to fail, but succeeded")
+	}
+
+	// Verify data is unchanged
+	var data string
+	err = conn.QueryRow("SELECT data FROM events WHERE id = ?", eventID).Scan(&data)
+	if err != nil {
+		t.Fatalf("failed to query event: %v", err)
+	}
+	if data != "probe data" {
+		t.Errorf("expected data 'probe data', got %q", data)
+	}
+}
+
+func TestOpenOnMigratedDBNoChange(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	// First open creates schema
+	db1, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("first Open failed: %v", err)
+	}
+
+	conn := db1.Conn()
+
+	// Insert test data
+	_, err = conn.Exec("INSERT INTO runs (id, manifest, manifest_hash) VALUES ('run-1', '{}', 'hash')")
+	if err != nil {
+		t.Fatalf("failed to insert run: %v", err)
+	}
+
+	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
+	if err != nil {
+		t.Fatalf("failed to insert turn: %v", err)
+	}
+
+	_, err = conn.Exec("INSERT INTO events (event_type, data) VALUES ('probe_complete', 'probe data')")
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	// Get schema version and event count
+	var version1 int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version1)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+
+	var count1 int
+	err = conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&count1)
+	if err != nil {
+		t.Fatalf("failed to query events: %v", err)
+	}
+
+	db1.Close()
+
+	// Second open should not change anything
+	db2, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("second Open failed: %v", err)
+	}
+
+	conn = db2.Conn()
+
+	var version2 int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version2)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+
+	var count2 int
+	err = conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&count2)
+	if err != nil {
+		t.Fatalf("failed to query events: %v", err)
+	}
+
+	db2.Close()
+
+	if version1 != version2 {
+		t.Errorf("schema version changed: %d -> %d", version1, version2)
+	}
+	if count1 != count2 {
+		t.Errorf("event count changed: %d -> %d", count1, count2)
 	}
 }
 
