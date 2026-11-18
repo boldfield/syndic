@@ -123,21 +123,39 @@ func (c *CalibrationRecord) UnmarshalJSON(data []byte) error {
 
 	case map[string]interface{}:
 		c.Available = true
-		if val, ok := v["bytes_per_token"]; ok {
-			if f, ok := val.(float64); ok {
-				c.BytesPerToken = f
-			}
+		// Validate required fields
+		if _, hasBytes := v["bytes_per_token"]; !hasBytes {
+			return fmt.Errorf("calibration object missing bytes_per_token")
 		}
-		if val, ok := v["observed_prompt_tokens"]; ok {
-			if f, ok := val.(float64); ok {
-				c.ObservedPromptTokens = int(f)
-			}
+		if _, hasObserved := v["observed_prompt_tokens"]; !hasObserved {
+			return fmt.Errorf("calibration object missing observed_prompt_tokens")
 		}
-		if val, ok := v["baseline_prompt_tokens"]; ok {
-			if f, ok := val.(float64); ok {
-				c.BaselinePromptTokens = int(f)
-			}
+		if _, hasBaseline := v["baseline_prompt_tokens"]; !hasBaseline {
+			return fmt.Errorf("calibration object missing baseline_prompt_tokens")
 		}
+
+		// Extract and validate types
+		val, _ := v["bytes_per_token"]
+		f, ok := val.(float64)
+		if !ok {
+			return fmt.Errorf("calibration bytes_per_token must be a number, got %T", val)
+		}
+		c.BytesPerToken = f
+
+		val, _ = v["observed_prompt_tokens"]
+		f, ok = val.(float64)
+		if !ok {
+			return fmt.Errorf("calibration observed_prompt_tokens must be a number, got %T", val)
+		}
+		c.ObservedPromptTokens = int(f)
+
+		val, _ = v["baseline_prompt_tokens"]
+		f, ok = val.(float64)
+		if !ok {
+			return fmt.Errorf("calibration baseline_prompt_tokens must be a number, got %T", val)
+		}
+		c.BaselinePromptTokens = int(f)
+
 		return nil
 
 	default:
@@ -196,22 +214,23 @@ func ParseProbeManifest(raw json.RawMessage) (m ProbeManifest, hasFingerprint bo
 	// Try to detect the shape by looking at the object structure
 	var objMap map[string]interface{}
 	if err := json.Unmarshal(raw, &objMap); err == nil {
-		// If it has fingerprint-specific fields, it's the new wrapped shape
-		if _, hasConfigFingerprint := objMap["config_fingerprint"]; hasConfigFingerprint {
-			var pm ProbeManifest
-			if err := json.Unmarshal(raw, &pm); err != nil {
-				return ProbeManifest{}, false, err
+		// Check if it's the new wrapped shape by validating all required fields
+		hasConfigFingerprint := objMap["config_fingerprint"] != nil
+		hasFingerprintRule := objMap["fingerprint_rule"] != nil
+		hasCalibration := objMap["calibration"] != nil
+		hasExport := objMap["export"] != nil
+
+		if hasConfigFingerprint || hasFingerprintRule || hasCalibration {
+			// If any wrapped field is present, all must be present for a valid wrapped shape
+			if !hasConfigFingerprint || !hasFingerprintRule || !hasCalibration || !hasExport {
+				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: incomplete wrapped shape")
 			}
-			return pm, true, nil
-		}
-		if _, hasFingerprintRule := objMap["fingerprint_rule"]; hasFingerprintRule {
-			var pm ProbeManifest
-			if err := json.Unmarshal(raw, &pm); err != nil {
-				return ProbeManifest{}, false, err
+			// Validate config_fingerprint is non-empty
+			fp, ok := objMap["config_fingerprint"].(string)
+			if !ok || fp == "" {
+				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: config_fingerprint must be a non-empty string")
 			}
-			return pm, true, nil
-		}
-		if _, hasCalibration := objMap["calibration"]; hasCalibration {
+
 			var pm ProbeManifest
 			if err := json.Unmarshal(raw, &pm); err != nil {
 				return ProbeManifest{}, false, err
