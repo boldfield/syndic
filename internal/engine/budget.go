@@ -142,6 +142,11 @@ func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string)
 	pb.contextBound = *mp.ContextBound
 	pb.tokensPerByteMax = *ep.TokensPerByteMax
 	pb.bytesPerToken = *mp.BytesPerToken
+	if mp.CalibratedBytesPerToken != nil {
+		// The manifest applied the roster's safety; the turn's effective
+		// safety may be overridden by the preset or quick profile.
+		pb.bytesPerToken = budget.EffectiveBytesPerToken(*mp.CalibratedBytesPerToken, *eff.Budgets.CalibrationSafety)
+	}
 	return pb, ""
 }
 

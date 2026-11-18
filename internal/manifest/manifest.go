@@ -40,6 +40,9 @@ type Participant struct {
 	OutputBound              *int
 	BytesPerToken            *float64
 	BytesPerTokenSource      string
+	// CalibratedBytesPerToken is the probe's calibration before the safety
+	// factor; nil unless BytesPerTokenSource is "probe".
+	CalibratedBytesPerToken *float64
 }
 
 // Built is the output of Build.
@@ -150,6 +153,8 @@ func buildParticipant(in Input, rosterParticipant config.Participant) (Participa
 		bytesPerToken := probeManifest.Calibration.BytesPerToken * calibrationSafety
 		p.BytesPerToken = &bytesPerToken
 		p.BytesPerTokenSource = "probe"
+		calibrated := probeManifest.Calibration.BytesPerToken
+		p.CalibratedBytesPerToken = &calibrated
 	} else if rosterParticipant.BytesPerToken != nil {
 		p.BytesPerToken = rosterParticipant.BytesPerToken
 		p.BytesPerTokenSource = "roster"

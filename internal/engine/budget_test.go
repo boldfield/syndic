@@ -576,3 +576,30 @@ func TestBudgetOverridesChangeOutputAndProjection(t *testing.T) {
 		t.Fatalf("quick projection %d did not shrink from %d", qr.EstimatedTokens, reply.EstimatedTokens)
 	}
 }
+
+// A preset's or quick profile's calibration_safety applies to the probe
+// calibration, giving the same projection as setting it on the roster.
+func TestBudgetCalibrationSafetyOverrides(t *testing.T) {
+	roster := projectionOf(t, withBudgets(enginetest.RosterTOML, "calibration_safety = 0.5"), nil)
+	base := projectionOf(t, enginetest.RosterTOML, nil)
+	if roster == base {
+		t.Fatalf("roster safety 0.5 did not change the projection (%d)", base)
+	}
+
+	preset := projectionOf(t, enginetest.RosterTOML+"\n[presets.review.budgets]\ncalibration_safety = 0.5\n", nil)
+	if preset != roster {
+		t.Fatalf("preset safety projection = %d, want %d", preset, roster)
+	}
+
+	toml := enginetest.RosterTOML +
+		"\n[quick.q2]\npreset = \"review\"\n[quick.q2.budgets]\ncalibration_safety = 0.5\n"
+	h := enginetest.New(t, toml, nil)
+	quick := "q2"
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, QuickProfile: &quick})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int(reply.EstimatedTokens) != roster {
+		t.Fatalf("quick safety projection = %d, want %d", reply.EstimatedTokens, roster)
+	}
+}
