@@ -59,6 +59,13 @@ func reviewScripts(reviewer fake.Step) map[string][]fake.Step {
 	}
 }
 
+func reviewScriptsMultiple(steps ...fake.Step) map[string][]fake.Step {
+	return map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText)},
+		"reviewer": steps,
+	}
+}
+
 func submitReview(t *testing.T, h *enginetest.Harness, id string) string {
 	t.Helper()
 	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: id, Input: "what is the answer?"})
@@ -206,27 +213,35 @@ func TestReviewApprove(t *testing.T) {
 
 func TestReviewVerdictOutcomes(t *testing.T) {
 	cases := []struct {
-		name   string
-		reply  fake.Step
-		reason string
-		status string
+		name       string
+		scripts    map[string][]fake.Step
+		reason     string
+		verdictLen int
+		calls      int
+		status     string
 	}{
-		{"prose approve", enginetest.Reply(fake.VerdictProseApprove()), "malformed_twice:reviewer", "malformed"},
-		{"wrong hash", verdictStep(fake.VerdictWrongHash), "reviewer_failed:reviewer:rejected", "rejected"},
-		{"approve with changes", verdictStep(fake.VerdictApproveWithChanges), "revision_request:reviewer", "revision_request"},
-		{"two envelopes", verdictStep(fake.VerdictTwoEnvelopes), "malformed_twice:reviewer", "malformed"},
+		{"prose approve", reviewScriptsMultiple(
+			enginetest.Reply(fake.VerdictProseApprove()),
+			enginetest.Reply(fake.VerdictProseApprove()),
+		), "malformed_twice:reviewer", 2, 2, "malformed"},
+		{"wrong hash", reviewScripts(verdictStep(fake.VerdictWrongHash)), "reviewer_failed:reviewer:rejected", 1, 1, "rejected"},
+		{"approve with changes", reviewScripts(verdictStep(fake.VerdictApproveWithChanges)), "revision_request:reviewer", 1, 1, "revision_request"},
+		{"two envelopes", reviewScriptsMultiple(
+			verdictStep(fake.VerdictTwoEnvelopes),
+			verdictStep(fake.VerdictTwoEnvelopes),
+		), "malformed_twice:reviewer", 2, 2, "malformed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(c.reply))
+			h := enginetest.New(t, enginetest.RosterTOML, c.scripts)
 			turnID := submitReview(t, h, "s1")
 			wantEnd(t, h, turnID, engine.StateIncomplete, c.reason)
 			rows := verdictRows(t, h, turnID)
-			if len(rows) != 1 || rows[0].ValidationStatus != c.status {
-				t.Fatalf("verdicts = %+v, want one %s", rows, c.status)
+			if len(rows) != c.verdictLen || (c.verdictLen > 0 && rows[0].ValidationStatus != c.status) {
+				t.Fatalf("verdicts = %+v, want %d %s", rows, c.verdictLen, c.status)
 			}
-			if n := len(h.Adapters["reviewer"].Calls()); n != 1 {
-				t.Fatalf("reviewer called %d times", n)
+			if n := len(h.Adapters["reviewer"].Calls()); n != c.calls {
+				t.Fatalf("reviewer called %d times, want %d", n, c.calls)
 			}
 			if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
 				t.Fatalf("engine stayed busy: %v", err)
@@ -566,6 +581,302 @@ func TestReviewDispatchTxIsAtomic(t *testing.T) {
 		t.Fatalf("reviewer called %d times", n)
 	}
 	h.Engine.SetPayloadHook(nil)
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairSuccessful(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		approveStep(),
+	))
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	attempts := attemptsOf(h, turnID, "reviewer")
+	if len(attempts) != 2 {
+		t.Fatalf("%d reviewer attempts, want 2", len(attempts))
+	}
+	first := getAttempt(t, h, attempts[0])
+	second := getAttempt(t, h, attempts[1])
+	if first.RepairOf != nil {
+		t.Fatalf("first attempt has RepairOf set: %v", first.RepairOf)
+	}
+	if second.RepairOf == nil || *second.RepairOf != first.ID {
+		t.Fatalf("second attempt RepairOf = %v, want %s", second.RepairOf, first.ID)
+	}
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(rows))
+	}
+	firstVerdict := rows[0]
+	secondVerdict := rows[1]
+	if firstVerdict.AttemptID == attempts[1] {
+		firstVerdict, secondVerdict = secondVerdict, firstVerdict
+	}
+	if firstVerdict.ValidationStatus != "malformed" || secondVerdict.ValidationStatus != "valid" {
+		t.Fatalf("verdict statuses = [%s, %s], want [malformed, valid]", firstVerdict.ValidationStatus, secondVerdict.ValidationStatus)
+	}
+	if n := len(h.Adapters["reviewer"].Calls()); n != 2 {
+		t.Fatalf("reviewer called %d times, want 2", n)
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairMessages(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		approveStep(),
+	))
+	turnID := submitReview(t, h, "s1")
+	waitEnded(t, h, turnID)
+	calls := h.Adapters["reviewer"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("%d calls, want 2", len(calls))
+	}
+	originalOutput := fake.VerdictProseApprove()
+	originalMsgs := calls[0].Request.Messages
+	repairMsgs := calls[1].Request.Messages
+	if len(repairMsgs) != 4 {
+		t.Fatalf("repair has %d messages, want 4 (system, user, assistant, user)", len(repairMsgs))
+	}
+	if repairMsgs[0].Role != "system" || repairMsgs[1].Role != "user" || repairMsgs[2].Role != "assistant" || repairMsgs[3].Role != "user" {
+		t.Fatalf("repair message roles = %v, want [system, user, assistant, user]", []string{
+			repairMsgs[0].Role, repairMsgs[1].Role, repairMsgs[2].Role, repairMsgs[3].Role,
+		})
+	}
+	if repairMsgs[2].Content != originalOutput {
+		t.Fatalf("repair assistant message != original output:\nrepair=%q\noriginal=%q", repairMsgs[2].Content, originalOutput)
+	}
+	if repairMsgs[1].Content != originalMsgs[len(originalMsgs)-1].Content {
+		t.Fatalf("repair user message != original user message")
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairEchosOriginalAttemptID(t *testing.T) {
+	var originalAttemptID string
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			originalAttemptID = req.Envelope.AttemptID
+			return fake.VerdictProseApprove()
+		}),
+		enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return strings.Join([]string{
+				"VERDICT v1",
+				"candidate: " + req.Envelope.CandidateHash,
+				"attempt: " + originalAttemptID,
+				"verdict: approve",
+				"reason: Approved",
+				"END VERDICT",
+			}, "\n")
+		}),
+	))
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateIncomplete, "reviewer_failed:reviewer:rejected")
+	calls := h.Adapters["reviewer"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("%d calls, want 2", len(calls))
+	}
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(rows))
+	}
+	attempts := attemptsOf(h, turnID, "reviewer")
+	if len(attempts) != 2 {
+		t.Fatalf("%d attempts, want 2", len(attempts))
+	}
+	var repairVerdict journal.VerdictRow
+	for _, v := range rows {
+		if v.AttemptID == attempts[1] {
+			repairVerdict = v
+			break
+		}
+	}
+	if repairVerdict.ValidationStatus != "rejected" {
+		t.Fatalf("repair verdict classification = %s, want rejected", repairVerdict.ValidationStatus)
+	}
+}
+
+func TestReviewRepairValidBlock(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "evidence", "remedy", "reason")
+		}),
+	))
+	turnID := submitReview(t, h, "s1")
+	row := waitEnded(t, h, turnID)
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(rows))
+	}
+	attempts := attemptsOf(h, turnID, "reviewer")
+	if len(attempts) != 2 {
+		t.Fatalf("%d attempts, want 2", len(attempts))
+	}
+	var repairVerdict journal.VerdictRow
+	for _, v := range rows {
+		if v.AttemptID == attempts[1] {
+			repairVerdict = v
+			break
+		}
+	}
+	if repairVerdict.ValidationStatus != "valid" || repairVerdict.Parsed != "block" {
+		t.Fatalf("repair verdict = %+v, want valid block", repairVerdict)
+	}
+	blockID := repairVerdict.ID + ":b1"
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "block:"+blockID {
+		t.Fatalf("turn ended %q %q, want block:%s", row.TerminalState, row.TerminalReason, blockID)
+	}
+	blocks, err := h.Store.OpenBlocks(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].ID != blockID {
+		t.Fatalf("open blocks = %+v", blocks)
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewTwoReviewerRepairAndApprove(t *testing.T) {
+	repairGate := make(chan struct{})
+	repairStarted := make(chan struct{})
+
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"r1": {
+			enginetest.Reply(fake.VerdictProseApprove()),
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				close(repairStarted)
+				<-repairGate
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
+		},
+		"r2": {approveStep()},
+	}
+	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+
+	select {
+	case <-repairStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repair response did not start")
+	}
+
+	row, err := h.Store.GetTurn(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.TerminalState != "" {
+		t.Fatalf("turn ended prematurely: %q %q", row.TerminalState, row.TerminalReason)
+	}
+
+	close(repairGate)
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 3 {
+		t.Fatalf("%d verdicts, want 3", len(rows))
+	}
+	calls := h.Adapters["r1"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("r1 called %d times, want 2", len(calls))
+	}
+	calls = h.Adapters["r2"].Calls()
+	if len(calls) != 1 {
+		t.Fatalf("r2 called %d times, want 1", len(calls))
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairParticipantStateEvents(t *testing.T) {
+	repairGate := make(chan struct{})
+	repairStarted := make(chan struct{})
+
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"reviewer": {
+			enginetest.Reply(fake.VerdictProseApprove()),
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				close(repairStarted)
+				<-repairGate
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
+		},
+	}
+	h := enginetest.New(t, enginetest.RosterTOML, scripts)
+	turnID := submitReview(t, h, "s1")
+
+	select {
+	case <-repairStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repair response did not start")
+	}
+
+	var lastParticipantEvent *wire.EvParticipantState
+	var allParticipantEvents []*wire.EvParticipantState
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvParticipantState); ok && p.Participant == "reviewer" {
+			allParticipantEvents = append(allParticipantEvents, p)
+			lastParticipantEvent = p
+		}
+	}
+	if lastParticipantEvent == nil {
+		t.Fatalf("no participant_state event for reviewer")
+	}
+	if len(allParticipantEvents) > 0 && allParticipantEvents[len(allParticipantEvents)-1].State != engine.ParticipantRunning {
+		states := make([]string, len(allParticipantEvents))
+		for i, e := range allParticipantEvents {
+			states[i] = e.State
+		}
+		t.Fatalf("reviewer participant_state events = %v, final want running", states)
+	}
+
+	close(repairGate)
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairAttemptBegunCarriesRepairOf(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		approveStep(),
+	))
+	turnID := submitReview(t, h, "s1")
+	waitEnded(t, h, turnID)
+	var originalAttemptID, repairAttemptID string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvAttemptBegun); ok && ev.TurnID == turnID && p.Participant == "reviewer" {
+			if originalAttemptID == "" {
+				originalAttemptID = p.AttemptID
+			} else {
+				repairAttemptID = p.AttemptID
+			}
+		}
+	}
+	if originalAttemptID == "" || repairAttemptID == "" {
+		t.Fatalf("missing attempt events: original=%s repair=%s", originalAttemptID, repairAttemptID)
+	}
+	var repairBegun *wire.EvAttemptBegun
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvAttemptBegun); ok && p.AttemptID == repairAttemptID {
+			repairBegun = p
+			break
+		}
+	}
+	if repairBegun == nil || repairBegun.RepairOf == nil || *repairBegun.RepairOf != originalAttemptID {
+		t.Fatalf("repair attempt_begun = %+v, want repair_of=%s", repairBegun, originalAttemptID)
+	}
 	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
 		t.Fatalf("engine stayed busy: %v", err)
 	}

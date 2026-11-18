@@ -276,6 +276,108 @@ func (e *Engine) newDelimiter(t *openTurn) (string, error) {
 	return "", prompt.ErrDelimiterCollision
 }
 
+// beginRepair creates a repair attempt for a malformed verdict and returns
+// a reviewerDispatch for it.
+func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, originalDispatch reviewerDispatch, originalOutput string) (*reviewerDispatch, error) {
+	p := e.participantConfig(originalDispatch.participant)
+	maxOut := budget.ClampOutput(*t.eff.Budgets.ReviewerMaxOutputTokens, e.built.Participants[originalDispatch.participant].OutputBound)
+	deadline := e.clock.Now().UTC().Add(t.attemptDeadline)
+	if t.turnDeadline.Before(deadline) {
+		deadline = t.turnDeadline
+	}
+
+	turn, err := tx.GetTurn(t.id)
+	if err != nil {
+		return nil, err
+	}
+
+	originalAttempt, err := tx.GetAttempt(originalDispatch.attemptID)
+	if err != nil {
+		return nil, err
+	}
+
+	var delimiter string
+	if originalAttempt.Delimiter != nil {
+		delimiter = *originalAttempt.Delimiter
+	}
+
+	repairAttemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
+		TurnID:          t.id,
+		Participant:     originalDispatch.participant,
+		Phase:           phaseReview,
+		Epoch:           turn.Epoch,
+		Deadline:        &deadline,
+		Delimiter:       delimiter,
+		MaxOutputTokens: maxOut,
+		RepairOf:        originalDispatch.attemptID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	originalReviewInput := prompt.ReviewInput{
+		Request:       t.input,
+		Candidate:     t.candidate,
+		CandidateHash: t.candidateHash,
+		AttemptID:     originalDispatch.attemptID,
+		Delimiter:     delimiter,
+	}
+	msgs, err := prompt.Repair(originalReviewInput, originalOutput, repairAttemptID)
+	if err != nil {
+		return nil, err
+	}
+	content := []byte(msgs[len(msgs)-1].Content)
+	msgID, sum, size, err := tx.AppendMessage(t.id, phaseReview, senderEngine, []string{originalDispatch.participant}, content, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := emit(t.id, wire.EventKindMessageAppended, wire.EvMessageAppended{
+		MsgID:   msgID,
+		TurnID:  t.id,
+		Phase:   phaseReview,
+		Sender:  senderEngine,
+		SHA256:  sum,
+		ByteLen: int64(size),
+	}); err != nil {
+		return nil, err
+	}
+	repairOfPtr := &originalDispatch.attemptID
+	if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
+		AttemptID:       repairAttemptID,
+		Participant:     originalDispatch.participant,
+		Phase:           phaseReview,
+		Epoch:           int64(turn.Epoch),
+		Deadline:        deadline.Format(time.RFC3339Nano),
+		MaxOutputTokens: int64(maxOut),
+		RepairOf:        repairOfPtr,
+	}); err != nil {
+		return nil, err
+	}
+	if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+		Participant: originalDispatch.participant,
+		State:       ParticipantRunning,
+	}); err != nil {
+		return nil, err
+	}
+	return &reviewerDispatch{
+		participant: originalDispatch.participant,
+		attemptID:   repairAttemptID,
+		req: transport.CompleteRequest{
+			Envelope: transport.AttemptEnvelope{
+				Participant:   originalDispatch.participant,
+				TurnID:        t.id,
+				Phase:         phaseReview,
+				Epoch:         turn.Epoch,
+				AttemptID:     repairAttemptID,
+				CandidateHash: t.candidateHash,
+			},
+			Model:           p.Model,
+			Messages:        msgs,
+			MaxOutputTokens: maxOut,
+			Deadline:        deadline,
+		},
+	}, nil
+}
+
 // completeReviewer runs accept, gate, parse and the decision for one
 // reviewer's result in one transaction.
 func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult) {
@@ -287,8 +389,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 
 	var quarantined, approvedNow bool
 	var endState, endReason string
+	var repairDispatch *reviewerDispatch
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, endState, endReason = false, false, "", ""
+		repairDispatch = nil
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -355,8 +459,20 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			endState, endReason = StateIncomplete, reasonRevision+d.participant
 		case verdict.Rejected:
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":rejected"
-		default:
-			endState, endReason = StateIncomplete, reasonMalformed+d.participant
+		case verdict.Malformed:
+			attempt, err := tx.GetAttempt(d.attemptID)
+			if err != nil {
+				return err
+			}
+			if attempt.RepairOf != nil {
+				endState, endReason = StateIncomplete, reasonMalformed+d.participant
+			} else {
+				rd, err := e.beginRepair(tx, emit, t, d, res.Text)
+				if err != nil {
+					return fmt.Errorf("beginning repair: %w", err)
+				}
+				repairDispatch = rd
+			}
 		}
 		if endState == "" {
 			return nil
@@ -369,6 +485,14 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		return
 	}
 	if quarantined {
+		return
+	}
+	if repairDispatch != nil {
+		e.running[d.participant] = true
+		go func() {
+			res := e.complete(repairDispatch.participant, repairDispatch.req)
+			e.completeReviewer(t, *repairDispatch, res)
+		}()
 		return
 	}
 	if approvedNow {

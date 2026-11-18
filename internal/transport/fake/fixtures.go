@@ -96,3 +96,16 @@ func VerdictBlockWithEndMarker(candidateHash, attemptID string) string {
 		"END VERDICT",
 	}, "\n")
 }
+
+// VerdictWrongAttemptID returns an approve with a different attempt ID than the one given.
+func VerdictWrongAttemptID(candidateHash, attemptID string) string {
+	wrongAttemptID := attemptID + "-stale"
+	return strings.Join([]string{
+		"VERDICT v1",
+		"candidate: " + candidateHash,
+		"attempt: " + wrongAttemptID,
+		"verdict: approve",
+		"reason: Approved",
+		"END VERDICT",
+	}, "\n")
+}
