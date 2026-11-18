@@ -9,7 +9,8 @@
 //   - Foreign key constraints link messages, attempts, candidates, verdicts, and blocks to their parent turns and attempts.
 //     Events may optionally reference a turn via turn_id; some events have no turn.
 //   - Immutability triggers abort any UPDATE or DELETE on messages, candidates, and events.
-//   - Triggers prevent UPDATE of runs.manifest, runs.manifest_hash, and prevent setting attempts.raw_output twice.
+//   - Triggers prevent UPDATE of runs.manifest, runs.manifest_hash, prevent setting attempts.raw_output twice,
+//     and enforce that blocks.withdrawn_against_hash is non-null exactly when blocks.state is 'withdrawn'.
 //
 // # Configuration
 //
