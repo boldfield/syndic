@@ -85,7 +85,22 @@ func NewWithOptions(profile config.EndpointProfile, resolver config.SecretResolv
 	return a
 }
 
+type ProbeOptions struct {
+	Timeout           time.Duration
+	DisableOverLength bool
+	AssumedContextLen int
+}
+
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
+	opts := ProbeOptions{
+		Timeout:           60 * time.Second,
+		DisableOverLength: false,
+		AssumedContextLen: 131072,
+	}
+	return a.ProbeWithOptions(ctx, endpoint, model, opts)
+}
+
+func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, opts ProbeOptions) (transport.CapabilityRecord, error) {
 	if endpoint != a.profile.Name {
 		return transport.CapabilityRecord{}, fmt.Errorf("endpoint %q does not match profile name %q", endpoint, a.profile.Name)
 	}
@@ -109,7 +124,7 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 		FinishReasons:            make(map[string]transport.CompletionStatus),
 		OverLength:               "not_run",
 		LatencyMillis:            nil,
-		ToolRestrictions:         []string{},
+		ToolRestrictions:         []string{"no tool definitions sent"},
 		ServerVersion:            "unknown",
 		AdapterVersion:           "openai-v1",
 		ObservedAt:               time.Now(),
@@ -137,8 +152,6 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 		resolvedSecrets = append(resolvedSecrets, headerVal)
 	}
 
-	const defaultProbeTimeout = 60 * time.Second
-
 	baseURL, err := url.Parse(a.profile.BaseURL)
 	if err != nil {
 		return record, err
@@ -147,18 +160,23 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 	probeFinishReasons := make(map[string]transport.CompletionStatus)
 	rawSteps := make(map[string]any)
 
-	a.probeModels(probeCtx, baseURL, &record, resolvedSecrets, rawSteps, defaultProbeTimeout)
+	if err := a.probeModels(probeCtx, baseURL, &record, resolvedSecrets, rawSteps, opts.Timeout); err != nil {
+		return record, err
+	}
 
-	step2Err, step2Body, step2Latency := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, defaultProbeTimeout)
+	step2Err, step2Body, step2Latency := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
 
 	if step2Err != nil {
 		if errors.Is(step2Err, transport.ErrUnreachable) {
+			scrubAndStore(&record, rawSteps, resolvedSecrets)
 			return record, step2Err
 		}
 		if errors.Is(step2Err, transport.ErrUnauthorized) {
+			scrubAndStore(&record, rawSteps, resolvedSecrets)
 			return record, step2Err
 		}
 		if errors.Is(step2Err, transport.ErrModelUnavailable) {
+			scrubAndStore(&record, rawSteps, resolvedSecrets)
 			return record, step2Err
 		}
 	}
@@ -190,7 +208,13 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 		}
 	}
 
-	a.probeSystemRole(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, defaultProbeTimeout, probeFinishReasons)
+	if err := a.probeSystemRole(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout, probeFinishReasons); err != nil {
+		return record, err
+	}
+
+	if !opts.DisableOverLength {
+		a.probeOverLength(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
+	}
 
 	if len(probeFinishReasons) > 0 {
 		record.FinishReasons = probeFinishReasons
@@ -200,11 +224,25 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 		record.FinishReasons = make(map[string]transport.CompletionStatus)
 	}
 
-	rawJSON, _ := json.Marshal(rawSteps)
-	scrubbed, _ := transport.Scrub(string(rawJSON), resolvedSecrets)
-	record.Raw = json.RawMessage(scrubbed)
+	if record.OverLength == "silent_truncation_likely" {
+		record.EligibleRequiredReviewer = transport.TriNo
+	}
+
+	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
+		return record, err
+	}
 
 	return record, nil
+}
+
+func scrubAndStore(record *transport.CapabilityRecord, rawSteps map[string]any, resolvedSecrets []string) error {
+	rawJSON, err := json.Marshal(rawSteps)
+	if err != nil {
+		return err
+	}
+	scrubbed, _ := transport.Scrub(string(rawJSON), resolvedSecrets)
+	record.Raw = json.RawMessage(scrubbed)
+	return nil
 }
 
 func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
@@ -591,7 +629,9 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		}
 		return nil
 	}
-	defer httpResp.Body.Close()
+	if err := httpResp.Body.Close(); err != nil {
+		return err
+	}
 
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 
@@ -657,7 +697,9 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		}
 
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-		httpResp.Body.Close()
+		if err := httpResp.Body.Close(); err != nil {
+			return err, nil, 0
+		}
 		latency = int(time.Since(startTime).Milliseconds())
 
 		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
@@ -731,7 +773,9 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-	httpResp.Body.Close()
+	if err := httpResp.Body.Close(); err != nil {
+		return err
+	}
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		var respData ResponseBody
@@ -753,6 +797,90 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	return nil
+}
+
+func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
+	endpoint := baseURL.JoinPath("/chat/completions")
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	headMarker := fmt.Sprintf("<<<HEAD_%d>>>", time.Now().UnixNano())
+	tailMarker := fmt.Sprintf("<<<TAIL_%d>>>", time.Now().UnixNano())
+
+	promptSizeChars := (assumedContextLen * 3 / 2) * 4
+	fillerSize := promptSizeChars - len(headMarker) - len(tailMarker) - len("Please respond with both markers: HEAD and TAIL. ")
+	if fillerSize < 0 {
+		fillerSize = 0
+	}
+
+	filler := strings.Repeat("x", fillerSize)
+	promptContent := headMarker + filler + tailMarker + " Please respond with both markers: HEAD and TAIL."
+
+	messages := []MessageInput{
+		{Role: "user", Content: promptContent},
+	}
+
+	maxTokensField := record.MaxTokensField
+	if maxTokensField == "" {
+		maxTokensField = "max_tokens"
+	}
+
+	requestBody := map[string]any{
+		"model":        model,
+		"messages":     messages,
+		"stream":       false,
+		maxTokensField: 500,
+	}
+
+	bodyBytes, _ := json.Marshal(requestBody)
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		record.OverLength = "errored"
+		return
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	a.addAuthHeaders(httpReq)
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		record.OverLength = "errored"
+		return
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
+	if err := httpResp.Body.Close(); err != nil {
+		record.OverLength = "errored"
+		return
+	}
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		record.OverLength = "errored"
+		return
+	}
+
+	var respData ResponseBody
+	if err := json.Unmarshal(body, &respData); err != nil || len(respData.Choices) == 0 {
+		record.OverLength = "errored"
+		return
+	}
+
+	content := respData.Choices[0].Message.Content
+	hasHeadMarker := strings.Contains(content, headMarker)
+	hasTailMarker := strings.Contains(content, tailMarker)
+
+	if hasHeadMarker && hasTailMarker {
+		record.OverLength = "both_markers_returned"
+	} else {
+		record.OverLength = "silent_truncation_likely"
+	}
+
+	finishReason := respData.Choices[0].FinishReason
+	if finishReason != "" {
+		finishReasons[finishReason] = a.normalizeFinishReason(finishReason)
+	}
 }
 
 func (a *Adapter) addAuthHeaders(req *http.Request) {
