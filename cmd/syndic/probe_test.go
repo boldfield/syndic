@@ -7,25 +7,35 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/lockfile"
 )
 
 func TestProbeSuccess(t *testing.T) {
 	// Create temporary directories
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -268,6 +278,34 @@ required_reviewers = ["reviewer"]
 
 	if !manifest.Calibration.Available {
 		t.Fatal("manifest should have available calibration")
+	}
+
+	// Verify exact fingerprint value
+	if manifest.ConfigFingerprint == "" {
+		t.Fatal("manifest should have non-empty config_fingerprint")
+	}
+
+	// Verify exact bytes per token: baseline=1, calibration=1034, so 4096 bytes / (1034 - 1) = ~4.0 bytes/token
+	expectedBytesPerToken := float64(4096) / float64(1034-1)
+	if math.Abs(manifest.Calibration.BytesPerToken-expectedBytesPerToken) > 0.01 {
+		t.Fatalf("expected bytes/token ~%.2f, got %.2f", expectedBytesPerToken, manifest.Calibration.BytesPerToken)
+	}
+
+	// Verify export file doesn't contain config_fingerprint
+	if strings.Contains(string(exportData), "config_fingerprint") {
+		t.Fatal("export file should not contain config_fingerprint")
+	}
+
+	// Verify manifest can be parsed with ParseProbeManifest and hasFingerprint is true
+	parsedManifest, hasFingerprint, err := evidence.ParseProbeManifest([]byte(runManifest.String))
+	if err != nil {
+		t.Fatalf("failed to parse manifest with ParseProbeManifest: %v", err)
+	}
+	if !hasFingerprint {
+		t.Fatal("ParseProbeManifest should return hasFingerprint == true")
+	}
+	if parsedManifest.ConfigFingerprint != manifest.ConfigFingerprint {
+		t.Fatalf("parsed manifest fingerprint mismatch")
 	}
 
 	var eventCount int
@@ -1303,5 +1341,639 @@ required_reviewers = ["reviewer"]
 	}
 	if runCount != 1 {
 		t.Fatalf("expected 1 run, got %d", runCount)
+	}
+}
+
+func TestProbeNoUsage(t *testing.T) {
+	// Create temporary directories
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server that returns no usage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			// Return no usage field
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	output, _ := io.ReadAll(r)
+	outputStr := string(output)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Verify manifest calibration is unavailable
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runManifest sql.NullString
+	if err := db.Conn().QueryRow("SELECT manifest FROM runs").Scan(&runManifest); err != nil {
+		t.Fatalf("failed to query run manifest: %v", err)
+	}
+
+	var manifest evidence.ProbeManifest
+	if err := json.Unmarshal([]byte(runManifest.String), &manifest); err != nil {
+		t.Fatalf("failed to parse manifest JSON: %v", err)
+	}
+
+	if manifest.Calibration.Available {
+		t.Fatal("manifest calibration should be unavailable")
+	}
+
+	// Verify manifest marshals calibration as "unavailable"
+	var manifestMap map[string]interface{}
+	if err := json.Unmarshal([]byte(runManifest.String), &manifestMap); err != nil {
+		t.Fatalf("failed to parse manifest map: %v", err)
+	}
+
+	calibrationValue, ok := manifestMap["calibration"]
+	if !ok {
+		t.Fatal("manifest should have calibration field")
+	}
+
+	if calibrationValue != "unavailable" {
+		t.Fatalf("expected calibration 'unavailable', got %v", calibrationValue)
+	}
+}
+
+func TestProbeLockContention(t *testing.T) {
+	// Create temporary directories
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Acquire lock in test to simulate engine holding it
+	paths, err := lockfile.Resolve(os.Getenv, os.Getenv("HOME"))
+	if err != nil {
+		t.Fatalf("failed to resolve runtime paths: %v", err)
+	}
+
+	testLock, err := lockfile.Acquire(paths.Lock, time.Now())
+	if err != nil {
+		t.Fatalf("failed to acquire test lock: %v", err)
+	}
+	defer testLock.Release()
+
+	// Run the probe command
+	var stderr bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stderr = oldStderr
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("failed to copy from pipe: %v", err)
+	}
+
+	// Should exit with code 5
+	if exitCode != 5 {
+		t.Fatalf("expected exit code 5, got %d", exitCode)
+	}
+
+	output := stderr.String()
+	if !strings.Contains(output, "PID") {
+		t.Fatalf("expected PID in stderr, got: %s", output)
+	}
+
+	// Verify journal has no new run
+	_, err = os.Stat(journalPath)
+	if err == nil {
+		db, err := journal.Open(journalPath)
+		if err == nil {
+			var runCount int
+			if err := db.Conn().QueryRow("SELECT COUNT(*) FROM runs").Scan(&runCount); err == nil {
+				if runCount > 0 {
+					t.Fatalf("expected no runs in journal when lock is held, got %d", runCount)
+				}
+			}
+			db.Close()
+		}
+	}
+}
+
+func TestProbeLockRelease(t *testing.T) {
+	// Create temporary directories
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				msgs, _ := body["messages"].([]interface{})
+				var userMsg string
+				for _, m := range msgs {
+					mm, ok := m.(map[string]interface{})
+					if ok && mm["role"] == "user" {
+						userMsg, _ = mm["content"].(string)
+						break
+					}
+				}
+
+				isBaseline := userMsg == ""
+				isCalibrationText := len(userMsg) == 4096
+
+				if isBaseline {
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": ""}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode baseline response: %v", err)
+					}
+					return
+				} else if isCalibrationText {
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1034, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode calibration text response: %v", err)
+					}
+					return
+				}
+			}
+
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	output, _ := io.ReadAll(r)
+	outputStr := string(output)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Now verify that the lock can be acquired
+	paths, err := lockfile.Resolve(os.Getenv, os.Getenv("HOME"))
+	if err != nil {
+		t.Fatalf("failed to resolve runtime paths: %v", err)
+	}
+
+	lock, err := lockfile.Acquire(paths.Lock, time.Now())
+	if err != nil {
+		t.Fatalf("failed to acquire lock after probe run: %v", err)
+	}
+	defer lock.Release()
+}
+
+func TestProbeSkipCalibration(t *testing.T) {
+	// Create temporary directories
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server that tracks calibration requests
+	calibrationRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				msgs, _ := body["messages"].([]interface{})
+				for _, m := range msgs {
+					mm, ok := m.(map[string]interface{})
+					if ok && mm["role"] == "user" {
+						userMsg, _ := mm["content"].(string)
+						if userMsg == "" || len(userMsg) == 4096 {
+							calibrationRequests++
+						}
+						break
+					}
+				}
+			}
+
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command with --skip-calibration
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+		"--skip-calibration",
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	output, _ := io.ReadAll(r)
+	outputStr := string(output)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Verify no calibration requests were made
+	if calibrationRequests > 0 {
+		t.Fatalf("expected no calibration requests with --skip-calibration, got %d", calibrationRequests)
+	}
+
+	// Verify manifest has unavailable calibration
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runManifest sql.NullString
+	if err := db.Conn().QueryRow("SELECT manifest FROM runs").Scan(&runManifest); err != nil {
+		t.Fatalf("failed to query run manifest: %v", err)
+	}
+
+	var manifest evidence.ProbeManifest
+	if err := json.Unmarshal([]byte(runManifest.String), &manifest); err != nil {
+		t.Fatalf("failed to parse manifest JSON: %v", err)
+	}
+
+	if manifest.Calibration.Available {
+		t.Fatal("manifest calibration should be unavailable with --skip-calibration")
 	}
 }

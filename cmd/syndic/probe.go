@@ -160,7 +160,6 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		fmt.Fprintf(os.Stderr, "error: failed to acquire engine lock: %v\n", err)
 		return 1
 	}
-	defer lock.Release()
 
 	// Create journal parent directory
 	if err := os.MkdirAll(filepath.Dir(jnl), 0700); err != nil {
@@ -198,6 +197,11 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	if err := store.AppendEvent("probe_completed", eventPayload); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to append event: %v\n", err)
 		return 1
+	}
+
+	// Release lock after journal operations are complete
+	if err := lock.Release(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to release engine lock: %v\n", err)
 	}
 
 	// Print summary
