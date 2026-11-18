@@ -82,9 +82,19 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 	}
 
 	// Set a deadline from ctx for reading the hello reply
+	// Also actively cancel the read when ctx is cancelled (for contexts without deadlines)
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetReadDeadline(deadline)
-		defer conn.SetReadDeadline(time.Time{})
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("set read deadline: %w", err)
+		}
+		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	} else if ctx != context.Background() {
+		// For contexts without deadlines, start a goroutine to interrupt the read
+		go func() {
+			<-ctx.Done()
+			_ = conn.SetReadDeadline(time.Now())
+		}()
 	}
 
 	// Read hello reply or error
@@ -360,10 +370,11 @@ func (c *Client) Unsubscribe(ctx context.Context) error {
 
 	c.eventMu.Lock()
 	c.subscribed = false
+	eventCancel := c.eventCancel
 	c.eventMu.Unlock()
 
-	if c.eventCancel != nil {
-		c.eventCancel()
+	if eventCancel != nil {
+		eventCancel()
 	}
 
 	return nil
@@ -388,9 +399,6 @@ func (c *Client) NextEvent(ctx context.Context) (wire.Frame, error) {
 			if err := json.Unmarshal(frame.Body, &errBody); err != nil {
 				return wire.Frame{}, fmt.Errorf("unmarshal error frame: %w", err)
 			}
-			c.eventMu.Lock()
-			c.lastSeq = frame.Seq
-			c.eventMu.Unlock()
 			return wire.Frame{}, &errBody
 		}
 
@@ -420,6 +428,10 @@ func (c *Client) nextID() string {
 }
 
 func (c *Client) doRequest(ctx context.Context, typ string, body any) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -479,6 +491,8 @@ func (c *Client) readLoop() {
 		if err != nil {
 			if err == io.EOF {
 				err = ErrClosed
+			} else if err != io.EOF {
+				err = fmt.Errorf("%w: %v", ErrClosed, err)
 			}
 			c.mu.Lock()
 			c.closed = true
@@ -511,39 +525,59 @@ func (c *Client) readLoop() {
 					select {
 					case c.eventQueue <- frame:
 					case <-eventCtx.Done():
-						return
+						continue
 					}
 				}
 			}
 		} else if frame.Type == "reply" || frame.Type == "error" {
-			if frame.Type == "error" && frame.ID == "" {
-				// Error frame with no ID: deliver to NextEvent and all pending requests
-				var errBody wire.Error
-				_ = json.Unmarshal(frame.Body, &errBody)
+			switch frame.Type {
+			case "error":
+				if frame.ID == "" {
+					// Error frame with no ID: deliver to NextEvent and all pending requests
+					var errBody wire.Error
+					_ = json.Unmarshal(frame.Body, &errBody)
 
-				// Deliver to all pending requests
-				c.pendingMu.Lock()
-				for _, req := range c.pending {
-					req.err = &errBody
-					close(req.done)
-				}
-				c.pending = make(map[string]*pendingRequest)
-				c.pendingMu.Unlock()
+					// Deliver to all pending requests
+					c.pendingMu.Lock()
+					for _, req := range c.pending {
+						req.err = &errBody
+						close(req.done)
+					}
+					c.pending = make(map[string]*pendingRequest)
+					c.pendingMu.Unlock()
 
-				// Deliver to NextEvent as well
-				c.eventMu.Lock()
-				subscribed := c.subscribed
-				eventCtx := c.eventCtx
-				c.eventMu.Unlock()
-				if subscribed && eventCtx != nil {
-					select {
-					case c.eventQueue <- frame:
-					case <-eventCtx.Done():
-						return
+					// Deliver to NextEvent as well
+					c.eventMu.Lock()
+					subscribed := c.subscribed
+					eventCtx := c.eventCtx
+					c.eventMu.Unlock()
+					if subscribed && eventCtx != nil {
+						select {
+						case c.eventQueue <- frame:
+						case <-eventCtx.Done():
+							continue
+						}
+					}
+				} else {
+					// Match to pending request by ID
+					c.pendingMu.Lock()
+					pending, ok := c.pending[frame.ID]
+					if ok {
+						delete(c.pending, frame.ID)
+					}
+					c.pendingMu.Unlock()
+
+					if ok {
+						var errBody wire.Error
+						if err := json.Unmarshal(frame.Body, &errBody); err != nil {
+							pending.err = err
+						} else {
+							pending.err = &errBody
+						}
+						close(pending.done)
 					}
 				}
-			} else {
-				// Match to pending request by ID
+			case "reply":
 				c.pendingMu.Lock()
 				pending, ok := c.pending[frame.ID]
 				if ok {
@@ -552,16 +586,7 @@ func (c *Client) readLoop() {
 				c.pendingMu.Unlock()
 
 				if ok {
-					if frame.Type == "error" {
-						var errBody wire.Error
-						if err := json.Unmarshal(frame.Body, &errBody); err != nil {
-							pending.err = err
-						} else {
-							pending.err = &errBody
-						}
-					} else {
-						pending.body = frame.Body
-					}
+					pending.body = frame.Body
 					close(pending.done)
 				}
 			}

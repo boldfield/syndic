@@ -142,8 +142,9 @@ func TestConcurrentRequests(t *testing.T) {
 		t.Fatalf("both goroutines should get replies, got %v", results)
 	}
 	// The key point is that each got one of the two expected values
-	if !((results[0] == "from-frame-0" && results[1] == "from-frame-1") ||
-		(results[0] == "from-frame-1" && results[1] == "from-frame-0")) {
+	ok := (results[0] == "from-frame-0" && results[1] == "from-frame-1") ||
+		(results[0] == "from-frame-1" && results[1] == "from-frame-0")
+	if !ok {
 		t.Fatalf("unexpected results: %v", results)
 	}
 }
@@ -608,9 +609,14 @@ func TestErrorFrameWithNoID(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	_, err = client.Subscribe(ctx, 0)
+	_, err = client.Subscribe(ctx, 7)
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	// Check LastSeq is set to sinceSeq immediately
+	if lastSeq := client.LastSeq(); lastSeq != 7 {
+		t.Fatalf("expected LastSeq=7 after Subscribe, got %d", lastSeq)
 	}
 
 	// Make a status request but lagging error arrives
@@ -634,6 +640,11 @@ func TestErrorFrameWithNoID(t *testing.T) {
 	// Status should also get error
 	if err := <-statusErr; err == nil {
 		t.Fatalf("expected error for status request, got nil")
+	}
+
+	// LastSeq should not change after lagging notice
+	if lastSeq := client.LastSeq(); lastSeq != 7 {
+		t.Fatalf("expected LastSeq=7 after lagging notice, got %d", lastSeq)
 	}
 
 	done <- true
@@ -681,9 +692,9 @@ func TestConnectionCloseWithWaitingRequest(t *testing.T) {
 	done <- true
 	time.Sleep(100 * time.Millisecond)
 
-	// Request should get an error (either write error or ErrClosed)
-	if err := <-statusErr; err == nil {
-		t.Fatalf("expected error, got nil")
+	// Request should get ErrClosed
+	if err := <-statusErr; !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
 
@@ -730,10 +741,30 @@ func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
 
+	// Make a request that will hang, then close the server
+	statusDone := make(chan error, 1)
+	go func() {
+		_, err := client.Status(ctx)
+		statusDone <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
 	// NextEvent should get ErrClosed when server closes
-	_, err = client.NextEvent(ctx)
-	if !errors.Is(err, ErrClosed) {
-		t.Fatalf("expected ErrClosed, got %v", err)
+	eventDone := make(chan error, 1)
+	go func() {
+		_, err := client.NextEvent(ctx)
+		eventDone <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Both should get ErrClosed
+	if err := <-statusDone; !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed for status, got %v", err)
+	}
+	if err := <-eventDone; !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed for event, got %v", err)
 	}
 }
 
@@ -918,7 +949,9 @@ func startTestServer(t *testing.T, handler func(*wire.Reader, *wire.Writer)) *te
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		os.RemoveAll(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("failed to remove temp dir: %v", err)
+		}
 		t.Fatalf("failed to listen: %v", err)
 	}
 
@@ -935,7 +968,7 @@ func startTestServer(t *testing.T, handler func(*wire.Reader, *wire.Writer)) *te
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				r := wire.NewReader(c)
 				w := wire.NewWriter(c)
 				handler(r, w)
@@ -948,7 +981,9 @@ func startTestServer(t *testing.T, handler func(*wire.Reader, *wire.Writer)) *te
 
 func (s *testServer) Close() {
 	_ = s.listener.Close()
-	_ = os.RemoveAll(s.dirToClean)
+	if err := os.RemoveAll(s.dirToClean); err != nil {
+		fmt.Printf("warning: failed to remove temp dir: %v\n", err)
+	}
 }
 
 func strPtr(s string) *string {
