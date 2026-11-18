@@ -168,6 +168,19 @@ func (tx *Tx) AppendMessage(turnID, phase, sender string, recipients []string, c
 		return "", "", 0, fmt.Errorf("insert message: %w", err)
 	}
 
+	eventPayload := map[string]interface{}{
+		"msg_id":   msgID,
+		"turn_id":  turnID,
+		"phase":    phase,
+		"sender":   sender,
+		"sha256":   sha256,
+		"byte_len": byteLen,
+	}
+	eventJSON, _ := json.Marshal(eventPayload)
+	if _, err := tx.Emit(turnID, "message_appended", json.RawMessage(eventJSON)); err != nil {
+		return "", "", 0, fmt.Errorf("emit message_appended event: %w", err)
+	}
+
 	return msgID, sha256, byteLen, nil
 }
 
@@ -196,6 +209,23 @@ func (tx *Tx) BeginAttempt(turnID, participant, phase string, epoch int, deadlin
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
 	`, attemptID, turnID, participant, phase, epoch, dispatchedAt, deadlineStr, repairOfPtr); err != nil {
 		return "", fmt.Errorf("insert attempt: %w", err)
+	}
+
+	eventPayload := map[string]interface{}{
+		"attempt_id":  attemptID,
+		"participant": participant,
+		"phase":       phase,
+		"epoch":       epoch,
+	}
+	if deadline != nil {
+		eventPayload["deadline"] = deadline.Format(time.RFC3339)
+	}
+	if repairOf != "" {
+		eventPayload["repair_of"] = repairOf
+	}
+	eventJSON, _ := json.Marshal(eventPayload)
+	if _, err := tx.Emit(turnID, "attempt_begun", json.RawMessage(eventJSON)); err != nil {
+		return "", fmt.Errorf("emit attempt_begun event: %w", err)
 	}
 
 	return attemptID, nil

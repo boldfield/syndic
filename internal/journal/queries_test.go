@@ -758,3 +758,105 @@ func TestTranscriptPageAttemptStatusAndScrubCount(t *testing.T) {
 		t.Errorf("expected scrub count 2, got %v", item.Attempt.ScrubCount)
 	}
 }
+
+func TestTranscriptPageAlternatingOrder(t *testing.T) {
+	db, cleanup := testOpenDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	var runID string
+	var turnID string
+
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		runID, _, err = tx.CreateRun([]byte(`{"test":true}`))
+		if err != nil {
+			return err
+		}
+
+		turnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return err
+		}
+
+		// Add attempt first
+		now := time.Now().UTC()
+		if _, err := tx.BeginAttempt(turnID, "participant-1", "phase1", 0, &now, ""); err != nil {
+			return err
+		}
+
+		// Then add message
+		msgContent := []byte("message after attempt")
+		if _, _, _, err := tx.AppendMessage(turnID, "phase1", "sender1", []string{"receiver1"}, msgContent, nil); err != nil {
+			return err
+		}
+
+		// Then add another attempt
+		now = now.Add(100 * time.Millisecond)
+		if _, err := tx.BeginAttempt(turnID, "participant-2", "phase1", 0, &now, ""); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	items, _, err := store.TranscriptPage(turnID, "", 200)
+	if err != nil {
+		t.Fatalf("TranscriptPage failed: %v", err)
+	}
+
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+
+	// Expected order: attempt, message, attempt (insertion order)
+	// The bug currently makes it: message, attempt, attempt
+	expectedKinds := []string{"attempt", "message", "attempt"}
+	for i, item := range items {
+		if item.Kind != expectedKinds[i] {
+			t.Errorf("item %d: expected kind %s, got %s", i, expectedKinds[i], item.Kind)
+		}
+		// Also check that At is not zero for messages
+		if item.Kind == "message" && item.At.IsZero() {
+			t.Errorf("item %d: message At is zero", i)
+		}
+	}
+}
+
+func TestTranscriptPageNegativeCursor(t *testing.T) {
+	db, cleanup := testOpenDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	var runID, turnID string
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		runID, _, err = tx.CreateRun([]byte(`{"test":true}`))
+		if err != nil {
+			return err
+		}
+
+		turnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return err
+		}
+
+		msgContent := []byte("message")
+		_, _, _, err = tx.AppendMessage(turnID, "phase1", "sender", []string{"receiver"}, msgContent, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	// A negative cursor should return an error, not panic
+	_, _, err = store.TranscriptPage(turnID, "-1", 10)
+	if err == nil {
+		t.Error("expected error for negative cursor, got nil")
+	}
+}

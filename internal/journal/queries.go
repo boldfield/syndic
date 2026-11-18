@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -268,10 +269,13 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		if _, err := fmt.Sscanf(cursor, "%d", &cursorOffset); err != nil {
 			return nil, "", fmt.Errorf("parse cursor: %w", err)
 		}
+		if cursorOffset < 0 {
+			return nil, "", fmt.Errorf("cursor out of range")
+		}
 	}
 
 	msgRows, err := tx.tx.Query(`
-		SELECT id, phase, sender, content_hash, byte_length, sequence, rowid
+		SELECT id, phase, sender, content_hash, byte_length, sequence
 		FROM messages
 		WHERE turn_id = ?
 		ORDER BY rowid ASC
@@ -281,33 +285,31 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 	}
 	defer func() { _ = msgRows.Close() }()
 
-	var allRows []transcriptRow
+	var msgByID = make(map[string]transcriptRow)
 
 	for msgRows.Next() {
 		var row transcriptRow
 		var msgID string
 		var sequence int64
-		var rowid int64
 
-		if err := msgRows.Scan(&msgID, &row.phase, &row.sender, &row.sha256, &row.byteLen, &sequence, &rowid); err != nil {
+		if err := msgRows.Scan(&msgID, &row.phase, &row.sender, &row.sha256, &row.byteLen, &sequence); err != nil {
 			return nil, "", fmt.Errorf("scan message: %w", err)
 		}
 
 		row.kind = "message"
 		row.ref = "msg:" + msgID
-		row.sortOrder = rowid
-		row.sortKind = "message"
-		allRows = append(allRows, row)
+		msgByID[msgID] = row
 	}
 	if err := msgRows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate messages: %w", err)
 	}
 
+	attemptByID := make(map[string]transcriptRow)
 	attemptRows, err := tx.tx.Query(`
-		SELECT id, dispatched_at, phase, participant, rowid
+		SELECT id, dispatched_at, phase, participant
 		FROM attempts
 		WHERE turn_id = ?
-		ORDER BY rowid ASC
+		ORDER BY dispatched_at ASC, rowid ASC
 	`, turnID)
 	if err != nil {
 		return nil, "", fmt.Errorf("query attempts: %w", err)
@@ -318,9 +320,8 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		var row transcriptRow
 		var attemptID string
 		var dispatchedAtStr string
-		var rowid int64
 
-		if err := attemptRows.Scan(&attemptID, &dispatchedAtStr, &row.phase, &row.sender, &rowid); err != nil {
+		if err := attemptRows.Scan(&attemptID, &dispatchedAtStr, &row.phase, &row.sender); err != nil {
 			return nil, "", fmt.Errorf("scan attempt: %w", err)
 		}
 
@@ -333,20 +334,75 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		row.ref = "attempt:" + attemptID
 		row.at = dispatchedAt
 		row.attemptID = &attemptID
-		row.sortOrder = rowid
-		row.sortKind = "attempt"
-		allRows = append(allRows, row)
+		attemptByID[attemptID] = row
 	}
 	if err := attemptRows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate attempts: %w", err)
 	}
 
-	sort.SliceStable(allRows, func(i, j int) bool {
-		if allRows[i].sortOrder != allRows[j].sortOrder {
-			return allRows[i].sortOrder < allRows[j].sortOrder
+	eventRows, err := tx.tx.Query(`
+		SELECT event_type, data, timestamp FROM events
+		WHERE turn_id = ?
+		ORDER BY id ASC
+	`, turnID)
+	if err != nil {
+		return nil, "", fmt.Errorf("query events: %w", err)
+	}
+	defer func() { _ = eventRows.Close() }()
+
+	var allRows []transcriptRow
+
+	for eventRows.Next() {
+		var eventType string
+		var dataStr string
+		var timestampStr string
+
+		if err := eventRows.Scan(&eventType, &dataStr, &timestampStr); err != nil {
+			return nil, "", fmt.Errorf("scan event: %w", err)
 		}
-		return false
-	})
+
+		eventTime, err := parseTime(timestampStr)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse event timestamp: %w", err)
+		}
+
+		switch eventType {
+		case "message_appended":
+			var eventData map[string]interface{}
+			if err := json.Unmarshal([]byte(dataStr), &eventData); err != nil {
+				continue
+			}
+			msgID, ok := eventData["msg_id"].(string)
+			if !ok {
+				continue
+			}
+			if row, exists := msgByID[msgID]; exists {
+				row.at = eventTime
+				allRows = append(allRows, row)
+			}
+
+		case "attempt_begun":
+			var eventData map[string]interface{}
+			if err := json.Unmarshal([]byte(dataStr), &eventData); err != nil {
+				continue
+			}
+			attemptID, ok := eventData["attempt_id"].(string)
+			if !ok {
+				continue
+			}
+			if row, exists := attemptByID[attemptID]; exists {
+				row.at = eventTime
+				allRows = append(allRows, row)
+			}
+		}
+	}
+	if err := eventRows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate events: %w", err)
+	}
+
+	if len(allRows) == 0 {
+		allRows = fallbackTranscriptOrder(msgByID, attemptByID)
+	}
 
 	var result []TranscriptItem
 	var newCursor string
@@ -373,9 +429,6 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 					h := sha256.Sum256([]byte(*attemptRow.RawOutput))
 					item.SHA256 = hex.EncodeToString(h[:])
 					item.ByteLen = int64(len(*attemptRow.RawOutput))
-				} else {
-					item.SHA256 = ""
-					item.ByteLen = 0
 				}
 
 				cleanedAttempt := *attemptRow
@@ -392,6 +445,27 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 	}
 
 	return result, newCursor, nil
+}
+
+func fallbackTranscriptOrder(msgByID map[string]transcriptRow, attemptByID map[string]transcriptRow) []transcriptRow {
+	var allRows []transcriptRow
+
+	for _, msg := range msgByID {
+		allRows = append(allRows, msg)
+	}
+
+	for _, attempt := range attemptByID {
+		allRows = append(allRows, attempt)
+	}
+
+	sort.SliceStable(allRows, func(i, j int) bool {
+		if allRows[i].at != allRows[j].at {
+			return allRows[i].at.Before(allRows[j].at)
+		}
+		return false
+	})
+
+	return allRows
 }
 
 func (s *Store) ContentRange(ref string, offset, limit int64) (data []byte, total int64, sha256 string, err error) {
