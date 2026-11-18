@@ -1,0 +1,393 @@
+package enginetest
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/engine"
+	"github.com/boldfield/syndic/internal/evidence"
+	"github.com/boldfield/syndic/internal/hub"
+	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/wire"
+)
+
+const (
+	// DefaultReportedModel is the model name the seeded exports record and
+	// the fake adapters report unless a step says otherwise.
+	DefaultReportedModel = "enginetest-model"
+	// AdapterVersion is the adapter version the harness reports and seeds
+	// fingerprints with.
+	AdapterVersion = "enginetest/1"
+	// EngineVersion is the engine version the harness starts with.
+	EngineVersion = "enginetest"
+
+	waitTimeout = 10 * time.Second
+)
+
+// RosterTOML is a valid roster with an author, a reviewer, a review default
+// preset, a solo preset and a quick profile, and non-provisional deadlines.
+const RosterTOML = `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[quick.fast]
+preset = "solo"
+drafts = false
+[quick.fast.budgets]
+author_max_output_tokens = 2048
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+
+type options struct {
+	skip        map[string]bool
+	outputBound map[string]int
+	eligible    map[string]transport.Tri
+	noStart     bool
+	clockStart  time.Time
+}
+
+// Option adjusts how New seeds and starts the harness.
+type Option func(*options)
+
+// SkipProbe leaves the participant without a probe record.
+func SkipProbe(id string) Option {
+	return func(o *options) { o.skip[id] = true }
+}
+
+// WithOutputBound seeds the participant's export with an output bound.
+func WithOutputBound(id string, tokens int) Option {
+	return func(o *options) { o.outputBound[id] = tokens }
+}
+
+// WithEligibleRequiredReviewer seeds the participant's export with the given
+// required-reviewer eligibility.
+func WithEligibleRequiredReviewer(id string, v transport.Tri) Option {
+	return func(o *options) { o.eligible[id] = v }
+}
+
+// NoStart builds the engine without starting it.
+func NoStart() Option {
+	return func(o *options) { o.noStart = true }
+}
+
+// Harness is a running engine with its journal, adapters, clock and event
+// stream.
+type Harness struct {
+	T          *testing.T
+	Engine     *engine.Engine
+	Store      *journal.Store
+	DB         *journal.DB
+	Hub        *hub.Hub
+	Clock      *FakeClock
+	RosterPath string
+	// Adapters are the scripted fakes, by participant id.
+	Adapters map[string]*fake.Adapter
+
+	gated map[string]*gatedAdapter
+
+	mu     sync.Mutex
+	events []Event
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// Reply is a complete, transport-ok scripted answer.
+func Reply(text string) fake.Step {
+	return fake.Step{
+		Kind:            fake.StepKindReply,
+		Text:            text,
+		Status:          transport.StatusComplete,
+		TransportStatus: transport.TransportStatusOK,
+	}
+}
+
+// New writes rosterTOML to a temporary file, opens a temporary journal,
+// seeds a usable probe record for every participant (except those passed to
+// SkipProbe), builds one fake adapter per participant from scripts, starts
+// the engine on a fake clock and subscribes to the hub from seq 0. Everything
+// is released when the test ends.
+func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts ...Option) *Harness {
+	t.Helper()
+	o := &options{
+		skip:        map[string]bool{},
+		outputBound: map[string]int{},
+		eligible:    map[string]transport.Tri{},
+		clockStart:  time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.toml")
+	if err := os.WriteFile(rosterPath, []byte(rosterTOML), 0o600); err != nil {
+		t.Fatalf("write roster: %v", err)
+	}
+	roster, err := config.Load(rosterPath)
+	if err != nil {
+		t.Fatalf("load roster: %v", err)
+	}
+
+	db, err := journal.Open(filepath.Join(dir, "journal.db"))
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close journal: %v", err)
+		}
+	})
+	store := journal.NewStore(db)
+	h := hub.New(store, 0)
+
+	seedProbeRecords(t, store, roster, o)
+
+	hn := &Harness{
+		T:          t,
+		Store:      store,
+		DB:         db,
+		Hub:        h,
+		Clock:      NewFakeClock(o.clockStart),
+		RosterPath: rosterPath,
+		Adapters:   map[string]*fake.Adapter{},
+		gated:      map[string]*gatedAdapter{},
+		done:       make(chan struct{}),
+	}
+	for _, p := range roster.Participants {
+		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel})
+		hn.Adapters[p.ID] = fa
+		hn.gated[p.ID] = &gatedAdapter{inner: fa}
+	}
+
+	eng, err := engine.New(engine.Options{
+		Store:         store,
+		Hub:           h,
+		RosterPath:    rosterPath,
+		EngineVersion: EngineVersion,
+		Clock:         hn.Clock,
+		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+			a, ok := hn.gated[p.ID]
+			if !ok {
+				return nil, "", errors.New("enginetest: no adapter for participant " + p.ID)
+			}
+			return a, AdapterVersion, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("engine.New: %v", err)
+	}
+	hn.Engine = eng
+
+	if !o.noStart {
+		if err := eng.Start(); err != nil {
+			t.Fatalf("engine.Start: %v", err)
+		}
+	}
+	hn.subscribe()
+	t.Cleanup(func() {
+		if err := eng.Stop(context.Background()); err != nil {
+			t.Errorf("engine.Stop: %v", err)
+		}
+	})
+	return hn
+}
+
+func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster, o *options) {
+	t.Helper()
+	seeded := map[[2]string]bool{}
+	for _, p := range roster.Participants {
+		key := [2]string{p.Endpoint, p.Model}
+		if o.skip[p.ID] || seeded[key] {
+			continue
+		}
+		seeded[key] = true
+
+		var profile config.EndpointProfile
+		for _, ep := range roster.Endpoints {
+			if ep.Name == p.Endpoint {
+				profile = ep
+			}
+		}
+		export := evidence.Export{
+			Redacted:                 true,
+			RedactionRule:            "redaction/v1",
+			EndpointName:             profile.Name,
+			DeclaredLocation:         profile.DeclaredLocation,
+			DeclaredExecution:        profile.DeclaredExecution,
+			DeclaredBilling:          profile.DeclaredBilling,
+			NetworkDependency:        profile.NetworkDependency,
+			Model:                    p.Model,
+			AuthMode:                 "none",
+			Identity:                 transport.NewUnknownIdentity(),
+			ReportedModel:            DefaultReportedModel,
+			Streaming:                transport.TriUnknown,
+			CancelObservable:         transport.TriUnknown,
+			UsageAvailable:           transport.TriUnknown,
+			ModelsEndpoint:           transport.TriUnknown,
+			ModelListed:              transport.TriUnknown,
+			SystemRoleHonored:        transport.TriUnknown,
+			EligibleRequiredReviewer: transport.TriUnknown,
+			AdapterVersion:           AdapterVersion,
+			ObservedAt:               o.clockStart,
+		}
+		if v, ok := o.outputBound[p.ID]; ok {
+			export.OutputBound = &v
+		}
+		if v, ok := o.eligible[p.ID]; ok {
+			export.EligibleRequiredReviewer = v
+		}
+		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, transport.Calibration{})
+		if err != nil {
+			t.Fatalf("probe manifest for %s: %v", p.ID, err)
+		}
+		data, err := json.Marshal(pm)
+		if err != nil {
+			t.Fatalf("marshal probe manifest: %v", err)
+		}
+		if _, _, err := store.CreateRun(data); err != nil {
+			t.Fatalf("seed probe record for %s: %v", p.ID, err)
+		}
+	}
+}
+
+func (h *Harness) subscribe() {
+	sub, _, err := h.Hub.Subscribe(0)
+	if err != nil {
+		h.T.Fatalf("subscribe: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	go func() {
+		defer close(h.done)
+		for {
+			ev, err := sub.Next(ctx)
+			if err != nil {
+				return
+			}
+			h.mu.Lock()
+			h.events = append(h.events, decode(ev))
+			h.mu.Unlock()
+		}
+	}()
+	h.T.Cleanup(func() {
+		h.cancel()
+		<-h.done
+		sub.Close()
+	})
+}
+
+// Events returns every event committed so far, decoded, in journal order. It
+// waits for the subscription to catch up with the journal first.
+func (h *Harness) Events() []Event {
+	h.T.Helper()
+	target, err := h.Store.MaxSeq()
+	if err != nil {
+		h.T.Fatalf("MaxSeq: %v", err)
+	}
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		h.mu.Lock()
+		caughtUp := len(h.events) > 0 && h.events[len(h.events)-1].Seq >= target
+		h.mu.Unlock()
+		if caughtUp || target == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]Event(nil), h.events...)
+}
+
+// TurnStates returns the turn_state states seen so far for the turn.
+func (h *Harness) TurnStates(turnID string) []string {
+	var states []string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvTurnState); ok && p.TurnID == turnID {
+			states = append(states, p.State)
+		}
+	}
+	return states
+}
+
+// WaitTurnState blocks until a turn_state event with the state has been seen
+// for the turn, and fails the test if none arrives.
+func (h *Harness) WaitTurnState(turnID, state string) {
+	h.T.Helper()
+	deadline := time.Now().Add(waitTimeout)
+	for time.Now().Before(deadline) {
+		for _, s := range h.TurnStates(turnID) {
+			if s == state {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	h.T.Fatalf("turn %s never reached state %q; saw %v", turnID, state, h.TurnStates(turnID))
+}
+
+// Hold makes the participant's next Complete call block until the returned
+// function is called, so a turn can be observed while open.
+func (h *Harness) Hold(participantID string) (release func()) {
+	g, ok := h.gated[participantID]
+	if !ok {
+		h.T.Fatalf("no adapter for participant %q", participantID)
+	}
+	release = g.hold()
+	h.T.Cleanup(release)
+	return release
+}
