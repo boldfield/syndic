@@ -29,6 +29,78 @@ func TestLoadExample(t *testing.T) {
 	if len(roster.Presets) != 2 {
 		t.Errorf("len(Presets) = %d, want 2", len(roster.Presets))
 	}
+
+	// Check deadlines
+	if roster.Deadlines.Attempt == nil || roster.Deadlines.Attempt.Duration != 300*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 300s", roster.Deadlines.Attempt)
+	}
+	if roster.Deadlines.Turn == nil || roster.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", roster.Deadlines.Turn)
+	}
+	if roster.Deadlines.Delivery == nil || roster.Deadlines.Delivery.Duration != 60*time.Second {
+		t.Errorf("Deadlines.Delivery = %v, want 60s", roster.Deadlines.Delivery)
+	}
+	if roster.Deadlines.Provisional == nil || !*roster.Deadlines.Provisional {
+		t.Errorf("Deadlines.Provisional = %v, want true", roster.Deadlines.Provisional)
+	}
+
+	// Check budgets
+	if roster.Budgets.CalibrationSafety == nil || *roster.Budgets.CalibrationSafety != 0.75 {
+		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", roster.Budgets.CalibrationSafety)
+	}
+	if roster.Budgets.MessageOverheadTokens == nil || *roster.Budgets.MessageOverheadTokens != 8 {
+		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", roster.Budgets.MessageOverheadTokens)
+	}
+	if roster.Budgets.RequestOverheadTokens == nil || *roster.Budgets.RequestOverheadTokens != 16 {
+		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", roster.Budgets.RequestOverheadTokens)
+	}
+	if roster.Budgets.ContextMargin == nil || *roster.Budgets.ContextMargin != 0.10 {
+		t.Errorf("Budgets.ContextMargin = %v, want 0.10", roster.Budgets.ContextMargin)
+	}
+	if roster.Budgets.AuthorMaxOutputTokens == nil || *roster.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", roster.Budgets.AuthorMaxOutputTokens)
+	}
+	if roster.Budgets.ReviewerMaxOutputTokens == nil || *roster.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", roster.Budgets.ReviewerMaxOutputTokens)
+	}
+	if roster.Budgets.DeliveryMaxTokens == nil || *roster.Budgets.DeliveryMaxTokens != 64 {
+		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", roster.Budgets.DeliveryMaxTokens)
+	}
+	if roster.Budgets.TurnMaxEstimatedTokens == nil || *roster.Budgets.TurnMaxEstimatedTokens != 250000 {
+		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", roster.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	// Check engine
+	if roster.Engine.StopGrace == nil || roster.Engine.StopGrace.Duration != 5*time.Second {
+		t.Errorf("Engine.StopGrace = %v, want 5s", roster.Engine.StopGrace)
+	}
+
+	// Check pools
+	if len(roster.Pools) != 1 {
+		t.Errorf("len(Pools) = %d, want 1", len(roster.Pools))
+	}
+	if _, ok := roster.Pools["default"]; !ok {
+		t.Fatal("default pool not found")
+	}
+	if roster.Pools["default"].Concurrency == nil || *roster.Pools["default"].Concurrency != 1 {
+		t.Errorf("Pools[default].Concurrency = %v, want 1", roster.Pools["default"].Concurrency)
+	}
+	if roster.Pools["default"].UncertainReleaseAfter == nil || roster.Pools["default"].UncertainReleaseAfter.Duration != 0 {
+		t.Errorf("Pools[default].UncertainReleaseAfter = %v, want 0s", roster.Pools["default"].UncertainReleaseAfter)
+	}
+
+	// Check participants
+	if roster.Participants[0].ContextTokens == nil || *roster.Participants[0].ContextTokens != 4096 {
+		t.Errorf("Participants[0].ContextTokens = %v, want 4096", roster.Participants[0].ContextTokens)
+	}
+	if roster.Participants[0].BytesPerToken == nil || *roster.Participants[0].BytesPerToken != 4.0 {
+		t.Errorf("Participants[0].BytesPerToken = %v, want 4.0", roster.Participants[0].BytesPerToken)
+	}
+
+	// Check endpoints
+	if roster.Endpoints[0].TokensPerByteMax == nil || *roster.Endpoints[0].TokensPerByteMax != 1.0 {
+		t.Errorf("Endpoints[0].TokensPerByteMax = %v, want 1.0", roster.Endpoints[0].TokensPerByteMax)
+	}
 }
 
 func TestValidateExampleRoster(t *testing.T) {
@@ -483,6 +555,142 @@ func TestValidateViolations(t *testing.T) {
 			},
 			wantMsgs: []string{"author", "nonexistent", "references non-existent pool"},
 		},
+		{
+			name: "negative turn deadline",
+			mutate: func(r *Roster) {
+				negDur := Duration{-1 * time.Second}
+				r.Deadlines.Turn = &negDur
+			},
+			wantMsgs: []string{"deadlines.turn", "positive"},
+		},
+		{
+			name: "negative delivery deadline",
+			mutate: func(r *Roster) {
+				negDur := Duration{-1 * time.Second}
+				r.Deadlines.Delivery = &negDur
+			},
+			wantMsgs: []string{"deadlines.delivery", "positive"},
+		},
+		{
+			name: "negative stop_grace",
+			mutate: func(r *Roster) {
+				negDur := Duration{-1 * time.Second}
+				r.Engine.StopGrace = &negDur
+			},
+			wantMsgs: []string{"engine.stop_grace", "positive"},
+		},
+		{
+			name: "negative uncertain_release_after",
+			mutate: func(r *Roster) {
+				if r.Pools == nil {
+					r.Pools = make(map[string]Pool)
+				}
+				negDur := Duration{-1 * time.Second}
+				r.Pools["test"] = Pool{UncertainReleaseAfter: &negDur}
+				r.Participants[0].Pool = "test"
+			},
+			wantMsgs: []string{"pools[\"test\"]", "uncertain_release_after", "must not be negative"},
+		},
+		{
+			name: "participant bytes_per_token zero",
+			mutate: func(r *Roster) {
+				bpt := 0.0
+				r.Participants[0].BytesPerToken = &bpt
+			},
+			wantMsgs: []string{"author", "bytes_per_token", "greater than 0"},
+		},
+		{
+			name: "participant bytes_per_token negative",
+			mutate: func(r *Roster) {
+				bpt := -1.0
+				r.Participants[0].BytesPerToken = &bpt
+			},
+			wantMsgs: []string{"author", "bytes_per_token", "greater than 0"},
+		},
+		{
+			name: "message_overhead_tokens zero",
+			mutate: func(r *Roster) {
+				mot := 0
+				r.Budgets.MessageOverheadTokens = &mot
+			},
+			wantMsgs: []string{"message_overhead_tokens", "at least 1"},
+		},
+		{
+			name: "request_overhead_tokens zero",
+			mutate: func(r *Roster) {
+				rot := 0
+				r.Budgets.RequestOverheadTokens = &rot
+			},
+			wantMsgs: []string{"request_overhead_tokens", "at least 1"},
+		},
+		{
+			name: "author_max_output_tokens zero",
+			mutate: func(r *Roster) {
+				amot := 0
+				r.Budgets.AuthorMaxOutputTokens = &amot
+			},
+			wantMsgs: []string{"author_max_output_tokens", "at least 1"},
+		},
+		{
+			name: "reviewer_max_output_tokens zero",
+			mutate: func(r *Roster) {
+				rmot := 0
+				r.Budgets.ReviewerMaxOutputTokens = &rmot
+			},
+			wantMsgs: []string{"reviewer_max_output_tokens", "at least 1"},
+		},
+		{
+			name: "delivery_max_tokens zero",
+			mutate: func(r *Roster) {
+				dmt := 0
+				r.Budgets.DeliveryMaxTokens = &dmt
+			},
+			wantMsgs: []string{"delivery_max_tokens", "at least 1"},
+		},
+		{
+			name: "turn_max_estimated_tokens zero",
+			mutate: func(r *Roster) {
+				tmet := 0
+				r.Budgets.TurnMaxEstimatedTokens = &tmet
+			},
+			wantMsgs: []string{"turn_max_estimated_tokens", "at least 1"},
+		},
+		{
+			name: "calibration_safety zero",
+			mutate: func(r *Roster) {
+				cs := 0.0
+				r.Budgets.CalibrationSafety = &cs
+			},
+			wantMsgs: []string{"calibration_safety", "greater than 0"},
+		},
+		{
+			name: "calibration_safety negative",
+			mutate: func(r *Roster) {
+				cs := -0.5
+				r.Budgets.CalibrationSafety = &cs
+			},
+			wantMsgs: []string{"calibration_safety", "greater than 0"},
+		},
+		{
+			name: "context_margin negative",
+			mutate: func(r *Roster) {
+				cm := -0.1
+				r.Budgets.ContextMargin = &cm
+			},
+			wantMsgs: []string{"context_margin", "at least 0"},
+		},
+		{
+			name: "zero uncertain_release_after (valid)",
+			mutate: func(r *Roster) {
+				if r.Pools == nil {
+					r.Pools = make(map[string]Pool)
+				}
+				zeroDur := Duration{0}
+				r.Pools["test"] = Pool{UncertainReleaseAfter: &zeroDur}
+				r.Participants[0].Pool = "test"
+			},
+			wantMsgs: []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -707,19 +915,52 @@ func TestApplyDefaults(t *testing.T) {
 }
 
 func TestApplyDefaultsPreservesExisting(t *testing.T) {
-	custom := 60 * time.Second
-	r := &Roster{
-		Deadlines: Deadlines{
-			Attempt: &Duration{custom},
-		},
+	r, err := Load("testdata/apply-defaults-preserve.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
 	}
-	r.ApplyDefaults()
 
-	if r.Deadlines.Attempt.Duration != custom {
-		t.Errorf("Deadlines.Attempt = %v, want %v", r.Deadlines.Attempt.Duration, custom)
+	// Should have attempt = 10s set, everything else should be defaults
+	if r.Deadlines.Attempt == nil || r.Deadlines.Attempt.Duration != 10*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 10s", r.Deadlines.Attempt)
 	}
-	if r.Deadlines.Turn.Duration != 900*time.Second {
-		t.Errorf("Deadlines.Turn = %v, want 900s", r.Deadlines.Turn.Duration)
+	if r.Deadlines.Turn == nil || r.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", r.Deadlines.Turn)
+	}
+	if r.Deadlines.Delivery == nil || r.Deadlines.Delivery.Duration != 60*time.Second {
+		t.Errorf("Deadlines.Delivery = %v, want 60s", r.Deadlines.Delivery)
+	}
+	if r.Deadlines.Provisional == nil || !*r.Deadlines.Provisional {
+		t.Errorf("Deadlines.Provisional = %v, want true", r.Deadlines.Provisional)
+	}
+
+	if r.Budgets.CalibrationSafety == nil || *r.Budgets.CalibrationSafety != 0.75 {
+		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", r.Budgets.CalibrationSafety)
+	}
+	if r.Budgets.MessageOverheadTokens == nil || *r.Budgets.MessageOverheadTokens != 8 {
+		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", r.Budgets.MessageOverheadTokens)
+	}
+	if r.Budgets.RequestOverheadTokens == nil || *r.Budgets.RequestOverheadTokens != 16 {
+		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", r.Budgets.RequestOverheadTokens)
+	}
+	if r.Budgets.ContextMargin == nil || *r.Budgets.ContextMargin != 0.10 {
+		t.Errorf("Budgets.ContextMargin = %v, want 0.10", r.Budgets.ContextMargin)
+	}
+	if r.Budgets.AuthorMaxOutputTokens == nil || *r.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", r.Budgets.AuthorMaxOutputTokens)
+	}
+	if r.Budgets.ReviewerMaxOutputTokens == nil || *r.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", r.Budgets.ReviewerMaxOutputTokens)
+	}
+	if r.Budgets.DeliveryMaxTokens == nil || *r.Budgets.DeliveryMaxTokens != 64 {
+		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", r.Budgets.DeliveryMaxTokens)
+	}
+	if r.Budgets.TurnMaxEstimatedTokens == nil || *r.Budgets.TurnMaxEstimatedTokens != 250000 {
+		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", r.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	if r.Engine.StopGrace == nil || r.Engine.StopGrace.Duration != 5*time.Second {
+		t.Errorf("Engine.StopGrace = %v, want 5s", r.Engine.StopGrace)
 	}
 }
 
@@ -793,8 +1034,8 @@ func TestMalformedDuration(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for malformed duration")
 	}
-	if !strings.Contains(err.Error(), "duration") && !strings.Contains(err.Error(), "TOML") {
-		t.Errorf("error doesn't mention duration or TOML: %v", err)
+	if !strings.Contains(err.Error(), "deadlines.attempt") {
+		t.Errorf("error doesn't mention deadlines.attempt: %v", err)
 	}
 }
 

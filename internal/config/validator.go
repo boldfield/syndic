@@ -141,7 +141,6 @@ func (r *Roster) Validate() error {
 					ep.Name, headerName, secretRef.Source))
 			}
 		}
-
 	}
 
 	// Validate presets
@@ -343,9 +342,7 @@ func (r *Roster) Validate() error {
 	}
 
 	// Validate Pools
-	seenPoolNames := make(map[string]bool)
 	for name, pool := range r.Pools {
-		seenPoolNames[name] = true
 		if pool.Concurrency != nil && *pool.Concurrency < 1 {
 			errs = append(errs, fmt.Errorf("pools[%q].concurrency must be at least 1", name))
 		}
@@ -360,8 +357,10 @@ func (r *Roster) Validate() error {
 		if poolName == "" {
 			poolName = "default"
 		}
-		if poolName != "default" && !seenPoolNames[poolName] {
-			errs = append(errs, fmt.Errorf("participant %q references non-existent pool: %q", p.ID, poolName))
+		if poolName != "default" {
+			if _, ok := r.Pools[poolName]; !ok {
+				errs = append(errs, fmt.Errorf("participant %q references non-existent pool: %q", p.ID, poolName))
+			}
 		}
 	}
 
