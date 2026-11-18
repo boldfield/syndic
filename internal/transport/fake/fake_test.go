@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -646,28 +647,34 @@ func TestVerdictFixtureSmokeTest(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := strings.Split(tc.verdict, "\n")
-			var verdictStart, verdictEnd int
+			verdictStart, verdictEnd := -1, -1
+			startCount := 0
 
-			// Find exact VERDICT v1 line
+			// Find exact VERDICT v1 line; exactly one is allowed
 			for i, line := range lines {
 				if line == "VERDICT v1" {
-					verdictStart = i
-					break
+					startCount++
+					if verdictStart < 0 {
+						verdictStart = i
+					}
 				}
+			}
+			if verdictStart < 0 {
+				t.Fatal("no exact VERDICT v1 line found")
+			}
+			if startCount != 1 {
+				t.Fatalf("VERDICT v1 appears %d times, expected exactly 1", startCount)
 			}
 
 			// Find exact END VERDICT line after VERDICT v1
-			found := false
 			for i := verdictStart + 1; i < len(lines); i++ {
 				if lines[i] == "END VERDICT" {
 					verdictEnd = i
-					found = true
 					break
 				}
 			}
-
-			if verdictStart < 0 || !found {
-				t.Fatal("no exact VERDICT v1 or END VERDICT line found")
+			if verdictEnd < 0 {
+				t.Fatal("no exact END VERDICT line found after VERDICT v1")
 			}
 
 			// Check each required field appears exactly once
@@ -719,16 +726,6 @@ func TestVerdictFixtureSmokeTest(t *testing.T) {
 
 // TestRaceCondition tests concurrent access safety.
 func TestRaceCondition(t *testing.T) {
-	script := []Step{
-		{
-			Kind:            StepKindReply,
-			Text:            "Response",
-			Status:          transport.StatusComplete,
-			TransportStatus: transport.TransportStatusOK,
-		},
-	}
-	adapter := New(script, Options{})
-
 	req := transport.CompleteRequest{
 		Envelope: transport.AttemptEnvelope{
 			Participant:   "test",
@@ -747,11 +744,53 @@ func TestRaceCondition(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// This test should pass with -race flag
-	_, _ = adapter.Complete(ctx, req)
-	calls := adapter.Calls()
-	if len(calls) != 1 {
-		t.Errorf("calls: %d, want 1", len(calls))
+	hang := New([]Step{
+		{Kind: StepKindHang},
+		{Kind: StepKindReply, Text: "r1", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK},
+		{Kind: StepKindReply, Text: "r2", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK},
+	}, Options{})
+	hangReq := req
+	hangReq.Envelope.AttemptID = "hang"
+	hangReq.Deadline = time.Now().Add(5 * time.Second)
+
+	var wg sync.WaitGroup
+	hangDone := make(chan transport.CompleteResult, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		res, _ := hang.Complete(ctx, hangReq)
+		hangDone <- res
+	}()
+
+	// Wait until the hanging call has been recorded.
+	for i := 0; i < 500 && len(hang.Calls()) == 0; i++ {
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := req
+			r.Envelope.AttemptID = "other"
+			_, _ = hang.Complete(ctx, r)
+			_ = hang.Calls()
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = hang.Calls()
+		_, _ = hang.Cancel(ctx, "hang")
+	}()
+	wg.Wait()
+
+	res := <-hangDone
+	if res.Status != transport.StatusInterrupted || res.TransportStatus != transport.TransportStatusCancelled {
+		t.Errorf("hang result: %v/%v, want interrupted/cancelled", res.Status, res.TransportStatus)
+	}
+	if n := len(hang.Calls()); n != 3 {
+		t.Errorf("calls: %d, want 3", n)
 	}
 }
 
