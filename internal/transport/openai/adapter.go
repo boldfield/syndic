@@ -165,24 +165,16 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		return record, err
 	}
 
-	step2Err, step2Body, step2Latency, step2ServerVersion := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
+	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
 	if step2ServerVersion != "" {
 		serverVersion = step2ServerVersion
 	}
 
-	if step2Err != nil {
-		if errors.Is(step2Err, transport.ErrUnreachable) {
-			scrubAndStore(&record, rawSteps, resolvedSecrets)
-			return record, step2Err
+	if errors.Is(step2Err, transport.ErrUnreachable) || errors.Is(step2Err, transport.ErrUnauthorized) || errors.Is(step2Err, transport.ErrModelUnavailable) {
+		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
+			return record, err
 		}
-		if errors.Is(step2Err, transport.ErrUnauthorized) {
-			scrubAndStore(&record, rawSteps, resolvedSecrets)
-			return record, step2Err
-		}
-		if errors.Is(step2Err, transport.ErrModelUnavailable) {
-			scrubAndStore(&record, rawSteps, resolvedSecrets)
-			return record, step2Err
-		}
+		return record, step2Err
 	}
 
 	if step2Body != nil {
@@ -224,7 +216,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		record.FinishReasons = probeFinishReasons
 	}
 
-	if record.FinishReasons == nil || len(record.FinishReasons) == 0 {
+	if len(record.FinishReasons) == 0 {
 		record.FinishReasons = make(map[string]transport.CompletionStatus)
 	}
 
@@ -243,20 +235,20 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	return record, nil
 }
 
-func recordRawStep(rawSteps map[string]any, path string, statusCode int, headers http.Header, body []byte) {
-	step := map[string]any{
+func recordRawStep(rawSteps map[string]any, step, path string, statusCode int, headers http.Header, body []byte) {
+	entry := map[string]any{
 		"path": path,
 	}
 	if statusCode != 0 {
-		step["status"] = statusCode
+		entry["status"] = statusCode
 		if headers != nil {
-			step["headers"] = headers
+			entry["headers"] = headers
 		}
 		if body != nil {
-			step["body"] = string(body)
+			entry["body"] = string(body)
 		}
 	}
-	rawSteps[path] = step
+	rawSteps[step] = entry
 }
 
 func scrubAndStore(record *transport.CapabilityRecord, rawSteps map[string]any, resolvedSecrets []string) error {
@@ -651,7 +643,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
 		if isConnectionRefusedOrDNSErr(err) {
-			recordRawStep(rawSteps, "/models", 0, nil, nil)
+			recordRawStep(rawSteps, "models", "/models", 0, nil, nil)
 		}
 		return nil
 	}
@@ -661,7 +653,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return err
 	}
 
-	recordRawStep(rawSteps, "/models", httpResp.StatusCode, httpResp.Header, body)
+	recordRawStep(rawSteps, "models", "/models", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode == 404 {
 		record.ModelsEndpoint = transport.TriNo
@@ -699,7 +691,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	return nil
 }
 
-func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration) (error, *ResponseBody, int, string) {
+func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration) (*ResponseBody, int, string, error) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	var maxTokensBody *ResponseBody
@@ -725,12 +717,12 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
-			return err, nil, 0, ""
+			return nil, 0, "", err
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if err := a.addAuthHeaders(httpReq); err != nil {
-			return err, nil, 0, ""
+			return nil, 0, "", err
 		}
 
 		startTime := time.Now()
@@ -741,15 +733,15 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 				if idx == 1 {
 					stepName = "max_completion_tokens"
 				}
-				recordRawStep(rawSteps, stepName, 0, nil, nil)
-				return transport.ErrUnreachable, nil, 0, ""
+				recordRawStep(rawSteps, stepName, "/chat/completions", 0, nil, nil)
+				return nil, 0, "", transport.ErrUnreachable
 			}
-			return err, nil, 0, ""
+			return nil, 0, "", err
 		}
 
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		if err := httpResp.Body.Close(); err != nil {
-			return err, nil, 0, ""
+			return nil, 0, "", err
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
@@ -757,7 +749,7 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		if idx == 1 {
 			stepName = "max_completion_tokens"
 		}
-		recordRawStep(rawSteps, stepName, httpResp.StatusCode, httpResp.Header, body)
+		recordRawStep(rawSteps, stepName, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
 		if serverVersion == "" && httpResp.Header.Get("Server") != "" {
 			serverVersion = httpResp.Header.Get("Server")
@@ -765,18 +757,18 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
 			record.AuthMode = "unknown"
-			return transport.ErrUnauthorized, nil, latency, serverVersion
+			return nil, latency, serverVersion, transport.ErrUnauthorized
 		}
 
 		if httpResp.StatusCode == 404 {
-			return transport.ErrModelUnavailable, nil, latency, serverVersion
+			return nil, latency, serverVersion, transport.ErrModelUnavailable
 		}
 
 		if httpResp.StatusCode == 400 {
 			if field == "max_tokens" {
 				continue
 			}
-			return nil, nil, latency, serverVersion
+			return nil, latency, serverVersion, nil
 		}
 
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
@@ -787,11 +779,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 				maxTokensBody = &respData
 			}
 
-			return nil, maxTokensBody, latency, serverVersion
+			return maxTokensBody, latency, serverVersion, nil
 		}
 	}
 
-	return nil, maxTokensBody, latency, serverVersion
+	return maxTokensBody, latency, serverVersion, nil
 }
 
 func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration, finishReasons map[string]transport.CompletionStatus) error {
@@ -840,7 +832,7 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		return err
 	}
 
-	recordRawStep(rawSteps, "system_role", httpResp.StatusCode, httpResp.Header, body)
+	recordRawStep(rawSteps, "system_role", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		var respData ResponseBody
@@ -925,7 +917,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return
 	}
 
-	recordRawStep(rawSteps, "over_length", httpResp.StatusCode, httpResp.Header, body)
+	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		record.OverLength = "errored"

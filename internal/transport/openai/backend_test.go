@@ -1159,8 +1159,8 @@ func TestProbeFullyCooperative(t *testing.T) {
 	if record.ModelsEndpoint != transport.TriYes {
 		t.Errorf("ModelsEndpoint: got %q, want TriYes", record.ModelsEndpoint)
 	}
-	if record.ModelListed == transport.TriNo {
-		t.Logf("Note: ModelListed is %q - server may have returned valid but unparseable models list", record.ModelListed)
+	if record.ModelListed != transport.TriYes {
+		t.Errorf("ModelListed: got %q, want TriYes", record.ModelListed)
 	}
 	if record.MaxTokensField == "" {
 		t.Errorf("MaxTokensField: should be set")
@@ -1177,8 +1177,8 @@ func TestProbeFullyCooperative(t *testing.T) {
 	if record.AuthMode != "api-key" {
 		t.Errorf("AuthMode: got %q, want api-key", record.AuthMode)
 	}
-	if record.ServerVersion != "test-server/1.0" && record.ServerVersion == "unknown" {
-		t.Logf("ServerVersion not extracted from header (acceptable)")
+	if record.ServerVersion != "test-server/1.0" {
+		t.Errorf("ServerVersion: got %q, want test-server/1.0", record.ServerVersion)
 	}
 	if record.OverLength == "" {
 		t.Errorf("OverLength: should be set")
@@ -1456,8 +1456,17 @@ func TestProbeSecretScrubbing(t *testing.T) {
 	if strings.Contains(rawStr, secret) {
 		t.Errorf("Raw record contains unredacted secret")
 	}
-	if !strings.Contains(rawStr, "REDACTED") && len(rawStr) > 10 {
-		t.Logf("Raw record may not have redaction marker (acceptable if no secrets in response)")
+	if !strings.Contains(rawStr, "Response contains") {
+		t.Errorf("Raw record does not contain the echoed response: %s", rawStr)
+	}
+	var steps map[string]map[string]any
+	if err := json.Unmarshal(record.Raw, &steps); err != nil {
+		t.Fatalf("Raw is not a JSON object: %v", err)
+	}
+	for _, k := range []string{"models", "max_tokens", "system_role", "over_length"} {
+		if _, ok := steps[k]; !ok {
+			t.Errorf("Raw missing step %q: %s", k, rawStr)
+		}
 	}
 }
 
