@@ -2,6 +2,7 @@ package journal_test
 
 import (
 	"database/sql"
+	"os"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -766,52 +767,32 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to enable foreign keys: %v", err)
 	}
 
-	// Apply migration 001
-	migration001 := `
-	-- Turn table with mode and terminal_state enums
-	CREATE TABLE turns (
-		id TEXT PRIMARY KEY,
-		run_id TEXT NOT NULL,
-		mode TEXT NOT NULL CHECK(mode IN ('solo', 'review')),
-		terminal_state TEXT CHECK(terminal_state IN ('approved', 'solo_complete', NULL)),
-		FOREIGN KEY (run_id) REFERENCES runs(id)
-	);
+	// Create schema_version table the way journal.go does
+	_, err = conn.Exec(`
+		CREATE TABLE schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		t.Fatalf("failed to create schema_version table: %v", err)
+	}
 
-	CREATE TABLE events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		turn_id TEXT NOT NULL,
-		event_type TEXT NOT NULL,
-		timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		data TEXT,
-		FOREIGN KEY (turn_id) REFERENCES turns(id)
-	);
+	// Read and apply migration 001
+	migration001Content, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("failed to read migration 001: %v", err)
+	}
 
-	CREATE TRIGGER events_update_prevented BEFORE UPDATE ON events
-	BEGIN
-		SELECT RAISE(ABORT, 'events table is immutable');
-	END;
-
-	CREATE TRIGGER events_delete_prevented BEFORE DELETE ON events
-	BEGIN
-		SELECT RAISE(ABORT, 'events table is immutable');
-	END;
-
-	CREATE TABLE runs (
-		id TEXT PRIMARY KEY,
-		manifest TEXT NOT NULL,
-		manifest_hash TEXT NOT NULL
-	);
-
-	CREATE TABLE schema_version (
-		version INTEGER PRIMARY KEY
-	);
-
-	INSERT INTO schema_version (version) VALUES (1);
-	`
-
-	_, err = conn.Exec(migration001)
+	_, err = conn.Exec(string(migration001Content))
 	if err != nil {
 		t.Fatalf("failed to apply migration 001: %v", err)
+	}
+
+	// Record version 1 in schema_version
+	_, err = conn.Exec("INSERT INTO schema_version (version) VALUES (1)")
+	if err != nil {
+		t.Fatalf("failed to record schema version 1: %v", err)
 	}
 
 	// Insert test run
@@ -849,7 +830,9 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to get event2 id: %v", err)
 	}
 
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("failed to close connection: %v", err)
+	}
 
 	// Now open with journal.Open which applies migrations
 	db, err := journal.Open(dbPath)
@@ -903,6 +886,17 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 	}
 	if data != "data2" {
 		t.Errorf("expected data 'data2', got %q", data)
+	}
+
+	// Check that UPDATE and DELETE still fail on the upgraded path
+	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = ?", "new data", event1ID)
+	if err == nil {
+		t.Errorf("expected UPDATE on events to fail on upgraded path, but succeeded")
+	}
+
+	_, err = conn.Exec("DELETE FROM events WHERE id = ?", event1ID)
+	if err == nil {
+		t.Errorf("expected DELETE on events to fail on upgraded path, but succeeded")
 	}
 }
 
@@ -982,7 +976,7 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		t.Fatalf("failed to insert event: %v", err)
 	}
 
-	// Get schema version and event count
+	// Get schema version, event count, and event details
 	var version1 int
 	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version1)
 	if err != nil {
@@ -995,7 +989,35 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		t.Fatalf("failed to query events: %v", err)
 	}
 
-	db1.Close()
+	var eventID1 int64
+	var eventType1, data1 string
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'probe_complete'").Scan(&eventID1, &eventType1, &data1)
+	if err != nil {
+		t.Fatalf("failed to query event: %v", err)
+	}
+
+	// Capture sqlite_master entries for events table and its triggers before second open
+	eventsMasterRows1, err := conn.Query("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'events' OR (type = 'trigger' AND name LIKE 'events_%') ORDER BY name")
+	if err != nil {
+		t.Fatalf("failed to query sqlite_master: %v", err)
+	}
+	var master1Entries []map[string]string
+	for eventsMasterRows1.Next() {
+		var typ, name, sql sql.NullString
+		if err := eventsMasterRows1.Scan(&typ, &name, &sql); err != nil {
+			t.Fatalf("failed to scan sqlite_master row: %v", err)
+		}
+		master1Entries = append(master1Entries, map[string]string{
+			"type": typ.String,
+			"name": name.String,
+			"sql":  sql.String,
+		})
+	}
+	eventsMasterRows1.Close()
+
+	if err := db1.Close(); err != nil {
+		t.Fatalf("failed to close database: %v", err)
+	}
 
 	// Second open should not change anything
 	db2, err := journal.Open(dbPath)
@@ -1017,13 +1039,63 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		t.Fatalf("failed to query events: %v", err)
 	}
 
-	db2.Close()
+	var eventID2 int64
+	var eventType2, data2 string
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'probe_complete'").Scan(&eventID2, &eventType2, &data2)
+	if err != nil {
+		t.Fatalf("failed to query event after second open: %v", err)
+	}
+
+	// Capture sqlite_master entries after second open
+	eventsMasterRows2, err := conn.Query("SELECT type, name, sql FROM sqlite_master WHERE tbl_name = 'events' OR (type = 'trigger' AND name LIKE 'events_%') ORDER BY name")
+	if err != nil {
+		t.Fatalf("failed to query sqlite_master after second open: %v", err)
+	}
+	var master2Entries []map[string]string
+	for eventsMasterRows2.Next() {
+		var typ, name, sql sql.NullString
+		if err := eventsMasterRows2.Scan(&typ, &name, &sql); err != nil {
+			t.Fatalf("failed to scan sqlite_master row: %v", err)
+		}
+		master2Entries = append(master2Entries, map[string]string{
+			"type": typ.String,
+			"name": name.String,
+			"sql":  sql.String,
+		})
+	}
+	eventsMasterRows2.Close()
+
+	if err := db2.Close(); err != nil {
+		t.Fatalf("failed to close database: %v", err)
+	}
 
 	if version1 != version2 {
 		t.Errorf("schema version changed: %d -> %d", version1, version2)
 	}
 	if count1 != count2 {
 		t.Errorf("event count changed: %d -> %d", count1, count2)
+	}
+	if eventID1 != eventID2 {
+		t.Errorf("event id changed: %d -> %d", eventID1, eventID2)
+	}
+	if eventType1 != eventType2 {
+		t.Errorf("event_type changed: %q -> %q", eventType1, eventType2)
+	}
+	if data1 != data2 {
+		t.Errorf("event data changed: %q -> %q", data1, data2)
+	}
+	if len(master1Entries) != len(master2Entries) {
+		t.Errorf("sqlite_master entries count changed: %d -> %d", len(master1Entries), len(master2Entries))
+	}
+	for i, entry1 := range master1Entries {
+		if i >= len(master2Entries) {
+			t.Errorf("sqlite_master entry %d missing after second open: %v", i, entry1)
+			continue
+		}
+		entry2 := master2Entries[i]
+		if entry1["type"] != entry2["type"] || entry1["name"] != entry2["name"] || entry1["sql"] != entry2["sql"] {
+			t.Errorf("sqlite_master entry %d changed: %v -> %v", i, entry1, entry2)
+		}
 	}
 }
 
