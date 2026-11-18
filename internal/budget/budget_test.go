@@ -59,6 +59,30 @@ func TestAdmissionTokens(t *testing.T) {
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
 			want:             33, // ceil(9 * 1.0) + 8 + 16
 		},
+		{
+			name:             "exact integer: 3 bytes at 1.0 tokens/byte",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 3))}},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:             3, // 3 * 1.0 = 3.0, should stay 3 not round up
+		},
+		{
+			name:             "rounding safety: 100 bytes at 1.1 tokens/byte",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 100))}},
+			tokensPerByteMax: 1.1,
+			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:             110, // 100 * 1.1 = 110.00000000000001, should be 110 not 111
+		},
+		{
+			name: "two messages with custom overheads",
+			msgs: []transport.Message{
+				{Role: "user", Content: string(make([]byte, 50))},
+				{Role: "assistant", Content: string(make([]byte, 75))},
+			},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 10, RequestTokens: 20},
+			want:             165, // (50 + 10) + (75 + 10) + 20 = 60 + 85 + 20 = 165
+		},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +148,30 @@ func TestEstimateTokens(t *testing.T) {
 			bytesPerToken: 3.0,
 			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
 			want:          16, // just RequestTokens
+		},
+		{
+			name:          "exact integer: 4096 bytes at 4.0 bytes/token",
+			msgs:          []transport.Message{{Role: "user", Content: string(make([]byte, 4096))}},
+			bytesPerToken: 4.0,
+			o:             Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:          1024, // 4096 / 4.0 = 1024.0, should stay 1024 not round up
+		},
+		{
+			name:          "multibyte UTF-8 characters",
+			msgs:          []transport.Message{{Role: "user", Content: "日本語"}}, // 3 characters, 9 bytes
+			bytesPerToken: 3.0,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:          27, // ceil(9 / 3.0) + 8 + 16 = 3 + 8 + 16 = 27
+		},
+		{
+			name: "two messages with custom overheads",
+			msgs: []transport.Message{
+				{Role: "user", Content: string(make([]byte, 60))},
+				{Role: "assistant", Content: string(make([]byte, 90))},
+			},
+			bytesPerToken: 3.0,
+			o:             Overheads{MessageTokens: 10, RequestTokens: 20},
+			want:          90, // ceil(60/3) + 10 + ceil(90/3) + 10 + 20 = 20 + 10 + 30 + 10 + 20 = 90
 		},
 	}
 
@@ -196,6 +244,18 @@ func TestUsableBound(t *testing.T) {
 			contextBound:  32768,
 			contextMargin: 0.10,
 			want:          29491, // floor(32768 * 0.9)
+		},
+		{
+			name:          "rounding safety: 1000 with 0.9 margin",
+			contextBound:  1000,
+			contextMargin: 0.9,
+			want:          100, // floor(1000 * 0.1) = floor(100.0), should be 100 not 99
+		},
+		{
+			name:          "rounding safety: 100 with 0.9 margin",
+			contextBound:  100,
+			contextMargin: 0.9,
+			want:          10, // floor(100 * 0.1) = floor(10.0), should be 10 not 9
 		},
 	}
 
@@ -291,7 +351,13 @@ func TestStandInBytes(t *testing.T) {
 			name:            "4096 tokens at 2.5 bytes/token",
 			maxOutputTokens: 4096,
 			bytesPerToken:   2.5,
-			want:            10240, // ceil(4096 * 2.5)
+			want:            10240, // ceil(4096 * 2.5) = ceil(10240.0) = 10240
+		},
+		{
+			name:            "rounding safety: 100 tokens at 0.07 bytes/token",
+			maxOutputTokens: 100,
+			bytesPerToken:   0.07,
+			want:            7, // ceil(100 * 0.07) = ceil(7.0), should be 7 not 8
 		},
 	}
 
