@@ -178,6 +178,10 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 					return journal.Event{}, ErrClosed
 				}
 				s.mu.Lock()
+				if s.closed {
+					s.mu.Unlock()
+					return journal.Event{}, ErrClosed
+				}
 				if event.Seq <= s.watermark {
 					s.mu.Unlock()
 					continue
@@ -196,6 +200,10 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 				return journal.Event{}, ErrClosed
 			}
 			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return journal.Event{}, ErrClosed
+			}
 			if event.Seq <= s.watermark {
 				s.mu.Unlock()
 				continue

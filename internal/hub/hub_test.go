@@ -852,3 +852,62 @@ func TestCloseWhileWaiting(t *testing.T) {
 		t.Errorf("expected ErrClosed, got %v", err)
 	}
 }
+
+func TestCloseWhileWaitingWithTxInFlight(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 10)
+
+	sub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	inTx := make(chan struct{})
+	release := make(chan struct{})
+	txDone := make(chan error, 1)
+	go func() {
+		txDone <- hub.Tx(func(_ *journal.Tx, emit Emit) error {
+			close(inTx)
+			<-release
+			return emit("", "k", map[string]string{})
+		})
+	}()
+	<-inTx
+
+	nextDone := make(chan error, 1)
+	go func() {
+		_, err := sub.Next(context.Background())
+		nextDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	closeDone := make(chan struct{})
+	go func() {
+		sub.Close()
+		close(closeDone)
+	}()
+	for {
+		sub.mu.Lock()
+		c := sub.closed
+		sub.mu.Unlock()
+		if c {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(release)
+	if err := <-txDone; err != nil {
+		t.Fatalf("Tx failed: %v", err)
+	}
+	<-closeDone
+
+	select {
+	case err := <-nextDone:
+		if !errors.Is(err, ErrClosed) {
+			t.Errorf("expected ErrClosed, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Next did not return")
+	}
+}
