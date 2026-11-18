@@ -32,8 +32,6 @@ type Harness struct {
 	rosterPath  string
 	journalPath string
 	db          *journal.DB
-	seenEvents  []journal.Event
-	seenEventMu sync.Mutex
 }
 
 // FakeClock is a controllable clock for testing.
@@ -87,27 +85,27 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]*fake.Step) (*Har
 	defer f.Close()
 
 	if _, err := f.WriteString(rosterTOML); err != nil {
-		os.Remove(f.Name())
+		_ = os.Remove(f.Name())
 		return nil, err
 	}
 	rosterPath := f.Name()
-	t.Cleanup(func() { os.Remove(rosterPath) })
+	t.Cleanup(func() { _ = os.Remove(rosterPath) })
 
 	// Create temp journal database
 	journalFile, err := os.CreateTemp("", "journal-*.db")
 	if err != nil {
 		return nil, err
 	}
-	journalFile.Close()
+	_ = journalFile.Close()
 	journalPath := journalFile.Name()
-	t.Cleanup(func() { os.Remove(journalPath) })
+	t.Cleanup(func() { _ = os.Remove(journalPath) })
 
 	// Initialize journal database
 	journalDB, err := journal.Open(journalPath)
 	if err != nil {
 		return nil, err
 	}
-	t.Cleanup(func() { journalDB.Close() })
+	t.Cleanup(func() { _ = journalDB.Close() })
 
 	store := journal.NewStore(journalDB)
 
@@ -229,7 +227,6 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]*fake.Step) (*Har
 		rosterPath:  rosterPath,
 		journalPath: journalPath,
 		db:          journalDB,
-		seenEvents:  []journal.Event{},
 	}
 
 	// Start engine

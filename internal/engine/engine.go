@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
@@ -80,19 +81,19 @@ type Engine struct {
 // New creates a new Engine with the given options.
 func New(o Options) (*Engine, error) {
 	if o.Store == nil {
-		return nil, errors.New("Store is required")
+		return nil, errors.New("store is required")
 	}
 	if o.Hub == nil {
-		return nil, errors.New("Hub is required")
+		return nil, errors.New("hub is required")
 	}
 	if o.RosterPath == "" {
-		return nil, errors.New("RosterPath is required")
+		return nil, errors.New("roster path is required")
 	}
 	if o.EngineVersion == "" {
-		return nil, errors.New("EngineVersion is required")
+		return nil, errors.New("engine version is required")
 	}
 	if o.NewAdapter == nil {
-		return nil, errors.New("NewAdapter is required")
+		return nil, errors.New("new adapter is required")
 	}
 
 	clock := o.Clock
@@ -559,7 +560,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	e.openTurnID = turnID
 
 	// Execute solo or review-mode path asynchronously (not holding the mutex)
-	go e.executeTurn(turnID, preset, author, req)
+	go e.executeTurn(turnID, presetName, preset, author, req)
 
 	return wire.SubmitReply{
 		TurnID:          turnID,
@@ -570,12 +571,40 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 }
 
 // executeTurn handles both solo and review-mode turns.
-func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.Participant, req wire.SubmitRequest) {
+func (e *Engine) executeTurn(turnID, presetName string, preset config.Preset, author config.Participant, req wire.SubmitRequest) {
+	// For review mode, end the turn immediately with not_implemented
+	if preset.Mode != "solo" {
+		err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+			reason := "author_failed:not_implemented"
+			if txErr := tx.EndTurn(turnID, "incomplete", reason); txErr != nil {
+				return txErr
+			}
+			return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+				TurnID: turnID,
+				State:  "incomplete",
+				Reason: &reason,
+			})
+		})
+		e.mu.Lock()
+		e.openTurnID = ""
+		e.mu.Unlock()
+		_ = err
+		return
+	}
+
 	e.mu.Lock()
 	adapter := e.adapters[author.ID]
+	roster := e.roster
 	e.mu.Unlock()
 
-	if adapter == nil {
+	if adapter == nil || roster == nil {
+		return
+	}
+
+	// Resolve deadlines and budgets
+	effective, err := roster.Resolve(presetName, "")
+	if err != nil {
+		e.endTurnWithError(turnID, "", "author_failed:error")
 		return
 	}
 
@@ -583,7 +612,7 @@ func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.
 	messages := prompt.Author(req.Input)
 
 	// Append request message in a transaction
-	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		msgID, sha256, byteLen, err := tx.AppendMessage(turnID, "author", "user", nil, []byte(req.Input), nil)
 		if err != nil {
 			return err
@@ -598,14 +627,43 @@ func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.
 		})
 	})
 	if err != nil {
+		e.endTurnWithError(turnID, "", "author_failed:error")
 		return
 	}
 
 	// Emit turn_state{author_dispatched} and begin attempt in one transaction
 	var attemptID string
 	now := e.clock.Now()
-	deadline := now.Add(5 * time.Minute) // TODO: use resolved deadlines from roster
-	maxOutput := 4096                    // TODO: use clamped author_max_output_tokens
+
+	// Compute effective attempt deadline: min(now + attempt deadline, turn deadline)
+	var attemptDeadline, turnDeadline time.Duration
+	if effective.Deadlines.Attempt != nil {
+		attemptDeadline = effective.Deadlines.Attempt.Duration
+	} else {
+		attemptDeadline = 5 * time.Minute // fallback
+	}
+	if effective.Deadlines.Turn != nil {
+		turnDeadline = effective.Deadlines.Turn.Duration
+	} else {
+		turnDeadline = 15 * time.Minute // fallback
+	}
+
+	attemptEndTime := now.Add(attemptDeadline)
+	turnEndTime := now.Add(turnDeadline)
+	var deadline time.Time
+	if attemptEndTime.Before(turnEndTime) {
+		deadline = attemptEndTime
+	} else {
+		deadline = turnEndTime
+	}
+
+	// Clamp output tokens
+	var maxOutput int
+	if effective.Budgets.AuthorMaxOutputTokens != nil {
+		maxOutput = budget.ClampOutput(*effective.Budgets.AuthorMaxOutputTokens, e.participants[author.ID].OutputBound)
+	} else {
+		maxOutput = budget.ClampOutput(4096, e.participants[author.ID].OutputBound)
+	}
 
 	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		params := journal.AttemptParams{
@@ -642,11 +700,16 @@ func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.
 		})
 	})
 	if err != nil {
+		e.endTurnWithError(turnID, attemptID, "author_failed:error")
 		return
 	}
 
 	// Call adapter to get result (outside the mutex)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		timeout = 30 * time.Second // fallback minimum
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	result, err := adapter.Complete(ctx, transport.CompleteRequest{
@@ -666,17 +729,50 @@ func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.
 
 	// Handle result or error
 	if err != nil {
-		// Go error from Complete - treated as status error
-		e.endTurnWithError(turnID, attemptID, "author_failed:error")
+		// Go error from Complete - treated as adapter_error
+		e.endTurnWithAdapterError(turnID, attemptID, err)
 		return
 	}
 
 	// End turn with result
-	e.endTurnWithResult(turnID, attemptID, &result, preset.Mode)
+	completeReq := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   author.ID,
+			TurnID:        turnID,
+			Phase:         "author",
+			Epoch:         0,
+			AttemptID:     attemptID,
+			CandidateHash: "",
+		},
+		Model:           author.Model,
+		Messages:        messages,
+		MaxOutputTokens: maxOutput,
+		Deadline:        deadline,
+	}
+	e.endTurnWithResult(turnID, attemptID, completeReq, &result, author.ID, preset.Mode)
 }
 
-// endTurnWithError ends a turn when adapter returns a Go error
+// endTurnWithError ends a turn without an attempt ID (e.g., early validation failure)
 func (e *Engine) endTurnWithError(turnID, attemptID, reason string) {
+	if attemptID == "" {
+		// No attempt started yet, just end the turn
+		err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+			if txErr := tx.EndTurn(turnID, "incomplete", reason); txErr != nil {
+				return txErr
+			}
+			return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+				TurnID: turnID,
+				State:  "incomplete",
+				Reason: &reason,
+			})
+		})
+		e.mu.Lock()
+		e.openTurnID = ""
+		e.mu.Unlock()
+		_ = err
+		return
+	}
+
 	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		if txErr := emit(turnID, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
 			AttemptID:       attemptID,
@@ -684,6 +780,11 @@ func (e *Engine) endTurnWithError(turnID, attemptID, reason string) {
 			ScrubCount:      0,
 			TransportStatus: "adapter_error:error",
 		}); txErr != nil {
+			return txErr
+		}
+
+		_, txErr := tx.BumpEpoch(turnID)
+		if txErr != nil {
 			return txErr
 		}
 
@@ -703,14 +804,83 @@ func (e *Engine) endTurnWithError(turnID, attemptID, reason string) {
 	e.openTurnID = ""
 	e.mu.Unlock()
 
-	if err != nil {
-		return
-	}
+	_ = err
+}
+
+// endTurnWithAdapterError ends a turn when adapter returns a Go error
+func (e *Engine) endTurnWithAdapterError(turnID, attemptID string, adapterErr error) {
+	reason := fmt.Sprintf("author_failed:adapter_error:%v", adapterErr)
+	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+		transportStatus := fmt.Sprintf("adapter_error:%v", adapterErr)
+		if txErr := emit(turnID, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+			AttemptID:       attemptID,
+			Status:          "error",
+			ScrubCount:      0,
+			TransportStatus: transportStatus,
+		}); txErr != nil {
+			return txErr
+		}
+
+		_, txErr := tx.BumpEpoch(turnID)
+		if txErr != nil {
+			return txErr
+		}
+
+		if txErr := tx.EndTurn(turnID, "incomplete", reason); txErr != nil {
+			return txErr
+		}
+
+		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: turnID,
+			State:  "incomplete",
+			Reason: &reason,
+		})
+	})
+
+	// Clear the open turn
+	e.mu.Lock()
+	e.openTurnID = ""
+	e.mu.Unlock()
+
+	_ = err
 }
 
 // endTurnWithResult processes an adapter result and ends the turn
-func (e *Engine) endTurnWithResult(turnID, attemptID string, result *transport.CompleteResult, mode string) {
+func (e *Engine) endTurnWithResult(turnID, attemptID string, req transport.CompleteRequest, result *transport.CompleteResult, participantID, mode string) {
 	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Store usage on attempt row if reported
+		if result.Usage != nil {
+			if txErr := tx.SetAttemptUsage(attemptID, result.Usage.Prompt, result.Usage.Completion); txErr != nil {
+				return txErr
+			}
+		}
+
+		// Check result with the identity gate
+		e.mu.Lock()
+		participant := e.participants[participantID]
+		e.mu.Unlock()
+
+		gateErr := transport.CheckResult(req, *result, participant.Expected)
+
+		var terminalState, terminalReason string
+
+		if gateErr != nil {
+			// Gate failed - store gate error and end incomplete
+			if txErr := tx.SetAttemptGate(attemptID, gateErr.Error()); txErr != nil {
+				return txErr
+			}
+			terminalState = "incomplete"
+			terminalReason = fmt.Sprintf("author_failed:gate:%v", gateErr)
+		} else if result.Status != transport.StatusComplete {
+			// Result complete but status not complete
+			terminalState = "incomplete"
+			terminalReason = fmt.Sprintf("author_failed:%s", result.Status)
+		} else {
+			// Happy path - solo complete
+			terminalState = "solo_complete"
+			terminalReason = "solo_ok"
+		}
+
 		accepted, err := tx.AcceptResult(attemptID, 0, "", journal.AttemptOutput{
 			RawScrubbed:     result.RawOutput,
 			ScrubCount:      result.ScrubCount,
@@ -724,12 +894,29 @@ func (e *Engine) endTurnWithResult(turnID, attemptID string, result *transport.C
 		}
 
 		if !accepted {
-			// Result quarantined
-			return emit(turnID, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+			// Result quarantined - end turn without changing terminal state
+			if txErr := emit(turnID, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
 				AttemptID:       attemptID,
-				Status:          "error",
-				ScrubCount:      0,
-				TransportStatus: "quarantined",
+				Status:          "quarantined",
+				ScrubCount:      result.ScrubCount,
+				TransportStatus: result.TransportStatus,
+			}); txErr != nil {
+				return txErr
+			}
+
+			_, txErr := tx.BumpEpoch(turnID)
+			if txErr != nil {
+				return txErr
+			}
+
+			if txErr := tx.EndTurn(turnID, terminalState, terminalReason); txErr != nil {
+				return txErr
+			}
+
+			return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+				TurnID: turnID,
+				State:  terminalState,
+				Reason: &terminalReason,
 			})
 		}
 
@@ -754,20 +941,9 @@ func (e *Engine) endTurnWithResult(turnID, attemptID string, result *transport.C
 			return txErr
 		}
 
-		// Determine terminal state and reason
-		var terminalState, terminalReason string
-		if mode == "review" {
-			terminalState = "incomplete"
-			terminalReason = "author_failed:not_implemented"
-		} else {
-			// solo mode
-			if result.Status != transport.StatusComplete {
-				terminalState = "incomplete"
-				terminalReason = fmt.Sprintf("author_failed:%s", result.Status)
-			} else {
-				terminalState = "solo_complete"
-				terminalReason = "solo_ok"
-			}
+		_, txErr := tx.BumpEpoch(turnID)
+		if txErr != nil {
+			return txErr
 		}
 
 		if txErr := tx.EndTurn(turnID, terminalState, terminalReason); txErr != nil {
@@ -786,9 +962,7 @@ func (e *Engine) endTurnWithResult(turnID, attemptID string, result *transport.C
 	e.openTurnID = ""
 	e.mu.Unlock()
 
-	if err != nil {
-		return
-	}
+	_ = err
 }
 
 // Cancel is not implemented in this task.
@@ -872,10 +1046,6 @@ func computeSubmissionHash(req wire.SubmitRequest) (string, error) {
 
 func ptrStr(s string) *string {
 	return &s
-}
-
-func ptrBool(b bool) *bool {
-	return &b
 }
 
 func containsStr(list []string, item string) bool {
