@@ -1089,39 +1089,34 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		maxTokensField = "max_tokens"
 	}
 
-	baselineReq, baselineResp, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
-	if baselineResp != nil {
-		recordRawStep(rawSteps, "calibration_baseline", "/chat/completions", baselineResp.StatusCode, baselineResp.Header, baselineReq)
-		defer baselineResp.Body.Close()
+	baselineStatusCode, baselineHeaders, baselineBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
+	if baselineStatusCode != 0 {
+		recordRawStep(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody)
 	} else if baselineErr != nil {
 		recordRawStep(rawSteps, "calibration_baseline", "/chat/completions", 0, nil, nil)
 	}
 
-	calibrationReq, calibrationResp, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
-	if calibrationResp != nil {
-		recordRawStep(rawSteps, "calibration", "/chat/completions", calibrationResp.StatusCode, calibrationResp.Header, calibrationReq)
-		defer calibrationResp.Body.Close()
+	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
+	if calibrationStatusCode != 0 {
+		recordRawStep(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody)
 	} else if calibrationErr != nil {
 		recordRawStep(rawSteps, "calibration", "/chat/completions", 0, nil, nil)
 	}
 
-	if baselineResp == nil || calibrationResp == nil {
+	if baselineStatusCode == 0 || calibrationStatusCode == 0 {
 		record.Calibration.Available = false
 		return
 	}
 
-	if baselineResp.StatusCode < 200 || baselineResp.StatusCode >= 300 {
+	if baselineStatusCode < 200 || baselineStatusCode >= 300 {
 		record.Calibration.Available = false
 		return
 	}
 
-	if calibrationResp.StatusCode < 200 || calibrationResp.StatusCode >= 300 {
+	if calibrationStatusCode < 200 || calibrationStatusCode >= 300 {
 		record.Calibration.Available = false
 		return
 	}
-
-	baselineBody, _ := io.ReadAll(io.LimitReader(baselineResp.Body, 1*1024*1024))
-	calibrationBody, _ := io.ReadAll(io.LimitReader(calibrationResp.Body, 1*1024*1024))
 
 	var baselineData ResponseBody
 	if err := json.Unmarshal(baselineBody, &baselineData); err != nil || baselineData.Usage == nil {
@@ -1149,7 +1144,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	record.Calibration.BytesPerToken = float64(len([]byte(calibrationText))) / float64(calibrationTokens-baselineTokens)
 }
 
-func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, timeout time.Duration, secrets *[]string) ([]byte, *http.Response, error) {
+func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, timeout time.Duration, secrets *[]string) (int, http.Header, []byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -1168,20 +1163,28 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, nil, err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	if err := a.addProbeAuth(httpReq, secrets); err != nil {
-		return nil, nil, err
+		return 0, nil, nil, err
 	}
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, nil, err
 	}
 
-	return bodyBytes, httpResp, nil
+	defer func() {
+		if err := httpResp.Body.Close(); err != nil {
+			// Log or handle close error if needed, but don't fail the probe
+		}
+	}()
+
+	respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+
+	return httpResp.StatusCode, httpResp.Header, respBody, nil
 }
 
 // addProbeAuth sets auth headers and appends every secret value resolved for
