@@ -27,10 +27,13 @@ const (
 
 // Turn states carried by turn_state events and the turns table.
 const (
-	StateSubmitted        = "submitted"
-	StateAuthorDispatched = "author_dispatched"
-	StateSoloComplete     = "solo_complete"
-	StateIncomplete       = "incomplete"
+	StateSubmitted           = "submitted"
+	StateAuthorDispatched    = "author_dispatched"
+	StateCandidateFrozen     = "candidate_frozen"
+	StateReviewersDispatched = "reviewers_dispatched"
+	StateApproved            = "approved"
+	StateSoloComplete        = "solo_complete"
+	StateIncomplete          = "incomplete"
 )
 
 // Participant states.
@@ -42,14 +45,17 @@ const (
 
 // Attempt phases and message senders.
 const (
-	phaseAuthor = "author"
-	senderUser  = "user"
+	phaseAuthor  = "author"
+	phaseReview  = "review"
+	senderUser   = "user"
+	senderEngine = "engine"
 )
 
 // Terminal reasons.
 const (
 	reasonSoloOK       = "solo_ok"
 	reasonAuthorFailed = "author_failed:"
+	reasonAllApproved  = "all_approved"
 )
 
 const defaultPool = "default"

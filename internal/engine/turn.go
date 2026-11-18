@@ -18,13 +18,6 @@ import (
 // goroutine and holds the engine mutex only around journal transactions and
 // the in-memory state they change, never across the adapter call.
 func (e *Engine) runTurn(t *openTurn) {
-	if t.mode != modeSolo {
-		// Review mode is the next task; until then it ends right after
-		// turn_state{submitted}.
-		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"not_implemented")
-		return
-	}
-
 	req, attemptID, err := e.dispatchAuthor(t)
 	if err != nil {
 		// Nothing was written for the dispatch; end the turn so the engine
@@ -33,7 +26,20 @@ func (e *Engine) runTurn(t *openTurn) {
 		return
 	}
 
-	res, err := e.adapterFor(t.author).Complete(context.Background(), req)
+	res := e.complete(t.author, req)
+	if t.mode != modeSolo {
+		if e.completeAuthorReview(t, attemptID, req, res) {
+			e.runReviewers(t)
+		}
+		return
+	}
+	e.completeAuthor(t, attemptID, req, res)
+}
+
+// complete calls the participant's adapter and turns a Go error into an
+// error result.
+func (e *Engine) complete(participant string, req transport.CompleteRequest) transport.CompleteResult {
+	res, err := e.adapterFor(participant).Complete(context.Background(), req)
 	if err != nil {
 		res = transport.CompleteResult{
 			Envelope:        req.Envelope,
@@ -41,7 +47,7 @@ func (e *Engine) runTurn(t *openTurn) {
 			TransportStatus: "adapter_error:" + err.Error(),
 		}
 	}
-	e.completeAuthor(t, attemptID, req, res)
+	return res
 }
 
 func (e *Engine) adapterFor(id string) transport.Adapter {
@@ -237,7 +243,9 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 		return
 	}
 	delete(e.running, t.author)
-	e.open = nil
+	if e.open == t {
+		e.open = nil
+	}
 }
 
 // endTurnIn is the terminal path: record the state and reason, bump the

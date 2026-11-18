@@ -155,6 +155,14 @@ func Reply(text string) fake.Step {
 	}
 }
 
+// ReplyFunc is a complete, transport-ok scripted answer built from the
+// request it answers, for replies that carry the attempt id or candidate hash.
+func ReplyFunc(build func(req transport.CompleteRequest) string) fake.Step {
+	step := Reply("")
+	step.Build = build
+	return step
+}
+
 // New writes rosterTOML to a temporary file, opens a temporary journal,
 // seeds a usable probe record for every participant (except those passed to
 // SkipProbe), builds one fake adapter per participant from scripts, starts
