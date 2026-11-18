@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -31,9 +32,11 @@ type probeServer struct {
 	noUsage     bool
 	overLength  string // "both", "head", "error"
 	// calibration response control: prompt tokens for baseline and calibration
-	calibrationBaseline int // 0 means use default (1)
-	calibrationObserved int // 0 means use default (based on text size)
-	calibrationStatus   int // non-zero means return this status code for calibration requests
+	calibrationBaseline   int  // 0 means use default (1)
+	calibrationObserved   int  // 0 means use default (based on text size)
+	calibrationStatus     int  // non-zero means return this status code for all calibration requests
+	calibrationTextStatus int  // non-zero means return this status code for calibration text request only (overrides calibrationStatus for text)
+	echoAuthInResponse    bool // when true, echo Authorization header in response for calibration requests
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
 }
@@ -95,6 +98,11 @@ func (p *probeServer) handler() http.Handler {
 			p.mu.Unlock()
 		}
 
+		// Handle calibration-specific error responses
+		if isCalibrationText && p.calibrationTextStatus != 0 {
+			w.WriteHeader(p.calibrationTextStatus)
+			return
+		}
 		if p.calibrationStatus != 0 && (isCalibration || isCalibrationText) {
 			w.WriteHeader(p.calibrationStatus)
 			return
@@ -139,6 +147,10 @@ func (p *probeServer) handler() http.Handler {
 		}
 		if !p.noUsage {
 			resp["usage"] = map[string]any{"prompt_tokens": promptTokens, "completion_tokens": 1}
+		}
+		// Echo Authorization header in response for calibration requests when testing scrubbing
+		if p.echoAuthInResponse && (isCalibration || isCalibrationText) {
+			resp["auth"] = r.Header.Get("Authorization")
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -404,7 +416,8 @@ func TestCalibrationSameTokenCount(t *testing.T) {
 }
 
 func TestCalibrationServerError(t *testing.T) {
-	p := &probeServer{calibrationStatus: http.StatusInternalServerError}
+	// Return 500 to calibration text request only (baseline should succeed)
+	p := &probeServer{calibrationTextStatus: http.StatusInternalServerError}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
@@ -429,12 +442,17 @@ func TestCalibrationServerError(t *testing.T) {
 		t.Fatal(errDisabled)
 	}
 
-	// Compare key fields (excluding Calibration since that's the difference)
-	if rec.MaxTokensField != recDisabled.MaxTokensField {
-		t.Errorf("MaxTokensField differs: %q vs %q", rec.MaxTokensField, recDisabled.MaxTokensField)
-	}
-	if rec.ModelsEndpoint != recDisabled.ModelsEndpoint {
-		t.Errorf("ModelsEndpoint differs: %v vs %v", rec.ModelsEndpoint, recDisabled.ModelsEndpoint)
+	// Compare all fields except Calibration, Raw, LatencyMillis, and ObservedAt (which legitimately differ)
+	// Use reflect.DeepEqual for comprehensive comparison
+	rec.Calibration = transport.Calibration{} // zero out for comparison
+	rec.Raw = nil
+	rec.LatencyMillis = nil
+	rec.ObservedAt = recDisabled.ObservedAt // use same timestamp for comparison
+	recDisabled.Calibration = transport.Calibration{}
+	recDisabled.Raw = nil
+	recDisabled.LatencyMillis = nil
+	if !reflect.DeepEqual(rec, recDisabled) {
+		t.Errorf("Records differ (excluding Calibration, Raw, LatencyMillis, ObservedAt).\nWith error:\n%+v\nWithout:\n%+v", rec, recDisabled)
 	}
 }
 
@@ -516,7 +534,11 @@ func TestCalibrationRequestBody(t *testing.T) {
 }
 
 func TestCalibrationWithSentinelSecret(t *testing.T) {
-	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		echoAuthInResponse:  true, // Server echoes Authorization header in response
+	}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
@@ -536,22 +558,33 @@ func TestCalibrationWithSentinelSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Get the raw response bodies (they should have Authorization header with token scrubbed)
+	// Convert the entire raw steps JSON to string to check for unscrubbedSecret
+	rawJSON := string(rec.Raw)
+
+	// Check calibration_baseline raw step
 	if baselineStep, ok := raw["calibration_baseline"]; !ok {
 		t.Fatal("calibration_baseline not in raw steps")
 	} else {
+		// Check that neither the response body nor the whole step contains the secret
 		body, _ := baselineStep["body"].(string)
 		if strings.Contains(body, "tok-123") {
-			t.Errorf("calibration_baseline raw step contains unscrubbedSecret 'tok-123'")
+			t.Errorf("calibration_baseline raw step body contains unscrubbed secret 'tok-123'")
 		}
 	}
 
+	// Check calibration raw step
 	if calibStep, ok := raw["calibration"]; !ok {
 		t.Fatal("calibration not in raw steps")
 	} else {
+		// Check that neither the response body nor the whole step contains the secret
 		body, _ := calibStep["body"].(string)
 		if strings.Contains(body, "tok-123") {
-			t.Errorf("calibration raw step contains unscrubbed secret 'tok-123'")
+			t.Errorf("calibration raw step body contains unscrubbed secret 'tok-123'")
 		}
+	}
+
+	// Check the whole JSON to ensure the secret is scrubbed everywhere
+	if strings.Contains(rawJSON, "tok-123") {
+		t.Errorf("Raw JSON contains unscrubbed secret 'tok-123'")
 	}
 }
