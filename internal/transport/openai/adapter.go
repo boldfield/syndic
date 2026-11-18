@@ -39,7 +39,10 @@ const defaultMaxBodySize = 16 * 1024 * 1024
 
 func New(profile config.EndpointProfile, resolver config.SecretResolver) *Adapter {
 	baseURL, _ := url.Parse(profile.BaseURL)
-	profileHost := baseURL.Host
+	profileHost := ""
+	if baseURL != nil {
+		profileHost = baseURL.Host
+	}
 
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -87,6 +90,7 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
 	result := transport.CompleteResult{
 		Envelope: req.Envelope,
+		Identity: transport.NewUnknownIdentity(),
 	}
 
 	for _, msg := range req.Messages {
@@ -295,8 +299,6 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		}
 		a.mu.Unlock()
 	}
-
-	result.Identity = transport.NewUnknownIdentity()
 
 	return result, nil
 }

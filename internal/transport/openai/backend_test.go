@@ -26,6 +26,16 @@ func TestMain(m *testing.M) {
 	log.SetOutput(&logBuffer)
 	code := m.Run()
 	log.SetOutput(os.Stderr)
+
+	logOutput := logBuffer.String()
+	secretsToCheck := []string{"super-secret-token"}
+	for _, secret := range secretsToCheck {
+		if strings.Contains(logOutput, secret) {
+			fmt.Fprintf(os.Stderr, "FAIL: log buffer contains unredacted secret: %s\n", secret)
+			os.Exit(1)
+		}
+	}
+
 	os.Exit(code)
 }
 
@@ -707,9 +717,48 @@ func TestConnectionRefused(t *testing.T) {
 	}
 }
 
-func TestSecretLogging(t *testing.T) {
-	logBuffer.Reset()
+func TestUnparseableBaseURL(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        "http://[::1",
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
 
+	resolver := &mockResolver{}
+	adapter := New(profile, resolver)
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(1 * time.Second),
+	}
+
+	result, err := adapter.Complete(context.Background(), req)
+
+	if err == nil {
+		t.Error("expected error for unparseable BaseURL, got nil")
+	}
+
+	if result.Identity != transport.NewUnknownIdentity() {
+		t.Errorf("identity got %+v, want %+v", result.Identity, transport.NewUnknownIdentity())
+	}
+}
+
+func TestSecretLogging(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := ResponseBody{
 			Model: "test-model",
@@ -757,14 +806,13 @@ func TestSecretLogging(t *testing.T) {
 		Deadline:        time.Now().Add(2 * time.Second),
 	}
 
-	result, _ := adapter.Complete(context.Background(), req)
+	result, err := adapter.Complete(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if strings.Contains(result.RawOutput, "super-secret-token") {
 		t.Error("raw output contains unredacted secret")
-	}
-
-	if strings.Contains(logBuffer.String(), "super-secret-token") {
-		t.Error("log buffer contains unredacted secret")
 	}
 }
 
