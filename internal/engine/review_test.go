@@ -746,19 +746,29 @@ func TestReviewRepairValidBlock(t *testing.T) {
 }
 
 func TestReviewTwoReviewerRepairAndApprove(t *testing.T) {
+	repairGate := make(chan struct{})
+	repairStarted := make(chan struct{})
+
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText)},
 		"r1": {
 			enginetest.Reply(fake.VerdictProseApprove()),
-			approveStep(),
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				close(repairStarted)
+				<-repairGate
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
 		},
 		"r2": {approveStep()},
 	}
 	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), scripts)
 	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptCompleted, 2)
-	r1Release := h.Hold("r1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 3)
+
+	select {
+	case <-repairStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repair response did not start")
+	}
 
 	row, err := h.Store.GetTurn(turnID)
 	if err != nil {
@@ -768,7 +778,7 @@ func TestReviewTwoReviewerRepairAndApprove(t *testing.T) {
 		t.Fatalf("turn ended prematurely: %q %q", row.TerminalState, row.TerminalReason)
 	}
 
-	r1Release()
+	close(repairGate)
 	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
 	rows := verdictRows(t, h, turnID)
 	if len(rows) != 3 {
@@ -788,18 +798,28 @@ func TestReviewTwoReviewerRepairAndApprove(t *testing.T) {
 }
 
 func TestReviewRepairParticipantStateEvents(t *testing.T) {
+	repairGate := make(chan struct{})
+	repairStarted := make(chan struct{})
+
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText)},
 		"reviewer": {
 			enginetest.Reply(fake.VerdictProseApprove()),
-			approveStep(),
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				close(repairStarted)
+				<-repairGate
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
 		},
 	}
 	h := enginetest.New(t, enginetest.RosterTOML, scripts)
 	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptCompleted, 1)
-	release := h.Hold("reviewer")
-	waitCount(t, h, wire.EventKindAttemptBegun, 2)
+
+	select {
+	case <-repairStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repair response did not start")
+	}
 
 	var lastParticipantEvent *wire.EvParticipantState
 	var allParticipantEvents []*wire.EvParticipantState
@@ -820,7 +840,7 @@ func TestReviewRepairParticipantStateEvents(t *testing.T) {
 		t.Fatalf("reviewer participant_state events = %v, final want running", states)
 	}
 
-	release()
+	close(repairGate)
 	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
 	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
 		t.Fatalf("engine stayed busy: %v", err)
