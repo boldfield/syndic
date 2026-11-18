@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -242,12 +244,201 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	return reply, nil
 }
 
-// projectAndValidateBudget validates budget requirements and projects token usage.
-// TODO: Implement full budget validation and projection as per section 4a of v4-delta-engine-tui.md
-// Current placeholder; next iteration will add: spending_ceiling, context_unknown, admission checks,
-// real prompt projection, dispatch-time reservation, completion-time reconciliation.
+// projectAndValidateBudget validates budget requirements and projects token usage
+// according to section 4a of v4-delta-engine-tui.md. It checks for spending_ceiling,
+// context_unknown, per-recipient admission bounds, and aggregate turn budgets,
+// and returns the projected token count if all checks pass.
 func (e *Engine) projectAndValidateBudget(input string, eff config.Effective) (*wire.Error, int64, error) {
-	// Placeholder: return nil, 0, nil (no checks, no projection)
-	// Full implementation deferred to next iteration
-	return nil, 0, nil
+	// Extract budget parameters
+	messageOverhead := 8
+	if eff.Budgets.MessageOverheadTokens != nil {
+		messageOverhead = *eff.Budgets.MessageOverheadTokens
+	}
+	requestOverhead := 16
+	if eff.Budgets.RequestOverheadTokens != nil {
+		requestOverhead = *eff.Budgets.RequestOverheadTokens
+	}
+	contextMargin := 0.10
+	if eff.Budgets.ContextMargin != nil {
+		contextMargin = *eff.Budgets.ContextMargin
+	}
+	authorMaxOutput := 4096
+	if eff.Budgets.AuthorMaxOutputTokens != nil {
+		authorMaxOutput = *eff.Budgets.AuthorMaxOutputTokens
+	}
+	reviewerMaxOutput := 2048
+	if eff.Budgets.ReviewerMaxOutputTokens != nil {
+		reviewerMaxOutput = *eff.Budgets.ReviewerMaxOutputTokens
+	}
+	deliveryMaxTokens := 64
+	if eff.Budgets.DeliveryMaxTokens != nil {
+		deliveryMaxTokens = *eff.Budgets.DeliveryMaxTokens
+	}
+	turnMaxEstimated := int64(250000)
+	if eff.Budgets.TurnMaxEstimatedTokens != nil {
+		turnMaxEstimated = int64(*eff.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	overheads := budget.Overheads{
+		MessageTokens: messageOverhead,
+		RequestTokens: requestOverhead,
+	}
+
+	// Find participant by id
+	findParticipant := func(id string) *config.Participant {
+		for i := range e.roster.Participants {
+			if e.roster.Participants[i].ID == id {
+				return &e.roster.Participants[i]
+			}
+		}
+		return nil
+	}
+
+	// Find endpoint by name
+	findEndpoint := func(name string) *config.EndpointProfile {
+		for i := range e.roster.Endpoints {
+			if e.roster.Endpoints[i].Name == name {
+				return &e.roster.Endpoints[i]
+			}
+		}
+		return nil
+	}
+
+	// Check spending_ceiling and context_unknown for all participants
+	allParticipants := append([]string{eff.Preset.Author}, eff.Preset.RequiredReviewers...)
+	for _, id := range allParticipants {
+		rosterParticipant := findParticipant(id)
+		if rosterParticipant == nil {
+			return nil, 0, fmt.Errorf("participant %q not found in roster", id)
+		}
+		ep := findEndpoint(rosterParticipant.Endpoint)
+		if ep == nil {
+			return nil, 0, fmt.Errorf("endpoint %q not found in roster", rosterParticipant.Endpoint)
+		}
+
+		// Check spending_ceiling for metered endpoints
+		if ep.DeclaredBilling == "metered" {
+			err := refusal(wire.ErrorCodeBudget)
+			err.Budget = strPtr("spending_ceiling")
+			err.Participant = strPtr(id)
+			return err, 0, nil
+		}
+
+		// Check context_unknown: tokens_per_byte_max on endpoint
+		if ep.TokensPerByteMax == nil {
+			err := refusal(wire.ErrorCodeBudget)
+			err.Budget = strPtr("context_unknown")
+			err.Participant = strPtr(id)
+			err.Missing = strPtr("tokens_per_byte_max")
+			return err, 0, nil
+		}
+
+		// Check context_unknown: context_bound on participant
+		p := e.built.Participants[id]
+		if p.ContextBound == nil {
+			err := refusal(wire.ErrorCodeBudget)
+			err.Budget = strPtr("context_unknown")
+			err.Participant = strPtr(id)
+			err.Missing = strPtr("context_bound")
+			return err, 0, nil
+		}
+
+		// Check context_unknown: bytes_per_token on participant
+		if p.BytesPerToken == nil {
+			err := refusal(wire.ErrorCodeBudget)
+			err.Budget = strPtr("context_unknown")
+			err.Participant = strPtr(id)
+			err.Missing = strPtr("bytes_per_token")
+			return err, 0, nil
+		}
+	}
+
+	// Build author prompt and measure it
+	authorParticipant := findParticipant(eff.Preset.Author)
+	authorEndpoint := findEndpoint(authorParticipant.Endpoint)
+	authorBuilt := e.built.Participants[eff.Preset.Author]
+
+	authorMessages := prompt.Author(input)
+	authorAdmissionTokens := budget.AdmissionTokens(authorMessages, *authorEndpoint.TokensPerByteMax, overheads)
+	authorEstimateTokens := budget.EstimateTokens(authorMessages, *authorBuilt.BytesPerToken, overheads)
+
+	// Clamp author output to endpoint bound if present
+	authorOutput := budget.ClampOutput(authorMaxOutput, authorBuilt.OutputBound)
+
+	// Check author admission
+	authorUsableBound := budget.UsableBound(*authorBuilt.ContextBound, contextMargin)
+	if !budget.Fits(authorAdmissionTokens, authorOutput, authorUsableBound) {
+		err := refusal(wire.ErrorCodeBudget)
+		err.Budget = strPtr("context")
+		err.Participant = strPtr(eff.Preset.Author)
+		err.Admission = int64Ptr(int64(authorAdmissionTokens + authorOutput))
+		err.Limit = int64Ptr(int64(authorUsableBound))
+		return err, 0, nil
+	}
+
+	// Project aggregate tokens: author + each reviewer + delivery
+	aggregateProjected := int64(0)
+	aggregateProjected += int64(authorEstimateTokens + authorOutput)
+
+	// Measure reviewer prompts (use stand-ins)
+	for _, reviewerID := range eff.Preset.RequiredReviewers {
+		reviewerParticipant := findParticipant(reviewerID)
+		reviewerEndpoint := findEndpoint(reviewerParticipant.Endpoint)
+		reviewerBuilt := e.built.Participants[reviewerID]
+
+		// Create stand-in candidate from author output projection
+		authorStandInBytes := budget.StandInBytes(authorOutput, *reviewerBuilt.BytesPerToken)
+
+		// Build reviewer prompt with stand-ins
+		reviewerInput := prompt.ReviewInput{
+			Request:       input,
+			Candidate:     string(make([]byte, authorStandInBytes)),
+			CandidateHash: "0000000000000000000000000000000000000000000000000000000000000000",
+			AttemptID:     "000000000000-0000-0000-0000-000000000000",
+			Delimiter:     "00000000000000000000000000000000",
+		}
+
+		reviewerMessages, err := prompt.Reviewer(reviewerInput)
+		if err != nil {
+			return nil, 0, fmt.Errorf("build reviewer prompt: %w", err)
+		}
+
+		reviewerAdmissionTokens := budget.AdmissionTokens(reviewerMessages, *reviewerEndpoint.TokensPerByteMax, overheads)
+		reviewerEstimateTokens := budget.EstimateTokens(reviewerMessages, *reviewerBuilt.BytesPerToken, overheads)
+		reviewerOutput := budget.ClampOutput(reviewerMaxOutput, reviewerBuilt.OutputBound)
+
+		// Check reviewer admission
+		reviewerUsableBound := budget.UsableBound(*reviewerBuilt.ContextBound, contextMargin)
+		if !budget.Fits(reviewerAdmissionTokens, reviewerOutput, reviewerUsableBound) {
+			err := refusal(wire.ErrorCodeBudget)
+			err.Budget = strPtr("context")
+			err.Participant = strPtr(reviewerID)
+			err.Admission = int64Ptr(int64(reviewerAdmissionTokens + reviewerOutput))
+			err.Limit = int64Ptr(int64(reviewerUsableBound))
+			return err, 0, nil
+		}
+
+		// Add reviewer projection (prompt + output + repair prompt + output)
+		aggregateProjected += int64(reviewerEstimateTokens + reviewerOutput)
+		// Repair: same as reviewer prompt + output
+		aggregateProjected += int64(reviewerEstimateTokens + reviewerOutput)
+	}
+
+	// Add delivery projection for each participant
+	for range allParticipants {
+		aggregateProjected += int64(deliveryMaxTokens)
+	}
+
+	// Check aggregate against turn budget
+	if aggregateProjected > turnMaxEstimated {
+		err := refusal(wire.ErrorCodeBudget)
+		err.Budget = strPtr("turn_max_estimated_tokens")
+		err.Estimated = int64Ptr(aggregateProjected)
+		err.Limit = int64Ptr(turnMaxEstimated)
+		return err, 0, nil
+	}
+
+	return nil, aggregateProjected, nil
 }
+
+func int64Ptr(i int64) *int64 { return &i }

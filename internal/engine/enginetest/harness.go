@@ -280,7 +280,10 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 				profile = ep
 			}
 		}
-		contextBound := 4096
+		contextBound := 128000
+		if p.ContextTokens != nil {
+			contextBound = *p.ContextTokens
+		}
 		export := evidence.Export{
 			Redacted:                 true,
 			RedactionRule:            "redaction/v1",
