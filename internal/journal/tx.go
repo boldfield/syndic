@@ -10,7 +10,8 @@ import (
 
 // Tx wraps a database transaction and provides the same operations as Store.
 type Tx struct {
-	tx *sql.Tx
+	tx    *sql.Tx
+	store *Store
 }
 
 // Tx runs all operations in fn inside a single transaction.
@@ -28,7 +29,7 @@ func (s *Store) Tx(fn func(tx *Tx) error) error {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 
-	wrapper := &Tx{tx: tx}
+	wrapper := &Tx{tx: tx, store: s}
 	var panicVal interface{}
 
 	defer func() {
@@ -310,10 +311,14 @@ func (tx *Tx) RecoverPending() ([]string, error) {
 
 // AppendEvent appends an event not tied to any turn (events.turn_id is NULL).
 func (tx *Tx) AppendEvent(kind string, payload json.RawMessage) error {
+	// Allocate next sequence number from the store's counter, same as Emit.
+	tx.store.nextSeq++
+	seq := tx.store.nextSeq
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO events (event_type, data)
-		VALUES (?, ?)
-	`, kind, string(payload)); err != nil {
+		INSERT INTO events (id, event_type, data)
+		VALUES (?, ?, ?)
+	`, seq, kind, string(payload)); err != nil {
 		return fmt.Errorf("insert event: %w", err)
 	}
 
