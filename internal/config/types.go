@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -24,6 +28,11 @@ type Role string
 const (
 	RoleAuthor   Role = "author"
 	RoleReviewer Role = "reviewer"
+)
+
+var (
+	ErrUnknownPreset       = errors.New("unknown preset")
+	ErrUnknownQuickProfile = errors.New("unknown quick profile")
 )
 
 type SecretRef struct {
@@ -97,9 +106,30 @@ type EndpointProfile struct {
 }
 
 type Preset struct {
-	Mode              string   `toml:"mode"` // "solo" or "review"
-	Author            string   `toml:"author"`
-	RequiredReviewers []string `toml:"required_reviewers"`
+	Mode              string     `toml:"mode"` // "solo" or "review"
+	Author            string     `toml:"author"`
+	RequiredReviewers []string   `toml:"required_reviewers"`
+	Deadlines         *Deadlines `toml:"deadlines"`
+	Budgets           *Budgets   `toml:"budgets"`
+}
+
+type QuickProfile struct {
+	Preset                    string   `toml:"preset"`
+	Drafts                    bool     `toml:"drafts"`
+	Budgets                   *Budgets `toml:"budgets"`
+	EligibleRequestCategories any      `toml:"eligible_request_categories"`
+	ProtectedPaths            any      `toml:"protected_paths"`
+	RequiredReviewTriggers    any      `toml:"required_review_triggers"`
+	OutputEscalationRules     any      `toml:"output_escalation_rules"`
+}
+
+type Effective struct {
+	PresetName   string
+	Preset       Preset
+	QuickProfile string
+	Drafts       bool
+	Deadlines    Deadlines
+	Budgets      Budgets
 }
 
 type RoutingPolicy struct {
@@ -108,15 +138,16 @@ type RoutingPolicy struct {
 }
 
 type Roster struct {
-	DefaultPreset string            `toml:"default_preset"`
-	Participants  []Participant     `toml:"participants"`
-	Endpoints     []EndpointProfile `toml:"endpoints"`
-	Presets       map[string]Preset `toml:"presets"`
-	Policy        RoutingPolicy     `toml:"policy"`
-	Deadlines     Deadlines         `toml:"deadlines"`
-	Budgets       Budgets           `toml:"budgets"`
-	Engine        EngineSettings    `toml:"engine"`
-	Pools         map[string]Pool   `toml:"pools"`
+	DefaultPreset string                  `toml:"default_preset"`
+	Participants  []Participant           `toml:"participants"`
+	Endpoints     []EndpointProfile       `toml:"endpoints"`
+	Presets       map[string]Preset       `toml:"presets"`
+	Policy        RoutingPolicy           `toml:"policy"`
+	Deadlines     Deadlines               `toml:"deadlines"`
+	Budgets       Budgets                 `toml:"budgets"`
+	Engine        EngineSettings          `toml:"engine"`
+	Pools         map[string]Pool         `toml:"pools"`
+	Quick         map[string]QuickProfile `toml:"quick"`
 }
 
 // String returns a string representation that never contains resolved secret values.
@@ -184,6 +215,173 @@ func (r *Roster) ApplyDefaults() {
 		sg := 5 * time.Second
 		r.Engine.StopGrace = &Duration{sg}
 	}
+}
+
+// Resolve resolves deadlines and budgets for a given preset and quick profile.
+// presetName takes precedence; if empty, uses the quick profile's preset; if that's also empty, uses the default preset.
+// quickProfile can be empty.
+func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
+	// Determine which preset to use
+	effectivePresetName := presetName
+	var quickProf QuickProfile
+	var hasQuickProf bool
+
+	if effectivePresetName == "" {
+		// Try to get preset from quick profile
+		if quickProfile != "" {
+			qp, ok := r.Quick[quickProfile]
+			if !ok {
+				return Effective{}, fmt.Errorf("quick profile %q: %w", quickProfile, ErrUnknownQuickProfile)
+			}
+			quickProf = qp
+			hasQuickProf = true
+			effectivePresetName = qp.Preset
+		}
+		if effectivePresetName == "" {
+			effectivePresetName = r.DefaultPreset
+		}
+	} else if quickProfile != "" {
+		// Explicit preset takes precedence, but we still need the quick profile for overrides
+		qp, ok := r.Quick[quickProfile]
+		if !ok {
+			return Effective{}, fmt.Errorf("quick profile %q: %w", quickProfile, ErrUnknownQuickProfile)
+		}
+		quickProf = qp
+		hasQuickProf = true
+	}
+
+	// Look up the preset
+	preset, ok := r.Presets[effectivePresetName]
+	if !ok {
+		return Effective{}, fmt.Errorf("preset %q: %w", effectivePresetName, ErrUnknownPreset)
+	}
+
+	// Build the Effective result by applying overrides in order
+	result := Effective{
+		PresetName: effectivePresetName,
+		Preset:     preset,
+		Drafts:     false,
+	}
+
+	if hasQuickProf {
+		result.QuickProfile = quickProfile
+		result.Drafts = quickProf.Drafts
+	}
+
+	// Copy roster-level deadlines and budgets
+	result.Deadlines = r.Deadlines
+	result.Budgets = r.Budgets
+
+	// Apply preset overrides to deadlines
+	if preset.Deadlines != nil {
+		if preset.Deadlines.Attempt != nil {
+			result.Deadlines.Attempt = preset.Deadlines.Attempt
+		}
+		if preset.Deadlines.Turn != nil {
+			result.Deadlines.Turn = preset.Deadlines.Turn
+		}
+		if preset.Deadlines.Delivery != nil {
+			result.Deadlines.Delivery = preset.Deadlines.Delivery
+		}
+		if preset.Deadlines.Provisional != nil {
+			result.Deadlines.Provisional = preset.Deadlines.Provisional
+		}
+	}
+
+	// Apply preset overrides to budgets
+	if preset.Budgets != nil {
+		if preset.Budgets.CalibrationSafety != nil {
+			result.Budgets.CalibrationSafety = preset.Budgets.CalibrationSafety
+		}
+		if preset.Budgets.MessageOverheadTokens != nil {
+			result.Budgets.MessageOverheadTokens = preset.Budgets.MessageOverheadTokens
+		}
+		if preset.Budgets.RequestOverheadTokens != nil {
+			result.Budgets.RequestOverheadTokens = preset.Budgets.RequestOverheadTokens
+		}
+		if preset.Budgets.ContextMargin != nil {
+			result.Budgets.ContextMargin = preset.Budgets.ContextMargin
+		}
+		if preset.Budgets.AuthorMaxOutputTokens != nil {
+			result.Budgets.AuthorMaxOutputTokens = preset.Budgets.AuthorMaxOutputTokens
+		}
+		if preset.Budgets.ReviewerMaxOutputTokens != nil {
+			result.Budgets.ReviewerMaxOutputTokens = preset.Budgets.ReviewerMaxOutputTokens
+		}
+		if preset.Budgets.DeliveryMaxTokens != nil {
+			result.Budgets.DeliveryMaxTokens = preset.Budgets.DeliveryMaxTokens
+		}
+		if preset.Budgets.TurnMaxEstimatedTokens != nil {
+			result.Budgets.TurnMaxEstimatedTokens = preset.Budgets.TurnMaxEstimatedTokens
+		}
+	}
+
+	// Apply quick profile budget overrides (quick profile has no deadline overrides)
+	if hasQuickProf && quickProf.Budgets != nil {
+		if quickProf.Budgets.CalibrationSafety != nil {
+			result.Budgets.CalibrationSafety = quickProf.Budgets.CalibrationSafety
+		}
+		if quickProf.Budgets.MessageOverheadTokens != nil {
+			result.Budgets.MessageOverheadTokens = quickProf.Budgets.MessageOverheadTokens
+		}
+		if quickProf.Budgets.RequestOverheadTokens != nil {
+			result.Budgets.RequestOverheadTokens = quickProf.Budgets.RequestOverheadTokens
+		}
+		if quickProf.Budgets.ContextMargin != nil {
+			result.Budgets.ContextMargin = quickProf.Budgets.ContextMargin
+		}
+		if quickProf.Budgets.AuthorMaxOutputTokens != nil {
+			result.Budgets.AuthorMaxOutputTokens = quickProf.Budgets.AuthorMaxOutputTokens
+		}
+		if quickProf.Budgets.ReviewerMaxOutputTokens != nil {
+			result.Budgets.ReviewerMaxOutputTokens = quickProf.Budgets.ReviewerMaxOutputTokens
+		}
+		if quickProf.Budgets.DeliveryMaxTokens != nil {
+			result.Budgets.DeliveryMaxTokens = quickProf.Budgets.DeliveryMaxTokens
+		}
+		if quickProf.Budgets.TurnMaxEstimatedTokens != nil {
+			result.Budgets.TurnMaxEstimatedTokens = quickProf.Budgets.TurnMaxEstimatedTokens
+		}
+	}
+
+	return result, nil
+}
+
+// QuickDefinitionSHA256 returns the SHA-256 hash of the quick profile's fully resolved definition.
+// It hashes {"preset": ..., "drafts": ..., "budgets": {...}} in canonical JSON form.
+func (r *Roster) QuickDefinitionSHA256(name string) (string, error) {
+	resolved, err := r.Resolve("", name)
+	if err != nil {
+		return "", err
+	}
+
+	// Build the JSON object to hash
+	hashObj := map[string]interface{}{
+		"preset":  resolved.PresetName,
+		"drafts":  resolved.Drafts,
+		"budgets": resolved.Budgets,
+	}
+
+	// Marshal to JSON with canonical form (sorted keys, no extra whitespace)
+	jsonBytes, err := json.Marshal(hashObj)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal quick profile definition: %w", err)
+	}
+
+	// Parse and re-marshal to ensure canonical form
+	var obj map[string]interface{}
+	err = json.Unmarshal(jsonBytes, &obj)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal quick profile definition: %w", err)
+	}
+
+	jsonBytes, err = json.Marshal(obj)
+	if err != nil {
+		return "", fmt.Errorf("failed to remarshal quick profile definition: %w", err)
+	}
+
+	hash := sha256.Sum256(jsonBytes)
+	return hex.EncodeToString(hash[:]), nil
 }
 
 // PoolFor returns the named pool's concurrency and uncertain_release_after values,

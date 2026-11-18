@@ -95,6 +95,16 @@ mode = "solo"
 author = "author"
 required_reviewers = []
 
+[presets.solo.deadlines]
+attempt = "150s"
+
+# quick: quick profiles with preset assignments and budget overrides
+[quick.fast]
+preset = "solo"
+drafts = false
+[quick.fast.budgets]
+author_max_output_tokens = 2048
+
 # policy: routing policy controlling which endpoints can be used
 # - local_only: when true, only endpoints with local execution are allowed
 # - allowed_destinations: when local_only=false, remote endpoints must be listed here

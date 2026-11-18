@@ -377,6 +377,122 @@ func (r *Roster) Validate() error {
 		}
 	}
 
+	// Validate Preset deadlines and budgets overrides
+	for name, preset := range r.Presets {
+		if preset.Deadlines != nil {
+			if preset.Deadlines.Attempt != nil && preset.Deadlines.Attempt.Duration <= 0 {
+				errs = append(errs, fmt.Errorf("presets[%q].deadlines.attempt must be positive", name))
+			}
+			if preset.Deadlines.Turn != nil && preset.Deadlines.Turn.Duration <= 0 {
+				errs = append(errs, fmt.Errorf("presets[%q].deadlines.turn must be positive", name))
+			}
+			if preset.Deadlines.Delivery != nil && preset.Deadlines.Delivery.Duration <= 0 {
+				errs = append(errs, fmt.Errorf("presets[%q].deadlines.delivery must be positive", name))
+			}
+		}
+
+		if preset.Budgets != nil {
+			if preset.Budgets.CalibrationSafety != nil {
+				if math.IsNaN(*preset.Budgets.CalibrationSafety) {
+					errs = append(errs, fmt.Errorf("presets[%q].budgets.calibration_safety must not be NaN", name))
+				} else if *preset.Budgets.CalibrationSafety <= 0 || *preset.Budgets.CalibrationSafety > 1.0 {
+					errs = append(errs, fmt.Errorf("presets[%q].budgets.calibration_safety must be greater than 0 and at most 1.0", name))
+				}
+			}
+			if preset.Budgets.ContextMargin != nil {
+				if math.IsNaN(*preset.Budgets.ContextMargin) {
+					errs = append(errs, fmt.Errorf("presets[%q].budgets.context_margin must not be NaN", name))
+				} else if *preset.Budgets.ContextMargin < 0 || *preset.Budgets.ContextMargin >= 1 {
+					errs = append(errs, fmt.Errorf("presets[%q].budgets.context_margin must be at least 0 and less than 1", name))
+				}
+			}
+			if preset.Budgets.MessageOverheadTokens != nil && *preset.Budgets.MessageOverheadTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.message_overhead_tokens must be at least 1", name))
+			}
+			if preset.Budgets.RequestOverheadTokens != nil && *preset.Budgets.RequestOverheadTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.request_overhead_tokens must be at least 1", name))
+			}
+			if preset.Budgets.AuthorMaxOutputTokens != nil && *preset.Budgets.AuthorMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.author_max_output_tokens must be at least 1", name))
+			}
+			if preset.Budgets.ReviewerMaxOutputTokens != nil && *preset.Budgets.ReviewerMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.reviewer_max_output_tokens must be at least 1", name))
+			}
+			if preset.Budgets.DeliveryMaxTokens != nil && *preset.Budgets.DeliveryMaxTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.delivery_max_tokens must be at least 1", name))
+			}
+			if preset.Budgets.TurnMaxEstimatedTokens != nil && *preset.Budgets.TurnMaxEstimatedTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.turn_max_estimated_tokens must be at least 1", name))
+			}
+		}
+
+		// Validate turn >= attempt for preset
+		if preset.Deadlines != nil && preset.Deadlines.Turn != nil && preset.Deadlines.Attempt != nil {
+			if preset.Deadlines.Turn.Duration < preset.Deadlines.Attempt.Duration {
+				errs = append(errs, fmt.Errorf("presets[%q].deadlines.turn must be at least presets[%q].deadlines.attempt", name, name))
+			}
+		}
+	}
+
+	// Validate Quick profiles
+	for profileName, qp := range r.Quick {
+		// Quick profile preset must be non-empty and exist
+		if qp.Preset == "" {
+			errs = append(errs, fmt.Errorf("quick profile %q: preset must be non-empty", profileName))
+		} else if !seenPresetNames[qp.Preset] {
+			errs = append(errs, fmt.Errorf("quick profile %q: preset %q does not exist", profileName, qp.Preset))
+		}
+
+		// Check for unimplemented properties
+		unimplementedProps := map[string]any{
+			"eligible_request_categories": qp.EligibleRequestCategories,
+			"protected_paths":             qp.ProtectedPaths,
+			"required_review_triggers":    qp.RequiredReviewTriggers,
+			"output_escalation_rules":     qp.OutputEscalationRules,
+		}
+		for propName, propValue := range unimplementedProps {
+			if propValue != nil {
+				errs = append(errs, fmt.Errorf("quick profile %q: %s is not yet implemented", profileName, propName))
+			}
+		}
+
+		// Validate budgets overrides in quick profile
+		if qp.Budgets != nil {
+			if qp.Budgets.CalibrationSafety != nil {
+				if math.IsNaN(*qp.Budgets.CalibrationSafety) {
+					errs = append(errs, fmt.Errorf("quick profile %q: budgets.calibration_safety must not be NaN", profileName))
+				} else if *qp.Budgets.CalibrationSafety <= 0 || *qp.Budgets.CalibrationSafety > 1.0 {
+					errs = append(errs, fmt.Errorf("quick profile %q: budgets.calibration_safety must be greater than 0 and at most 1.0", profileName))
+				}
+			}
+			if qp.Budgets.ContextMargin != nil {
+				if math.IsNaN(*qp.Budgets.ContextMargin) {
+					errs = append(errs, fmt.Errorf("quick profile %q: budgets.context_margin must not be NaN", profileName))
+				} else if *qp.Budgets.ContextMargin < 0 || *qp.Budgets.ContextMargin >= 1 {
+					errs = append(errs, fmt.Errorf("quick profile %q: budgets.context_margin must be at least 0 and less than 1", profileName))
+				}
+			}
+			if qp.Budgets.MessageOverheadTokens != nil && *qp.Budgets.MessageOverheadTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.message_overhead_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.RequestOverheadTokens != nil && *qp.Budgets.RequestOverheadTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.request_overhead_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.AuthorMaxOutputTokens != nil && *qp.Budgets.AuthorMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.author_max_output_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.ReviewerMaxOutputTokens != nil && *qp.Budgets.ReviewerMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.reviewer_max_output_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.DeliveryMaxTokens != nil && *qp.Budgets.DeliveryMaxTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.delivery_max_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.TurnMaxEstimatedTokens != nil && *qp.Budgets.TurnMaxEstimatedTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.turn_max_estimated_tokens must be at least 1", profileName))
+			}
+		}
+	}
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
