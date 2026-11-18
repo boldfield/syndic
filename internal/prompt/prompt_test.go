@@ -3,6 +3,8 @@ package prompt
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -21,7 +23,7 @@ func TestNewDelimiter(t *testing.T) {
 		t.Errorf("expected 32 characters, got %d", len(delim))
 	}
 
-	// Test that two calls produce different results with a real reader
+	// Test that two calls produce different results with different readers
 	r1 := bytes.NewReader([]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F})
 	r2 := bytes.NewReader([]byte{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F})
 	d1, _ := NewDelimiter(r1)
@@ -30,12 +32,25 @@ func TestNewDelimiter(t *testing.T) {
 		t.Errorf("two calls should produce different delimiters")
 	}
 
-	// Test error handling
-	r3 := bytes.NewReader([]byte{0x00, 0x01}) // Only 2 bytes, not 16
+	// Test error handling with insufficient bytes
+	r3 := bytes.NewReader([]byte{0x00, 0x01})
 	_, err = NewDelimiter(r3)
 	if err == nil {
 		t.Errorf("expected error for insufficient bytes")
 	}
+
+	// Test error handling with an erroring reader
+	errReader := &errorReader{}
+	_, err = NewDelimiter(errReader)
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("expected error to be propagated, got %v", err)
+	}
+}
+
+type errorReader struct{}
+
+func (r *errorReader) Read(b []byte) (int, error) {
+	return 0, io.EOF
 }
 
 func TestAuthor(t *testing.T) {
@@ -92,6 +107,11 @@ func TestReviewerSuccess(t *testing.T) {
 		t.Errorf("system message should contain attempt ID")
 	}
 
+	// Check that system message explains the delimiters
+	if !strings.Contains(messages[0].Content, "delimiter") {
+		t.Errorf("system message should explain delimiter fencing")
+	}
+
 	// Check that user message contains request and candidate verbatim
 	if !strings.Contains(messages[1].Content, "Please review this.") {
 		t.Errorf("user message should contain request verbatim")
@@ -100,24 +120,38 @@ func TestReviewerSuccess(t *testing.T) {
 		t.Errorf("user message should contain candidate verbatim")
 	}
 
-	// Check that delimiter lines are present
-	delimLine := "===== delim123 ====="
-	if !strings.Contains(messages[1].Content, delimLine) {
-		t.Errorf("user message should contain delimiter line %s", delimLine)
+	// Check that delimiter lines with labels are present
+	delimBeginReq := "===== delim123 BEGIN REQUEST ====="
+	delimEndReq := "===== delim123 END REQUEST ====="
+	delimBeginCand := "===== delim123 BEGIN CANDIDATE ====="
+	delimEndCand := "===== delim123 END CANDIDATE ====="
+
+	if !strings.Contains(messages[1].Content, delimBeginReq) {
+		t.Errorf("user message should contain %s", delimBeginReq)
+	}
+	if !strings.Contains(messages[1].Content, delimEndReq) {
+		t.Errorf("user message should contain %s", delimEndReq)
+	}
+	if !strings.Contains(messages[1].Content, delimBeginCand) {
+		t.Errorf("user message should contain %s", delimBeginCand)
+	}
+	if !strings.Contains(messages[1].Content, delimEndCand) {
+		t.Errorf("user message should contain %s", delimEndCand)
 	}
 
-	// Should have two opening delimiters and two closing delimiters
-	delimCount := strings.Count(messages[1].Content, delimLine)
-	if delimCount != 4 {
-		t.Errorf("expected 4 delimiter lines, got %d", delimCount)
+	// Check the structure: delimiter lines should contain their labels
+	userContent := messages[1].Content
+	if !strings.Contains(userContent, "BEGIN REQUEST") {
+		t.Errorf("user message should contain BEGIN REQUEST label")
 	}
-
-	// Check for REQUEST and CANDIDATE labels
-	if !strings.Contains(messages[1].Content, "REQUEST") {
-		t.Errorf("user message should contain REQUEST label")
+	if !strings.Contains(userContent, "END REQUEST") {
+		t.Errorf("user message should contain END REQUEST label")
 	}
-	if !strings.Contains(messages[1].Content, "CANDIDATE") {
-		t.Errorf("user message should contain CANDIDATE label")
+	if !strings.Contains(userContent, "BEGIN CANDIDATE") {
+		t.Errorf("user message should contain BEGIN CANDIDATE label")
+	}
+	if !strings.Contains(userContent, "END CANDIDATE") {
+		t.Errorf("user message should contain END CANDIDATE label")
 	}
 }
 
@@ -129,7 +163,7 @@ func TestReviewerDelimiterCollision(t *testing.T) {
 		AttemptID:     "attempt1",
 		Delimiter:     "uniquedelim",
 	})
-	if err != ErrDelimiterCollision {
+	if !errors.Is(err, ErrDelimiterCollision) {
 		t.Errorf("expected ErrDelimiterCollision, got %v", err)
 	}
 
@@ -140,7 +174,7 @@ func TestReviewerDelimiterCollision(t *testing.T) {
 		AttemptID:     "attempt1",
 		Delimiter:     "uniquedelim",
 	})
-	if err != ErrDelimiterCollision {
+	if !errors.Is(err, ErrDelimiterCollision) {
 		t.Errorf("expected ErrDelimiterCollision in candidate, got %v", err)
 	}
 }
@@ -259,6 +293,40 @@ func TestRepairErrors(t *testing.T) {
 	}, "output", "repair1")
 	if err == nil {
 		t.Errorf("expected error for empty candidate hash")
+	}
+
+	// Test error handling for empty repairAttemptID
+	_, err = Repair(ReviewInput{
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		AttemptID:     "id",
+		Delimiter:     "delim",
+	}, "output", "")
+	if err == nil {
+		t.Errorf("expected error for empty repair attempt id")
+	}
+}
+
+func TestRepairWithEmptyOutput(t *testing.T) {
+	messages, err := Repair(ReviewInput{
+		Request:       "Please review this.",
+		Candidate:     "This is the candidate.",
+		CandidateHash: "abc123",
+		AttemptID:     "attempt1",
+		Delimiter:     "delim123",
+	}, "", "repair1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(messages))
+	}
+
+	// Check that assistant message equals original output exactly (even if empty)
+	if messages[2].Content != "" {
+		t.Errorf("assistant content should equal original output exactly (empty string)")
 	}
 }
 
