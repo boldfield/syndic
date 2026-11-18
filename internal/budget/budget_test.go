@@ -98,6 +98,13 @@ func TestAdmissionTokens(t *testing.T) {
 			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
 			want:             11000000, // 10M * 1.1 = 11M exactly
 		},
+		{
+			name:             "large magnitude genuinely fractional: 10M at 1.0000000000005",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 10000000))}},
+			tokensPerByteMax: 1.0000000000005,
+			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:             10000001, // ceil(10M * 1.0000000000005) = ceil(10M + 5e-6) = 10,000,001, not snapped to 10M
+		},
 	}
 
 	for _, tt := range tests {
@@ -300,6 +307,12 @@ func TestUsableBound(t *testing.T) {
 			contextMargin: 0.7,
 			want:          3000000, // floor(10M * 0.3) = floor(3M) = 3M exactly
 		},
+		{
+			name:          "large magnitude genuinely fractional: 10M with 0.0000000000005 margin",
+			contextBound:  10000000,
+			contextMargin: 0.0000000000005,
+			want:          9999999, // floor(10M * (1 - 5e-13)) = floor(10M * 0.9999999999995) = floor(9,999,999.9995) = 9,999,999, not snapped to 10M
+		},
 	}
 
 	for _, tt := range tests {
@@ -407,6 +420,12 @@ func TestStandInBytes(t *testing.T) {
 			maxOutputTokens: 1,
 			bytesPerToken:   1.0000000005,
 			want:            2, // ceil(1.0000000005) = 2, not snapped to 1
+		},
+		{
+			name:            "large magnitude genuinely fractional: 10M tokens at 1.0000000000005 bytes/token",
+			maxOutputTokens: 10000000,
+			bytesPerToken:   1.0000000000005,
+			want:            10000001, // ceil(10M * 1.0000000000005) = ceil(10M + 5e-6) = 10,000,001, not snapped to 10M
 		},
 	}
 

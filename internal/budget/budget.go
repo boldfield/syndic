@@ -12,30 +12,34 @@ type Overheads struct {
 }
 
 // ceilSafe rounds a float up to the nearest integer, snapping to the nearest integer
-// when the result is within relative floating-point error of an integer
+// when the result is within ULP-scale floating-point error of an integer
 // (to avoid floating-point errors that round mathematically integral results up by one).
-// Uses relative tolerance to distinguish representation error from genuine fractions.
+// Uses a tolerance proportional to the magnitude to handle ULPs correctly.
 func ceilSafe(x float64) int {
 	r := math.Round(x)
-	// Snap only if error is within relative epsilon: use max(1.0, abs(r)) to avoid
-	// division issues near zero. This catches products like 100*1.1=110.00000000000001
-	// but not values like 1.0000000005 which are genuinely fractional.
-	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-12 {
+	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r)).
+	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
+	// This catches products like 100*1.1=110.00000000000001 but rejects genuinely
+	// fractional values like 1.0000000005 and large-magnitude fractions like
+	// 10,000,000.000005 (error 5e-6 >> tolerance 1e-8).
+	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-15 {
 		return int(r)
 	}
 	return int(math.Ceil(x))
 }
 
 // floorSafe rounds a float down to the nearest integer, snapping to the nearest integer
-// when the result is within relative floating-point error of an integer
+// when the result is within ULP-scale floating-point error of an integer
 // (to avoid floating-point errors that round mathematically integral results down by one).
-// Uses relative tolerance to distinguish representation error from genuine fractions.
+// Uses a tolerance proportional to the magnitude to handle ULPs correctly.
 func floorSafe(x float64) int {
 	r := math.Round(x)
-	// Snap only if error is within relative epsilon: use max(1.0, abs(r)) to avoid
-	// division issues near zero. This catches products like 1000*0.1=100.0 but not
-	// values like 0.9999999995 which are genuinely fractional.
-	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-12 {
+	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r)).
+	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
+	// This catches products like 1000*0.1=100.0 but rejects genuinely fractional values
+	// like 0.9999999995 and large-magnitude near-integer values like 9,999,999.999995
+	// (fractional part 0.999995 >> tolerance 1e-8 at magnitude 10M).
+	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-15 {
 		return int(r)
 	}
 	return int(math.Floor(x))
