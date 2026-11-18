@@ -149,9 +149,10 @@ func (e *Engine) dispatchReviewers(t *openTurn) ([]reviewerDispatch, bool) {
 		e.mu.Unlock()
 
 		if canDispatch {
-			d, err := e.beginReviewer(t, id, false)
+			d, err := e.beginReviewer(t, id, isLast)
 			if err != nil {
 				e.mu.Lock()
+				e.scheduler.ReleaseSlot(poolName)
 				for _, begun := range ds {
 					delete(e.running, begun.participant)
 				}
@@ -173,14 +174,6 @@ func (e *Engine) dispatchReviewers(t *openTurn) ([]reviewerDispatch, bool) {
 		}
 	}
 
-	e.mu.Lock()
-	if err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateReviewersDispatched})
-	}); err != nil {
-		e.mu.Unlock()
-		return nil, false
-	}
-	e.mu.Unlock()
 	return ds, true
 }
 

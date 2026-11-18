@@ -26,10 +26,11 @@ func reviewRoster(authorID string, reviewers ...string) string {
 	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
 	var extra, quoted []string
 	for _, id := range reviewers {
-		extra = append(extra, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\n")
+		extra = append(extra, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"\n")
 		quoted = append(quoted, `"`+id+`"`)
 	}
-	toml = strings.Replace(toml, "[[endpoints]]", strings.Join(extra, "\n")+"\n[[endpoints]]", 1)
+	poolConfig := "[pools.reviewers]\nconcurrency = 10\n\n"
+	toml = strings.Replace(toml, "[[endpoints]]", poolConfig+strings.Join(extra, "")+"\n[[endpoints]]", 1)
 	toml = strings.Replace(toml, `required_reviewers = ["reviewer"]`, "required_reviewers = ["+strings.Join(quoted, ", ")+"]", 1)
 	return toml
 }
