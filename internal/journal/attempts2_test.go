@@ -145,6 +145,68 @@ func TestBeginAttemptWithRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBeginAttemptWithRepairOfRoundTrip verifies that non-empty RepairOf values round-trip correctly.
+func TestBeginAttemptWithRepairOfRoundTrip(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	var runID, turnID, firstAttemptID, secondAttemptID string
+	deadline := time.Now().Add(1 * time.Hour)
+
+	err := store.Tx(func(tx *journal.Tx) error {
+		var txErr error
+		runID, _, txErr = tx.CreateRun([]byte("{}"))
+		if txErr != nil {
+			return txErr
+		}
+
+		turnID, txErr = tx.CreateTurn(runID, "solo", nil)
+		if txErr != nil {
+			return txErr
+		}
+
+		// Create first attempt
+		params := journal.AttemptParams{
+			TurnID:                turnID,
+			Participant:           "participant1",
+			Phase:                 "phase1",
+			Epoch:                 42,
+			Deadline:              &deadline,
+			RepairOf:              "",
+			Delimiter:             "delimiter-value",
+			MaxOutputTokens:       2000,
+			EstimatedPromptTokens: 1000,
+		}
+
+		firstAttemptID, txErr = tx.BeginAttemptWith(params)
+		if txErr != nil {
+			return txErr
+		}
+
+		// Create second attempt with non-empty RepairOf pointing to first
+		params.RepairOf = firstAttemptID
+		secondAttemptID, txErr = tx.BeginAttemptWith(params)
+		return txErr
+	})
+	if err != nil {
+		t.Fatalf("failed to create attempts: %v", err)
+	}
+
+	row, err := store.GetAttempt(secondAttemptID)
+	if err != nil {
+		t.Fatalf("failed to get second attempt: %v", err)
+	}
+
+	// Verify RepairOf is set and round-trips correctly
+	if row.RepairOf == nil {
+		t.Errorf("expected RepairOf to be set, got nil")
+	} else if *row.RepairOf != firstAttemptID {
+		t.Errorf("expected RepairOf %s, got %s", firstAttemptID, *row.RepairOf)
+	}
+}
+
 // TestRecordRetryDispatch verifies retry dispatch recording and state enforcement.
 func TestRecordRetryDispatch(t *testing.T) {
 	db, cleanup := openTestDB(t)
@@ -194,7 +256,11 @@ func TestRecordRetryDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query dispatch indexes: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 
 	var expectedIndexes []int
 	for rows.Next() {
