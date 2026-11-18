@@ -303,6 +303,7 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 	type rawRow struct {
 		kind            string
 		id              string
+		rowid           int64
 		phase           string
 		sender          string
 		sha256          string
@@ -310,6 +311,7 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		journalSeq      sql.NullInt64
 		sequence        sql.NullInt64
 		dispatchedAtStr sql.NullString
+		rawOutput       sql.NullString
 		isNullRow       bool
 	}
 
@@ -317,29 +319,30 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 
 	rows, err := tx.tx.Query(`
 		WITH combined AS (
-			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 1 as is_null_row
+			SELECT 'message' as kind, m.id, m.rowid, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, NULL as raw_output, 1 as is_null_row
 			FROM messages m
 			WHERE m.turn_id = ? AND m.journal_seq IS NULL
 			UNION ALL
-			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 1 as is_null_row
+			SELECT 'attempt' as kind, a.id, a.rowid, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, a.raw_output, 1 as is_null_row
 			FROM attempts a
 			WHERE a.turn_id = ? AND a.journal_seq IS NULL
 			UNION ALL
-			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 0 as is_null_row
+			SELECT 'message' as kind, m.id, m.rowid, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, NULL as raw_output, 0 as is_null_row
 			FROM messages m
 			WHERE m.turn_id = ? AND m.journal_seq IS NOT NULL
 			UNION ALL
-			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 0 as is_null_row
+			SELECT 'attempt' as kind, a.id, a.rowid, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, a.raw_output, 0 as is_null_row
 			FROM attempts a
 			WHERE a.turn_id = ? AND a.journal_seq IS NOT NULL
 		)
-		SELECT kind, id, phase, sender, sha256, byte_length, journal_seq, sequence, dispatched_at, is_null_row
+		SELECT kind, id, rowid, phase, sender, sha256, byte_length, journal_seq, sequence, dispatched_at, raw_output, is_null_row
 		FROM combined
 		ORDER BY
 			is_null_row DESC,
 			CASE WHEN is_null_row = 1 AND kind = 'message' THEN 0 WHEN is_null_row = 1 AND kind = 'attempt' THEN 1 ELSE 2 END,
 			CASE WHEN is_null_row = 1 AND kind = 'message' THEN COALESCE(sequence, 0) END,
 			CASE WHEN is_null_row = 1 AND kind = 'attempt' THEN dispatched_at END,
+			CASE WHEN is_null_row = 1 THEN rowid END,
 			journal_seq
 	`, turnID, turnID, turnID, turnID)
 
@@ -350,19 +353,27 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 
 	for rows.Next() {
 		var kind, id, phase, sender, sha256 string
+		var rowid int64
 		var byteLen int64
 		var journalSeq sql.NullInt64
 		var sequence sql.NullInt64
 		var dispatchedAtStr sql.NullString
+		var rawOutput sql.NullString
 		var isNullRow int
 
-		if err := rows.Scan(&kind, &id, &phase, &sender, &sha256, &byteLen, &journalSeq, &sequence, &dispatchedAtStr, &isNullRow); err != nil {
+		if err := rows.Scan(&kind, &id, &rowid, &phase, &sender, &sha256, &byteLen, &journalSeq, &sequence, &dispatchedAtStr, &rawOutput, &isNullRow); err != nil {
 			return nil, "", fmt.Errorf("scan transcript row: %w", err)
+		}
+
+		// Compute SHA256 for attempts based on raw_output
+		if kind == "attempt" && rawOutput.Valid {
+			sha256 = computeSHA256([]byte(rawOutput.String))
 		}
 
 		allRows = append(allRows, rawRow{
 			kind:            kind,
 			id:              id,
+			rowid:           rowid,
 			phase:           phase,
 			sender:          sender,
 			sha256:          sha256,
@@ -370,6 +381,7 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 			journalSeq:      journalSeq,
 			sequence:        sequence,
 			dispatchedAtStr: dispatchedAtStr,
+			rawOutput:       rawOutput,
 			isNullRow:       isNullRow == 1,
 		})
 	}
@@ -380,21 +392,26 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 
 	var startIdx int
 	if cursor != "" {
+		found := false
 		for i, row := range allRows {
 			var sortKey string
 			if row.isNullRow {
 				if row.kind == "message" && row.sequence.Valid {
-					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
+					sortKey = fmt.Sprintf("null:m:%d:%d", row.sequence.Int64, row.rowid)
 				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
-					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
+					sortKey = fmt.Sprintf("null:a:%s:%d", row.dispatchedAtStr.String, row.rowid)
 				}
 			} else if row.journalSeq.Valid {
 				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
 			}
 			if sortKey == cursor {
 				startIdx = i + 1
+				found = true
 				break
 			}
+		}
+		if !found {
+			return nil, "", fmt.Errorf("unrecognized cursor: %w", fmt.Errorf("cursor %q not found", cursor))
 		}
 	}
 
@@ -434,9 +451,9 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 			var sortKey string
 			if row.isNullRow {
 				if row.kind == "message" && row.sequence.Valid {
-					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
+					sortKey = fmt.Sprintf("null:m:%d:%d", row.sequence.Int64, row.rowid)
 				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
-					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
+					sortKey = fmt.Sprintf("null:a:%s:%d", row.dispatchedAtStr.String, row.rowid)
 				}
 			} else if row.journalSeq.Valid {
 				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
@@ -501,9 +518,7 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 
 		if rawOutput.Valid {
 			content = rawOutput.String
-			if content != "" {
-				sha256 = computeSHA256([]byte(content))
-			}
+			sha256 = computeSHA256([]byte(content))
 		}
 	} else if len(ref) >= 10 && ref[:10] == "candidate:" {
 		candidateID := ref[10:]
