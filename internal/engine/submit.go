@@ -243,17 +243,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 }
 
 // projectAndValidateBudget validates budget requirements and projects token usage.
-// It checks for spending_ceiling, context_unknown, and admission bounds, and computes
-// the aggregate projected token count.
-// projectAndValidateBudget validates basic budget requirements.
-// TODO: Implement full budget projection with real prompt builders and all validation checks.
+// TODO: Implement full budget validation and projection as per section 4a of v4-delta-engine-tui.md
+// Current placeholder; next iteration will add: spending_ceiling, context_unknown, admission checks,
+// real prompt projection, dispatch-time reservation, completion-time reconciliation.
 func (e *Engine) projectAndValidateBudget(input string, eff config.Effective) (*wire.Error, int64, error) {
-	// For now, return a placeholder estimate of 0
-	// This will be expanded to include:
-	// - Spending ceiling validation for metered endpoints
-	// - Context unknown checks for missing budget fields
-	// - Real prompt building and admission checks
-	// - Repair and delivery projections
-	aggregateEstimate := int64(0)
-	return nil, aggregateEstimate, nil
+	// Placeholder: return nil, 0, nil (no checks, no projection)
+	// Full implementation deferred to next iteration
+	return nil, 0, nil
 }
