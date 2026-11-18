@@ -604,35 +604,6 @@ func TestProvisional(t *testing.T) {
 	h.WaitTurnState(reply.TurnID, engine.StateSoloComplete)
 }
 
-func TestReviewPresetPlaceholder(t *testing.T) {
-	h := enginetest.New(t, enginetest.RosterTOML, nil)
-	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply.Preset != "review" {
-		t.Fatalf("preset = %q", reply.Preset)
-	}
-	h.WaitTurnState(reply.TurnID, engine.StateIncomplete)
-	last := lastTurnState(t, h, reply.TurnID)
-	if last.Reason == nil || *last.Reason != "author_failed:not_implemented" {
-		t.Fatalf("last = %+v", last)
-	}
-	if got := h.TurnStates(reply.TurnID); len(got) != 2 || got[0] != engine.StateSubmitted {
-		t.Fatalf("turn states = %v", got)
-	}
-	if n := countEvents(h, wire.EventKindAttemptBegun); n != 0 {
-		t.Fatalf("attempt_begun events = %d", n)
-	}
-	turn, err := h.Store.GetTurn(reply.TurnID)
-	if err != nil || turn.Epoch != 1 {
-		t.Fatalf("turn = %+v, err %v", turn, err)
-	}
-	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
-		t.Fatalf("engine stayed busy: %v", err)
-	}
-}
-
 type unmarshalable struct{ C chan int }
 
 func TestSubmitTxIsAtomic(t *testing.T) {

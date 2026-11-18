@@ -24,6 +24,12 @@ type openTurn struct {
 	eff             config.Effective
 	attemptDeadline time.Duration
 	turnDeadline    time.Time
+
+	// Review state, owned by Engine.mu.
+	required      []string
+	candidate     string
+	candidateHash string
+	approved      map[string]bool
 }
 
 // submissionHash is the SHA-256 over the canonical JSON of the request
@@ -179,6 +185,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
+		required:        eff.Preset.RequiredReviewers,
+		approved:        map[string]bool{},
 	}
 	e.open = t
 	go e.runTurn(t)

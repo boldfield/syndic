@@ -34,6 +34,10 @@ type Step struct {
 	EchoedString       string
 	Err                error
 	Usage              *transport.Usage
+	// Build, when set on a reply step, computes Text from the request, so a
+	// reply can carry values that exist only after dispatch (an attempt id
+	// or a candidate hash).
+	Build func(req transport.CompleteRequest) string
 }
 
 // CompleteCall records a single Complete call with all its details.
@@ -138,6 +142,10 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	switch step.Kind {
 	case StepKindReply:
+		if step.Build != nil {
+			step.Text = step.Build(req)
+			step.RawOutput = ""
+		}
 		// Apply delay for reply steps.
 		if step.Delay > 0 {
 			time.Sleep(step.Delay)
