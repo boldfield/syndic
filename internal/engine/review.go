@@ -106,6 +106,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		return false
 	}
 	if ended {
+		e.endTurnWithCleanup(t)
 		if e.open == t {
 			e.open = nil
 		}
@@ -566,8 +567,11 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if approvedNow {
 		t.approved[d.participant] = true
 	}
-	if endState != "" && e.open == t {
-		e.open = nil
+	if endState != "" {
+		e.endTurnWithCleanup(t)
+		if e.open == t {
+			e.open = nil
+		}
 	}
 }
 

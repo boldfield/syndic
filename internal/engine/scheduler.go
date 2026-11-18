@@ -35,9 +35,9 @@ type poolScheduler struct {
 type Scheduler struct {
 	mu               sync.Mutex
 	pools            map[string]*poolScheduler
-	participantState map[string]string // participant id -> state
-	attemptDeadlines map[string]func() // attempt id -> cancel function
-	turnDeadline     func()            // turn-level cancel function
+	participantState map[string]string      // participant id -> state
+	attemptDeadlines map[string]func() bool // attempt id -> cancel function
+	turnDeadline     func() bool            // turn-level cancel function
 }
 
 // NewScheduler creates a new scheduler with pools configured from the roster.
@@ -49,7 +49,7 @@ func NewScheduler(roster interface {
 	s := &Scheduler{
 		pools:            make(map[string]*poolScheduler),
 		participantState: make(map[string]string),
-		attemptDeadlines: make(map[string]func()),
+		attemptDeadlines: make(map[string]func() bool),
 	}
 
 	// Initialize pools with their concurrency limits.
@@ -198,20 +198,14 @@ func (s *Scheduler) ReleaseSlot(poolName string) {
 func (s *Scheduler) SetAttemptDeadlineTimer(attemptID string, cancel func() bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if cancel() {
-		s.attemptDeadlines[attemptID] = func() { cancel() }
-	}
+	s.attemptDeadlines[attemptID] = cancel
 }
 
 // SetTurnDeadlineTimer stores the cancel function for a turn deadline.
 func (s *Scheduler) SetTurnDeadlineTimer(cancel func() bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if cancel() {
-		s.turnDeadline = func() { cancel() }
-	}
+	s.turnDeadline = cancel
 }
 
 // ClearDeadlineTimer removes an attempt deadline timer.
@@ -235,7 +229,7 @@ func (s *Scheduler) ClearAllDeadlines() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.attemptDeadlines = make(map[string]func())
+	s.attemptDeadlines = make(map[string]func() bool)
 	s.turnDeadline = nil
 }
 

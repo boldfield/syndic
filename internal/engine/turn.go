@@ -226,6 +226,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return
 	}
+	e.endTurnWithCleanup(t)
 	delete(e.running, t.author)
 
 	// Release the pool slot for the author.
@@ -253,6 +254,7 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 	if err != nil {
 		return
 	}
+	e.endTurnWithCleanup(t)
 	delete(e.running, t.author)
 	if e.open == t {
 		e.open = nil
@@ -269,6 +271,15 @@ func endTurnIn(tx *journal.Tx, emit hub.Emit, turnID, state, reason string) erro
 		return err
 	}
 	return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{TurnID: turnID, State: state, Reason: &reason})
+}
+
+// endTurnWithCleanup is called after endTurnIn to clean up timers and queues.
+// It must be called with e.mu held and after the transaction commits.
+func (e *Engine) endTurnWithCleanup(t *openTurn) {
+	if e.scheduler != nil {
+		e.scheduler.ClearAllDeadlines()
+		e.scheduler.ClearTurnQueues(t.id)
+	}
 }
 
 // authorFailedStatus follows the design's "Terminal reasons" rule: the
