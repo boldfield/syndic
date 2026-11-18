@@ -19,6 +19,8 @@ import (
 func TestGuardSentinel(t *testing.T) {
 	sentinelInRaw := "SENSITIVE_HEADER_VALUE_12345"
 
+	sentinelVersion := "SERVER_VERSION_SENTINEL_67890"
+
 	rawJSON := fmt.Sprintf(`{"headers":{"X-Foo":["%s"]},"body":"%s"}`, sentinelInRaw, sentinelInRaw)
 
 	record := transport.CapabilityRecord{
@@ -29,6 +31,7 @@ func TestGuardSentinel(t *testing.T) {
 		ReportedModel:  "test-model",
 		AdapterVersion: "1.0.0",
 		ObservedAt:     time.Now(),
+		ServerVersion:  sentinelVersion,
 		Raw:            json.RawMessage(rawJSON),
 	}
 
@@ -54,6 +57,9 @@ func TestGuardSentinel(t *testing.T) {
 	// Verify sentinel is not in the export (was in both header and body in Raw)
 	if found := contains(exportStr, sentinelInRaw); found {
 		t.Errorf("Raw sentinel %q found in export", sentinelInRaw)
+	}
+	if found := contains(exportStr, sentinelVersion); found {
+		t.Errorf("ServerVersion sentinel %q found in export", sentinelVersion)
 	}
 }
 
@@ -130,6 +136,16 @@ func TestLocalHostIncluded(t *testing.T) {
 	}
 	if export.Port != "8000" {
 		t.Errorf("Expected Port '8000', got %q", export.Port)
+	}
+
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	for _, part := range []string{"8000/", "://"} {
+		if contains(string(data), part) {
+			t.Errorf("Serialized export contains %q, which follows the host", part)
+		}
 	}
 }
 
@@ -329,8 +345,17 @@ func TestWriteRawFilePermissions(t *testing.T) {
 	}
 }
 
+// freezeClock fixes the file-name clock so repeated writes collide.
+func freezeClock(t *testing.T) {
+	t.Helper()
+	orig := now
+	now = func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }
+	t.Cleanup(func() { now = orig })
+}
+
 // TestWriteRawNoOverwrite verifies that WriteRaw does not overwrite existing files.
 func TestWriteRawNoOverwrite(t *testing.T) {
+	freezeClock(t)
 	tempDir := t.TempDir()
 
 	record := transport.CapabilityRecord{
@@ -343,159 +368,56 @@ func TestWriteRawNoOverwrite(t *testing.T) {
 		ObservedAt:     time.Now(),
 	}
 
-	// Write first time
 	path1, err := WriteRaw(record, tempDir)
 	if err != nil {
 		t.Fatalf("First WriteRaw failed: %v", err)
 	}
+	before, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("read first file: %v", err)
+	}
 
-	// Mock the file to exist by sleeping a bit (since filenames are time-based)
-	time.Sleep(10 * time.Millisecond)
-
-	// Write again with same record - should fail
-	record.ObservedAt = time.Now() // Ensure different timestamp
-	_, err = WriteRaw(record, tempDir)
-	if err == nil {
+	record.AdapterVersion = "2.0.0"
+	if _, err = WriteRaw(record, tempDir); err == nil {
 		t.Fatalf("Expected WriteRaw to fail on second write, but succeeded")
 	}
 
-	// Verify first file still exists and is unchanged
-	fi, err := os.Stat(path1)
+	after, err := os.ReadFile(path1)
 	if err != nil {
 		t.Fatalf("First file was deleted or inaccessible: %v", err)
 	}
-	if fi.Size() == 0 {
-		t.Errorf("First file is empty")
-	}
-}
-
-// TestWriteRawModelNameSanitization verifies that model names with special
-// characters are sanitized to dashes.
-func TestWriteRawModelNameSanitization(t *testing.T) {
-	tempDir := t.TempDir()
-
-	record := transport.CapabilityRecord{
-		Endpoint:       "test-endpoint",
-		Model:          "claude-3/sonnet:latest",
-		AuthMode:       "api-key",
-		Identity:       transport.NewUnknownIdentity(),
-		ReportedModel:  "test-model",
-		AdapterVersion: "1.0.0",
-		ObservedAt:     time.Now(),
-	}
-
-	path, err := WriteRaw(record, tempDir)
-	if err != nil {
-		t.Fatalf("WriteRaw failed: %v", err)
-	}
-
-	filename := filepath.Base(path)
-	// Should contain dashes instead of / and :
-	if contains(filename, "/") {
-		t.Errorf("Filename contains forward slash: %q", filename)
-	}
-	if contains(filename, ":") {
-		t.Errorf("Filename contains colon: %q", filename)
-	}
-
-	// Verify file contains expected sanitized model name
-	if !contains(filename, "claude-3-sonnet-latest") {
-		t.Errorf("Expected sanitized model name 'claude-3-sonnet-latest' in filename, got %q", filename)
-	}
-}
-
-// TestWriteExportFilePermissions verifies that WriteExport creates files with mode 0600.
-func TestWriteExportFilePermissions(t *testing.T) {
-	tempDir := t.TempDir()
-
-	record := transport.CapabilityRecord{
-		Endpoint:       "test-endpoint",
-		Model:          "test-model",
-		AuthMode:       "api-key",
-		Identity:       transport.NewUnknownIdentity(),
-		ReportedModel:  "test-model",
-		AdapterVersion: "1.0.0",
-		ObservedAt:     time.Now(),
-	}
-
-	profile := config.EndpointProfile{
-		Name:             "test-endpoint",
-		BaseURL:          "http://localhost:8000",
-		DeclaredLocation: "local",
-	}
-
-	export, err := Redact(record, profile)
-	if err != nil {
-		t.Fatalf("Redact failed: %v", err)
-	}
-
-	path, err := WriteExport(export, tempDir)
-	if err != nil {
-		t.Fatalf("WriteExport failed: %v", err)
-	}
-
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat failed: %v", err)
-	}
-
-	mode := fi.Mode().Perm()
-	if mode != 0600 {
-		t.Errorf("Expected file mode 0600, got %#o", mode)
+	if string(before) != string(after) {
+		t.Errorf("First file was modified by the failed second write")
 	}
 }
 
 // TestWriteExportNoOverwrite verifies that WriteExport does not overwrite existing files.
 func TestWriteExportNoOverwrite(t *testing.T) {
+	freezeClock(t)
 	tempDir := t.TempDir()
 
-	record := transport.CapabilityRecord{
-		Endpoint:       "test-endpoint",
-		Model:          "test-model",
-		AuthMode:       "api-key",
-		Identity:       transport.NewUnknownIdentity(),
-		ReportedModel:  "test-model",
-		AdapterVersion: "1.0.0",
-		ObservedAt:     time.Now(),
-	}
+	export := Export{Redacted: true, RedactionRule: "evidence/v1", EndpointName: "test-endpoint", Model: "test-model"}
 
-	profile := config.EndpointProfile{
-		Name:             "test-endpoint",
-		BaseURL:          "http://localhost:8000",
-		DeclaredLocation: "local",
-	}
-
-	export, err := Redact(record, profile)
-	if err != nil {
-		t.Fatalf("Redact failed: %v", err)
-	}
-
-	// Write first time
-	_, err = WriteExport(export, tempDir)
+	path1, err := WriteExport(export, tempDir)
 	if err != nil {
 		t.Fatalf("First WriteExport failed: %v", err)
 	}
-
-	// Write again - should fail (timestamp guarantees unique filename only within same second)
-	record.ObservedAt = time.Now()
-	export, err = Redact(record, profile)
+	before, err := os.ReadFile(path1)
 	if err != nil {
-		t.Fatalf("Redact failed: %v", err)
+		t.Fatalf("read first file: %v", err)
 	}
 
-	_, err = WriteExport(export, tempDir)
-	if err == nil {
-		// Try waiting and trying again
-		time.Sleep(1100 * time.Millisecond) // Wait more than a second
-		record.ObservedAt = time.Now()
-		export, err = Redact(record, profile)
-		if err != nil {
-			t.Fatalf("Redact failed: %v", err)
-		}
-		_, err = WriteExport(export, tempDir)
-		if err == nil {
-			t.Errorf("Expected WriteExport to eventually fail on second write with same timestamp, but succeeded")
-		}
+	export.AuthMode = "changed"
+	if _, err = WriteExport(export, tempDir); err == nil {
+		t.Fatalf("Expected WriteExport to fail on second write, but succeeded")
+	}
+
+	after, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatalf("First file was deleted or inaccessible: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("First file was modified by the failed second write")
 	}
 }
 

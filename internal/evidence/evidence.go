@@ -3,15 +3,20 @@ package evidence
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/transport"
 )
+
+// now is the clock used for file names; tests replace it.
+var now = time.Now
 
 var sanitizeRE = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
@@ -78,10 +83,10 @@ func Redact(record transport.CapabilityRecord, profile config.EndpointProfile) (
 		SystemRoleHonored:        record.SystemRoleHonored,
 		EligibleRequiredReviewer: record.EligibleRequiredReviewer,
 		MaxTokensField:           record.MaxTokensField,
-		FinishReasons:            record.FinishReasons,
+		FinishReasons:            maps.Clone(record.FinishReasons),
 		OverLength:               record.OverLength,
 		Latency:                  record.LatencyMillis,
-		ToolRestrictions:         record.ToolRestrictions,
+		ToolRestrictions:         slices.Clone(record.ToolRestrictions),
 		AdapterVersion:           record.AdapterVersion,
 		ObservedAt:               record.ObservedAt,
 	}
@@ -197,8 +202,7 @@ func WriteExport(export Export, dir string) (string, error) {
 // generateFilename generates a filename from endpoint, model, and suffix.
 // Replaces non-alphanumeric characters (except dots and dashes) with dashes.
 func generateFilename(endpoint, model, suffix string) string {
-	now := time.Now().UTC()
-	timestamp := now.Format("20060102T150405Z")
+	timestamp := now().UTC().Format("20060102T150405Z")
 
 	endpoint = sanitizeRE.ReplaceAllString(endpoint, "-")
 	model = sanitizeRE.ReplaceAllString(model, "-")
