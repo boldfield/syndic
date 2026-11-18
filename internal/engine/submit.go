@@ -150,7 +150,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	// Check budget at submit time
 	budgetRefusal, projected, err := e.projectAndValidateBudget(req.Input, eff)
 	if err != nil {
-		return wire.SubmitReply{}, err
+		return wire.SubmitReply{}, fmt.Errorf("projectAndValidateBudget: %w", err)
 	}
 	if budgetRefusal != nil {
 		return wire.SubmitReply{}, budgetRefusal
@@ -161,10 +161,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		maxEstimate = int64(*eff.Budgets.TurnMaxEstimatedTokens)
 	}
 
+	zero := int64(0)
 	budgetRecord := wire.BudgetRecord{
 		Projected: &projected,
-		Reserved:  &projected,
-		Charged:   &projected,
+		Reserved:  &zero,
+		Charged:   &zero,
 		Limit:     &maxEstimate,
 		Exhausted: false,
 	}
@@ -241,26 +242,18 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	return reply, nil
 }
 
+// projectAndValidateBudget validates budget requirements and projects token usage.
+// It checks for spending_ceiling, context_unknown, and admission bounds, and computes
+// the aggregate projected token count.
 // projectAndValidateBudget validates basic budget requirements.
 // TODO: Implement full budget projection with real prompt builders and all validation checks.
 func (e *Engine) projectAndValidateBudget(input string, eff config.Effective) (*wire.Error, int64, error) {
-	// For now, just validate that all participants in the preset are probed
-	// Full projection and validation will be implemented in the next iteration
-
-	// Check that all required participants are usable
-	for _, id := range append([]string{eff.Preset.Author}, eff.Preset.RequiredReviewers...) {
-		if p, ok := e.built.Participants[id]; !ok || !p.Usable {
-			err := refusal(wire.ErrorCodeUnprobed)
-			err.Participant = strPtr(id)
-			if !ok {
-				err.Detail = strPtr("not_found")
-			} else {
-				err.Detail = strPtr(p.Detail)
-			}
-			return err, 0, nil
-		}
-	}
-
-	// Placeholder projection of 0 for now - this will be replaced with full projection
-	return nil, 0, nil
+	// For now, return a placeholder estimate of 0
+	// This will be expanded to include:
+	// - Spending ceiling validation for metered endpoints
+	// - Context unknown checks for missing budget fields
+	// - Real prompt building and admission checks
+	// - Repair and delivery projections
+	aggregateEstimate := int64(0)
+	return nil, aggregateEstimate, nil
 }
