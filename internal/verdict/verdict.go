@@ -45,16 +45,11 @@ func Parse(text, candidateHash, attemptID string) Result {
 
 	for i, line := range lines {
 		if line == "VERDICT v1" {
-			verdictCount++
-			// A second VERDICT v1 anywhere is malformed
-			if verdictCount > 1 {
-				return Result{
-					Classification: Malformed,
-					Commentary:     text,
-					Problem:        "multiple VERDICT v1 lines found",
-				}
+			if openIdx == -1 {
+				// First VERDICT v1 found
+				openIdx = i
 			}
-			openIdx = i
+			verdictCount++
 		}
 		if line == "END VERDICT" && openIdx != -1 && closeIdx == -1 {
 			closeIdx = i
@@ -70,14 +65,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 		}
 	}
 
-	// Opening line must be exactly "VERDICT v1" with no leading or trailing spaces
-	if lines[openIdx] != "VERDICT v1" {
-		return Result{
-			Classification: Malformed,
-			Commentary:     text,
-			Problem:        "opening line has incorrect format",
-		}
-	}
+	// If a second VERDICT v1 was found, we'll mark the result as malformed
+	// but only after parsing the first envelope
 
 	// Extract commentary (before opening and after closing)
 	commentBefore := strings.Join(lines[:openIdx], "\n")
@@ -111,17 +100,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
-					Verdict: Verdict{
-						Candidate: strings.TrimSpace(fields["candidate"]),
-						Attempt:   strings.TrimSpace(fields["attempt"]),
-						Decision:  fields["verdict"],
-						Severity:  strings.TrimSpace(fields["severity"]),
-						BlockID:   strings.TrimSpace(fields["block_id"]),
-						Evidence:  strings.TrimSpace(fields["evidence"]),
-						Remedy:    strings.TrimSpace(fields["remedy"]),
-						Reason:    strings.TrimSpace(fields["reason"]),
-					},
-					Problem: fmt.Sprintf("unknown field: %s", name),
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("unknown field: %s", name),
 				}
 			}
 
@@ -130,17 +110,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
-					Verdict: Verdict{
-						Candidate: strings.TrimSpace(fields["candidate"]),
-						Attempt:   strings.TrimSpace(fields["attempt"]),
-						Decision:  fields["verdict"],
-						Severity:  strings.TrimSpace(fields["severity"]),
-						BlockID:   strings.TrimSpace(fields["block_id"]),
-						Evidence:  strings.TrimSpace(fields["evidence"]),
-						Remedy:    strings.TrimSpace(fields["remedy"]),
-						Reason:    strings.TrimSpace(fields["reason"]),
-					},
-					Problem: fmt.Sprintf("duplicate field: %s", name),
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("duplicate field: %s", name),
 				}
 			}
 
@@ -161,17 +132,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
-					Verdict: Verdict{
-						Candidate: strings.TrimSpace(fields["candidate"]),
-						Attempt:   strings.TrimSpace(fields["attempt"]),
-						Decision:  fields["verdict"],
-						Severity:  strings.TrimSpace(fields["severity"]),
-						BlockID:   strings.TrimSpace(fields["block_id"]),
-						Evidence:  strings.TrimSpace(fields["evidence"]),
-						Remedy:    strings.TrimSpace(fields["remedy"]),
-						Reason:    strings.TrimSpace(fields["reason"]),
-					},
-					Problem: fmt.Sprintf("continuation line after single-line field: %s", lastMultilineField),
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("continuation line after single-line field: %s", lastMultilineField),
 				}
 			}
 
@@ -187,17 +149,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 			return Result{
 				Classification: Malformed,
 				Commentary:     commentary,
-				Verdict: Verdict{
-					Candidate: strings.TrimSpace(fields["candidate"]),
-					Attempt:   strings.TrimSpace(fields["attempt"]),
-					Decision:  fields["verdict"],
-					Severity:  strings.TrimSpace(fields["severity"]),
-					BlockID:   strings.TrimSpace(fields["block_id"]),
-					Evidence:  strings.TrimSpace(fields["evidence"]),
-					Remedy:    strings.TrimSpace(fields["remedy"]),
-					Reason:    strings.TrimSpace(fields["reason"]),
-				},
-				Problem: fmt.Sprintf("missing or empty required field: %s", field),
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        fmt.Sprintf("missing or empty required field: %s", field),
 			}
 		}
 	}
@@ -208,17 +161,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 		return Result{
 			Classification: Malformed,
 			Commentary:     commentary,
-			Verdict: Verdict{
-				Candidate: strings.TrimSpace(fields["candidate"]),
-				Attempt:   strings.TrimSpace(fields["attempt"]),
-				Decision:  verdict,
-				Severity:  strings.TrimSpace(fields["severity"]),
-				BlockID:   strings.TrimSpace(fields["block_id"]),
-				Evidence:  strings.TrimSpace(fields["evidence"]),
-				Remedy:    strings.TrimSpace(fields["remedy"]),
-				Reason:    strings.TrimSpace(fields["reason"]),
-			},
-			Problem: fmt.Sprintf("invalid verdict value: %s", verdict),
+			Verdict:        buildPartialVerdict(fields),
+			Problem:        fmt.Sprintf("invalid verdict value: %s", verdict),
 		}
 	}
 
@@ -232,17 +176,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
-					Verdict: Verdict{
-						Candidate: strings.TrimSpace(fields["candidate"]),
-						Attempt:   strings.TrimSpace(fields["attempt"]),
-						Decision:  verdict,
-						Severity:  strings.TrimSpace(fields["severity"]),
-						BlockID:   strings.TrimSpace(fields["block_id"]),
-						Evidence:  strings.TrimSpace(fields["evidence"]),
-						Remedy:    strings.TrimSpace(fields["remedy"]),
-						Reason:    strings.TrimSpace(fields["reason"]),
-					},
-					Problem: fmt.Sprintf("missing or empty required block field: %s", field),
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("missing or empty required block field: %s", field),
 				}
 			}
 		}
@@ -253,17 +188,8 @@ func Parse(text, candidateHash, attemptID string) Result {
 			return Result{
 				Classification: Malformed,
 				Commentary:     commentary,
-				Verdict: Verdict{
-					Candidate: strings.TrimSpace(fields["candidate"]),
-					Attempt:   strings.TrimSpace(fields["attempt"]),
-					Decision:  verdict,
-					Severity:  severity,
-					BlockID:   strings.TrimSpace(fields["block_id"]),
-					Evidence:  strings.TrimSpace(fields["evidence"]),
-					Remedy:    strings.TrimSpace(fields["remedy"]),
-					Reason:    strings.TrimSpace(fields["reason"]),
-				},
-				Problem: fmt.Sprintf("invalid severity value: %s", severity),
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        fmt.Sprintf("invalid severity value: %s", severity),
 			}
 		}
 	} else {
@@ -273,15 +199,20 @@ func Parse(text, candidateHash, attemptID string) Result {
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
-					Verdict: Verdict{
-						Candidate: strings.TrimSpace(fields["candidate"]),
-						Attempt:   strings.TrimSpace(fields["attempt"]),
-						Decision:  verdict,
-						Reason:    strings.TrimSpace(fields["reason"]),
-					},
-					Problem: fmt.Sprintf("%s field not allowed for %s verdict", field, verdict),
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("%s field not allowed for %s verdict", field, verdict),
 				}
 			}
+		}
+	}
+
+	// A second VERDICT v1 anywhere in the text is malformed
+	if verdictCount > 1 {
+		return Result{
+			Classification: Malformed,
+			Commentary:     commentary,
+			Verdict:        buildPartialVerdict(fields),
+			Problem:        "multiple VERDICT v1 lines found",
 		}
 	}
 
@@ -338,4 +269,18 @@ func isValidFieldName(name string) bool {
 		"reason":    true,
 	}
 	return validFields[name]
+}
+
+// buildPartialVerdict constructs a Verdict from parsed fields, trimming values appropriately.
+func buildPartialVerdict(fields map[string]string) Verdict {
+	return Verdict{
+		Candidate: strings.TrimSpace(fields["candidate"]),
+		Attempt:   strings.TrimSpace(fields["attempt"]),
+		Decision:  fields["verdict"],
+		Severity:  strings.TrimSpace(fields["severity"]),
+		BlockID:   strings.TrimSpace(fields["block_id"]),
+		Evidence:  strings.TrimSpace(fields["evidence"]),
+		Remedy:    strings.TrimSpace(fields["remedy"]),
+		Reason:    strings.TrimSpace(fields["reason"]),
+	}
 }

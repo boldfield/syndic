@@ -83,6 +83,22 @@ func TestParseVerdicts(t *testing.T) {
 			attemptID:       "attempt1",
 			expectedClass:   Malformed,
 			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				// Should have partial verdict from first envelope
+				if r.Verdict.Candidate != "hash123" {
+					t.Errorf("expected partial verdict filled, got candidate %q", r.Verdict.Candidate)
+				}
+				if r.Verdict.Attempt != "attempt1" {
+					t.Errorf("expected partial verdict filled, got attempt %q", r.Verdict.Attempt)
+				}
+				if r.Verdict.Decision != "approve" {
+					t.Errorf("expected partial verdict decision filled, got %q", r.Verdict.Decision)
+				}
+				// Commentary should have text after first envelope (which includes second VERDICT v1)
+				if !strings.Contains(r.Commentary, "VERDICT v1") {
+					t.Errorf("expected commentary to contain second VERDICT v1, got %q", r.Commentary)
+				}
+			},
 		},
 		{
 			name:             "VerdictBlockWithEndMarker",
@@ -147,6 +163,15 @@ func TestParseVerdicts(t *testing.T) {
 			attemptID:       "attempt1",
 			expectedClass:   Malformed,
 			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				// Should have all parsed fields in partial verdict
+				if r.Verdict.Severity != "low" {
+					t.Errorf("expected severity to be parsed, got %q", r.Verdict.Severity)
+				}
+				if r.Verdict.Candidate != "hash123" {
+					t.Errorf("expected partial verdict filled, got candidate %q", r.Verdict.Candidate)
+				}
+			},
 		},
 		{
 			name:            "BlockMissingRemedy",
@@ -262,6 +287,22 @@ func TestParseVerdicts(t *testing.T) {
 			attemptID:       "attempt1",
 			expectedClass:   Malformed,
 			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				// Should have partial verdict from first envelope
+				if r.Verdict.Candidate != "hash123" {
+					t.Errorf("expected partial verdict filled, got candidate %q", r.Verdict.Candidate)
+				}
+				if r.Verdict.Attempt != "attempt1" {
+					t.Errorf("expected partial verdict filled, got attempt %q", r.Verdict.Attempt)
+				}
+				if r.Verdict.Decision != "approve" {
+					t.Errorf("expected partial verdict decision filled, got %q", r.Verdict.Decision)
+				}
+				// Commentary should be empty (all lines are part of envelope)
+				if r.Commentary != "" {
+					t.Errorf("expected empty commentary, got %q", r.Commentary)
+				}
+			},
 		},
 		{
 			name:            "MalformedWithProseAndPartialVerdict",
