@@ -229,10 +229,17 @@ func TestProbeRawDirInGitWorktree(t *testing.T) {
 	rawDir := filepath.Join(tmpDir, "raw")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	// Create minimal roster
 	rosterContent := `
@@ -281,6 +288,8 @@ required_reviewers = ["reviewer"]
 		"--endpoint", "test-endpoint",
 		"--model", "test-model",
 		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
 		"--secrets-dir", secretsDir,
 	})
 
@@ -298,10 +307,18 @@ func TestProbeUnreachable(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	// Create roster with unreachable endpoint
 	rosterContent := `
@@ -354,6 +371,9 @@ required_reviewers = ["reviewer"]
 		"--roster", rosterPath,
 		"--endpoint", "test-endpoint",
 		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
 		"--secrets-dir", secretsDir,
 	})
 
@@ -372,6 +392,12 @@ required_reviewers = ["reviewer"]
 	output := stderr.String()
 	if !strings.Contains(output, "unreachable") {
 		t.Fatalf("expected 'unreachable' in output, got: %s", output)
+	}
+
+	// Verify no export was written
+	exportFiles, err := os.ReadDir(exportDir)
+	if err == nil && len(exportFiles) > 0 {
+		t.Fatalf("expected no export files, got %d", len(exportFiles))
 	}
 }
 
@@ -488,6 +514,16 @@ required_reviewers = ["reviewer"]
 func TestProbeInvalidRoster(t *testing.T) {
 	tmpDir := t.TempDir()
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	// Write invalid TOML
 	if err := os.WriteFile(rosterPath, []byte("this is not valid [toml"), 0600); err != nil {
@@ -500,6 +536,7 @@ func TestProbeInvalidRoster(t *testing.T) {
 		"--roster", rosterPath,
 		"--endpoint", "test-endpoint",
 		"--model", "test-model",
+		"--secrets-dir", secretsDir,
 	})
 
 	if exitCode != 2 {
@@ -511,10 +548,18 @@ func TestProbeEndpointNotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	rosterContent := `
 default_preset = "test-preset"
@@ -560,6 +605,9 @@ required_reviewers = ["reviewer"]
 		"--roster", rosterPath,
 		"--endpoint", "nonexistent-endpoint",
 		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
 		"--secrets-dir", secretsDir,
 	})
 
@@ -574,10 +622,16 @@ func TestProbeUnauthorized(t *testing.T) {
 	exportDir := filepath.Join(tmpDir, "export")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	// Create a test server that returns 401
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -639,6 +693,7 @@ required_reviewers = ["reviewer"]
 		"--model", "test-model",
 		"--raw-dir", rawDir,
 		"--export-dir", exportDir,
+		"--journal", journalPath,
 		"--secrets-dir", secretsDir,
 	})
 
@@ -773,10 +828,18 @@ func TestProbeInvalidRosterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
+
+	// Set environment to temp directory to avoid home directory pollution
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
 
 	// Create roster with validation violations
 	rosterContent := `
@@ -803,6 +866,9 @@ declared_location = "mars"
 		"--roster", rosterPath,
 		"--endpoint", "test-endpoint",
 		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
 		"--secrets-dir", secretsDir,
 	})
 
@@ -816,6 +882,112 @@ declared_location = "mars"
 
 	if exitCode != 2 {
 		t.Fatalf("expected exit code 2, got %d, stderr: %s", exitCode, stderr.String())
+	}
+
+	output := stderr.String()
+	// Assert that the captured output contains expected violations
+	expectedViolations := []string{"unknown declared_location", "unknown dialect", "default_preset is empty"}
+	for _, violation := range expectedViolations {
+		if !strings.Contains(output, violation) {
+			t.Fatalf("expected violation '%s' in output, got: %s", violation, output)
+		}
+	}
+}
+
+func TestProbeRawDirRelativePathFromNestedWorkingDirectory(t *testing.T) {
+	// Create a temporary repository structure
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	nestedDir := filepath.Join(repoDir, "nested")
+	gitDir := filepath.Join(repoDir, ".git")
+
+	if err := os.MkdirAll(nestedDir, 0700); err != nil {
+		t.Fatalf("failed to create nested dir: %v", err)
+	}
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+
+	// Set working directory to the nested directory
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(nestedDir); err != nil {
+		t.Fatalf("failed to change directory: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	// Create relative raw dir
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Set environment to temp directory
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+
+	// Create roster
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command with relative raw directory
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", "relative-raw",
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should exit 4 because raw dir is inside worktree
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4 for raw dir inside worktree, got %d", exitCode)
 	}
 }
 

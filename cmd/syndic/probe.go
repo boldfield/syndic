@@ -231,11 +231,16 @@ func isInsideGitWorktree(path string) bool {
 	for {
 		// Check if this path exists
 		if _, err := os.Stat(current); err == nil {
-			// Found an existing path, evaluate symlinks
-			resolved, err := filepath.EvalSymlinks(current)
+			// Found an existing path, convert to absolute path before symlink evaluation
+			absPath, err := filepath.Abs(current)
 			if err != nil {
-				// If we can't resolve, continue with lexical path
-				resolved = current
+				absPath = current
+			}
+			// Evaluate symlinks
+			resolved, err := filepath.EvalSymlinks(absPath)
+			if err != nil {
+				// If we can't resolve, continue with absolute path
+				resolved = absPath
 			}
 			// Walk up from the resolved path
 			checkPath := resolved
