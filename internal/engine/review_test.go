@@ -17,7 +17,10 @@ import (
 const authorText = "the answer is 42"
 
 // reviewRoster is RosterTOML with the author renamed and one reviewer per
-// id, all of them required by the review preset.
+// id, all of them required by the review preset. The reviewers share a pool
+// wide enough to run them all at once: in the default pool, with concurrency
+// 1, they would run one after another, and the tests here that hold one
+// reviewer while another answers need them in flight together.
 func reviewRoster(authorID string, reviewers ...string) string {
 	toml := enginetest.RosterTOML
 	toml = strings.ReplaceAll(toml, `id = "author"`, `id = "`+authorID+`"`)
@@ -26,10 +29,11 @@ func reviewRoster(authorID string, reviewers ...string) string {
 	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
 	var extra, quoted []string
 	for _, id := range reviewers {
-		extra = append(extra, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\n")
+		extra = append(extra, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"\n")
 		quoted = append(quoted, `"`+id+`"`)
 	}
 	toml = strings.Replace(toml, "[[endpoints]]", strings.Join(extra, "\n")+"\n[[endpoints]]", 1)
+	toml += "\n[pools.reviewers]\nconcurrency = 10\n"
 	toml = strings.Replace(toml, `required_reviewers = ["reviewer"]`, "required_reviewers = ["+strings.Join(quoted, ", ")+"]", 1)
 	return toml
 }
