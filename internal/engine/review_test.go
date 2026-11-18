@@ -657,3 +657,123 @@ func TestReviewRepairMessages(t *testing.T) {
 		t.Fatalf("engine stayed busy: %v", err)
 	}
 }
+
+func TestReviewRepairEchosOriginalAttemptID(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		verdictStep(func(hash, attempt string) string {
+			return fake.VerdictWrongAttemptID(hash, attempt)
+		}),
+	))
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateIncomplete, "reviewer_failed:reviewer:rejected")
+	calls := h.Adapters["reviewer"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("%d calls, want 2", len(calls))
+	}
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(rows))
+	}
+	attempts := attemptsOf(h, turnID, "reviewer")
+	if len(attempts) != 2 {
+		t.Fatalf("%d attempts, want 2", len(attempts))
+	}
+}
+
+func TestReviewRepairValidBlock(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "evidence", "remedy", "reason")
+		}),
+	))
+	turnID := submitReview(t, h, "s1")
+	row := waitEnded(t, h, turnID)
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 2 {
+		t.Fatalf("%d verdicts, want 2", len(rows))
+	}
+	repairVerdict := rows[1]
+	if repairVerdict.ValidationStatus != "valid" || repairVerdict.Parsed != "block" {
+		t.Fatalf("repair verdict = %+v, want valid block", repairVerdict)
+	}
+	blockID := repairVerdict.ID + ":b1"
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "block:"+blockID {
+		t.Fatalf("turn ended %q %q, want block:%s", row.TerminalState, row.TerminalReason, blockID)
+	}
+	blocks, err := h.Store.OpenBlocks(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0].ID != blockID {
+		t.Fatalf("open blocks = %+v", blocks)
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewTwoReviewerRepairAndApprove(t *testing.T) {
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"r1": {
+			enginetest.Reply(fake.VerdictProseApprove()),
+			approveStep(),
+		},
+		"r2": {approveStep()},
+	}
+	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	rows := verdictRows(t, h, turnID)
+	if len(rows) != 3 {
+		t.Fatalf("%d verdicts, want 3", len(rows))
+	}
+	calls := h.Adapters["r1"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("r1 called %d times, want 2", len(calls))
+	}
+	calls = h.Adapters["r2"].Calls()
+	if len(calls) != 1 {
+		t.Fatalf("r2 called %d times, want 1", len(calls))
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}
+
+func TestReviewRepairAttemptBegunCarriesRepairOf(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScriptsMultiple(
+		enginetest.Reply(fake.VerdictProseApprove()),
+		approveStep(),
+	))
+	turnID := submitReview(t, h, "s1")
+	waitEnded(t, h, turnID)
+	var originalAttemptID, repairAttemptID string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvAttemptBegun); ok && ev.TurnID == turnID && p.Participant == "reviewer" {
+			if originalAttemptID == "" {
+				originalAttemptID = p.AttemptID
+			} else {
+				repairAttemptID = p.AttemptID
+			}
+		}
+	}
+	if originalAttemptID == "" || repairAttemptID == "" {
+		t.Fatalf("missing attempt events: original=%s repair=%s", originalAttemptID, repairAttemptID)
+	}
+	var repairBegun *wire.EvAttemptBegun
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvAttemptBegun); ok && p.AttemptID == repairAttemptID {
+			repairBegun = p
+			break
+		}
+	}
+	if repairBegun == nil || repairBegun.RepairOf == nil || *repairBegun.RepairOf != originalAttemptID {
+		t.Fatalf("repair attempt_begun = %+v, want repair_of=%s", repairBegun, originalAttemptID)
+	}
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatalf("engine stayed busy: %v", err)
+	}
+}

@@ -314,14 +314,14 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
-	reviewInput := prompt.ReviewInput{
+	originalReviewInput := prompt.ReviewInput{
 		Request:       t.input,
 		Candidate:     t.candidate,
 		CandidateHash: t.candidateHash,
-		AttemptID:     repairAttemptID,
+		AttemptID:     originalDispatch.attemptID,
 		Delimiter:     delimiter,
 	}
-	msgs, err := prompt.Repair(reviewInput, originalOutput, repairAttemptID)
+	msgs, err := prompt.Repair(originalReviewInput, originalOutput, repairAttemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +349,12 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 		Deadline:        deadline.Format(time.RFC3339Nano),
 		MaxOutputTokens: int64(maxOut),
 		RepairOf:        repairOfPtr,
+	}); err != nil {
+		return nil, err
+	}
+	if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+		Participant: originalDispatch.participant,
+		State:       ParticipantRunning,
 	}); err != nil {
 		return nil, err
 	}
