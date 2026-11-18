@@ -3,13 +3,13 @@ package engine_test
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -417,14 +417,74 @@ func TestAttemptDeadlineOnHangReviewAuthorIdle(t *testing.T) {
 	}
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 
-	var states []string
-	for _, ev := range h.Events() {
-		if p, ok := ev.Payload.(*wire.EvParticipantState); ok && p.Participant == "author" {
-			states = append(states, p.State)
-		}
-	}
+	states := stateEvents(h, "author")
 	want := []string{engine.ParticipantRunning, engine.ParticipantIdle}
-	if !reflect.DeepEqual(states, want) {
+	if joinStates(states) != joinStates(want) {
 		t.Fatalf("author participant_state events = %v, want %v", states, want)
 	}
+}
+
+func TestRepairQueuesBehindWaitingReviewer(t *testing.T) {
+	scripts := approvers("r2")
+	scripts["r1"] = []fake.Step{enginetest.Reply(fake.VerdictProseApprove()), approveStep()}
+	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}, {"r2", "p"}}, nil, ""), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+
+	var order []string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvAttemptBegun); ok && p.Phase == "review" {
+			order = append(order, p.Participant)
+		}
+	}
+	if got := strings.Join(order, ","); got != "r1,r2,r1" {
+		t.Fatalf("review attempts began in order %s, want r1,r2,r1", got)
+	}
+}
+
+func TestOverlappingAttemptsKeepParticipantRunning(t *testing.T) {
+	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	gate := make(chan struct{})
+	scripts := map[string][]fake.Step{"author": {
+		{Kind: fake.StepKindHang},
+		enginetest.ReplyFunc(func(transport.CompleteRequest) string { <-gate; return authorText }),
+	}}
+	roster := schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, "\n[pools.default]\nconcurrency = 2\n")
+	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(start))
+	reply, err := h.Engine.Submit(soloReq("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCount(t, h, wire.EventKindAttemptBegun, 1)
+	first := attemptsOf(h, reply.TurnID, "author")[0]
+	h.Clock.Advance(61 * time.Second)
+	wantEnd(t, h, reply.TurnID, engine.StateIncomplete, "deadline:attempt:"+first)
+
+	if _, err := h.Engine.Submit(soloReq("s2")); err != nil {
+		t.Fatal(err)
+	}
+	waitCount(t, h, wire.EventKindAttemptBegun, 2)
+	if _, err := h.Adapters["author"].Cancel(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	// The old request's slot is released once its Complete call returns.
+	waitQuarantined(t, h, first)
+	time.Sleep(50 * time.Millisecond)
+	if s := participantState(t, h, "author"); s != engine.ParticipantRunning {
+		t.Fatalf("author is %s while its newer attempt runs", s)
+	}
+	close(gate)
+	waitParticipantState(t, h, "author", engine.ParticipantIdle)
+}
+
+func waitQuarantined(t *testing.T, h *enginetest.Harness, attemptID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if getAttempt(t, h, attemptID).Quarantined {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("attempt %s was not quarantined", attemptID)
 }

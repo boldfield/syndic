@@ -127,6 +127,7 @@ type Engine struct {
 	startedAt    time.Time
 	open         *openTurn
 	running      map[string]bool
+	inflight     map[string]int // dispatches holding a pool slot, per participant
 	queued       map[string]bool
 	pools        map[string]*pool
 }
@@ -153,6 +154,7 @@ func New(o Options) (*Engine, error) {
 		rand:       o.Rand,
 		newAdapter: o.NewAdapter,
 		running:    make(map[string]bool),
+		inflight:   make(map[string]int),
 		queued:     make(map[string]bool),
 		pools:      make(map[string]*pool),
 	}

@@ -50,6 +50,7 @@ func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
 	concurrency, _ := e.roster.PoolFor(name)
 	if p.running < concurrency && len(p.queue) == 0 {
 		p.running++
+		e.inflight[participant]++
 		start()
 		return nil
 	}
@@ -81,7 +82,11 @@ func (e *Engine) releaseLocked(participant string) {
 	if p.running > 0 {
 		p.running--
 	}
-	if e.running[participant] {
+	if e.inflight[participant] > 0 {
+		e.inflight[participant]--
+	}
+	// A newer dispatch of the same participant may still be running.
+	if e.inflight[participant] == 0 && e.running[participant] {
 		delete(e.running, participant)
 		_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 			return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
@@ -96,6 +101,7 @@ func (e *Engine) releaseLocked(participant string) {
 			continue
 		}
 		p.running++
+		e.inflight[head.participant]++
 		head.start()
 	}
 }
