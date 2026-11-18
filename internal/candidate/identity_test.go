@@ -1,6 +1,7 @@
 package candidate
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -38,14 +39,9 @@ func TestHashValue(t *testing.T) {
 		t.Fatalf("Hash failed: %v", err)
 	}
 
-	if len(hash) != 64 {
-		t.Errorf("Hash length should be 64, got %d", len(hash))
-	}
-
-	for _, c := range hash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			t.Errorf("Hash contains non-lowercase-hex character: %c", c)
-		}
+	expectedHash := "8c24d1efe000fe81f3d653df3740ed0c201461beeaf46df78a8433659dd5878e"
+	if hash != expectedHash {
+		t.Errorf("Hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
 	}
 }
 
@@ -90,8 +86,14 @@ func TestHashChangesWithManifest(t *testing.T) {
 		EvidenceIDs:     []string{"ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when manifest hash changes")
@@ -115,8 +117,14 @@ func TestHashChangesWithTurnID(t *testing.T) {
 		EvidenceIDs:     []string{"ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when turn id changes")
@@ -140,8 +148,14 @@ func TestHashChangesWithAuthorAttemptID(t *testing.T) {
 		EvidenceIDs:     []string{"ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when author attempt id changes")
@@ -165,8 +179,14 @@ func TestHashChangesWithContent(t *testing.T) {
 		EvidenceIDs:     []string{"ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when content changes")
@@ -190,8 +210,14 @@ func TestHashChangesWithContentByte(t *testing.T) {
 		EvidenceIDs:     []string{"ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when one byte of content changes")
@@ -215,8 +241,14 @@ func TestHashChangesWithEvidenceList(t *testing.T) {
 		EvidenceIDs:     []string{"ev2", "ev1"},
 	}
 
-	hash1, _ := Hash(id1)
-	hash2, _ := Hash(id2)
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when evidence order changes")
@@ -240,8 +272,14 @@ func TestEvidenceOrderMatters(t *testing.T) {
 		EvidenceIDs:     []string{"b", "a"},
 	}
 
-	canonical1, _ := Canonical(id1)
-	canonical2, _ := Canonical(id2)
+	canonical1, err := Canonical(id1)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
+	canonical2, err := Canonical(id2)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
 
 	if string(canonical1) == string(canonical2) {
 		t.Error("Canonical forms should differ when evidence order differs")
@@ -262,7 +300,7 @@ func TestNoEvidence(t *testing.T) {
 		t.Fatalf("Canonical failed: %v", err)
 	}
 
-	if !contains(string(canonical), "evidence:none\n") {
+	if !strings.Contains(string(canonical), "evidence:none\n") {
 		t.Error("Should have evidence:none when no evidence ids")
 	}
 }
@@ -281,7 +319,7 @@ func TestEmptyContent(t *testing.T) {
 		t.Fatalf("Canonical failed: %v", err)
 	}
 
-	if !contains(string(canonical), "content_len:0\n") {
+	if !strings.Contains(string(canonical), "content_len:0\n") {
 		t.Error("Should have content_len:0 for empty content")
 	}
 }
@@ -300,7 +338,7 @@ func TestNonUTF8Content(t *testing.T) {
 		t.Fatalf("Canonical should not error on non-UTF8 content: %v", err)
 	}
 
-	if !contains(string(canonical), "content_len:3\n") {
+	if !strings.Contains(string(canonical), "content_len:3\n") {
 		t.Error("Should correctly count non-UTF8 bytes")
 	}
 }
@@ -348,13 +386,4 @@ func TestEvidenceIDContainsComma(t *testing.T) {
 	if err == nil {
 		t.Error("Should error when evidence id contains comma")
 	}
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i < len(s)-len(substr)+1; i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

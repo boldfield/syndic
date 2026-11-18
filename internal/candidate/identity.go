@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// Identity represents the identity of a candidate answer.
 type Identity struct {
 	ManifestHash    string
 	TurnID          string
@@ -15,6 +16,7 @@ type Identity struct {
 	EvidenceIDs     []string
 }
 
+// Canonical computes the canonical form of an identity, producing seven lines each terminated by newline.
 func Canonical(id Identity) ([]byte, error) {
 	if err := validateIdentity(id); err != nil {
 		return nil, err
@@ -40,6 +42,7 @@ func Canonical(id Identity) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// Hash computes the lowercase hex SHA-256 hash of the canonical form.
 func Hash(id Identity) (string, error) {
 	canonical, err := Canonical(id)
 	if err != nil {
