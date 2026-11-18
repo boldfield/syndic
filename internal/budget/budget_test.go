@@ -1,6 +1,7 @@
 package budget
 
 import (
+	"math"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/transport"
@@ -83,6 +84,20 @@ func TestAdmissionTokens(t *testing.T) {
 			o:                Overheads{MessageTokens: 10, RequestTokens: 20},
 			want:             165, // (50 + 10) + (75 + 10) + 20 = 60 + 85 + 20 = 165
 		},
+		{
+			name:             "near-integer fractional value: 1 byte at 1.0000000005",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 1))}},
+			tokensPerByteMax: 1.0000000005,
+			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:             2, // ceil(1.0000000005) = 2, not snapped to 1
+		},
+		{
+			name:             "large magnitude off-by-one: 10MB at 1.1 bytes",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 10000000))}},
+			tokensPerByteMax: 1.1,
+			o:                Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:             11000000, // 10M * 1.1 = 11M exactly
+		},
 	}
 
 	for _, tt := range tests {
@@ -102,6 +117,7 @@ func TestAdmissionTokensPanic(t *testing.T) {
 	}{
 		{name: "zero", tokensPerByteMax: 0},
 		{name: "negative", tokensPerByteMax: -1},
+		{name: "NaN", tokensPerByteMax: math.NaN()},
 	}
 
 	for _, tt := range tests {
@@ -173,6 +189,20 @@ func TestEstimateTokens(t *testing.T) {
 			o:             Overheads{MessageTokens: 10, RequestTokens: 20},
 			want:          90, // ceil(60/3) + 10 + ceil(90/3) + 10 + 20 = 20 + 10 + 30 + 10 + 20 = 90
 		},
+		{
+			name:          "near-integer fractional value: 1 byte at 0.9999999995 bytes/token",
+			msgs:          []transport.Message{{Role: "user", Content: string(make([]byte, 1))}},
+			bytesPerToken: 0.9999999995,
+			o:             Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:          2, // ceil(1/0.9999999995) = ceil(1.0000000005...) = 2, not snapped to 1
+		},
+		{
+			name:          "large magnitude exact: 3MB at 0.3 bytes/token",
+			msgs:          []transport.Message{{Role: "user", Content: string(make([]byte, 3000000))}},
+			bytesPerToken: 0.3,
+			o:             Overheads{MessageTokens: 0, RequestTokens: 0},
+			want:          10000000, // 3M / 0.3 = 10M exactly
+		},
 	}
 
 	for _, tt := range tests {
@@ -192,6 +222,7 @@ func TestEstimateTokensPanic(t *testing.T) {
 	}{
 		{name: "zero", bytesPerToken: 0},
 		{name: "negative", bytesPerToken: -1},
+		{name: "NaN", bytesPerToken: math.NaN()},
 	}
 
 	for _, tt := range tests {
@@ -256,6 +287,18 @@ func TestUsableBound(t *testing.T) {
 			contextBound:  100,
 			contextMargin: 0.9,
 			want:          10, // floor(100 * 0.1) = floor(10.0), should be 10 not 9
+		},
+		{
+			name:          "near-integer fractional value: 1 with 0.0000000005 margin",
+			contextBound:  1,
+			contextMargin: 0.0000000005,
+			want:          0, // floor(1 * (1 - 0.0000000005)) = floor(0.9999999995) = 0, not snapped to 1
+		},
+		{
+			name:          "large magnitude exact: 10M with 0.7 margin",
+			contextBound:  10000000,
+			contextMargin: 0.7,
+			want:          3000000, // floor(10M * 0.3) = floor(3M) = 3M exactly
 		},
 	}
 
@@ -359,6 +402,12 @@ func TestStandInBytes(t *testing.T) {
 			bytesPerToken:   0.07,
 			want:            7, // ceil(100 * 0.07) = ceil(7.0), should be 7 not 8
 		},
+		{
+			name:            "near-integer fractional value: 1 token at 1.0000000005 bytes/token",
+			maxOutputTokens: 1,
+			bytesPerToken:   1.0000000005,
+			want:            2, // ceil(1.0000000005) = 2, not snapped to 1
+		},
 	}
 
 	for _, tt := range tests {
@@ -378,6 +427,7 @@ func TestStandInBytesPanic(t *testing.T) {
 	}{
 		{name: "zero", bytesPerToken: 0},
 		{name: "negative", bytesPerToken: -1},
+		{name: "NaN", bytesPerToken: math.NaN()},
 	}
 
 	for _, tt := range tests {

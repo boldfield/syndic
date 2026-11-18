@@ -12,22 +12,30 @@ type Overheads struct {
 }
 
 // ceilSafe rounds a float up to the nearest integer, snapping to the nearest integer
-// when the result is within epsilon of an integer (to avoid floating-point errors
-// that round mathematically integral results up by one).
+// when the result is within relative floating-point error of an integer
+// (to avoid floating-point errors that round mathematically integral results up by one).
+// Uses relative tolerance to distinguish representation error from genuine fractions.
 func ceilSafe(x float64) int {
 	r := math.Round(x)
-	if math.Abs(x-r) < 1e-9 {
+	// Snap only if error is within relative epsilon: use max(1.0, abs(r)) to avoid
+	// division issues near zero. This catches products like 100*1.1=110.00000000000001
+	// but not values like 1.0000000005 which are genuinely fractional.
+	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-12 {
 		return int(r)
 	}
 	return int(math.Ceil(x))
 }
 
 // floorSafe rounds a float down to the nearest integer, snapping to the nearest integer
-// when the result is within epsilon of an integer (to avoid floating-point errors
-// that round mathematically integral results down by one).
+// when the result is within relative floating-point error of an integer
+// (to avoid floating-point errors that round mathematically integral results down by one).
+// Uses relative tolerance to distinguish representation error from genuine fractions.
 func floorSafe(x float64) int {
 	r := math.Round(x)
-	if math.Abs(x-r) < 1e-9 {
+	// Snap only if error is within relative epsilon: use max(1.0, abs(r)) to avoid
+	// division issues near zero. This catches products like 1000*0.1=100.0 but not
+	// values like 0.9999999995 which are genuinely fractional.
+	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-12 {
 		return int(r)
 	}
 	return int(math.Floor(x))
@@ -35,9 +43,9 @@ func floorSafe(x float64) int {
 
 // AdmissionTokens computes the token count for messages using an admission bound formula.
 // It calculates: sum of (ceil(len(content in bytes) × tokensPerByteMax) + MessageTokens) + RequestTokens.
-// Panics if tokensPerByteMax is not greater than zero.
+// Panics if tokensPerByteMax is not greater than zero (including NaN).
 func AdmissionTokens(msgs []transport.Message, tokensPerByteMax float64, o Overheads) int {
-	if tokensPerByteMax <= 0 {
+	if !(tokensPerByteMax > 0) {
 		panic("tokensPerByteMax must be greater than zero")
 	}
 
@@ -51,9 +59,9 @@ func AdmissionTokens(msgs []transport.Message, tokensPerByteMax float64, o Overh
 
 // EstimateTokens computes an estimate of token count for messages.
 // It calculates: sum of (ceil(len(content in bytes) / bytesPerToken) + MessageTokens) + RequestTokens.
-// Panics if bytesPerToken is not greater than zero.
+// Panics if bytesPerToken is not greater than zero (including NaN).
 func EstimateTokens(msgs []transport.Message, bytesPerToken float64, o Overheads) int {
-	if bytesPerToken <= 0 {
+	if !(bytesPerToken > 0) {
 		panic("bytesPerToken must be greater than zero")
 	}
 
@@ -94,9 +102,9 @@ func ClampOutput(configured int, outputBound *int) int {
 
 // StandInBytes computes the size in bytes of a stand-in text placeholder.
 // It calculates: ceil(maxOutputTokens × bytesPerToken).
-// Panics if bytesPerToken is not greater than zero.
+// Panics if bytesPerToken is not greater than zero (including NaN).
 func StandInBytes(maxOutputTokens int, bytesPerToken float64) int {
-	if bytesPerToken <= 0 {
+	if !(bytesPerToken > 0) {
 		panic("bytesPerToken must be greater than zero")
 	}
 
