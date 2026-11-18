@@ -31,7 +31,7 @@ func TestDialSuccess(t *testing.T) {
 			RosterHash:    "hash1",
 			ManifestHash:  "hash2",
 		})
-		w.Write(reply)
+		_ = w.Write(reply)
 	})
 	defer server.Close()
 
@@ -42,7 +42,7 @@ func TestDialSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	hello := client.Hello()
 	if hello.RunID != "run-1" {
@@ -54,7 +54,7 @@ func TestDialErrorReply(t *testing.T) {
 	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
 		_, _ = r.Read()
 		errReply, _ := wire.NewError("", &wire.Error{Code: "protocol"})
-		w.Write(errReply)
+		_ = w.Write(errReply)
 	})
 	defer server.Close()
 
@@ -63,7 +63,7 @@ func TestDialErrorReply(t *testing.T) {
 
 	client, err := Dial(ctx, server.addr, "test-client", "1.0")
 	if client != nil {
-		client.Close()
+		_ = client.Close()
 	}
 	if err == nil {
 		t.Fatalf("expected error, got nil")
@@ -87,7 +87,7 @@ func TestConcurrentRequests(t *testing.T) {
 				RosterHash:    "hash1",
 				ManifestHash:  "hash2",
 			})
-			w.Write(reply)
+			_ = w.Write(reply)
 		}
 
 		// For other requests, send reply in reverse order
@@ -97,10 +97,10 @@ func TestConcurrentRequests(t *testing.T) {
 
 		// Send replies in reverse order
 		reply2, _ := wire.NewReply(frames[1].ID, wire.StatusReply{RunID: "from-frame-1"})
-		w.Write(reply2)
+		_ = w.Write(reply2)
 
 		reply1, _ := wire.NewReply(frames[0].ID, wire.StatusReply{RunID: "from-frame-0"})
-		w.Write(reply1)
+		_ = w.Write(reply1)
 
 		<-done
 	})
@@ -113,7 +113,7 @@ func TestConcurrentRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var wg sync.WaitGroup
 	results := make([]string, 2)
@@ -165,7 +165,7 @@ func TestErrorReply(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -173,7 +173,7 @@ func TestErrorReply(t *testing.T) {
 				Code:   "busy",
 				TurnID: strPtr("turn-123"),
 			})
-			w.Write(errReply)
+			_ = w.Write(errReply)
 
 			<-done
 			return
@@ -188,7 +188,7 @@ func TestErrorReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Status(ctx)
 	done <- true
@@ -229,13 +229,13 @@ func TestContent(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
 			if frame.Type == wire.RequestContent {
 				var req wire.ContentRequest
-				json.Unmarshal(frame.Body, &req)
+				_ = json.Unmarshal(frame.Body, &req)
 
 				offset := int(req.Offset)
 				limit := int(req.Limit)
@@ -252,7 +252,7 @@ func TestContent(t *testing.T) {
 					Total:  int64(len(content)),
 					SHA256: hashStr,
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 			}
 
 			select {
@@ -271,7 +271,7 @@ func TestContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	result, err := client.Content(ctx, "test-ref")
 	done <- true
@@ -301,7 +301,7 @@ func TestContentSHA256Mismatch(t *testing.T) {
 				RosterHash:    "hash1",
 				ManifestHash:  "hash2",
 			})
-			w.Write(reply)
+			_ = w.Write(reply)
 			return
 		}
 
@@ -312,7 +312,7 @@ func TestContentSHA256Mismatch(t *testing.T) {
 			Total:  5,
 			SHA256: "wronghash",
 		})
-		w.Write(reply)
+		_ = w.Write(reply)
 	})
 	defer server.Close()
 
@@ -323,11 +323,68 @@ func TestContentSHA256Mismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Content(ctx, "test-ref")
 	if err == nil {
 		t.Fatalf("expected error for sha256 mismatch")
+	}
+}
+
+func TestContentShortFinalPage(t *testing.T) {
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply("", wire.HelloReply{
+					EngineVersion: "1.0",
+					Protocol:      1,
+					RunID:         "run-1",
+					RunFirstSeq:   0,
+					RosterHash:    "hash1",
+					ManifestHash:  "hash2",
+				})
+				_ = w.Write(reply)
+				continue
+			}
+
+			if frame.Type == wire.RequestContent {
+				var req wire.ContentRequest
+				_ = json.Unmarshal(frame.Body, &req)
+
+				// Always send 0 bytes, saying total is 100 - causes infinite loop
+				hash := sha256.Sum256([]byte{})
+				hashStr := fmt.Sprintf("%x", hash)
+
+				reply, _ := wire.NewReply(frame.ID, wire.ContentReply{
+					Ref:    req.Ref,
+					Offset: req.Offset,
+					Data:   wire.EncodePage([]byte{}),
+					Total:  100,
+					SHA256: hashStr,
+				})
+				_ = w.Write(reply)
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = client.Content(ctx, "test-ref")
+	if err == nil {
+		t.Fatalf("expected error for zero-length page before reaching total")
 	}
 }
 
@@ -348,7 +405,7 @@ func TestSubscribeAndNextEvent(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -357,13 +414,13 @@ func TestSubscribeAndNextEvent(t *testing.T) {
 					OK:          true,
 					LiveFromSeq: 1,
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 
 				// Send three events
 				for i := 1; i <= 3; i++ {
 					body, _ := json.Marshal(wire.EvEngineStarted{RunID: "run-1"})
 					event := wire.NewEvent(int64(i), wire.EventKindEngineStarted, time.Now(), body)
-					w.Write(event)
+					_ = w.Write(event)
 				}
 
 				<-done
@@ -380,7 +437,7 @@ func TestSubscribeAndNextEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	liveFrom, err := client.Subscribe(ctx, 0)
 	if err != nil {
@@ -427,7 +484,7 @@ func TestEventBetweenRequestAndReply(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -436,7 +493,7 @@ func TestEventBetweenRequestAndReply(t *testing.T) {
 					OK:          true,
 					LiveFromSeq: 1,
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -444,11 +501,11 @@ func TestEventBetweenRequestAndReply(t *testing.T) {
 				// Send an event before the reply
 				body, _ := json.Marshal(wire.EvEngineStarted{RunID: "run-1"})
 				event := wire.NewEvent(1, wire.EventKindEngineStarted, time.Now(), body)
-				w.Write(event)
+				_ = w.Write(event)
 
 				// Now send the status reply
 				reply, _ := wire.NewReply(frame.ID, wire.StatusReply{RunID: "run-1"})
-				w.Write(reply)
+				_ = w.Write(reply)
 
 				<-done
 				return
@@ -464,7 +521,7 @@ func TestEventBetweenRequestAndReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Subscribe(ctx, 0)
 	if err != nil {
@@ -513,7 +570,7 @@ func TestErrorFrameWithNoID(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -522,7 +579,7 @@ func TestErrorFrameWithNoID(t *testing.T) {
 					OK:          true,
 					LiveFromSeq: 1,
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				subscribed = true
 				continue
 			}
@@ -533,7 +590,7 @@ func TestErrorFrameWithNoID(t *testing.T) {
 					Code:    "lagging",
 					LastSeq: int64Ptr(7),
 				})
-				w.Write(errReply)
+				_ = w.Write(errReply)
 
 				<-done
 				return
@@ -549,7 +606,7 @@ func TestErrorFrameWithNoID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Subscribe(ctx, 0)
 	if err != nil {
@@ -582,7 +639,8 @@ func TestErrorFrameWithNoID(t *testing.T) {
 	done <- true
 }
 
-func TestConnectionClose(t *testing.T) {
+func TestConnectionCloseWithWaitingRequest(t *testing.T) {
+	done := make(chan bool, 1)
 	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
 		frame, _ := r.Read()
 		if frame.Type == wire.RequestHello {
@@ -594,10 +652,9 @@ func TestConnectionClose(t *testing.T) {
 				RosterHash:    "hash1",
 				ManifestHash:  "hash2",
 			})
-			w.Write(reply)
+			_ = w.Write(reply)
 		}
-		// Close connection immediately
-		return
+		<-done
 	})
 	defer server.Close()
 
@@ -608,13 +665,73 @@ func TestConnectionClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
-	// Give the read loop time to notice the close
+	// Make a request that will hang
+	statusErr := make(chan error, 1)
+	go func() {
+		_, err := client.Status(ctx)
+		statusErr <- err
+	}()
+
+	// Give the request time to reach the server
+	time.Sleep(50 * time.Millisecond)
+
+	// Close server without waiting
+	done <- true
 	time.Sleep(100 * time.Millisecond)
 
-	// Any call should return ErrClosed
-	_, err = client.Status(ctx)
+	// Request should get an error (either write error or ErrClosed)
+	if err := <-statusErr; err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+}
+
+func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply("", wire.HelloReply{
+					EngineVersion: "1.0",
+					Protocol:      1,
+					RunID:         "run-1",
+					RunFirstSeq:   0,
+					RosterHash:    "hash1",
+					ManifestHash:  "hash2",
+				})
+				_ = w.Write(reply)
+			} else if frame.Type == wire.RequestSubscribe {
+				reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{
+					OK:          true,
+					LiveFromSeq: 1,
+				})
+				_ = w.Write(reply)
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	_, err = client.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	// NextEvent should get ErrClosed when server closes
+	_, err = client.NextEvent(ctx)
 	if !errors.Is(err, ErrClosed) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
@@ -636,7 +753,7 @@ func TestContextCancellation(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 			// Don't send reply to Status, so request hangs until context is cancelled
@@ -651,7 +768,7 @@ func TestContextCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	ctx2, cancel2 := context.WithCancel(ctx)
 	go func() {
@@ -660,11 +777,64 @@ func TestContextCancellation(t *testing.T) {
 	}()
 
 	_, err = client.Status(ctx2)
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 
 	cancel()
+}
+
+func TestAlreadyCancelledContextThenSuccessfulRequest(t *testing.T) {
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply("", wire.HelloReply{
+					EngineVersion: "1.0",
+					Protocol:      1,
+					RunID:         "run-1",
+					RunFirstSeq:   0,
+					RosterHash:    "hash1",
+					ManifestHash:  "hash2",
+				})
+				_ = w.Write(reply)
+				continue
+			}
+			reply, _ := wire.NewReply(frame.ID, wire.StatusReply{RunID: "run-1"})
+			_ = w.Write(reply)
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// First request with cancelled context
+	ctx2, cancel2 := context.WithCancel(ctx)
+	cancel2()
+
+	_, err = client.Status(ctx2)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	// Second request with fresh context should work
+	reply, err := client.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if reply.RunID != "run-1" {
+		t.Fatalf("expected run-1, got %s", reply.RunID)
+	}
 }
 
 func TestUnknownEventKind(t *testing.T) {
@@ -684,7 +854,7 @@ func TestUnknownEventKind(t *testing.T) {
 					RosterHash:    "hash1",
 					ManifestHash:  "hash2",
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 				continue
 			}
 
@@ -693,12 +863,11 @@ func TestUnknownEventKind(t *testing.T) {
 					OK:          true,
 					LiveFromSeq: 1,
 				})
-				w.Write(reply)
+				_ = w.Write(reply)
 
 				// Send unknown event kind
 				event := wire.NewEvent(1, "unknown_kind", time.Now(), []byte(`{"data":"test"}`))
-				w.Write(event)
-
+				_ = w.Write(event)
 				<-done
 				return
 			}
@@ -713,7 +882,7 @@ func TestUnknownEventKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	_, err = client.Subscribe(ctx, 0)
 	if err != nil {
@@ -778,8 +947,8 @@ func startTestServer(t *testing.T, handler func(*wire.Reader, *wire.Writer)) *te
 }
 
 func (s *testServer) Close() {
-	s.listener.Close()
-	os.RemoveAll(s.dirToClean)
+	_ = s.listener.Close()
+	_ = os.RemoveAll(s.dirToClean)
 }
 
 func strPtr(s string) *string {

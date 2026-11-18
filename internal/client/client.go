@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -37,6 +38,7 @@ type Client struct {
 	eventQueue  chan wire.Frame
 	eventCtx    context.Context
 	eventCancel context.CancelFunc
+	eventBuffer []wire.Frame
 
 	// Frame ID generation
 	idCounter uint64
@@ -49,7 +51,8 @@ type pendingRequest struct {
 }
 
 func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*Client, error) {
-	conn, err := net.Dial("unix", socketPath)
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("dial: %w", err)
 	}
@@ -69,24 +72,30 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 		Protocol:      wire.ProtocolVersion,
 	})
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("hello request: %w", err)
 	}
 
 	if err := c.writer.Write(req); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("write hello: %w", err)
+	}
+
+	// Set a deadline from ctx for reading the hello reply
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetReadDeadline(deadline)
+		defer conn.SetReadDeadline(time.Time{})
 	}
 
 	// Read hello reply or error
 	frame, err := c.reader.Read()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("read hello reply: %w", err)
 	}
 
 	if frame.Type == "error" {
-		conn.Close()
+		_ = conn.Close()
 		var errBody wire.Error
 		if err := json.Unmarshal(frame.Body, &errBody); err != nil {
 			return nil, fmt.Errorf("unmarshal error: %w", err)
@@ -95,13 +104,13 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 	}
 
 	if frame.Type != "reply" {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("expected reply, got %s", frame.Type)
 	}
 
 	var hello wire.HelloReply
 	if err := json.Unmarshal(frame.Body, &hello); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("unmarshal hello reply: %w", err)
 	}
 
@@ -147,7 +156,10 @@ func (c *Client) Close() error {
 	c.pending = make(map[string]*pendingRequest)
 	c.pendingMu.Unlock()
 
-	return err
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Client) Status(ctx context.Context) (wire.StatusReply, error) {
@@ -265,6 +277,10 @@ func (c *Client) Content(ctx context.Context, ref string) ([]byte, error) {
 			return nil, fmt.Errorf("decode content page: %w", err)
 		}
 
+		if len(decoded) == 0 && offset < totalSize {
+			return nil, fmt.Errorf("content: received zero-length page before reaching total")
+		}
+
 		result = append(result, decoded...)
 		offset += int64(len(decoded))
 
@@ -277,12 +293,10 @@ func (c *Client) Content(ctx context.Context, ref string) ([]byte, error) {
 		return nil, fmt.Errorf("content: expected %d bytes, got %d", totalSize, len(result))
 	}
 
-	if expectedSHA256 != "" {
-		hash := sha256.Sum256(result)
-		actual := fmt.Sprintf("%x", hash)
-		if actual != expectedSHA256 {
-			return nil, fmt.Errorf("content: sha256 mismatch")
-		}
+	hash := sha256.Sum256(result)
+	actual := fmt.Sprintf("%x", hash)
+	if actual != expectedSHA256 {
+		return nil, fmt.Errorf("content: sha256 mismatch")
 	}
 
 	return result, nil
@@ -294,36 +308,39 @@ func (c *Client) Subscribe(ctx context.Context, sinceSeq int64) (int64, error) {
 		c.eventMu.Unlock()
 		return 0, errors.New("already subscribed")
 	}
-	c.subscribed = true
 	c.eventMu.Unlock()
 
-	c.eventCtx, c.eventCancel = context.WithCancel(context.Background())
+	eventCtx, eventCancel := context.WithCancel(context.Background())
 
 	var reply wire.SubscribeReply
 	body, err := c.doRequest(ctx, wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: sinceSeq})
 	if err != nil {
-		c.eventMu.Lock()
-		c.subscribed = false
-		c.eventMu.Unlock()
-		if c.eventCancel != nil {
-			c.eventCancel()
-		}
+		eventCancel()
 		return 0, err
 	}
 
 	if err := json.Unmarshal(body, &reply); err != nil {
-		c.eventMu.Lock()
-		c.subscribed = false
-		c.eventMu.Unlock()
-		if c.eventCancel != nil {
-			c.eventCancel()
-		}
+		eventCancel()
 		return 0, fmt.Errorf("unmarshal subscribe reply: %w", err)
 	}
 
 	c.eventMu.Lock()
-	c.lastSeq = reply.LiveFromSeq - 1
+	c.eventCtx = eventCtx
+	c.eventCancel = eventCancel
+	c.lastSeq = sinceSeq
+	c.subscribed = true
+	bufferedEvents := c.eventBuffer
+	c.eventBuffer = nil
 	c.eventMu.Unlock()
+
+	// Flush buffered events to the queue
+	for _, evt := range bufferedEvents {
+		select {
+		case c.eventQueue <- evt:
+		case <-eventCtx.Done():
+			return reply.LiveFromSeq, nil
+		}
+	}
 
 	return reply.LiveFromSeq, nil
 }
@@ -353,8 +370,19 @@ func (c *Client) Unsubscribe(ctx context.Context) error {
 }
 
 func (c *Client) NextEvent(ctx context.Context) (wire.Frame, error) {
+	c.eventMu.Lock()
+	eventCtx := c.eventCtx
+	c.eventMu.Unlock()
+
+	if eventCtx == nil {
+		return wire.Frame{}, errors.New("not subscribed")
+	}
+
 	select {
-	case frame := <-c.eventQueue:
+	case frame, ok := <-c.eventQueue:
+		if !ok {
+			return wire.Frame{}, ErrClosed
+		}
 		if frame.Type == "error" {
 			var errBody wire.Error
 			if err := json.Unmarshal(frame.Body, &errBody); err != nil {
@@ -373,7 +401,7 @@ func (c *Client) NextEvent(ctx context.Context) (wire.Frame, error) {
 
 	case <-ctx.Done():
 		return wire.Frame{}, ctx.Err()
-	case <-c.eventCtx.Done():
+	case <-eventCtx.Done():
 		return wire.Frame{}, ErrClosed
 	}
 }
@@ -473,19 +501,25 @@ func (c *Client) readLoop() {
 		if frame.Type == "event" {
 			c.eventMu.Lock()
 			subscribed := c.subscribed
-			c.eventMu.Unlock()
-			if subscribed {
-				select {
-				case c.eventQueue <- frame:
-				case <-c.eventCtx.Done():
-					return
+			if !subscribed {
+				c.eventBuffer = append(c.eventBuffer, frame)
+				c.eventMu.Unlock()
+			} else {
+				eventCtx := c.eventCtx
+				c.eventMu.Unlock()
+				if eventCtx != nil {
+					select {
+					case c.eventQueue <- frame:
+					case <-eventCtx.Done():
+						return
+					}
 				}
 			}
 		} else if frame.Type == "reply" || frame.Type == "error" {
 			if frame.Type == "error" && frame.ID == "" {
 				// Error frame with no ID: deliver to NextEvent and all pending requests
 				var errBody wire.Error
-				json.Unmarshal(frame.Body, &errBody)
+				_ = json.Unmarshal(frame.Body, &errBody)
 
 				// Deliver to all pending requests
 				c.pendingMu.Lock()
@@ -499,11 +533,12 @@ func (c *Client) readLoop() {
 				// Deliver to NextEvent as well
 				c.eventMu.Lock()
 				subscribed := c.subscribed
+				eventCtx := c.eventCtx
 				c.eventMu.Unlock()
-				if subscribed {
+				if subscribed && eventCtx != nil {
 					select {
 					case c.eventQueue <- frame:
-					case <-c.eventCtx.Done():
+					case <-eventCtx.Done():
 						return
 					}
 				}
@@ -511,6 +546,9 @@ func (c *Client) readLoop() {
 				// Match to pending request by ID
 				c.pendingMu.Lock()
 				pending, ok := c.pending[frame.ID]
+				if ok {
+					delete(c.pending, frame.ID)
+				}
 				c.pendingMu.Unlock()
 
 				if ok {
