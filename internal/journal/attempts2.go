@@ -65,10 +65,23 @@ func (tx *Tx) BeginAttemptWith(p AttemptParams) (string, error) {
 
 	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
 
+	var journalSeq int
+	if err := tx.tx.QueryRow(`
+		SELECT next FROM journal_counter WHERE id = 1
+	`).Scan(&journalSeq); err != nil {
+		return "", fmt.Errorf("get journal sequence: %w", err)
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, delimiter, max_output_tokens, estimated_prompt_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-	`, attemptID, p.TurnID, p.Participant, p.Phase, p.Epoch, dispatchedAt, deadlineStr, repairOfPtr, p.Delimiter, p.MaxOutputTokens, p.EstimatedPromptTokens); err != nil {
+		UPDATE journal_counter SET next = next + 1 WHERE id = 1
+	`); err != nil {
+		return "", fmt.Errorf("increment journal counter: %w", err)
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, delimiter, max_output_tokens, estimated_prompt_tokens, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+	`, attemptID, p.TurnID, p.Participant, p.Phase, p.Epoch, dispatchedAt, deadlineStr, repairOfPtr, p.Delimiter, p.MaxOutputTokens, p.EstimatedPromptTokens, journalSeq); err != nil {
 		return "", fmt.Errorf("insert attempt: %w", err)
 	}
 

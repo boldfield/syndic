@@ -699,8 +699,8 @@ func TestFreshDBSchemaVersion4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("expected schema version 4, got %d", version)
+	if version != 5 {
+		t.Errorf("expected schema version 5, got %d", version)
 	}
 }
 
@@ -860,8 +860,8 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("expected schema version 4 after upgrade, got %d", version)
+	if version != 5 {
+		t.Errorf("expected schema version 5 after upgrade, got %d", version)
 	}
 
 	// Check that the block still exists with null withdrawn_against_hash and other fields unchanged
@@ -1203,8 +1203,8 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("expected schema version 4 after upgrade, got %d", version)
+	if version != 5 {
+		t.Errorf("expected schema version 5 after upgrade, got %d", version)
 	}
 
 	// Check that the event still exists with original data preserved

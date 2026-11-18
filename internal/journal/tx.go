@@ -161,10 +161,23 @@ func (tx *Tx) AppendMessage(turnID, phase, sender string, recipients []string, c
 		return "", "", 0, fmt.Errorf("get next sequence: %w", err)
 	}
 
+	var journalSeq int
+	if err := tx.tx.QueryRow(`
+		SELECT next FROM journal_counter WHERE id = 1
+	`).Scan(&journalSeq); err != nil {
+		return "", "", 0, fmt.Errorf("get journal sequence: %w", err)
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, parent_ids)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, msgID, turnID, phase, sender, string(recipientSet), nextSeq, string(content), sha256, byteLen, parentIDs); err != nil {
+		UPDATE journal_counter SET next = next + 1 WHERE id = 1
+	`); err != nil {
+		return "", "", 0, fmt.Errorf("increment journal counter: %w", err)
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, parent_ids, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, msgID, turnID, phase, sender, string(recipientSet), nextSeq, string(content), sha256, byteLen, parentIDs, journalSeq); err != nil {
 		return "", "", 0, fmt.Errorf("insert message: %w", err)
 	}
 
@@ -191,10 +204,23 @@ func (tx *Tx) BeginAttempt(turnID, participant, phase string, epoch int, deadlin
 
 	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
 
+	var journalSeq int
+	if err := tx.tx.QueryRow(`
+		SELECT next FROM journal_counter WHERE id = 1
+	`).Scan(&journalSeq); err != nil {
+		return "", fmt.Errorf("get journal sequence: %w", err)
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-	`, attemptID, turnID, participant, phase, epoch, dispatchedAt, deadlineStr, repairOfPtr); err != nil {
+		UPDATE journal_counter SET next = next + 1 WHERE id = 1
+	`); err != nil {
+		return "", fmt.Errorf("increment journal counter: %w", err)
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+	`, attemptID, turnID, participant, phase, epoch, dispatchedAt, deadlineStr, repairOfPtr, journalSeq); err != nil {
 		return "", fmt.Errorf("insert attempt: %w", err)
 	}
 
