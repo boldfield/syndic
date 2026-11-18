@@ -151,6 +151,9 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.OutputBound = &v
 	}
 	ws.BytesPerToken = mp.BytesPerToken
+	if e.exceeded[p.ID] {
+		ws.Estimate = estimateExceeded
+	}
 	return ws
 }
 

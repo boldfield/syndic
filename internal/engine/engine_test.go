@@ -212,7 +212,7 @@ func TestSoloHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply.Preset != "solo" || reply.QuickProfile != nil || reply.EstimatedTokens != 0 {
+	if reply.Preset != "solo" || reply.QuickProfile != nil || reply.EstimatedTokens <= 0 {
 		t.Fatalf("reply = %+v", reply)
 	}
 	h.WaitTurnState(reply.TurnID, engine.StateSoloComplete)

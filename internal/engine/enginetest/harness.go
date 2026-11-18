@@ -21,6 +21,14 @@ import (
 )
 
 const (
+	// DefaultContextBound is the context bound the seeded exports record
+	// unless WithContextBound says otherwise.
+	DefaultContextBound = 128000
+	// DefaultCalibration is the calibrated bytes per token the seeded probe
+	// records unless WithCalibration says otherwise. With the default
+	// calibration safety of 0.75 the engine estimates at 3.0.
+	DefaultCalibration = 4.0
+
 	// DefaultReportedModel is the model name the seeded exports record and
 	// the fake adapters report unless a step says otherwise.
 	DefaultReportedModel = "enginetest-model"
@@ -93,11 +101,13 @@ allowed_destinations = []
 `
 
 type options struct {
-	skip        map[string]bool
-	outputBound map[string]int
-	eligible    map[string]transport.Tri
-	noStart     bool
-	clockStart  time.Time
+	skip         map[string]bool
+	outputBound  map[string]int
+	eligible     map[string]transport.Tri
+	contextBound map[string]int
+	calibration  map[string]float64
+	noStart      bool
+	clockStart   time.Time
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -111,6 +121,18 @@ func SkipProbe(id string) Option {
 // WithOutputBound seeds the participant's export with an output bound.
 func WithOutputBound(id string, tokens int) Option {
 	return func(o *options) { o.outputBound[id] = tokens }
+}
+
+// WithContextBound seeds the participant's export with a context bound. Zero
+// seeds none.
+func WithContextBound(id string, tokens int) Option {
+	return func(o *options) { o.contextBound[id] = tokens }
+}
+
+// WithCalibration seeds the participant's calibration with bytes per token.
+// Zero seeds a calibration the server could not provide.
+func WithCalibration(id string, bytesPerToken float64) Option {
+	return func(o *options) { o.calibration[id] = bytesPerToken }
 }
 
 // WithEligibleRequiredReviewer seeds the participant's export with the given
@@ -177,10 +199,12 @@ func ReplyFunc(build func(req transport.CompleteRequest) string) fake.Step {
 func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts ...Option) *Harness {
 	t.Helper()
 	o := &options{
-		skip:        map[string]bool{},
-		outputBound: map[string]int{},
-		eligible:    map[string]transport.Tri{},
-		clockStart:  time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
+		skip:         map[string]bool{},
+		outputBound:  map[string]int{},
+		eligible:     map[string]transport.Tri{},
+		contextBound: map[string]int{},
+		calibration:  map[string]float64{},
+		clockStart:   time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -298,13 +322,28 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 			AdapterVersion:           AdapterVersion,
 			ObservedAt:               o.clockStart,
 		}
+		bound := DefaultContextBound
+		if v, ok := o.contextBound[p.ID]; ok {
+			bound = v
+		}
+		if bound > 0 {
+			export.ContextBound = &bound
+		}
 		if v, ok := o.outputBound[p.ID]; ok {
 			export.OutputBound = &v
 		}
 		if v, ok := o.eligible[p.ID]; ok {
 			export.EligibleRequiredReviewer = v
 		}
-		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, transport.Calibration{})
+		bytesPerToken := DefaultCalibration
+		if v, ok := o.calibration[p.ID]; ok {
+			bytesPerToken = v
+		}
+		calibration := transport.Calibration{}
+		if bytesPerToken > 0 {
+			calibration = transport.Calibration{Available: true, BytesPerToken: bytesPerToken}
+		}
+		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, calibration)
 		if err != nil {
 			t.Fatalf("probe manifest for %s: %v", p.ID, err)
 		}
