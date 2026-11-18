@@ -32,6 +32,12 @@ type Step struct {
 	EchoedString       string
 }
 
+// CompleteCall records a single Complete call with all its details.
+type CompleteCall struct {
+	Request  transport.CompleteRequest
+	Messages []transport.Message
+}
+
 // Adapter is a scripted fake adapter for testing.
 type Adapter struct {
 	script               []Step
@@ -42,9 +48,10 @@ type Adapter struct {
 	cancelConfirmed      bool
 	usageAvailable       bool
 
-	mu      sync.Mutex
-	calls   [][]transport.Message
-	current int
+	mu             sync.Mutex
+	calls          []CompleteCall
+	current        int
+	hangingAttempt map[string]context.CancelFunc
 }
 
 // New creates a new fake adapter with the given script and options.
@@ -64,6 +71,7 @@ func New(script []Step, opts Options) *Adapter {
 		resolvedSecrets:      opts.ResolvedSecrets,
 		cancelConfirmed:      opts.CancelConfirmed,
 		usageAvailable:       opts.UsageAvailable,
+		hangingAttempt:       make(map[string]context.CancelFunc),
 	}
 }
 
@@ -85,13 +93,18 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 // Complete consumes one step from the script and returns the result.
 func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
-	// Record the call
-	a.calls = append(a.calls, req.Messages)
+	// Record the call with a deep copy of messages.
+	msgCopy := make([]transport.Message, len(req.Messages))
+	copy(msgCopy, req.Messages)
+	a.calls = append(a.calls, CompleteCall{
+		Request:  req,
+		Messages: msgCopy,
+	})
 
-	// Check if script is exhausted
+	// Check if script is exhausted.
 	if a.current >= len(a.script) {
+		a.mu.Unlock()
 		return transport.CompleteResult{
 			Envelope:        req.Envelope,
 			RawOutput:       "",
@@ -118,8 +131,15 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		reportedModel = a.defaultReportedModel
 	}
 
+	a.mu.Unlock()
+
 	switch step.Kind {
 	case StepKindReply:
+		// Apply delay for reply steps.
+		if step.Delay > 0 {
+			time.Sleep(step.Delay)
+		}
+
 		rawOutput := step.RawOutput
 		if rawOutput == "" {
 			rawOutput = step.Text
@@ -142,6 +162,11 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		}, nil
 
 	case StepKindEcho:
+		// Apply delay for echo steps.
+		if step.Delay > 0 {
+			time.Sleep(step.Delay)
+		}
+
 		responseText := fmt.Sprintf("Echo: %s", step.EchoedString)
 		scrubbed, count := transport.Scrub(responseText, a.resolvedSecrets)
 		return transport.CompleteResult{
@@ -157,43 +182,37 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		}, nil
 
 	case StepKindHang:
-		if step.Delay > 0 {
-			time.Sleep(step.Delay)
+		// Block until context is done or Cancel is called.
+		attemptID := req.Envelope.AttemptID
+		hangCtx, cancel := context.WithCancel(ctx)
+		a.mu.Lock()
+		a.hangingAttempt[attemptID] = cancel
+		a.mu.Unlock()
+
+		<-hangCtx.Done()
+
+		a.mu.Lock()
+		delete(a.hangingAttempt, attemptID)
+		a.mu.Unlock()
+
+		ts := transport.TransportStatusTimeout
+		if hangCtx.Err() == context.Canceled {
+			ts = transport.TransportStatusCancelled
+		} else if ctx.Err() == context.DeadlineExceeded {
+			ts = transport.TransportStatusTimeout
 		}
 
-		select {
-		case <-ctx.Done():
-			ts := step.TransportStatus
-			if ctx.Err() == context.DeadlineExceeded {
-				ts = transport.TransportStatusTimeout
-			} else if ctx.Err() == context.Canceled {
-				ts = transport.TransportStatusCancelled
-			}
-			return transport.CompleteResult{
-				Envelope:        req.Envelope,
-				RawOutput:       "",
-				Text:            "",
-				ScrubCount:      0,
-				Identity:        identity,
-				ReportedModel:   reportedModel,
-				Status:          transport.StatusInterrupted,
-				NativeFinish:    "",
-				TransportStatus: ts,
-			}, nil
-		default:
-			// Context not done, treat as timeout
-			return transport.CompleteResult{
-				Envelope:        req.Envelope,
-				RawOutput:       "",
-				Text:            "",
-				ScrubCount:      0,
-				Identity:        identity,
-				ReportedModel:   reportedModel,
-				Status:          transport.StatusInterrupted,
-				NativeFinish:    "",
-				TransportStatus: transport.TransportStatusTimeout,
-			}, nil
-		}
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       "",
+			Text:            "",
+			ScrubCount:      0,
+			Identity:        identity,
+			ReportedModel:   reportedModel,
+			Status:          transport.StatusInterrupted,
+			NativeFinish:    "",
+			TransportStatus: ts,
+		}, nil
 
 	default:
 		return transport.CompleteResult{
@@ -210,12 +229,20 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	}
 }
 
-// Cancel records a cancellation request.
+// Cancel records a cancellation request and unblocks any hanging attempt with that ID.
 func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
-	confirmed := transport.TriUnknown
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	confirmed := transport.TriYes
 	if a.cancelConfirmed {
-		confirmed = transport.TriYes
+		confirmed = transport.TriUnknown
 	}
+
+	if cancel, exists := a.hangingAttempt[attemptID]; exists {
+		cancel()
+	}
+
 	return transport.CancelStatus{
 		Requested:       true,
 		ServerConfirmed: confirmed,
@@ -233,11 +260,19 @@ func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
 	}, nil
 }
 
-// Calls returns the message arrays for all Complete calls, in order.
-func (a *Adapter) Calls() [][]transport.Message {
+// Calls returns deep copies of all CompleteCall records received, in order.
+func (a *Adapter) Calls() []CompleteCall {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	result := make([][]transport.Message, len(a.calls))
-	copy(result, a.calls)
+
+	result := make([]CompleteCall, len(a.calls))
+	for i, call := range a.calls {
+		msgCopy := make([]transport.Message, len(call.Messages))
+		copy(msgCopy, call.Messages)
+		result[i] = CompleteCall{
+			Request:  call.Request,
+			Messages: msgCopy,
+		}
+	}
 	return result
 }

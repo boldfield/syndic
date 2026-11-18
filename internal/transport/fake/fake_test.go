@@ -2,7 +2,6 @@ package fake
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,89 +9,6 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/contracttest"
 )
-
-// VerdictApprove returns a well-formed approval envelope.
-func VerdictApprove(candidateHash, attemptID string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: %s
-attempt: %s
-verdict: approve
-END VERDICT
-`, candidateHash, attemptID)
-}
-
-// VerdictBlock returns a well-formed block envelope.
-func VerdictBlock(candidateHash, attemptID, blockID, severity, evidence, remedy, reason string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: %s
-attempt: %s
-verdict: block
-severity: %s
-block_id: %s
-evidence: %s
-remedy: %s
-reason: %s
-END VERDICT
-`, candidateHash, attemptID, severity, blockID, evidence, remedy, reason)
-}
-
-// VerdictProseApprove returns prose containing "approve" with no envelope.
-func VerdictProseApprove() string {
-	return "I approve of this response."
-}
-
-// VerdictWrongHash returns an approve with a different candidate hash.
-func VerdictWrongHash(attemptID string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: wrong-hash
-attempt: %s
-verdict: approve
-END VERDICT
-`, attemptID)
-}
-
-// VerdictApproveWithChanges returns an approve-with-changes verdict.
-func VerdictApproveWithChanges(candidateHash, attemptID string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: %s
-attempt: %s
-verdict: approve-with-changes
-END VERDICT
-`, candidateHash, attemptID)
-}
-
-// VerdictTwoEnvelopes returns output containing two envelopes.
-func VerdictTwoEnvelopes(candidateHash, attemptID string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: %s
-attempt: %s
-verdict: approve
-END VERDICT
-VERDICT v1
-candidate: %s
-attempt: %s
-verdict: approve
-END VERDICT
-`, candidateHash, attemptID, candidateHash, attemptID)
-}
-
-// VerdictBlockWithEndMarker returns a block with "END VERDICT" in the reason.
-func VerdictBlockWithEndMarker(candidateHash, attemptID string) string {
-	return fmt.Sprintf(`VERDICT v1
-candidate: %s
-attempt: %s
-verdict: block
-severity: high
-block_id: b1
-evidence: test
-remedy: fix it
-reason: This is a reason with
-END VERDICT
-on its own line, plus more text
-after the marker
-END VERDICT
-`, candidateHash, attemptID)
-}
 
 // Backend provides fixtures for contract tests.
 type Backend struct {
@@ -626,12 +542,12 @@ func TestCalls(t *testing.T) {
 		t.Fatalf("calls count: %d, want 2", len(calls))
 	}
 
-	if len(calls[0]) != 2 || calls[0][1].Content != "User message" {
-		t.Errorf("first call: %v", calls[0])
+	if len(calls[0].Messages) != 2 || calls[0].Messages[1].Content != "User message" {
+		t.Errorf("first call: %v", calls[0].Messages)
 	}
 
-	if len(calls[1]) != 2 || calls[1][1].Content != "Second user message" {
-		t.Errorf("second call: %v", calls[1])
+	if len(calls[1].Messages) != 2 || calls[1].Messages[1].Content != "Second user message" {
+		t.Errorf("second call: %v", calls[1].Messages)
 	}
 }
 
@@ -681,7 +597,7 @@ func TestVerdictFixtures(t *testing.T) {
 	}
 }
 
-// TestVerdictFixtureSmokeTest validates well-formed verdicts.
+// TestVerdictFixtureSmokeTest validates well-formed verdicts per delta §6.
 func TestVerdictFixtureSmokeTest(t *testing.T) {
 	hash := "test-hash"
 	attemptID := "test-attempt"
@@ -731,9 +647,11 @@ func TestVerdictFixtureSmokeTest(t *testing.T) {
 				hasCandidate := strings.Contains(content, "candidate:")
 				hasAttempt := strings.Contains(content, "attempt:")
 				hasVerdict := strings.Contains(content, "verdict:")
+				hasReason := strings.Contains(content, "reason:")
 
-				if !hasCandidate || !hasAttempt || !hasVerdict {
-					t.Errorf("missing required fields in envelope")
+				if !hasCandidate || !hasAttempt || !hasVerdict || !hasReason {
+					t.Errorf("missing required fields in envelope: candidate=%v attempt=%v verdict=%v reason=%v",
+						hasCandidate, hasAttempt, hasVerdict, hasReason)
 				}
 			}
 		})
@@ -775,5 +693,298 @@ func TestRaceCondition(t *testing.T) {
 	calls := adapter.Calls()
 	if len(calls) != 1 {
 		t.Errorf("calls: %d, want 1", len(calls))
+	}
+}
+
+// TestHangWithoutCancel verifies hang blocks until deadline.
+func TestHangWithoutCancel(t *testing.T) {
+	script := []Step{
+		{
+			Kind: StepKindHang,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(100 * time.Millisecond),
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), req.Deadline)
+	defer cancel()
+
+	start := time.Now()
+	result, err := adapter.Complete(ctx, req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("hang without cancel: %v", err)
+	}
+	if result.Status != transport.StatusInterrupted {
+		t.Errorf("status: %q, want interrupted", result.Status)
+	}
+	if result.TransportStatus != transport.TransportStatusTimeout {
+		t.Errorf("transport status: %q, want timeout", result.TransportStatus)
+	}
+	if elapsed < 90*time.Millisecond {
+		t.Errorf("elapsed %v, want ~100ms", elapsed)
+	}
+}
+
+// TestHangWithCancelDriven verifies Cancel unblocks a hanging attempt.
+func TestHangWithCancelDriven(t *testing.T) {
+	script := []Step{
+		{
+			Kind: StepKindHang,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "a1",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(10 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan bool)
+	go func() {
+		result, err := adapter.Complete(ctx, req)
+		if err != nil {
+			t.Errorf("hang with cancel: %v", err)
+		}
+		if result.Status != transport.StatusInterrupted {
+			t.Errorf("status: %q, want interrupted", result.Status)
+		}
+		if result.TransportStatus != transport.TransportStatusCancelled {
+			t.Errorf("transport status: %q, want cancelled", result.TransportStatus)
+		}
+		done <- true
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	adapter.Cancel(context.Background(), "a1")
+	<-done
+}
+
+// TestCancelDefault verifies Cancel default is ServerConfirmed = yes.
+func TestCancelDefault(t *testing.T) {
+	script := []Step{}
+	adapter := New(script, Options{CancelConfirmed: false})
+
+	status, err := adapter.Cancel(context.Background(), "test-id")
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if status.ServerConfirmed != transport.TriYes {
+		t.Errorf("ServerConfirmed: %q, want yes (CancelConfirmed: false)", status.ServerConfirmed)
+	}
+
+	adapter2 := New(script, Options{CancelConfirmed: true})
+	status2, err := adapter2.Cancel(context.Background(), "test-id")
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if status2.ServerConfirmed != transport.TriUnknown {
+		t.Errorf("ServerConfirmed: %q, want unknown (CancelConfirmed: true)", status2.ServerConfirmed)
+	}
+
+	adapter3 := New(script, Options{})
+	status3, err := adapter3.Cancel(context.Background(), "test-id")
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if status3.ServerConfirmed != transport.TriYes {
+		t.Errorf("ServerConfirmed: %q, want yes (default)", status3.ServerConfirmed)
+	}
+}
+
+// TestReplyWithDelay verifies reply steps respect Delay.
+func TestReplyWithDelay(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Reply with delay",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+			Delay:           50 * time.Millisecond,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	result, err := adapter.Complete(ctx, req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("reply with delay: %v", err)
+	}
+	if result.Text != "Reply with delay" {
+		t.Errorf("text: %q, want 'Reply with delay'", result.Text)
+	}
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("elapsed %v, want ~50ms", elapsed)
+	}
+}
+
+// TestEchoWithDelay verifies echo steps respect Delay.
+func TestEchoWithDelay(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindEcho,
+			EchoedString:    "echo-value",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+			Delay:           50 * time.Millisecond,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	result, err := adapter.Complete(ctx, req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("echo with delay: %v", err)
+	}
+	if !strings.Contains(result.Text, "echo-value") {
+		t.Errorf("text does not contain echo-value: %q", result.Text)
+	}
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("elapsed %v, want ~50ms", elapsed)
+	}
+}
+
+// TestStepKindValidation tests unknown step kind handling.
+func TestStepKindValidation(t *testing.T) {
+	adapter := New([]Step{}, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if result.Status != transport.StatusError {
+		t.Errorf("status: %q, want error", result.Status)
+	}
+	if result.TransportStatus != "script_exhausted" {
+		t.Errorf("transport status: %q, want script_exhausted", result.TransportStatus)
+	}
+}
+
+// TestCallsMutation verifies Calls() returns deep copies that don't affect stored data.
+func TestCallsMutation(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model: "test",
+		Messages: []transport.Message{
+			{Role: "user", Content: "original message"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _ = adapter.Complete(ctx, req)
+
+	calls := adapter.Calls()
+	calls[0].Messages[0].Content = "mutated message"
+
+	calls2 := adapter.Calls()
+	if calls2[0].Messages[0].Content != "original message" {
+		t.Errorf("mutation affected stored calls: %q", calls2[0].Messages[0].Content)
 	}
 }
