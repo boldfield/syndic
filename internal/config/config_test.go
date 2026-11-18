@@ -1200,6 +1200,10 @@ func TestResolvePresetOverride(t *testing.T) {
 					ReviewerMaxOutputTokens: ptr(1024),
 				},
 			},
+			"solo": {
+				Mode:   "solo",
+				Author: "a",
+			},
 		},
 		Budgets: Budgets{
 			ReviewerMaxOutputTokens: ptr(2048),
@@ -1207,7 +1211,7 @@ func TestResolvePresetOverride(t *testing.T) {
 		},
 	}
 
-	resolved, err := r.Resolve("", "")
+	resolved, err := r.Resolve("review", "")
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -1218,13 +1222,33 @@ func TestResolvePresetOverride(t *testing.T) {
 	if *resolved.Budgets.AuthorMaxOutputTokens != 4096 {
 		t.Errorf("AuthorMaxOutputTokens = %d, want 4096 (unchanged)", *resolved.Budgets.AuthorMaxOutputTokens)
 	}
+
+	// Check that another preset without overrides gets the roster value
+	resolved2, err := r.Resolve("solo", "")
+	if err != nil {
+		t.Fatalf("Resolve solo preset failed: %v", err)
+	}
+
+	if *resolved2.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("solo preset ReviewerMaxOutputTokens = %d, want 2048 (roster value)", *resolved2.Budgets.ReviewerMaxOutputTokens)
+	}
+	if *resolved2.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("solo preset AuthorMaxOutputTokens = %d, want 4096 (roster value)", *resolved2.Budgets.AuthorMaxOutputTokens)
+	}
 }
 
 func TestResolveQuickProfileOverridePrecedence(t *testing.T) {
 	r := &Roster{
 		DefaultPreset: "review",
 		Presets: map[string]Preset{
-			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+			"review": {
+				Mode:              "review",
+				Author:            "a",
+				RequiredReviewers: []string{"r"},
+				Budgets: &Budgets{
+					ReviewerMaxOutputTokens: ptr(1024),
+				},
+			},
 		},
 		Budgets: Budgets{
 			ReviewerMaxOutputTokens: ptr(2048),
@@ -1244,8 +1268,9 @@ func TestResolveQuickProfileOverridePrecedence(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
+	// Test full precedence: roster 2048 -> preset 1024 -> quick 512
 	if *resolved.Budgets.ReviewerMaxOutputTokens != 512 {
-		t.Errorf("ReviewerMaxOutputTokens = %d, want 512 (quick profile override)", *resolved.Budgets.ReviewerMaxOutputTokens)
+		t.Errorf("ReviewerMaxOutputTokens = %d, want 512 (quick profile override after preset)", *resolved.Budgets.ReviewerMaxOutputTokens)
 	}
 }
 
@@ -1275,6 +1300,9 @@ func TestResolveExplicitPresetWinsOverQuickProfile(t *testing.T) {
 	}
 	if resolved.QuickProfile != "fast" {
 		t.Errorf("QuickProfile = %q, want fast", resolved.QuickProfile)
+	}
+	if resolved.Preset.Mode != "review" {
+		t.Errorf("Preset.Mode = %q, want review", resolved.Preset.Mode)
 	}
 	if !resolved.Drafts {
 		t.Errorf("Drafts = %v, want true (from quick profile)", resolved.Drafts)
@@ -1427,24 +1455,149 @@ func TestValidateQuickProfilePresetMustExist(t *testing.T) {
 	}
 }
 
+func TestValidateQuickProfilePresetCannotBeEmpty(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Quick = map[string]QuickProfile{
+		"test": {Preset: ""},
+	}
+
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for empty preset in quick profile")
+	}
+	if !strings.Contains(err.Error(), "test") {
+		t.Errorf("error doesn't contain profile name: %v", err)
+	}
+	if !strings.Contains(err.Error(), "preset") {
+		t.Errorf("error doesn't mention preset: %v", err)
+	}
+}
+
+func TestValidatePresetBudgetOverrideRanges(t *testing.T) {
+	tests := []struct {
+		name       string
+		setBudget  func(*Budgets)
+		wantErrMsg string
+	}{
+		{
+			name: "preset reviewer_max_output_tokens zero",
+			setBudget: func(b *Budgets) {
+				v := 0
+				b.ReviewerMaxOutputTokens = &v
+			},
+			wantErrMsg: "reviewer_max_output_tokens",
+		},
+		{
+			name: "preset calibration_safety out of range",
+			setBudget: func(b *Budgets) {
+				v := 1.5
+				b.CalibrationSafety = &v
+			},
+			wantErrMsg: "calibration_safety",
+		},
+		{
+			name: "preset context_margin negative",
+			setBudget: func(b *Budgets) {
+				v := -0.1
+				b.ContextMargin = &v
+			},
+			wantErrMsg: "context_margin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roster := makeBaseRoster()
+			roster.Presets["solo"] = Preset{Mode: "solo", Author: "author"}
+			budget := &Budgets{}
+			tt.setBudget(budget)
+			p := roster.Presets["solo"]
+			p.Budgets = budget
+			roster.Presets["solo"] = p
+
+			err := roster.Validate()
+			if err == nil {
+				t.Fatalf("expected validation error for invalid preset budget")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrMsg) {
+				t.Errorf("error doesn't contain %q: %v", tt.wantErrMsg, err)
+			}
+		})
+	}
+}
+
+func TestValidateQuickProfileBudgetOverrideRanges(t *testing.T) {
+	tests := []struct {
+		name       string
+		setBudget  func(*Budgets)
+		wantErrMsg string
+	}{
+		{
+			name: "quick profile reviewer_max_output_tokens zero",
+			setBudget: func(b *Budgets) {
+				v := 0
+				b.ReviewerMaxOutputTokens = &v
+			},
+			wantErrMsg: "reviewer_max_output_tokens",
+		},
+		{
+			name: "quick profile calibration_safety negative",
+			setBudget: func(b *Budgets) {
+				v := -0.5
+				b.CalibrationSafety = &v
+			},
+			wantErrMsg: "calibration_safety",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roster := makeBaseRoster()
+			roster.Presets["solo"] = Preset{Mode: "solo", Author: "author"}
+			budget := &Budgets{}
+			tt.setBudget(budget)
+			roster.Quick = map[string]QuickProfile{
+				"test": {
+					Preset:  "solo",
+					Budgets: budget,
+				},
+			}
+
+			err := roster.Validate()
+			if err == nil {
+				t.Fatalf("expected validation error for invalid quick profile budget")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrMsg) {
+				t.Errorf("error doesn't contain %q: %v", tt.wantErrMsg, err)
+			}
+		})
+	}
+}
+
 func TestQuickDefinitionSHA256Stability(t *testing.T) {
-	r, err := Load("testdata/example.toml")
+	// Load the file twice independently
+	r1, err := Load("testdata/example.toml")
 	if err != nil {
-		t.Fatalf("Load failed: %v", err)
+		t.Fatalf("Load 1 failed: %v", err)
 	}
 
-	hash1, err := r.QuickDefinitionSHA256("fast")
+	r2, err := Load("testdata/example.toml")
 	if err != nil {
-		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+		t.Fatalf("Load 2 failed: %v", err)
 	}
 
-	hash2, err := r.QuickDefinitionSHA256("fast")
+	hash1, err := r1.QuickDefinitionSHA256("fast")
 	if err != nil {
-		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+		t.Fatalf("QuickDefinitionSHA256 on first load failed: %v", err)
+	}
+
+	hash2, err := r2.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 on second load failed: %v", err)
 	}
 
 	if hash1 != hash2 {
-		t.Errorf("hash not stable: %q != %q", hash1, hash2)
+		t.Errorf("hash not stable across two loads: %q != %q", hash1, hash2)
 	}
 }
 
@@ -1504,24 +1657,47 @@ func TestQuickDefinitionSHA256ChangesWithPresetOverride(t *testing.T) {
 }
 
 func TestResolveEffectiveDeadlineValidation(t *testing.T) {
-	roster := makeBaseRoster()
-	roster.Deadlines = Deadlines{
-		Attempt: &Duration{300 * time.Second},
-		Turn:    &Duration{900 * time.Second},
-	}
-	review := roster.Presets["review"]
-	review.Deadlines = &Deadlines{
-		Attempt: &Duration{20 * time.Minute},
-	}
-	roster.Presets["review"] = review
+	t.Run("attempt-only override exceeds turn", func(t *testing.T) {
+		roster := makeBaseRoster()
+		roster.Deadlines = Deadlines{
+			Attempt: &Duration{300 * time.Second},
+			Turn:    &Duration{900 * time.Second},
+		}
+		review := roster.Presets["review"]
+		review.Deadlines = &Deadlines{
+			Attempt: &Duration{20 * time.Minute},
+		}
+		roster.Presets["review"] = review
 
-	err := roster.Validate()
-	if err == nil {
-		t.Fatal("expected validation error for turn < attempt")
-	}
-	if !strings.Contains(err.Error(), "turn") || !strings.Contains(err.Error(), "attempt") {
-		t.Errorf("error doesn't describe deadline issue: %v", err)
-	}
+		err := roster.Validate()
+		if err == nil {
+			t.Fatal("expected validation error for turn < attempt")
+		}
+		if !strings.Contains(err.Error(), "turn") || !strings.Contains(err.Error(), "attempt") {
+			t.Errorf("error doesn't describe deadline issue: %v", err)
+		}
+	})
+
+	t.Run("turn-only override below inherited attempt", func(t *testing.T) {
+		roster := makeBaseRoster()
+		roster.Deadlines = Deadlines{
+			Attempt: &Duration{300 * time.Second},
+			Turn:    &Duration{900 * time.Second},
+		}
+		review := roster.Presets["review"]
+		review.Deadlines = &Deadlines{
+			Turn: &Duration{100 * time.Second},
+		}
+		roster.Presets["review"] = review
+
+		err := roster.Validate()
+		if err == nil {
+			t.Fatal("expected validation error for turn < attempt")
+		}
+		if !strings.Contains(err.Error(), "turn") || !strings.Contains(err.Error(), "attempt") {
+			t.Errorf("error doesn't describe deadline issue: %v", err)
+		}
+	})
 }
 
 func BenchmarkValidate(b *testing.B) {
