@@ -152,23 +152,31 @@ func (s *Store) AppendEvent(kind string, payload json.RawMessage) error {
 
 // AttemptRow represents a row from the attempts table.
 type AttemptRow struct {
-	ID                string
-	TurnID            string
-	Participant       string
-	Phase             string
-	Epoch             int
-	DispatchedAt      time.Time
-	Deadline          *time.Time
-	State             string
-	Status            *string
-	CancellationState string
-	Quarantined       bool
-	RawOutput         *string
-	ScrubCount        *int
-	ObservedIdentity  *string
-	NativeFinish      *string
-	TransportStatus   *string
-	RepairOf          *string
+	ID                    string
+	TurnID                string
+	Participant           string
+	Phase                 string
+	Epoch                 int
+	DispatchedAt          time.Time
+	Deadline              *time.Time
+	State                 string
+	Status                *string
+	CancellationState     string
+	Quarantined           bool
+	RawOutput             *string
+	ScrubCount            *int
+	ObservedIdentity      *string
+	NativeFinish          *string
+	TransportStatus       *string
+	RepairOf              *string
+	GateError             *string
+	Commentary            *string
+	Delimiter             *string
+	MaxOutputTokens       *int
+	EstimatedPromptTokens *int
+	UsagePrompt           *int
+	UsageCompletion       *int
+	RetryCount            *int
 }
 
 // GetAttempt retrieves an attempt by ID.
@@ -244,13 +252,14 @@ func (s *Store) OverrideBlock(blockID string) error {
 
 // Block represents a row from the blocks table.
 type Block struct {
-	ID            string
-	VerdictID     string
-	CandidateHash string
-	Severity      string
-	Evidence      string
-	Remedy        string
-	State         string
+	ID              string
+	VerdictID       string
+	CandidateHash   string
+	Severity        string
+	Evidence        string
+	Remedy          string
+	State           string
+	ReviewerBlockID string
 }
 
 // OpenBlocks returns blocks in open state for a turn, across all its candidates.
