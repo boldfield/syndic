@@ -1110,11 +1110,12 @@ func BenchmarkComplete(b *testing.B) {
 // Test Probe with fully cooperative server
 func TestProbeFullyCooperative(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/models" {
+		switch r.URL.Path {
+		case "/models":
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Server", "test-server/1.0")
 			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"test-model","object":"model"}]}`))
-		} else if r.URL.Path == "/chat/completions" {
+		case "/chat/completions":
 			resp := ResponseBody{
 				Model: "test-model",
 				Choices: []ChoiceBody{
