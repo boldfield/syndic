@@ -220,6 +220,34 @@ func TestResolveXDGStateHomeUnset(t *testing.T) {
 	}
 }
 
+func TestResolveMissingXDGRuntimeDirEmptyHome(t *testing.T) {
+	tmpDir := t.TempDir()
+	missingRuntimeDir := filepath.Join(tmpDir, "missing-run")
+
+	getenv := func(name string) string {
+		if name == "XDG_RUNTIME_DIR" {
+			return missingRuntimeDir
+		}
+		return ""
+	}
+
+	paths, err := Resolve(getenv, "")
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+
+	if paths != (Paths{}) {
+		t.Errorf("Expected empty Paths, got %+v", paths)
+	}
+
+	// Ensure the missing runtime path was not created
+	if _, err := os.Stat(missingRuntimeDir); err == nil {
+		t.Fatal("Missing runtime dir should not have been created")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Unexpected error checking missing runtime dir: %v", err)
+	}
+}
+
 func TestAcquireAndReadHolder(t *testing.T) {
 	tmpDir := t.TempDir()
 	lockPath := filepath.Join(tmpDir, "test.lock")
@@ -338,7 +366,9 @@ func TestRemoveStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	paths := Paths{
 		Dir:    tmpDir,

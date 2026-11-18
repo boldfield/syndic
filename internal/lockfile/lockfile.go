@@ -24,34 +24,46 @@ type Paths struct {
 // An unset or empty variable is skipped.
 // If none qualifies it returns an error listing what it tried.
 func Resolve(getenv func(string) string, homeDir string) (Paths, error) {
-	var paths []string
+	var candidates []struct {
+		path           string
+		isHomeFallback bool
+	}
 	var tried []string
 
 	xdgRuntimeDir := getenv("XDG_RUNTIME_DIR")
 	if xdgRuntimeDir != "" {
-		paths = append(paths, filepath.Join(xdgRuntimeDir, "syndic"))
+		candidates = append(candidates, struct {
+			path           string
+			isHomeFallback bool
+		}{filepath.Join(xdgRuntimeDir, "syndic"), false})
 		tried = append(tried, fmt.Sprintf("$XDG_RUNTIME_DIR/syndic (%s)", xdgRuntimeDir))
 	}
 
 	xdgStateHome := getenv("XDG_STATE_HOME")
 	if xdgStateHome != "" {
-		paths = append(paths, filepath.Join(xdgStateHome, "syndic"))
+		candidates = append(candidates, struct {
+			path           string
+			isHomeFallback bool
+		}{filepath.Join(xdgStateHome, "syndic"), false})
 		tried = append(tried, fmt.Sprintf("$XDG_STATE_HOME/syndic (%s)", xdgStateHome))
 	}
 
 	if homeDir != "" {
-		paths = append(paths, filepath.Join(homeDir, ".local", "state", "syndic"))
+		candidates = append(candidates, struct {
+			path           string
+			isHomeFallback bool
+		}{filepath.Join(homeDir, ".local", "state", "syndic"), true})
 		tried = append(tried, fmt.Sprintf("<homeDir>/.local/state/syndic (%s)", homeDir))
 	}
 
-	for i, p := range paths {
+	for _, c := range candidates {
+		p := c.path
 		parent := filepath.Dir(p)
 
 		fi, err := os.Stat(parent)
 		if err != nil {
-			// For XDG paths, skip if parent doesn't exist. For homeDir fallback (last candidate),
-			// create the parent directories.
-			if i < len(paths)-1 {
+			// For home fallback, create parent if missing. For XDG candidates, skip.
+			if !c.isHomeFallback {
 				continue
 			}
 			if err := os.MkdirAll(parent, 0755); err != nil {
@@ -162,12 +174,16 @@ func Acquire(path string, now time.Time) (*Lock, error) {
 
 	data, err := json.Marshal(holder)
 	if err != nil {
-		f.Close()
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("close after marshal error: %w", err)
+		}
 		return nil, fmt.Errorf("marshal holder: %w", err)
 	}
 
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("close after write error: %w", err)
+		}
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 
