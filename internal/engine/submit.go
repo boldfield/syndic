@@ -200,7 +200,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	}
 	e.open = t
 	e.armTurn(t)
-	go e.runTurn(t)
+	if e.open == t {
+		go e.runTurn(t)
+	}
 
 	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName}
 	if eff.QuickProfile != "" {

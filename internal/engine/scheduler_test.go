@@ -314,6 +314,45 @@ func TestTurnTimerFiresAtRecordedDeadline(t *testing.T) {
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 }
 
+func TestTurnDeadlinePassedDuringSubmit(t *testing.T) {
+	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
+	h := enginetest.New(t, schedRoster("100s", "100s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
+	// The submit transaction takes longer than the whole turn.
+	h.Engine.SetPayloadHook(func(kind string, payload any) any {
+		if kind == wire.EventKindTurnSubmitted {
+			h.Clock.Advance(101 * time.Second)
+		}
+		return payload
+	})
+	reply, err := h.Engine.Submit(soloReq("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The turn ended before Submit returned, with no clock advance after it.
+	row, err := h.Store.GetTurn(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "deadline:turn" {
+		t.Fatalf("turn = %s/%s, want incomplete/deadline:turn", row.TerminalState, row.TerminalReason)
+	}
+	if n := len(h.Adapters["author"].Calls()); n != 0 {
+		t.Fatalf("author was called %d times", n)
+	}
+	if n := len(attemptsOf(h, reply.TurnID, "author")); n != 0 {
+		t.Fatalf("author has %d attempts", n)
+	}
+	for _, ev := range h.Events() {
+		if ev.Kind == wire.EventKindAttemptBegun || ev.Kind == wire.EventKindDeadline {
+			t.Fatalf("unexpected %s event after the turn ended", ev.Kind)
+		}
+	}
+	if got := participantState(t, h, "author"); got != engine.ParticipantIdle {
+		t.Fatalf("author state = %s, want idle", got)
+	}
+}
+
 func TestAttemptDeadlineClampedToTurn(t *testing.T) {
 	h := enginetest.New(t, schedRoster("80s", "100s", []reviewer{{"r1", "p"}}, nil, ""), approvers("r1"))
 	start := h.Clock.Now()

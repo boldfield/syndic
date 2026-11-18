@@ -45,6 +45,9 @@ func (e *Engine) poolState(name string) *pool {
 // of it, start runs at once; otherwise the dispatch queues, first in first
 // out, and the participant is queued. e.mu is held.
 func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
+	if e.open != t || e.turnExpired(t) {
+		return nil
+	}
 	name := e.poolOf(participant)
 	p := e.poolState(name)
 	concurrency, _ := e.roster.PoolFor(name)
@@ -102,6 +105,11 @@ func (e *Engine) releaseLocked(participant string) {
 	concurrency, _ := e.roster.PoolFor(name)
 	for p.running < concurrency && len(p.queue) > 0 {
 		head := p.queue[0]
+		// A turn whose deadline has passed ends here; dropping its queue
+		// takes head out and reports it idle.
+		if e.open == head.t && e.turnExpired(head.t) && e.open != head.t {
+			continue
+		}
 		p.queue = p.queue[1:]
 		delete(e.queued, head.participant)
 		if e.open != head.t {
@@ -153,10 +161,23 @@ func (e *Engine) attemptDeadline(t *openTurn) time.Time {
 	return deadline
 }
 
+// turnExpired ends the open turn with deadline:turn when its deadline has
+// already passed, so nothing is dispatched after it. e.mu is held.
+func (e *Engine) turnExpired(t *openTurn) bool {
+	if e.clock.Now().Before(t.turnDeadline) {
+		return false
+	}
+	e.finishLocked(t, StateIncomplete, reasonDeadlineTurn)
+	return true
+}
+
 // armTurn starts the turn's deadline timer and its once-a-second report. The
-// timer fires at the turn's recorded deadline, however long ago that was set.
-// e.mu is held.
+// timer fires at the turn's recorded deadline, however long ago that was set;
+// a deadline already past ends the turn here. e.mu is held.
 func (e *Engine) armTurn(t *openTurn) {
+	if e.turnExpired(t) {
+		return
+	}
 	d := t.turnDeadline.Sub(e.clock.Now())
 	t.stopTurn = e.clock.AfterFunc(d, func() { e.onTurnDeadline(t) })
 	t.stopTick = e.clock.AfterFunc(tickInterval, func() { e.onTick(t) })
