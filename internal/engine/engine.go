@@ -613,7 +613,7 @@ func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.
 	var attemptID string
 	now := e.clock.Now()
 	deadline := now.Add(5 * time.Minute) // TODO: use resolved deadlines from roster
-	maxOutput := 4096                     // TODO: use clamped author_max_output_tokens
+	maxOutput := 4096                    // TODO: use clamped author_max_output_tokens
 
 	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		params := journal.AttemptParams{
