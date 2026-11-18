@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -1129,5 +1130,276 @@ func TestCallsMutation(t *testing.T) {
 	calls2 := adapter.Calls()
 	if calls2[0].Request.Messages[0].Content != "original message" {
 		t.Errorf("mutation affected stored calls: %q", calls2[0].Request.Messages[0].Content)
+	}
+}
+
+// TestStepKindError verifies error step returns given error and records call.
+func TestStepKindError(t *testing.T) {
+	testErr := errors.New("test error")
+	script := []Step{
+		{
+			Kind: StepKindError,
+			Err:  testErr,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if !errors.Is(err, testErr) {
+		t.Errorf("error: %v, want %v", err, testErr)
+	}
+	if errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error incorrectly wrapped with ErrNotSent")
+	}
+	if result.Envelope != req.Envelope {
+		t.Errorf("result envelope mismatch")
+	}
+
+	calls := adapter.Calls()
+	if len(calls) != 1 {
+		t.Errorf("calls count: %d, want 1", len(calls))
+	}
+}
+
+// TestStepKindNotSent verifies not-sent step wraps error with ErrNotSent.
+func TestStepKindNotSent(t *testing.T) {
+	testErr := errors.New("network error")
+	script := []Step{
+		{
+			Kind: StepKindNotSent,
+			Err:  testErr,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not wrapped with ErrNotSent: %v", err)
+	}
+	if !errors.Is(err, testErr) {
+		t.Errorf("original error lost: %v", err)
+	}
+	if result.Envelope != req.Envelope {
+		t.Errorf("result envelope mismatch")
+	}
+
+	calls := adapter.Calls()
+	if len(calls) != 1 {
+		t.Errorf("calls count: %d, want 1", len(calls))
+	}
+}
+
+// TestStepKindNotSentNilError verifies not-sent with nil error returns bare ErrNotSent.
+func TestStepKindNotSentNilError(t *testing.T) {
+	script := []Step{
+		{
+			Kind: StepKindNotSent,
+			Err:  nil,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error: %v, want ErrNotSent", err)
+	}
+	if result.Envelope != req.Envelope {
+		t.Errorf("result envelope mismatch")
+	}
+}
+
+// TestStepKindErrorZeroValue verifies error step returns zero-value result with only Envelope.
+func TestStepKindErrorZeroValue(t *testing.T) {
+	testErr := errors.New("test error")
+	script := []Step{
+		{
+			Kind: StepKindError,
+			Err:  testErr,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, _ := adapter.Complete(ctx, req)
+
+	if result.RawOutput != "" || result.Text != "" || result.ScrubCount != 0 {
+		t.Errorf("result fields not zero: RawOutput=%q, Text=%q, ScrubCount=%d",
+			result.RawOutput, result.Text, result.ScrubCount)
+	}
+	if result.Identity != (transport.ModelIdentity{}) {
+		t.Errorf("result.Identity not zero")
+	}
+	if result.ReportedModel != "" {
+		t.Errorf("result.ReportedModel not zero: %q", result.ReportedModel)
+	}
+	if result.Status != (transport.CompletionStatus("")) {
+		t.Errorf("result.Status not zero: %q", result.Status)
+	}
+	if result.NativeFinish != "" {
+		t.Errorf("result.NativeFinish not zero: %q", result.NativeFinish)
+	}
+	if result.TransportStatus != "" {
+		t.Errorf("result.TransportStatus not zero: %q", result.TransportStatus)
+	}
+	if result.Usage != nil {
+		t.Errorf("result.Usage not nil")
+	}
+}
+
+// TestReplyWithUsageSet verifies reply step returns Usage when set.
+func TestReplyWithUsageSet(t *testing.T) {
+	usage := &transport.Usage{Prompt: 10, Completion: 5}
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+			Usage:           usage,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	if result.Usage == nil {
+		t.Errorf("result.Usage is nil, want %v", usage)
+	} else if result.Usage.Prompt != usage.Prompt || result.Usage.Completion != usage.Completion {
+		t.Errorf("result.Usage mismatch: %v, want %v", result.Usage, usage)
+	}
+}
+
+// TestReplyWithoutUsage verifies reply step returns nil Usage when not set.
+func TestReplyWithoutUsage(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	if result.Usage != nil {
+		t.Errorf("result.Usage is not nil: %v", result.Usage)
 	}
 }

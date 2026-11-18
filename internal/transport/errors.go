@@ -13,4 +13,5 @@ var (
 	ErrUnauthorized      = errors.New("unauthorized")
 	ErrModelUnavailable  = errors.New("model unavailable")
 	ErrInvalidIdentity   = errors.New("invalid identity")
+	ErrNotSent           = errors.New("request not sent")
 )

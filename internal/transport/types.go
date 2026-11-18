@@ -51,6 +51,14 @@ func HTTPStatusString(code int) string {
 // ScrubMarker is the marker used to replace redacted secrets.
 const ScrubMarker = "[REDACTED-SECRET]"
 
+// Calibration records calibration information for token budgeting.
+type Calibration struct {
+	Available            bool
+	BytesPerToken        float64
+	ObservedPromptTokens int
+	BaselinePromptTokens int
+}
+
 // ModelIdentity represents the identity of a model as observed from the server.
 type ModelIdentity struct {
 	Kind  string // "digest", "revision", or "unknown"
@@ -171,6 +179,7 @@ type CapabilityRecord struct {
 	ToolRestrictions         []string
 	ServerVersion            string
 	AdapterVersion           string
+	Calibration              Calibration
 	ObservedAt               time.Time
 	// Raw is the unredacted evidence from the probe. It is local-only and never
 	// exported or committed; it may contain sensitive server details.
