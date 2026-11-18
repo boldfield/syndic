@@ -74,6 +74,57 @@ func TestDialErrorReply(t *testing.T) {
 	}
 }
 
+func TestDialContextCancellation(t *testing.T) {
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		frame, _ := r.Read()
+		if frame.Type == wire.RequestHello {
+			reply, _ := wire.NewReply("", wire.HelloReply{
+				EngineVersion: "1.0",
+				Protocol:      1,
+				RunID:         "run-1",
+				RunFirstSeq:   0,
+				RosterHash:    "hash1",
+				ManifestHash:  "hash2",
+			})
+			_ = w.Write(reply)
+		}
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			switch frame.Type {
+			case wire.RequestStatus:
+				reply, _ := wire.NewReply(frame.ID, wire.StatusReply{RunID: "run-1"})
+				_ = w.Write(reply)
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+
+	status, err := client.Status(ctx2)
+	if err != nil {
+		t.Fatalf("Status after cancel should work, got error: %v", err)
+	}
+	if status.RunID != "run-1" {
+		t.Fatalf("expected run-1, got %s", status.RunID)
+	}
+}
+
 func TestConcurrentRequests(t *testing.T) {
 	done := make(chan bool, 1)
 	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
@@ -705,7 +756,8 @@ func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if frame.Type == wire.RequestHello {
+			switch frame.Type {
+			case wire.RequestHello:
 				reply, _ := wire.NewReply("", wire.HelloReply{
 					EngineVersion: "1.0",
 					Protocol:      1,
@@ -715,7 +767,7 @@ func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
 					ManifestHash:  "hash2",
 				})
 				_ = w.Write(reply)
-			} else if frame.Type == wire.RequestSubscribe {
+			case wire.RequestSubscribe:
 				reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{
 					OK:          true,
 					LiveFromSeq: 1,

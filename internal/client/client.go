@@ -83,22 +83,27 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 
 	// Set a deadline from ctx for reading the hello reply
 	// Also actively cancel the read when ctx is cancelled (for contexts without deadlines)
+	done := make(chan struct{})
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("set read deadline: %w", err)
 		}
-		defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
-	} else if ctx != context.Background() {
+	} else {
 		// For contexts without deadlines, start a goroutine to interrupt the read
 		go func() {
-			<-ctx.Done()
-			_ = conn.SetReadDeadline(time.Now())
+			select {
+			case <-ctx.Done():
+				_ = conn.SetReadDeadline(time.Now())
+			case <-done:
+			}
 		}()
 	}
 
 	// Read hello reply or error
 	frame, err := c.reader.Read()
+	close(done)
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("read hello reply: %w", err)
@@ -467,11 +472,23 @@ func (c *Client) doRequest(ctx context.Context, typ string, body any) ([]byte, e
 		return nil, ErrClosed
 	}
 	err = c.writer.Write(req)
-	c.mu.Unlock()
-
 	if err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
+		c.closed = true
+		c.mu.Unlock()
+
+		// Notify all pending requests
+		c.pendingMu.Lock()
+		wrappedErr := fmt.Errorf("%w: %v", ErrClosed, err)
+		for _, req := range c.pending {
+			req.err = wrappedErr
+			close(req.done)
+		}
+		c.pending = make(map[string]*pendingRequest)
+		c.pendingMu.Unlock()
+
+		return nil, wrappedErr
 	}
+	c.mu.Unlock()
 
 	// Wait for reply
 	select {
