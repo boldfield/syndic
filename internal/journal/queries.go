@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -280,6 +282,11 @@ type TranscriptItem struct {
 	Attempt *AttemptRow
 }
 
+const (
+	transcriptMaxLimit = 200
+	contentMaxLimit    = 262144
+)
+
 // TranscriptPage returns a page of transcript items for a turn in journal order.
 // limit is clamped to 1-200. cursor is opaque; empty for the first page.
 func (s *Store) TranscriptPage(turnID, cursor string, limit int) (items []TranscriptItem, nextCursor string, err error) {
@@ -291,166 +298,169 @@ func (s *Store) TranscriptPage(turnID, cursor string, limit int) (items []Transc
 	return items, nextCursor, err
 }
 
+type transcriptRef struct {
+	kind  string
+	id    string
+	after string // cursor that resumes just after this row
+}
+
+// parseTranscriptCursor returns the section ("legacy" or "seq") and position
+// encoded in cursor. "legacy:n" means n pre-journal_seq rows were consumed;
+// "seq:n" means rows up to journal_seq n were consumed.
+func parseTranscriptCursor(cursor string) (section string, pos int64, err error) {
+	if cursor == "" {
+		return "legacy", 0, nil
+	}
+	sec, num, ok := strings.Cut(cursor, ":")
+	if ok && (sec == "legacy" || sec == "seq") {
+		n, perr := strconv.ParseInt(num, 10, 64)
+		if perr == nil && n >= 0 {
+			return sec, n, nil
+		}
+	}
+	return "", 0, fmt.Errorf("invalid transcript cursor %q", cursor)
+}
+
 // TranscriptPage returns a page of transcript items for a turn in journal order.
+// Rows written before migration 005 (NULL journal_seq) come first: messages by
+// sequence, then attempts by dispatched_at and rowid. All other rows follow in
+// ascending journal_seq.
 func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem, string, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > transcriptMaxLimit {
+		limit = transcriptMaxLimit
 	}
-
-	type rawRow struct {
-		kind            string
-		id              string
-		phase           string
-		sender          string
-		sha256          string
-		byteLen         int64
-		journalSeq      sql.NullInt64
-		sequence        sql.NullInt64
-		dispatchedAtStr sql.NullString
-		isNullRow       bool
-	}
-
-	var allRows []rawRow
-
-	rows, err := tx.tx.Query(`
-		WITH combined AS (
-			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 1 as is_null_row
-			FROM messages m
-			WHERE m.turn_id = ? AND m.journal_seq IS NULL
-			UNION ALL
-			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 1 as is_null_row
-			FROM attempts a
-			WHERE a.turn_id = ? AND a.journal_seq IS NULL
-			UNION ALL
-			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 0 as is_null_row
-			FROM messages m
-			WHERE m.turn_id = ? AND m.journal_seq IS NOT NULL
-			UNION ALL
-			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 0 as is_null_row
-			FROM attempts a
-			WHERE a.turn_id = ? AND a.journal_seq IS NOT NULL
-		)
-		SELECT kind, id, phase, sender, sha256, byte_length, journal_seq, sequence, dispatched_at, is_null_row
-		FROM combined
-		ORDER BY
-			is_null_row DESC,
-			CASE WHEN is_null_row = 1 AND kind = 'message' THEN 0 WHEN is_null_row = 1 AND kind = 'attempt' THEN 1 ELSE 2 END,
-			CASE WHEN is_null_row = 1 AND kind = 'message' THEN COALESCE(sequence, 0) END,
-			CASE WHEN is_null_row = 1 AND kind = 'attempt' THEN dispatched_at END,
-			journal_seq
-	`, turnID, turnID, turnID, turnID)
-
+	section, pos, err := parseTranscriptCursor(cursor)
 	if err != nil {
-		return nil, "", fmt.Errorf("query transcript: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var kind, id, phase, sender, sha256 string
-		var byteLen int64
-		var journalSeq sql.NullInt64
-		var sequence sql.NullInt64
-		var dispatchedAtStr sql.NullString
-		var isNullRow int
-
-		if err := rows.Scan(&kind, &id, &phase, &sender, &sha256, &byteLen, &journalSeq, &sequence, &dispatchedAtStr, &isNullRow); err != nil {
-			return nil, "", fmt.Errorf("scan transcript row: %w", err)
-		}
-
-		allRows = append(allRows, rawRow{
-			kind:            kind,
-			id:              id,
-			phase:           phase,
-			sender:          sender,
-			sha256:          sha256,
-			byteLen:         byteLen,
-			journalSeq:      journalSeq,
-			sequence:        sequence,
-			dispatchedAtStr: dispatchedAtStr,
-			isNullRow:       isNullRow == 1,
-		})
+		return nil, "", err
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("iterate transcript: %w", err)
+	want := limit + 1 // one lookahead row tells us whether another page exists
+	var refs []transcriptRef
+
+	if section == "legacy" {
+		rows, err := tx.tx.Query(`
+			SELECT kind, id FROM (
+				SELECT 0 AS grp, 'message' AS kind, id, sequence AS k1, '' AS k2, rowid AS k3
+				FROM messages WHERE turn_id = ? AND journal_seq IS NULL
+				UNION ALL
+				SELECT 1, 'attempt', id, 0, dispatched_at, rowid
+				FROM attempts WHERE turn_id = ? AND journal_seq IS NULL
+			)
+			ORDER BY grp, k1, k2, k3
+			LIMIT ? OFFSET ?
+		`, turnID, turnID, want, pos)
+		if err != nil {
+			return nil, "", fmt.Errorf("query legacy transcript: %w", err)
+		}
+		offset := pos
+		for rows.Next() {
+			var r transcriptRef
+			if err := rows.Scan(&r.kind, &r.id); err != nil {
+				_ = rows.Close()
+				return nil, "", fmt.Errorf("scan transcript row: %w", err)
+			}
+			offset++
+			r.after = fmt.Sprintf("legacy:%d", offset)
+			refs = append(refs, r)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, "", fmt.Errorf("iterate transcript: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, "", fmt.Errorf("close transcript rows: %w", err)
+		}
+		pos = 0 // continue into the journal_seq section from the start
 	}
 
-	var startIdx int
-	if cursor != "" {
-		for i, row := range allRows {
-			var sortKey string
-			if row.isNullRow {
-				if row.kind == "message" && row.sequence.Valid {
-					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
-				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
-					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
-				}
-			} else if row.journalSeq.Valid {
-				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
+	if len(refs) < want {
+		rows, err := tx.tx.Query(`
+			SELECT kind, id, journal_seq FROM (
+				SELECT 'message' AS kind, id, journal_seq FROM messages WHERE turn_id = ? AND journal_seq > ?
+				UNION ALL
+				SELECT 'attempt', id, journal_seq FROM attempts WHERE turn_id = ? AND journal_seq > ?
+			)
+			ORDER BY journal_seq
+			LIMIT ?
+		`, turnID, pos, turnID, pos, want-len(refs))
+		if err != nil {
+			return nil, "", fmt.Errorf("query transcript: %w", err)
+		}
+		for rows.Next() {
+			var r transcriptRef
+			var seq int64
+			if err := rows.Scan(&r.kind, &r.id, &seq); err != nil {
+				_ = rows.Close()
+				return nil, "", fmt.Errorf("scan transcript row: %w", err)
 			}
-			if sortKey == cursor {
-				startIdx = i + 1
-				break
-			}
+			r.after = fmt.Sprintf("seq:%d", seq)
+			refs = append(refs, r)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, "", fmt.Errorf("iterate transcript: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, "", fmt.Errorf("close transcript rows: %w", err)
 		}
 	}
 
-	var items []TranscriptItem
-	var nextCursor string
+	nextCursor := ""
+	if len(refs) > limit {
+		refs = refs[:limit]
+		nextCursor = refs[limit-1].after
+	}
 
-	for i := startIdx; i < len(allRows) && len(items) < limit; i++ {
-		row := allRows[i]
-
-		item := TranscriptItem{
-			Kind:    row.kind,
-			Ref:     row.kind + ":" + row.id,
-			Phase:   row.phase,
-			Sender:  row.sender,
-			SHA256:  row.sha256,
-			ByteLen: row.byteLen,
+	items := make([]TranscriptItem, 0, len(refs))
+	for _, r := range refs {
+		item, err := tx.transcriptItem(r)
+		if err != nil {
+			return nil, "", err
 		}
-
-		if row.kind == "attempt" {
-			attempt, err := tx.GetAttempt(row.id)
-			if err != nil {
-				return nil, "", fmt.Errorf("get attempt for transcript: %w", err)
-			}
-			attempt.RawOutput = nil
-			item.Attempt = attempt
-			if row.dispatchedAtStr.Valid {
-				t, err := parseTime(row.dispatchedAtStr.String)
-				if err == nil {
-					item.At = t
-				}
-			}
-		}
-
 		items = append(items, item)
+	}
+	return items, nextCursor, nil
+}
 
-		if len(items) == limit && i+1 < len(allRows) {
-			var sortKey string
-			if row.isNullRow {
-				if row.kind == "message" && row.sequence.Valid {
-					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
-				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
-					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
-				}
-			} else if row.journalSeq.Valid {
-				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
-			}
-			nextCursor = sortKey
+func (tx *Tx) transcriptItem(r transcriptRef) (TranscriptItem, error) {
+	if r.kind == "message" {
+		item := TranscriptItem{Kind: "message", Ref: "msg:" + r.id}
+		if err := tx.tx.QueryRow(`
+			SELECT phase, sender, content_hash, LENGTH(CAST(content AS BLOB)) FROM messages WHERE id = ?
+		`, r.id).Scan(&item.Phase, &item.Sender, &item.SHA256, &item.ByteLen); err != nil {
+			return TranscriptItem{}, fmt.Errorf("query message for transcript: %w", err)
 		}
+		return item, nil
 	}
 
-	return items, nextCursor, nil
+	attempt, err := tx.GetAttempt(r.id)
+	if err != nil {
+		return TranscriptItem{}, fmt.Errorf("get attempt for transcript: %w", err)
+	}
+	item := TranscriptItem{
+		Kind:   "attempt",
+		Ref:    "attempt:" + r.id,
+		At:     attempt.DispatchedAt,
+		Phase:  attempt.Phase,
+		Sender: attempt.Participant,
+	}
+	if attempt.RawOutput != nil && *attempt.RawOutput != "" {
+		body := []byte(*attempt.RawOutput)
+		item.SHA256 = computeSHA256(body)
+		item.ByteLen = int64(len(body))
+	}
+	attempt.RawOutput = nil
+	item.Attempt = attempt
+	return item, nil
 }
 
 // ContentRange returns a byte range of content from a message, attempt output, or candidate.
 // ref is "msg:<id>", "attempt:<id>", or "candidate:<id>".
 // offset and limit are in raw bytes. limit is clamped to 262144.
+// total and sha256 describe the whole body, not the returned range.
 func (s *Store) ContentRange(ref string, offset, limit int64) (data []byte, total int64, sha256 string, err error) {
 	err = s.Tx(func(tx *Tx) error {
 		var txErr error
@@ -465,76 +475,44 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	if limit < 1 {
 		return nil, 0, "", fmt.Errorf("limit must be >= 1")
 	}
-	if limit > 262144 {
-		limit = 262144
+	if limit > contentMaxLimit {
+		limit = contentMaxLimit
 	}
-
 	if offset < 0 {
 		return nil, 0, "", fmt.Errorf("offset must be >= 0: %w", ErrOutOfRange)
 	}
 
-	var content string
-	var sha256 string
-
-	if len(ref) >= 4 && ref[:4] == "msg:" {
-		msgID := ref[4:]
-		if err := tx.tx.QueryRow(`
-			SELECT content, content_hash FROM messages WHERE id = ?
-		`, msgID).Scan(&content, &sha256); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, 0, "", ErrNoSuchContent
-			}
-			return nil, 0, "", fmt.Errorf("query message: %w", err)
-		}
-	} else if len(ref) >= 8 && ref[:8] == "attempt:" {
-		attemptID := ref[8:]
-		var rawOutput sql.NullString
-		if err := tx.tx.QueryRow(`
-			SELECT COALESCE(raw_output, '')
-			FROM attempts WHERE id = ?
-		`, attemptID).Scan(&rawOutput); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, 0, "", ErrNoSuchContent
-			}
-			return nil, 0, "", fmt.Errorf("query attempt: %w", err)
-		}
-
-		if rawOutput.Valid {
-			content = rawOutput.String
-			if content != "" {
-				sha256 = computeSHA256([]byte(content))
-			}
-		}
-	} else if len(ref) >= 10 && ref[:10] == "candidate:" {
-		candidateID := ref[10:]
-		if err := tx.tx.QueryRow(`
-			SELECT content, content_hash FROM candidates WHERE id = ?
-		`, candidateID).Scan(&content, &sha256); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, 0, "", ErrNoSuchContent
-			}
-			return nil, 0, "", fmt.Errorf("query candidate: %w", err)
-		}
-	} else {
-		return nil, 0, "", ErrNoSuchContent
+	kind, id, _ := strings.Cut(ref, ":")
+	var query string
+	switch kind {
+	case "msg":
+		query = `SELECT content FROM messages WHERE id = ?`
+	case "attempt":
+		query = `SELECT COALESCE(raw_output, '') FROM attempts WHERE id = ?`
+	case "candidate":
+		query = `SELECT content FROM candidates WHERE id = ?`
+	default:
+		return nil, 0, "", fmt.Errorf("unknown content ref %q: %w", ref, ErrNoSuchContent)
 	}
 
-	contentBytes := []byte(content)
-	total := int64(len(contentBytes))
+	var content string
+	if err := tx.tx.QueryRow(query, id).Scan(&content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, 0, "", fmt.Errorf("content %q: %w", ref, ErrNoSuchContent)
+		}
+		return nil, 0, "", fmt.Errorf("query content: %w", err)
+	}
+
+	body := []byte(content)
+	total := int64(len(body))
+	sum := computeSHA256(body)
 
 	if offset > total {
-		return nil, 0, "", fmt.Errorf("offset beyond content: %w", ErrOutOfRange)
+		return nil, 0, "", fmt.Errorf("offset %d beyond content length %d: %w", offset, total, ErrOutOfRange)
 	}
-
-	if offset == total {
-		return []byte{}, total, sha256, nil
-	}
-
 	end := offset + limit
 	if end > total {
 		end = total
 	}
-
-	data := contentBytes[offset:end]
-	return data, total, sha256, nil
+	return append([]byte{}, body[offset:end]...), total, sum, nil
 }

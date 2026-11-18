@@ -65,17 +65,9 @@ func (tx *Tx) BeginAttemptWith(p AttemptParams) (string, error) {
 
 	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
 
-	var journalSeq int
-	if err := tx.tx.QueryRow(`
-		SELECT next FROM journal_counter WHERE id = 1
-	`).Scan(&journalSeq); err != nil {
-		return "", fmt.Errorf("get journal sequence: %w", err)
-	}
-
-	if _, err := tx.tx.Exec(`
-		UPDATE journal_counter SET next = next + 1 WHERE id = 1
-	`); err != nil {
-		return "", fmt.Errorf("increment journal counter: %w", err)
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", err
 	}
 
 	if _, err := tx.tx.Exec(`
