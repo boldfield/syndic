@@ -30,13 +30,15 @@ func New(store *journal.Store, queueSize int) *Hub {
 }
 
 type Subscription struct {
-	hub       *Hub
-	queue     chan journal.Event
-	lagging   bool
-	lastSeq   int64
-	watermark int64
-	mu        sync.Mutex
-	closed    bool
+	hub          *Hub
+	queue        chan journal.Event
+	lagging      bool
+	lastSeq      int64
+	watermark    int64
+	replayBuffer []journal.Event
+	replayIdx    int
+	mu           sync.Mutex
+	closed       bool
 }
 
 var (
@@ -83,6 +85,7 @@ func (h *Hub) Tx(fn func(tx *journal.Tx, emit Emit) error) error {
 		return err
 	}
 
+	var laggingSubs []*Subscription
 	for sub := range h.subs {
 		for _, event := range emittedEvents {
 			select {
@@ -91,8 +94,14 @@ func (h *Hub) Tx(fn func(tx *journal.Tx, emit Emit) error) error {
 				sub.mu.Lock()
 				sub.lagging = true
 				sub.mu.Unlock()
+				laggingSubs = append(laggingSubs, sub)
+				break
 			}
 		}
+	}
+
+	for _, sub := range laggingSubs {
+		delete(h.subs, sub)
 	}
 
 	return nil
@@ -129,17 +138,26 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 	s.mu.Unlock()
 
 	for {
+		if s.replayIdx < len(s.replayBuffer) {
+			event := s.replayBuffer[s.replayIdx]
+			s.mu.Lock()
+			s.lastSeq = event.Seq
+			s.mu.Unlock()
+			s.replayIdx++
+			return event, nil
+		}
+
 		if s.lastSeq < s.watermark {
 			events, err := s.hub.store.EventsSince(s.lastSeq, 1024)
 			if err != nil {
 				return journal.Event{}, err
 			}
+			s.mu.Lock()
+			s.replayBuffer = events
+			s.replayIdx = 0
+			s.mu.Unlock()
 			if len(events) > 0 {
-				event := events[0]
-				s.mu.Lock()
-				s.lastSeq = event.Seq
-				s.mu.Unlock()
-				return event, nil
+				continue
 			}
 		}
 
@@ -150,7 +168,9 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 					return journal.Event{}, ErrClosed
 				}
 				s.mu.Lock()
-				s.lastSeq = event.Seq
+				if event.Seq > s.watermark {
+					s.lastSeq = event.Seq
+				}
 				s.mu.Unlock()
 				return event, nil
 			default:
@@ -164,7 +184,9 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 				return journal.Event{}, ErrClosed
 			}
 			s.mu.Lock()
-			s.lastSeq = event.Seq
+			if event.Seq > s.watermark {
+				s.lastSeq = event.Seq
+			}
 			lagging = s.lagging
 			s.mu.Unlock()
 			return event, nil

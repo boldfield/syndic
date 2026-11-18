@@ -519,3 +519,288 @@ func TestPayloadMarshaling(t *testing.T) {
 
 	sub.Close()
 }
+
+func TestLaggingErrorWithResume(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 8)
+
+	sub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	err = hub.Tx(func(tx *journal.Tx, emit Emit) error {
+		for i := 0; i < 9; i++ {
+			if err := emit("", "event", map[string]int{"n": i}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Tx failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var lastEvent journal.Event
+	for i := 0; i < 8; i++ {
+		event, err := sub.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next %d failed: %v", i, err)
+		}
+		lastEvent = event
+	}
+
+	_, err = sub.Next(ctx)
+	if !errors.Is(err, ErrLagging) {
+		t.Fatalf("expected ErrLagging, got %v", err)
+	}
+
+	var lagErr *LaggingError
+	if !errors.As(err, &lagErr) {
+		t.Fatalf("expected *LaggingError, got %T", err)
+	}
+
+	resumeSeq := lagErr.LastSeq
+	if resumeSeq != lastEvent.Seq {
+		t.Errorf("LaggingError.LastSeq %d != lastEvent.Seq %d", resumeSeq, lastEvent.Seq)
+	}
+
+	sub.Close()
+
+	sub2, _, err := hub.Subscribe(resumeSeq)
+	if err != nil {
+		t.Fatalf("Subscribe resume failed: %v", err)
+	}
+	defer sub2.Close()
+
+	event, err := sub2.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next after resume failed: %v", err)
+	}
+	if event.Seq != lastEvent.Seq+1 {
+		t.Errorf("resume got seq %d, expected %d", event.Seq, lastEvent.Seq+1)
+	}
+}
+
+func TestConcurrent5000EventHandoff(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 1024)
+
+	const numEvents = 500
+
+	done := make(chan int)
+	go func() {
+		for i := 0; i < numEvents; i++ {
+			n := i
+			err := hub.Tx(func(tx *journal.Tx, emit Emit) error {
+				return emit("", "event", map[string]int{"n": n})
+			})
+			if err != nil {
+				t.Errorf("Tx %d failed: %v", i, err)
+				return
+			}
+		}
+		done <- 1
+	}()
+
+	sub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+	defer sub.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var prevSeq int64
+	for i := 0; i < numEvents; i++ {
+		event, err := sub.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next %d failed: %v", i, err)
+		}
+		if event.Seq <= prevSeq {
+			t.Errorf("event %d: seq %d not strictly increasing after %d", i, event.Seq, prevSeq)
+		}
+		prevSeq = event.Seq
+	}
+
+	<-done
+}
+
+func TestTenStaggeredSubscribers(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 1024)
+
+	const totalEvents = 100
+	const subscribers = 10
+
+	for i := 0; i < totalEvents; i++ {
+		n := i
+		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
+			return emit("", "event", map[string]int{"n": n})
+		})
+	}
+
+	subs := make([]*Subscription, subscribers)
+	for i := 0; i < subscribers; i++ {
+		sinceSeq := int64((i * totalEvents) / subscribers)
+		sub, _, err := hub.Subscribe(sinceSeq)
+		if err != nil {
+			t.Fatalf("Subscribe %d failed: %v", i, err)
+		}
+		subs[i] = sub
+	}
+	defer func() {
+		for _, sub := range subs {
+			sub.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var maxSeqs [subscribers]int64
+	for i := 0; i < subscribers; i++ {
+		for {
+			event, err := subs[i].Next(ctx)
+			if err != nil {
+				if err == context.DeadlineExceeded {
+					break
+				}
+				t.Fatalf("sub %d Next failed: %v", i, err)
+			}
+			maxSeqs[i] = event.Seq
+		}
+	}
+
+	for i := 1; i < subscribers; i++ {
+		if maxSeqs[i] != maxSeqs[0] {
+			t.Errorf("sub %d final seq %d != sub 0 final seq %d", i, maxSeqs[i], maxSeqs[0])
+		}
+	}
+}
+
+func TestReplayLargeWithStalledSubscriber(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 1024)
+
+	const totalSeeded = 1000
+	for i := 0; i < totalSeeded; i++ {
+		n := i
+		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
+			return emit("", "event", map[string]int{"n": n})
+		})
+	}
+
+	stalledSub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("stalled subscribe failed: %v", err)
+	}
+	defer stalledSub.Close()
+
+	readerSub, _, err := hub.Subscribe(500)
+	if err != nil {
+		t.Fatalf("reader subscribe failed: %v", err)
+	}
+	defer readerSub.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for i := 0; i < 50; i++ {
+		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
+			return emit("", "event", map[string]int{"n": totalSeeded + i})
+		})
+	}
+
+	var prevSeq int64
+	eventCount := 0
+	expectedCount := totalSeeded - 500 + 50
+	for eventCount < expectedCount {
+		event, err := readerSub.Next(ctx)
+		if err != nil {
+			if err == context.DeadlineExceeded {
+				break
+			}
+			t.Fatalf("reader Next failed: %v", err)
+		}
+		if event.Seq <= prevSeq {
+			t.Errorf("seq %d not strictly increasing after %d", event.Seq, prevSeq)
+		}
+		prevSeq = event.Seq
+		eventCount++
+	}
+
+	if eventCount != expectedCount {
+		t.Errorf("reader got %d events, expected %d", eventCount, expectedCount)
+	}
+}
+
+func TestCancelationThenReuse(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 10)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	sub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+	defer sub.Close()
+
+	done := make(chan error)
+	go func() {
+		_, err := sub.Next(ctx)
+		done <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	err = <-done
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+
+	_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
+		return emit("", "event", map[string]string{"data": "test"})
+	})
+
+	event, err := sub.Next(ctx2)
+	if err != nil {
+		t.Fatalf("Next after cancel failed: %v", err)
+	}
+	if event.Kind != "event" {
+		t.Errorf("expected event, got %q", event.Kind)
+	}
+}
+
+func TestCloseWhileWaiting(t *testing.T) {
+	store := setupTestDB(t)
+	hub := New(store, 10)
+
+	sub, _, err := hub.Subscribe(0)
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	done := make(chan error)
+	go func() {
+		_, err := sub.Next(context.Background())
+		done <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	sub.Close()
+
+	err = <-done
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("expected ErrClosed, got %v", err)
+	}
+}
