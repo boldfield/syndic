@@ -34,8 +34,7 @@ type Step struct {
 
 // CompleteCall records a single Complete call with all its details.
 type CompleteCall struct {
-	Request  transport.CompleteRequest
-	Messages []transport.Message
+	Request transport.CompleteRequest
 }
 
 // Adapter is a scripted fake adapter for testing.
@@ -45,7 +44,7 @@ type Adapter struct {
 	defaultReportedModel string
 	capability           transport.CapabilityRecord
 	resolvedSecrets      []string
-	cancelConfirmed      bool
+	cancelUnconfirmed    bool
 	usageAvailable       bool
 
 	mu             sync.Mutex
@@ -69,7 +68,7 @@ func New(script []Step, opts Options) *Adapter {
 		defaultReportedModel: opts.DefaultReportedModel,
 		capability:           opts.Capability,
 		resolvedSecrets:      opts.ResolvedSecrets,
-		cancelConfirmed:      opts.CancelConfirmed,
+		cancelUnconfirmed:    opts.CancelUnconfirmed,
 		usageAvailable:       opts.UsageAvailable,
 		hangingAttempt:       make(map[string]context.CancelFunc),
 	}
@@ -81,7 +80,7 @@ type Options struct {
 	DefaultReportedModel string
 	Capability           transport.CapabilityRecord
 	ResolvedSecrets      []string
-	CancelConfirmed      bool
+	CancelUnconfirmed    bool
 	UsageAvailable       bool
 }
 
@@ -94,12 +93,12 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
 	a.mu.Lock()
 
-	// Record the call with a deep copy of messages.
+	// Record the call with a deep copy of the entire request including messages.
 	msgCopy := make([]transport.Message, len(req.Messages))
 	copy(msgCopy, req.Messages)
+	req.Messages = msgCopy
 	a.calls = append(a.calls, CompleteCall{
-		Request:  req,
-		Messages: msgCopy,
+		Request: req,
 	})
 
 	// Check if script is exhausted.
@@ -182,23 +181,29 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		}, nil
 
 	case StepKindHang:
-		// Block until context is done or Cancel is called.
+		// Block until context is done, Cancel is called, or req.Deadline passes.
 		attemptID := req.Envelope.AttemptID
-		hangCtx, cancel := context.WithCancel(ctx)
+		hangCtx := ctx
+		if !req.Deadline.IsZero() {
+			var cancel context.CancelFunc
+			hangCtx, cancel = context.WithDeadline(ctx, req.Deadline)
+			defer cancel()
+		}
+		hangCtxCancel, cancelFunc := context.WithCancel(hangCtx)
 		a.mu.Lock()
-		a.hangingAttempt[attemptID] = cancel
+		a.hangingAttempt[attemptID] = cancelFunc
 		a.mu.Unlock()
 
-		<-hangCtx.Done()
+		<-hangCtxCancel.Done()
 
 		a.mu.Lock()
 		delete(a.hangingAttempt, attemptID)
 		a.mu.Unlock()
 
 		ts := transport.TransportStatusTimeout
-		if hangCtx.Err() == context.Canceled {
+		if hangCtxCancel.Err() == context.Canceled {
 			ts = transport.TransportStatusCancelled
-		} else if ctx.Err() == context.DeadlineExceeded {
+		} else if hangCtxCancel.Err() == context.DeadlineExceeded {
 			ts = transport.TransportStatusTimeout
 		}
 
@@ -235,7 +240,7 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 	defer a.mu.Unlock()
 
 	confirmed := transport.TriYes
-	if a.cancelConfirmed {
+	if a.cancelUnconfirmed {
 		confirmed = transport.TriUnknown
 	}
 
@@ -267,11 +272,12 @@ func (a *Adapter) Calls() []CompleteCall {
 
 	result := make([]CompleteCall, len(a.calls))
 	for i, call := range a.calls {
-		msgCopy := make([]transport.Message, len(call.Messages))
-		copy(msgCopy, call.Messages)
+		msgCopy := make([]transport.Message, len(call.Request.Messages))
+		copy(msgCopy, call.Request.Messages)
+		requestCopy := call.Request
+		requestCopy.Messages = msgCopy
 		result[i] = CompleteCall{
-			Request:  call.Request,
-			Messages: msgCopy,
+			Request: requestCopy,
 		}
 	}
 	return result

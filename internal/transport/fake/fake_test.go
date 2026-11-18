@@ -542,12 +542,12 @@ func TestCalls(t *testing.T) {
 		t.Fatalf("calls count: %d, want 2", len(calls))
 	}
 
-	if len(calls[0].Messages) != 2 || calls[0].Messages[1].Content != "User message" {
-		t.Errorf("first call: %v", calls[0].Messages)
+	if len(calls[0].Request.Messages) != 2 || calls[0].Request.Messages[1].Content != "User message" {
+		t.Errorf("first call: %v", calls[0].Request.Messages)
 	}
 
-	if len(calls[1].Messages) != 2 || calls[1].Messages[1].Content != "Second user message" {
-		t.Errorf("second call: %v", calls[1].Messages)
+	if len(calls[1].Request.Messages) != 2 || calls[1].Request.Messages[1].Content != "Second user message" {
+		t.Errorf("second call: %v", calls[1].Request.Messages)
 	}
 }
 
@@ -594,6 +594,30 @@ func TestVerdictFixtures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestVerdictWrongHashDifferent verifies VerdictWrongHash returns a different hash.
+func TestVerdictWrongHashDifferent(t *testing.T) {
+	hash := "test-hash"
+	attemptID := "test-attempt"
+	verdict := VerdictWrongHash(hash, attemptID)
+
+	if strings.Contains(verdict, "candidate: test-hash\n") {
+		t.Errorf("VerdictWrongHash returned the same hash as input")
+	}
+	if !strings.Contains(verdict, "candidate: test-hash-stale\n") {
+		t.Errorf("VerdictWrongHash did not return expected different hash")
+	}
+
+	// Also test with a hash that is "wrong-hash"
+	wrongHash := "wrong-hash"
+	verdict2 := VerdictWrongHash(wrongHash, attemptID)
+	if strings.Contains(verdict2, "candidate: wrong-hash\n") {
+		t.Errorf("VerdictWrongHash hardcoded wrong-hash when input is 'wrong-hash'")
+	}
+	if !strings.Contains(verdict2, "candidate: wrong-hash-stale\n") {
+		t.Errorf("VerdictWrongHash did not properly derive different hash from 'wrong-hash'")
 	}
 }
 
@@ -741,6 +765,48 @@ func TestHangWithoutCancel(t *testing.T) {
 	}
 }
 
+// TestHangWithBackgroundContextRespectReqDeadline verifies hang respects req.Deadline even with context.Background().
+func TestHangWithBackgroundContextRespectReqDeadline(t *testing.T) {
+	script := []Step{
+		{
+			Kind: StepKindHang,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(100 * time.Millisecond),
+	}
+
+	start := time.Now()
+	result, err := adapter.Complete(context.Background(), req)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("hang with background context: %v", err)
+	}
+	if result.Status != transport.StatusInterrupted {
+		t.Errorf("status: %q, want interrupted", result.Status)
+	}
+	if result.TransportStatus != transport.TransportStatusTimeout {
+		t.Errorf("transport status: %q, want timeout", result.TransportStatus)
+	}
+	if elapsed < 90*time.Millisecond {
+		t.Errorf("elapsed %v, want ~100ms", elapsed)
+	}
+}
+
 // TestHangWithCancelDriven verifies Cancel unblocks a hanging attempt.
 func TestHangWithCancelDriven(t *testing.T) {
 	script := []Step{
@@ -784,30 +850,33 @@ func TestHangWithCancelDriven(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	adapter.Cancel(context.Background(), "a1")
+	_, err := adapter.Cancel(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
 	<-done
 }
 
 // TestCancelDefault verifies Cancel default is ServerConfirmed = yes.
 func TestCancelDefault(t *testing.T) {
 	script := []Step{}
-	adapter := New(script, Options{CancelConfirmed: false})
+	adapter := New(script, Options{CancelUnconfirmed: false})
 
 	status, err := adapter.Cancel(context.Background(), "test-id")
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if status.ServerConfirmed != transport.TriYes {
-		t.Errorf("ServerConfirmed: %q, want yes (CancelConfirmed: false)", status.ServerConfirmed)
+		t.Errorf("ServerConfirmed: %q, want yes (CancelUnconfirmed: false)", status.ServerConfirmed)
 	}
 
-	adapter2 := New(script, Options{CancelConfirmed: true})
+	adapter2 := New(script, Options{CancelUnconfirmed: true})
 	status2, err := adapter2.Cancel(context.Background(), "test-id")
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if status2.ServerConfirmed != transport.TriUnknown {
-		t.Errorf("ServerConfirmed: %q, want unknown (CancelConfirmed: true)", status2.ServerConfirmed)
+		t.Errorf("ServerConfirmed: %q, want unknown (CancelUnconfirmed: true)", status2.ServerConfirmed)
 	}
 
 	adapter3 := New(script, Options{})
@@ -981,10 +1050,10 @@ func TestCallsMutation(t *testing.T) {
 	_, _ = adapter.Complete(ctx, req)
 
 	calls := adapter.Calls()
-	calls[0].Messages[0].Content = "mutated message"
+	calls[0].Request.Messages[0].Content = "mutated message"
 
 	calls2 := adapter.Calls()
-	if calls2[0].Messages[0].Content != "original message" {
-		t.Errorf("mutation affected stored calls: %q", calls2[0].Messages[0].Content)
+	if calls2[0].Request.Messages[0].Content != "original message" {
+		t.Errorf("mutation affected stored calls: %q", calls2[0].Request.Messages[0].Content)
 	}
 }
