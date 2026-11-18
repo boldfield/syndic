@@ -126,6 +126,9 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		}
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning
+	case e.scheduler != nil:
+		state := e.scheduler.GetParticipantState(p.ID)
+		ws.State = state
 	default:
 		ws.State = ParticipantIdle
 	}

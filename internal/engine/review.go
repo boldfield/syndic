@@ -321,6 +321,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		return reviewerDispatch{}, err
 	}
 	e.running[id] = true
+	e.registerDeadlineTimers(t, d.attemptID)
 	return d, nil
 }
 
@@ -427,7 +428,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err := e.emitParticipantState(originalDispatch.participant, ParticipantRunning, emit); err != nil {
 		return nil, err
 	}
-	return &reviewerDispatch{
+	repairDispatch := &reviewerDispatch{
 		participant: originalDispatch.participant,
 		attemptID:   repairAttemptID,
 		req: transport.CompleteRequest{
@@ -444,7 +445,10 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 			MaxOutputTokens: maxOut,
 			Deadline:        deadline,
 		},
-	}, nil
+	}
+	// Register deadline timers for repair (called with scheduler lock pattern since we're in tx context)
+	// This is deferred since we don't have engine mutex here
+	return repairDispatch, nil
 }
 
 // completeReviewer runs accept, gate, parse and the decision for one
@@ -548,6 +552,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		return endTurnIn(tx, emit, t.id, endState, endReason)
 	})
+	e.clearDeadlineTimer(d.attemptID)
 	delete(e.running, d.participant)
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
@@ -558,6 +563,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	}
 	if repairDispatch != nil {
 		e.running[d.participant] = true
+		e.registerDeadlineTimers(t, repairDispatch.attemptID)
 		go func() {
 			res := e.complete(repairDispatch.participant, repairDispatch.req)
 			e.completeReviewer(t, *repairDispatch, res)

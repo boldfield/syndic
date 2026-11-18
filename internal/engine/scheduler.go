@@ -229,8 +229,23 @@ func (s *Scheduler) ClearAllDeadlines() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for _, cancel := range s.attemptDeadlines {
+		if cancel != nil {
+			cancel()
+		}
+	}
+	if s.turnDeadline != nil {
+		s.turnDeadline()
+	}
 	s.attemptDeadlines = make(map[string]func() bool)
 	s.turnDeadline = nil
+}
+
+// TurnDeadlineTimer returns the turn deadline timer if set.
+func (s *Scheduler) TurnDeadlineTimer() func() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.turnDeadline
 }
 
 // ClearTurnQueues removes all queued dispatches for a given turn.

@@ -67,7 +67,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 	if poolName == "" {
 		poolName = "default"
 	}
-	e.scheduler.TryDispatch(t.author, poolName)
+	_ = e.scheduler.TryDispatch(t.author, poolName)
 
 	defer e.mu.Unlock()
 
@@ -154,6 +154,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		return transport.CompleteRequest{}, "", err
 	}
 	e.running[t.author] = true
+	e.registerDeadlineTimers(t, attemptID)
 	return req, attemptID, nil
 }
 
@@ -216,6 +217,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		}
 		return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
 	})
+	e.clearDeadlineTimer(attemptID)
 	if quarantined {
 		return
 	}

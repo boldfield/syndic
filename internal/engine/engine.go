@@ -343,7 +343,7 @@ func (e *Engine) emitParticipantState(participant, state string, emit hub.Emit) 
 }
 
 // setAttemptDeadlineTimer registers a deadline timer for an attempt.
-func (e *Engine) setAttemptDeadlineTimer(attemptID string, cancel func() bool) {
+func (e *Engine) setAttemptDeadlineTimer(attemptID string, turnID string, deadline time.Time, cancel func() bool) {
 	if e.scheduler == nil {
 		return
 	}
@@ -351,7 +351,7 @@ func (e *Engine) setAttemptDeadlineTimer(attemptID string, cancel func() bool) {
 }
 
 // setTurnDeadlineTimer registers a deadline timer for a turn.
-func (e *Engine) setTurnDeadlineTimer(cancel func() bool) {
+func (e *Engine) setTurnDeadlineTimer(turnID string, deadline time.Time, cancel func() bool) {
 	if e.scheduler == nil {
 		return
 	}
@@ -380,6 +380,64 @@ func (e *Engine) clearAllDeadlines() {
 		return
 	}
 	e.scheduler.ClearAllDeadlines()
+}
+
+// registerDeadlineTimers registers timers for attempt and turn deadlines.
+// Called with e.mu held after the attempt row is written.
+func (e *Engine) registerDeadlineTimers(t *openTurn, attemptID string) {
+	now := e.clock.Now()
+
+	// Calculate attempt deadline
+	attemptDeadline := now.Add(t.attemptDeadline)
+	if t.turnDeadline.Before(attemptDeadline) {
+		attemptDeadline = t.turnDeadline
+	}
+	timeToAttemptDeadline := attemptDeadline.Sub(now)
+
+	// Register attempt deadline timer
+	if timeToAttemptDeadline > 0 {
+		stop := e.clock.AfterFunc(timeToAttemptDeadline, func() {
+			e.onAttemptDeadline(t.id, attemptID)
+		})
+		e.setAttemptDeadlineTimer(attemptID, t.id, attemptDeadline, stop)
+	}
+
+	// Register turn deadline timer (only once per turn)
+	if e.scheduler != nil && e.scheduler.TurnDeadlineTimer() == nil {
+		timeToTurnDeadline := t.turnDeadline.Sub(now)
+		if timeToTurnDeadline > 0 {
+			stop := e.clock.AfterFunc(timeToTurnDeadline, func() {
+				e.onTurnDeadline(t.id)
+			})
+			e.setTurnDeadlineTimer(t.id, t.turnDeadline, stop)
+		}
+	}
+}
+
+// onAttemptDeadline is called when an attempt deadline expires.
+func (e *Engine) onAttemptDeadline(turnID, attemptID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.open == nil || e.open.id != turnID {
+		return
+	}
+
+	// End the turn with deadline:attempt reason
+	e.finishLocked(e.open, StateIncomplete, "deadline:attempt:"+attemptID)
+}
+
+// onTurnDeadline is called when a turn deadline expires.
+func (e *Engine) onTurnDeadline(turnID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.open == nil || e.open.id != turnID {
+		return
+	}
+
+	// End the turn with deadline:turn reason
+	e.finishLocked(e.open, StateIncomplete, "deadline:turn")
 }
 
 // Cancel is implemented by a later task.
