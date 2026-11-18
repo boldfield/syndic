@@ -605,3 +605,792 @@ func TestFileNameSanitized(t *testing.T) {
 		t.Errorf("export file written outside dir: %s", exportPath)
 	}
 }
+
+// TestConfigFingerprintConsistent verifies that the same input produces the same hash
+// and asserts a fixed expected value to catch accidental canonical form changes.
+func TestConfigFingerprintConsistent(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		MaxTokensField:    "max_tokens",
+		Models:            []string{"model-a", "model-b"},
+	}
+
+	const expectedGolden = "5fbd2664926e2c5733fcc14b99f0edbaebd40c367e806e4c2948059fd52ad7d5"
+
+	fp1, err := ConfigFingerprint(profile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	fp2, err := ConfigFingerprint(profile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 != fp2 {
+		t.Errorf("Fingerprints differ for identical input: %q vs %q", fp1, fp2)
+	}
+
+	// Assert the fixed expected golden value
+	if fp1 != expectedGolden {
+		t.Errorf("Fingerprint changed: expected %q, got %q. This may indicate an accidental change to the canonical form.", expectedGolden, fp1)
+	}
+
+	// Check format: should be lowercase hex SHA-256 (64 chars)
+	if len(fp1) != 64 {
+		t.Errorf("Expected 64-char hex fingerprint, got length %d", len(fp1))
+	}
+	for _, c := range fp1 {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Errorf("Fingerprint contains non-hex character: %c", c)
+		}
+	}
+}
+
+// TestConfigFingerprintChangesOnBaseURLChange verifies that fingerprint changes
+// when base URL changes.
+func TestConfigFingerprintChangesOnBaseURLChange(t *testing.T) {
+	baseProfile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	fp1, err := ConfigFingerprint(baseProfile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	modifiedProfile := baseProfile
+	modifiedProfile.BaseURL = "http://localhost:9000/v1"
+
+	fp2, err := ConfigFingerprint(modifiedProfile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when base URL changes, but got same value: %q", fp1)
+	}
+}
+
+// TestConfigFingerprintChangesOnModelChange verifies that fingerprint changes
+// when model changes.
+func TestConfigFingerprintChangesOnModelChange(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	fp1, err := ConfigFingerprint(profile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	fp2, err := ConfigFingerprint(profile, "model-b", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when model changes, but got same value: %q", fp1)
+	}
+}
+
+// TestConfigFingerprintChangesOnAdapterVersionChange verifies that fingerprint
+// changes when adapter version changes.
+func TestConfigFingerprintChangesOnAdapterVersionChange(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	fp1, err := ConfigFingerprint(profile, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	fp2, err := ConfigFingerprint(profile, "model-a", "2.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when adapter version changes, but got same value: %q", fp1)
+	}
+}
+
+// TestConfigFingerprintChangesOnAuthChange verifies that fingerprint changes
+// when auth reference changes.
+func TestConfigFingerprintChangesOnAuthChange(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		Auth: &config.SecretRef{
+			Source: "env",
+			Name:   "KEY1",
+		},
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	profile2 := profile1
+	profile2.Auth = &config.SecretRef{
+		Source: "env",
+		Name:   "KEY2",
+	}
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when auth reference changes")
+	}
+}
+
+// TestConfigFingerprintOrderIndependent verifies that map insertion order
+// doesn't affect the fingerprint.
+func TestConfigFingerprintOrderIndependent(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		ExtraHeaders: map[string]config.SecretRef{
+			"X-Header-A": {Source: "env", Name: "HDR_A"},
+			"X-Header-B": {Source: "env", Name: "HDR_B"},
+		},
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	// Create profile2 with same headers but inserted in different order.
+	profile2 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		ExtraHeaders: map[string]config.SecretRef{
+			"X-Header-B": {Source: "env", Name: "HDR_B"},
+			"X-Header-A": {Source: "env", Name: "HDR_A"},
+		},
+	}
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 != fp2 {
+		t.Errorf("Fingerprints should be equal regardless of map insertion order")
+	}
+}
+
+// TestConfigFingerprintChangesOnExtraHeaderNameChange verifies that fingerprint
+// changes when an extra header name changes.
+func TestConfigFingerprintChangesOnExtraHeaderNameChange(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		ExtraHeaders: map[string]config.SecretRef{
+			"X-Header-Old": {Source: "env", Name: "HDR_A"},
+		},
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	profile2 := profile1
+	profile2.ExtraHeaders = map[string]config.SecretRef{
+		"X-Header-New": {Source: "env", Name: "HDR_A"},
+	}
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when extra header name changes")
+	}
+}
+
+// TestConfigFingerprintChangesOnExtraHeaderReferenceChange verifies that fingerprint
+// changes when an extra header's reference name changes.
+func TestConfigFingerprintChangesOnExtraHeaderReferenceChange(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		ExtraHeaders: map[string]config.SecretRef{
+			"X-Custom": {Source: "env", Name: "OLD_NAME"},
+		},
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	profile2 := profile1
+	profile2.ExtraHeaders = map[string]config.SecretRef{
+		"X-Custom": {Source: "env", Name: "NEW_NAME"},
+	}
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when extra header reference changes")
+	}
+}
+
+// TestConfigFingerprintChangesOnMaxTokensFieldChange verifies that fingerprint
+// changes when the max_tokens_field changes.
+func TestConfigFingerprintChangesOnMaxTokensFieldChange(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		MaxTokensField:    "max_tokens",
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	profile2 := profile1
+	profile2.MaxTokensField = "max_completion_tokens"
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when max_tokens_field changes")
+	}
+}
+
+// TestCalibrationRecordAvailableMarshaling verifies that an available
+// calibration marshals to an object.
+func TestCalibrationRecordAvailableMarshaling(t *testing.T) {
+	cal := CalibrationRecord{
+		Available:            true,
+		BytesPerToken:        0.5,
+		ObservedPromptTokens: 100,
+		BaselinePromptTokens: 80,
+	}
+
+	data, err := json.Marshal(cal)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var obj map[string]interface{}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if bytes, ok := obj["bytes_per_token"]; !ok || bytes != 0.5 {
+		t.Errorf("Expected bytes_per_token 0.5 in object")
+	}
+	if tokens, ok := obj["observed_prompt_tokens"]; !ok || tokens != float64(100) {
+		t.Errorf("Expected observed_prompt_tokens 100 in object")
+	}
+	if baseline, ok := obj["baseline_prompt_tokens"]; !ok || baseline != float64(80) {
+		t.Errorf("Expected baseline_prompt_tokens 80 in object")
+	}
+}
+
+// TestCalibrationRecordUnavailableMarshaling verifies that an unavailable
+// calibration marshals to "unavailable" string.
+func TestCalibrationRecordUnavailableMarshaling(t *testing.T) {
+	cal := CalibrationRecord{
+		Available: false,
+	}
+
+	data, err := json.Marshal(cal)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		t.Fatalf("Unmarshal to string failed: %v", err)
+	}
+
+	if str != "unavailable" {
+		t.Errorf("Expected 'unavailable', got %q", str)
+	}
+}
+
+// TestCalibrationRecordRoundTrip verifies that a CalibrationRecord
+// round-trips through marshaling.
+func TestCalibrationRecordRoundTrip(t *testing.T) {
+	original := CalibrationRecord{
+		Available:            true,
+		BytesPerToken:        0.75,
+		ObservedPromptTokens: 150,
+		BaselinePromptTokens: 120,
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var unmarshaled CalibrationRecord
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if unmarshaled != original {
+		t.Errorf("Round-trip failed: original %+v, unmarshaled %+v", original, unmarshaled)
+	}
+}
+
+// TestCalibrationRecordInvalidType verifies that UnmarshalJSON rejects wrong types.
+func TestCalibrationRecordInvalidType(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr bool
+	}{
+		{"invalid string", `"bad_string"`, true},
+		{"missing bytes_per_token", `{"observed_prompt_tokens":100,"baseline_prompt_tokens":80}`, true},
+		{"missing observed_prompt_tokens", `{"bytes_per_token":0.5,"baseline_prompt_tokens":80}`, true},
+		{"missing baseline_prompt_tokens", `{"bytes_per_token":0.5,"observed_prompt_tokens":100}`, true},
+		{"bytes_per_token wrong type", `{"bytes_per_token":"string","observed_prompt_tokens":100,"baseline_prompt_tokens":80}`, true},
+		{"observed_prompt_tokens wrong type", `{"bytes_per_token":0.5,"observed_prompt_tokens":"string","baseline_prompt_tokens":80}`, true},
+		{"baseline_prompt_tokens wrong type", `{"bytes_per_token":0.5,"observed_prompt_tokens":100,"baseline_prompt_tokens":"string"}`, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cal CalibrationRecord
+			err := json.Unmarshal([]byte(tt.data), &cal)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UnmarshalJSON error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestProbeManifestCalibrationRoundTrip verifies that a CalibrationRecord
+// within a ProbeManifest round-trips through json.Marshal and ParseProbeManifest.
+func TestProbeManifestCalibrationRoundTrip(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	export := Export{
+		Redacted:      true,
+		RedactionRule: "evidence/v1",
+		EndpointName:  "test-endpoint",
+		Model:         "test-model",
+	}
+
+	cal := transport.Calibration{
+		Available:            true,
+		BytesPerToken:        0.5,
+		ObservedPromptTokens: 100,
+		BaselinePromptTokens: 80,
+	}
+
+	original, err := NewProbeManifest(export, profile, "test-model", "1.0.0", cal)
+	if err != nil {
+		t.Fatalf("NewProbeManifest failed: %v", err)
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	parsed, hasFingerprint, err := ParseProbeManifest(data)
+	if err != nil {
+		t.Fatalf("ParseProbeManifest failed: %v", err)
+	}
+
+	if !hasFingerprint {
+		t.Errorf("Expected hasFingerprint=true")
+	}
+
+	if parsed.Calibration != original.Calibration {
+		t.Errorf("Calibration mismatch: original %+v, parsed %+v", original.Calibration, parsed.Calibration)
+	}
+}
+
+// TestNewProbeManifest verifies that NewProbeManifest creates a valid manifest.
+func TestNewProbeManifest(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	export := Export{
+		Redacted:      true,
+		RedactionRule: "evidence/v1",
+		EndpointName:  "test-endpoint",
+		Model:         "test-model",
+	}
+
+	cal := transport.Calibration{
+		Available:            true,
+		BytesPerToken:        0.5,
+		ObservedPromptTokens: 100,
+		BaselinePromptTokens: 80,
+	}
+
+	manifest, err := NewProbeManifest(export, profile, "test-model", "1.0.0", cal)
+	if err != nil {
+		t.Fatalf("NewProbeManifest failed: %v", err)
+	}
+
+	if manifest.Export.EndpointName != export.EndpointName {
+		t.Errorf("Export.EndpointName mismatch")
+	}
+	if manifest.FingerprintRule != FingerprintRule {
+		t.Errorf("FingerprintRule expected %q, got %q", FingerprintRule, manifest.FingerprintRule)
+	}
+	if manifest.ConfigFingerprint == "" {
+		t.Errorf("ConfigFingerprint is empty")
+	}
+	if manifest.Calibration.Available != true {
+		t.Errorf("Calibration.Available expected true, got false")
+	}
+}
+
+// TestParseProbeManifestWrapped verifies that ParseProbeManifest can parse
+// the new wrapped shape.
+func TestParseProbeManifestWrapped(t *testing.T) {
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+	}
+
+	export := Export{
+		Redacted:      true,
+		RedactionRule: "evidence/v1",
+		EndpointName:  "test-endpoint",
+		Model:         "test-model",
+	}
+
+	cal := transport.Calibration{
+		Available:            true,
+		BytesPerToken:        0.5,
+		ObservedPromptTokens: 100,
+		BaselinePromptTokens: 80,
+	}
+
+	original, err := NewProbeManifest(export, profile, "test-model", "1.0.0", cal)
+	if err != nil {
+		t.Fatalf("NewProbeManifest failed: %v", err)
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	parsed, hasFingerprint, err := ParseProbeManifest(data)
+	if err != nil {
+		t.Fatalf("ParseProbeManifest failed: %v", err)
+	}
+
+	if !hasFingerprint {
+		t.Errorf("Expected hasFingerprint=true, got false")
+	}
+	if parsed.ConfigFingerprint != original.ConfigFingerprint {
+		t.Errorf("ConfigFingerprint mismatch: %q vs %q", parsed.ConfigFingerprint, original.ConfigFingerprint)
+	}
+	if parsed.FingerprintRule != original.FingerprintRule {
+		t.Errorf("FingerprintRule mismatch")
+	}
+	if parsed.Calibration.Available != original.Calibration.Available {
+		t.Errorf("Calibration.Available mismatch")
+	}
+}
+
+// TestParseProbeManifestBareExport verifies that ParseProbeManifest can parse
+// a bare export (old format).
+func TestParseProbeManifestBareExport(t *testing.T) {
+	export := Export{
+		Redacted:      true,
+		RedactionRule: "evidence/v1",
+		EndpointName:  "test-endpoint",
+		Model:         "test-model",
+	}
+
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal export failed: %v", err)
+	}
+
+	parsed, hasFingerprint, err := ParseProbeManifest(data)
+	if err != nil {
+		t.Fatalf("ParseProbeManifest failed: %v", err)
+	}
+
+	if hasFingerprint {
+		t.Errorf("Expected hasFingerprint=false for bare export, got true")
+	}
+	if parsed.Export.EndpointName != export.EndpointName {
+		t.Errorf("Parsed export EndpointName doesn't match original")
+	}
+	if parsed.ConfigFingerprint != "" {
+		t.Errorf("Expected empty ConfigFingerprint for bare export")
+	}
+}
+
+// TestParseProbeManifestEmptyObject verifies that ParseProbeManifest rejects
+// an empty object.
+func TestParseProbeManifestEmptyObject(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage("{}"))
+	if err == nil {
+		t.Errorf("Expected error for empty object, got nil")
+	}
+}
+
+// TestParseProbeManifestArray verifies that ParseProbeManifest rejects an array.
+func TestParseProbeManifestArray(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage("[]"))
+	if err == nil {
+		t.Errorf("Expected error for array, got nil")
+	}
+}
+
+// TestParseProbeManifestPartialCalibration verifies that ParseProbeManifest
+// rejects a partial wrapped shape with only calibration.
+func TestParseProbeManifestPartialCalibration(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"calibration":"unavailable"}`))
+	if err == nil {
+		t.Errorf("Expected error for partial wrapped shape with only calibration, got nil")
+	}
+}
+
+// TestParseProbeManifestPartialFingerprint verifies that ParseProbeManifest
+// rejects a partial wrapped shape with only empty config_fingerprint.
+func TestParseProbeManifestPartialFingerprint(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"config_fingerprint":""}`))
+	if err == nil {
+		t.Errorf("Expected error for partial wrapped shape with empty config_fingerprint, got nil")
+	}
+}
+
+// TestParseProbeManifestPartialRule verifies that ParseProbeManifest
+// rejects a partial wrapped shape with only fingerprint_rule.
+func TestParseProbeManifestPartialRule(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"fingerprint_rule":"fingerprint/v1"}`))
+	if err == nil {
+		t.Errorf("Expected error for partial wrapped shape with only fingerprint_rule, got nil")
+	}
+}
+
+// TestParseProbeManifestPartialWrappedMissingExport verifies that ParseProbeManifest
+// rejects a wrapped shape that has config_fingerprint but is missing export.
+func TestParseProbeManifestPartialWrappedMissingExport(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"config_fingerprint":"abc123","fingerprint_rule":"fingerprint/v1","calibration":"unavailable"}`))
+	if err == nil {
+		t.Errorf("Expected error for wrapped shape missing export, got nil")
+	}
+}
+
+// TestParseProbeManifestWrappedIncompleteExport verifies that ParseProbeManifest
+// rejects a wrapped manifest with an incomplete export (missing redaction_rule).
+func TestParseProbeManifestWrappedIncompleteExport(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"export":{"endpoint_name":"ep","model":"m"},"config_fingerprint":"abc","fingerprint_rule":"fingerprint/v1","calibration":"unavailable"}`))
+	if err == nil {
+		t.Errorf("Expected error for wrapped manifest with incomplete export (missing redaction_rule), got nil")
+	}
+}
+
+// TestManifestSentinelInReference verifies that the marshalled manifest's
+// config_fingerprint does not contain resolved sentinel secrets, only reference names.
+func TestManifestSentinelInReference(t *testing.T) {
+	const sentinel = "sk-SENTINEL-DoNotUseThisInProduction123456789"
+
+	profile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		Auth: &config.SecretRef{
+			Source: "env",
+			Name:   "API_KEY",
+		},
+	}
+
+	// Compute fingerprint - it should contain the reference name in its input
+	fp, err := ConfigFingerprint(profile, "test-model", "1.0.0")
+	if err != nil {
+		t.Fatalf("ConfigFingerprint failed: %v", err)
+	}
+
+	export := Export{
+		Redacted:      true,
+		RedactionRule: "evidence/v1",
+		EndpointName:  "test-endpoint",
+		Model:         "test-model",
+		AuthSecret:    "env:API_KEY",
+	}
+
+	cal := transport.Calibration{
+		Available: false,
+	}
+
+	manifest, err := NewProbeManifest(export, profile, "test-model", "1.0.0", cal)
+	if err != nil {
+		t.Fatalf("NewProbeManifest failed: %v", err)
+	}
+
+	// The fingerprint should contain the reference name in its canonical JSON input
+	if manifest.ConfigFingerprint != fp {
+		t.Errorf("Fingerprint mismatch")
+	}
+
+	// The auth secret in the export contains the reference name
+	if manifest.Export.AuthSecret != "env:API_KEY" {
+		t.Errorf("Expected AuthSecret 'env:API_KEY', got %q", manifest.Export.AuthSecret)
+	}
+
+	// Marshal the entire manifest to JSON
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	manifestStr := string(data)
+
+	// The marshalled manifest should contain the reference name but not any sentinel
+	if !contains(manifestStr, "API_KEY") {
+		t.Errorf("Manifest should contain reference name API_KEY")
+	}
+	if contains(manifestStr, sentinel) {
+		t.Errorf("Manifest should not contain sentinel value %q", sentinel)
+	}
+}
+
+// TestParseProbeManifestRejectPartialRedacted verifies that ParseProbeManifest
+// rejects objects that only have the redacted field without other required fields.
+func TestParseProbeManifestRejectPartialRedacted(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"only redacted true", `{"redacted":true}`},
+		{"only redacted false", `{"redacted":false}`},
+		{"only redacted null", `{"redacted":null}`},
+		{"redacted with one field", `{"redacted":true,"endpoint_name":"test"}`},
+		{"redacted with two fields", `{"redacted":true,"endpoint_name":"test","model":"gpt-4"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ParseProbeManifest(json.RawMessage(tt.json))
+			if err == nil {
+				t.Errorf("Expected error for %s, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestCalibrationRecordRejectNonIntegralTokenCounts verifies that UnmarshalJSON
+// rejects non-integral values for token count fields.
+func TestCalibrationRecordRejectNonIntegralTokenCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"observed_prompt_tokens float", `{"bytes_per_token":0.5,"observed_prompt_tokens":1.5,"baseline_prompt_tokens":80}`},
+		{"baseline_prompt_tokens float", `{"bytes_per_token":0.5,"observed_prompt_tokens":100,"baseline_prompt_tokens":80.9}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cal CalibrationRecord
+			err := json.Unmarshal([]byte(tt.json), &cal)
+			if err == nil {
+				t.Errorf("Expected error for %s (got values: observed=%d, baseline=%d), got nil",
+					tt.name, cal.ObservedPromptTokens, cal.BaselinePromptTokens)
+			}
+		})
+	}
+}
