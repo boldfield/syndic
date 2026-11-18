@@ -5,6 +5,33 @@
 # Must reference a preset with mode="review" (the shipped default is review-based).
 default_preset = "review"
 
+# deadlines: timeout values for submission and review phases
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = true
+
+# budgets: token budgets for costing and admission control
+[budgets]
+calibration_safety          = 0.75
+message_overhead_tokens     = 8
+request_overhead_tokens     = 16
+context_margin              = 0.10
+author_max_output_tokens    = 4096
+reviewer_max_output_tokens  = 2048
+delivery_max_tokens         = 64
+turn_max_estimated_tokens   = 250000
+
+# engine: engine-wide settings
+[engine]
+stop_grace = "5s"
+
+# pools: resource pools for scheduling and capacity management
+[pools.default]
+concurrency             = 1
+uncertain_release_after = "0s"
+
 # participants: array of participants (authors and reviewers)
 # - id: unique identifier for this participant
 # - model: the LLM model this participant uses
@@ -12,6 +39,8 @@ default_preset = "review"
 # - endpoint: for api route, the name of the endpoint profile to use
 # - eligible_roles: ["author"] or ["reviewer"] or both
 # - pool: resource pool for scheduling
+# - context_tokens: assumed context length (used if probe record lacks context_bound)
+# - bytes_per_token: calibrated bytes per token (used if probe record lacks calibration)
 [[participants]]
 id = "author"
 model = "llama2"
@@ -19,6 +48,8 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["author"]
 pool = "default"
+context_tokens = 4096
+bytes_per_token = 4.0
 
 [[participants]]
 id = "reviewer"
@@ -27,6 +58,8 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
+context_tokens = 4096
+bytes_per_token = 4.0
 
 # endpoints: array of endpoint profiles describing remote LLM services
 # - name: unique identifier for this endpoint
@@ -37,6 +70,7 @@ pool = "default"
 # - network_dependency: "none", "vpn", or "other"
 # - dialect: "chat_completions_v1" (the OpenAI-compatible chat API)
 # - models: allowlist of model names this endpoint supports
+# - tokens_per_byte_max: required for admission control, no default
 [[endpoints]]
 name = "local"
 base_url = "http://localhost:11434/v1"
@@ -46,6 +80,7 @@ declared_billing = "none"
 network_dependency = "none"
 dialect = "chat_completions_v1"
 models = ["llama2"]
+tokens_per_byte_max = 1.0
 
 # presets: named review configurations
 # - review: mode requires an author and one or more required reviewers

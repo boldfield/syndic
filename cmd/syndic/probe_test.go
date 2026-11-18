@@ -984,6 +984,121 @@ required_reviewers = ["reviewer"]
 	}
 }
 
+func TestProbeMeteringEndpointRefused(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server that behaves like an OpenAI-compatible endpoint
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{})
+	}))
+	defer server.Close()
+
+	// Create roster with metered endpoint
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "metered"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Set environment to temp directory
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+
+	// Run the probe command and capture stderr
+	var stderr bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stderr = oldStderr
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("failed to copy from pipe: %v", err)
+	}
+
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2 for metered endpoint, got %d", exitCode)
+	}
+
+	output := stderr.String()
+	if !strings.Contains(output, "metered") || !strings.Contains(output, "spending ceiling") {
+		t.Fatalf("expected metered/spending ceiling error message, got: %s", output)
+	}
+
+	// Verify the test server received zero requests (probe was rejected before adapter was built)
+	if requestCount > 0 {
+		t.Fatalf("expected zero requests to server, got %d", requestCount)
+	}
+
+	// Verify no export was written
+	if _, err := os.Stat(exportDir); err == nil {
+		exportFiles, _ := os.ReadDir(exportDir)
+		if len(exportFiles) > 0 {
+			t.Fatalf("expected no export files, got %d", len(exportFiles))
+		}
+	}
+}
+
 func TestProbeJournalParentDirDoesNotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	rawDir := filepath.Join(tmpDir, "raw")

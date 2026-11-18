@@ -337,7 +337,7 @@ func TestValidateViolations(t *testing.T) {
 			mutate: func(r *Roster) {
 				r.Endpoints[0].DeclaredBilling = "metered"
 			},
-			wantMsgs: []string{"ep1", "metered", "spending ceiling", "alpha"},
+			wantMsgs: []string{},
 		},
 		{
 			name: "local_only rejects corporate location",
@@ -413,6 +413,75 @@ func TestValidateViolations(t *testing.T) {
 				})
 			},
 			wantMsgs: []string{"duplicate participant", "author", "missing endpoint", "default_preset", "nonexistent"},
+		},
+		{
+			name: "negative attempt deadline",
+			mutate: func(r *Roster) {
+				negDur := Duration{-1 * time.Second}
+				r.Deadlines.Attempt = &negDur
+			},
+			wantMsgs: []string{"deadlines.attempt", "positive"},
+		},
+		{
+			name: "turn deadline less than attempt",
+			mutate: func(r *Roster) {
+				attempt := Duration{10 * time.Second}
+				turn := Duration{5 * time.Second}
+				r.Deadlines.Attempt = &attempt
+				r.Deadlines.Turn = &turn
+			},
+			wantMsgs: []string{"deadlines.turn", "at least", "deadlines.attempt"},
+		},
+		{
+			name: "calibration_safety out of range",
+			mutate: func(r *Roster) {
+				cs := 1.5
+				r.Budgets.CalibrationSafety = &cs
+			},
+			wantMsgs: []string{"calibration_safety", "greater than 0", "at most 1.0"},
+		},
+		{
+			name: "context_margin out of range",
+			mutate: func(r *Roster) {
+				cm := 1.5
+				r.Budgets.ContextMargin = &cm
+			},
+			wantMsgs: []string{"context_margin", "less than 1"},
+		},
+		{
+			name: "participant context_tokens invalid",
+			mutate: func(r *Roster) {
+				ct := 0
+				r.Participants[0].ContextTokens = &ct
+			},
+			wantMsgs: []string{"author", "context_tokens", "at least 1"},
+		},
+		{
+			name: "endpoint tokens_per_byte_max invalid",
+			mutate: func(r *Roster) {
+				tpb := 0.0
+				r.Endpoints[0].TokensPerByteMax = &tpb
+			},
+			wantMsgs: []string{"ep1", "tokens_per_byte_max", "greater than 0"},
+		},
+		{
+			name: "pool concurrency invalid",
+			mutate: func(r *Roster) {
+				if r.Pools == nil {
+					r.Pools = make(map[string]Pool)
+				}
+				conc := 0
+				r.Pools["test"] = Pool{Concurrency: &conc}
+				r.Participants[0].Pool = "test"
+			},
+			wantMsgs: []string{"pools[\"test\"]", "concurrency", "at least 1"},
+		},
+		{
+			name: "participant references non-existent pool",
+			mutate: func(r *Roster) {
+				r.Participants[0].Pool = "nonexistent"
+			},
+			wantMsgs: []string{"author", "nonexistent", "references non-existent pool"},
 		},
 	}
 
@@ -590,6 +659,159 @@ func TestResolveWithSentinelString(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults(t *testing.T) {
+	r := &Roster{}
+	r.ApplyDefaults()
+
+	if r.Deadlines.Attempt == nil || r.Deadlines.Attempt.Duration != 300*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 300s", r.Deadlines.Attempt)
+	}
+	if r.Deadlines.Turn == nil || r.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", r.Deadlines.Turn)
+	}
+	if r.Deadlines.Delivery == nil || r.Deadlines.Delivery.Duration != 60*time.Second {
+		t.Errorf("Deadlines.Delivery = %v, want 60s", r.Deadlines.Delivery)
+	}
+	if r.Deadlines.Provisional == nil || !*r.Deadlines.Provisional {
+		t.Errorf("Deadlines.Provisional = %v, want true", r.Deadlines.Provisional)
+	}
+
+	if r.Budgets.CalibrationSafety == nil || *r.Budgets.CalibrationSafety != 0.75 {
+		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", r.Budgets.CalibrationSafety)
+	}
+	if r.Budgets.MessageOverheadTokens == nil || *r.Budgets.MessageOverheadTokens != 8 {
+		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", r.Budgets.MessageOverheadTokens)
+	}
+	if r.Budgets.RequestOverheadTokens == nil || *r.Budgets.RequestOverheadTokens != 16 {
+		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", r.Budgets.RequestOverheadTokens)
+	}
+	if r.Budgets.ContextMargin == nil || *r.Budgets.ContextMargin != 0.10 {
+		t.Errorf("Budgets.ContextMargin = %v, want 0.10", r.Budgets.ContextMargin)
+	}
+	if r.Budgets.AuthorMaxOutputTokens == nil || *r.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", r.Budgets.AuthorMaxOutputTokens)
+	}
+	if r.Budgets.ReviewerMaxOutputTokens == nil || *r.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", r.Budgets.ReviewerMaxOutputTokens)
+	}
+	if r.Budgets.DeliveryMaxTokens == nil || *r.Budgets.DeliveryMaxTokens != 64 {
+		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", r.Budgets.DeliveryMaxTokens)
+	}
+	if r.Budgets.TurnMaxEstimatedTokens == nil || *r.Budgets.TurnMaxEstimatedTokens != 250000 {
+		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", r.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	if r.Engine.StopGrace == nil || r.Engine.StopGrace.Duration != 5*time.Second {
+		t.Errorf("Engine.StopGrace = %v, want 5s", r.Engine.StopGrace)
+	}
+}
+
+func TestApplyDefaultsPreservesExisting(t *testing.T) {
+	custom := 60 * time.Second
+	r := &Roster{
+		Deadlines: Deadlines{
+			Attempt: &Duration{custom},
+		},
+	}
+	r.ApplyDefaults()
+
+	if r.Deadlines.Attempt.Duration != custom {
+		t.Errorf("Deadlines.Attempt = %v, want %v", r.Deadlines.Attempt.Duration, custom)
+	}
+	if r.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", r.Deadlines.Turn.Duration)
+	}
+}
+
+func TestPoolFor(t *testing.T) {
+	r := &Roster{
+		Pools: map[string]Pool{
+			"spark": {
+				Concurrency:           ptr(5),
+				UncertainReleaseAfter: &Duration{10 * time.Second},
+			},
+		},
+	}
+
+	// Test declared pool
+	conc, release := r.PoolFor("spark")
+	if conc != 5 {
+		t.Errorf("PoolFor(spark) concurrency = %d, want 5", conc)
+	}
+	if release != 10*time.Second {
+		t.Errorf("PoolFor(spark) release = %v, want 10s", release)
+	}
+
+	// Test default pool
+	conc, release = r.PoolFor("default")
+	if conc != 1 {
+		t.Errorf("PoolFor(default) concurrency = %d, want 1", conc)
+	}
+	if release != 0 {
+		t.Errorf("PoolFor(default) release = %v, want 0", release)
+	}
+
+	// Test empty string
+	conc, release = r.PoolFor("")
+	if conc != 1 {
+		t.Errorf("PoolFor(\"\") concurrency = %d, want 1", conc)
+	}
+	if release != 0 {
+		t.Errorf("PoolFor(\"\") release = %v, want 0", release)
+	}
+
+	// Test undeclared pool
+	conc, release = r.PoolFor("unknown")
+	if conc != 1 {
+		t.Errorf("PoolFor(unknown) concurrency = %d, want 1", conc)
+	}
+	if release != 0 {
+		t.Errorf("PoolFor(unknown) release = %v, want 0", release)
+	}
+}
+
+func TestPoolForWithPartialFields(t *testing.T) {
+	r := &Roster{
+		Pools: map[string]Pool{
+			"test": {
+				Concurrency: ptr(3),
+			},
+		},
+	}
+
+	conc, release := r.PoolFor("test")
+	if conc != 3 {
+		t.Errorf("PoolFor(test) concurrency = %d, want 3", conc)
+	}
+	if release != 0 {
+		t.Errorf("PoolFor(test) release = %v, want 0", release)
+	}
+}
+
+func TestMalformedDuration(t *testing.T) {
+	_, err := Load("testdata/malformed-duration.toml")
+	if err == nil {
+		t.Fatal("expected error for malformed duration")
+	}
+	if !strings.Contains(err.Error(), "duration") && !strings.Contains(err.Error(), "TOML") {
+		t.Errorf("error doesn't mention duration or TOML: %v", err)
+	}
+}
+
+func TestUnknownBudgetKey(t *testing.T) {
+	_, err := Load("testdata/unknown-budget-key.toml")
+	if err == nil {
+		t.Fatal("expected error for unknown budget key")
+	}
+	if !strings.Contains(err.Error(), "unknown keys") {
+		t.Errorf("error doesn't mention unknown keys: %v", err)
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
 func BenchmarkValidate(b *testing.B) {
 	roster, _ := Load("testdata/example.toml")
 	b.ResetTimer()
@@ -611,7 +833,7 @@ func TestStressTest(t *testing.T) {
 			Route:         "api",
 			Endpoint:      fmt.Sprintf("ep%d", i),
 			EligibleRoles: []Role{RoleAuthor, RoleReviewer},
-			Pool:          "p",
+			Pool:          "default",
 		}
 		endpoints[i] = EndpointProfile{
 			Name:              fmt.Sprintf("ep%d", i),
