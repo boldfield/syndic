@@ -62,14 +62,9 @@ func Resolve(getenv func(string) string, homeDir string) (Paths, error) {
 
 		fi, err := os.Stat(parent)
 		if err != nil {
-			// For home fallback, create parent if missing. For XDG candidates, skip.
-			if !c.isHomeFallback {
-				continue
-			}
-			if err := os.MkdirAll(parent, 0755); err != nil {
-				continue
-			}
-		} else if !fi.IsDir() {
+			continue
+		}
+		if !fi.IsDir() {
 			continue
 		}
 
@@ -80,7 +75,6 @@ func Resolve(getenv func(string) string, homeDir string) (Paths, error) {
 		if err := os.MkdirAll(p, 0700); err != nil {
 			continue
 		}
-
 		if err := os.Chmod(p, 0700); err != nil {
 			continue
 		}

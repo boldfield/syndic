@@ -81,6 +81,11 @@ func TestResolveHomeDir(t *testing.T) {
 	if err := os.MkdirAll(homeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Pre-create the parent directory for the home fallback
+	stateDir := filepath.Join(homeDir, ".local", "state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	getenv := func(name string) string {
 		return ""
@@ -149,6 +154,11 @@ func TestResolveEmptyEnv(t *testing.T) {
 	if err := os.MkdirAll(homeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Pre-create the parent directory for the home fallback
+	stateDir := filepath.Join(homeDir, ".local", "state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	getenv := func(name string) string {
 		return ""
@@ -205,6 +215,11 @@ func TestResolveXDGStateHomeUnset(t *testing.T) {
 	if err := os.MkdirAll(homeDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Pre-create the parent directory for the home fallback
+	stateDir := filepath.Join(homeDir, ".local", "state")
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	getenv := func(name string) string {
 		return ""
@@ -245,6 +260,36 @@ func TestResolveMissingXDGRuntimeDirEmptyHome(t *testing.T) {
 		t.Fatal("Missing runtime dir should not have been created")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("Unexpected error checking missing runtime dir: %v", err)
+	}
+}
+
+func TestResolveHomeMissingParentNotCreated(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Do NOT create the .local/state parent directory
+
+	getenv := func(name string) string {
+		return ""
+	}
+
+	paths, err := Resolve(getenv, homeDir)
+	if err == nil {
+		t.Fatal("Expected error when home parent is missing")
+	}
+
+	if paths != (Paths{}) {
+		t.Errorf("Expected empty Paths, got %+v", paths)
+	}
+
+	// Ensure the missing parent was not created
+	missingParent := filepath.Join(homeDir, ".local", "state")
+	if _, err := os.Stat(missingParent); err == nil {
+		t.Fatal("Missing parent directory should not have been created")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("Unexpected error checking missing parent: %v", err)
 	}
 }
 
