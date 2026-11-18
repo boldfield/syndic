@@ -6,6 +6,8 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
+// Overheads are the declared per-message and per-request token overheads
+// (message_overhead_tokens and request_overhead_tokens).
 type Overheads struct {
 	MessageTokens int
 	RequestTokens int
@@ -32,14 +34,18 @@ func ceilSafe(x float64) int {
 // when the result is within ULP-scale floating-point error of an integer
 // (to avoid floating-point errors that round mathematically integral results down by one).
 // Uses a tolerance proportional to the magnitude to handle ULPs correctly.
-func floorSafe(x float64) int {
+//
+// scale is the magnitude of the inputs that produced x. Representation error in
+// a product like b*(1-m) is bounded by about b*epsilon, not by the size of the
+// result, so the tolerance follows scale rather than x.
+func floorSafe(x, scale float64) int {
 	r := math.Round(x)
 	// Snap only if error is within ~4.5 ULPs: tolerance = 1e-15 * max(1.0, abs(r)).
 	// At any magnitude m, this is roughly (1e-15 * m) / (m * 2.22e-16) ≈ 4.5 ULPs.
 	// This catches products like 1000*0.1=100.0 but rejects genuinely fractional values
 	// like 0.9999999995 and large-magnitude near-integer values like 9,999,999.999995
-	// (fractional part 0.999995 >> tolerance 1e-8 at magnitude 10M).
-	if math.Abs(x-r) < math.Max(1.0, math.Abs(r))*1e-15 {
+	// (distance to the nearest integer is 5e-6, well above the tolerance 1e-8 at magnitude 10M).
+	if math.Abs(x-r) < math.Max(1.0, math.Max(math.Abs(r), scale))*1e-15 {
 		return int(r)
 	}
 	return int(math.Floor(x))
@@ -87,7 +93,7 @@ func EffectiveBytesPerToken(calibrated float64, calibrationSafety float64) float
 // UsableBound computes the usable context bound given a context margin.
 // It calculates: floor(contextBound × (1 - contextMargin)).
 func UsableBound(contextBound int, contextMargin float64) int {
-	return floorSafe(float64(contextBound) * (1 - contextMargin))
+	return floorSafe(float64(contextBound)*(1-contextMargin), float64(contextBound))
 }
 
 // Fits determines whether admission tokens plus max output tokens fit within the usable bound.

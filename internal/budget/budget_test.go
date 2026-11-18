@@ -313,6 +313,10 @@ func TestUsableBound(t *testing.T) {
 			contextMargin: 0.0000000000005,
 			want:          9999999, // floor(10M * (1 - 5e-13)) = floor(10M * 0.9999999999995) = floor(9,999,999.9995) = 9,999,999, not snapped to 10M
 		},
+		{name: "high margin 10000/0.9461", contextBound: 10000, contextMargin: 0.9461, want: 539},
+		{name: "high margin 100000/0.9471", contextBound: 100000, contextMargin: 0.9471, want: 5290},
+		{name: "high margin 100000/0.9999", contextBound: 100000, contextMargin: 0.9999, want: 10},
+		{name: "high margin 330000/0.9451", contextBound: 330000, contextMargin: 0.9451, want: 18117},
 	}
 
 	for _, tt := range tests {
