@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -57,7 +58,7 @@ func (tx *Tx) ListAttempts(turnID string) ([]AttemptRow, error) {
 		       max_output_tokens, estimated_prompt_tokens, usage_prompt, usage_completion, retry_count
 		FROM attempts
 		WHERE turn_id = ?
-		ORDER BY dispatched_at ASC, id ASC
+		ORDER BY dispatched_at ASC, rowid ASC
 	`, turnID)
 	if err != nil {
 		return nil, fmt.Errorf("query attempts: %w", err)
@@ -127,7 +128,7 @@ func (tx *Tx) ListVerdicts(turnID string) ([]VerdictRow, error) {
 		FROM verdicts v
 		JOIN attempts a ON v.attempt_id = a.id
 		WHERE a.turn_id = ?
-		ORDER BY a.dispatched_at ASC, a.id ASC, v.id ASC
+		ORDER BY a.dispatched_at ASC, a.rowid ASC, v.rowid ASC
 	`, turnID)
 	if err != nil {
 		return nil, fmt.Errorf("query verdicts: %w", err)
@@ -241,6 +242,8 @@ type transcriptRow struct {
 	sha256    string
 	byteLen   int64
 	attemptID *string
+	sortOrder int64
+	sortKind  string
 }
 
 func (s *Store) TranscriptPage(turnID, cursor string, limit int) (items []TranscriptItem, nextCursor string, err error) {
@@ -267,32 +270,33 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		}
 	}
 
-	var allRows []transcriptRow
-
 	msgRows, err := tx.tx.Query(`
-		SELECT id, phase, sender, content_hash, byte_length, sequence
+		SELECT id, phase, sender, content_hash, byte_length, sequence, rowid
 		FROM messages
 		WHERE turn_id = ?
-		ORDER BY sequence ASC, id ASC
+		ORDER BY rowid ASC
 	`, turnID)
 	if err != nil {
 		return nil, "", fmt.Errorf("query messages: %w", err)
 	}
 	defer func() { _ = msgRows.Close() }()
 
+	var allRows []transcriptRow
+
 	for msgRows.Next() {
 		var row transcriptRow
 		var msgID string
-		var sequence int
+		var sequence int64
+		var rowid int64
 
-		if err := msgRows.Scan(&msgID, &row.phase, &row.sender, &row.sha256, &row.byteLen, &sequence); err != nil {
+		if err := msgRows.Scan(&msgID, &row.phase, &row.sender, &row.sha256, &row.byteLen, &sequence, &rowid); err != nil {
 			return nil, "", fmt.Errorf("scan message: %w", err)
 		}
 
 		row.kind = "message"
 		row.ref = "msg:" + msgID
-		row.at = time.Time{}
-
+		row.sortOrder = rowid
+		row.sortKind = "message"
 		allRows = append(allRows, row)
 	}
 	if err := msgRows.Err(); err != nil {
@@ -300,10 +304,10 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 	}
 
 	attemptRows, err := tx.tx.Query(`
-		SELECT id, dispatched_at, phase, participant
+		SELECT id, dispatched_at, phase, participant, rowid
 		FROM attempts
 		WHERE turn_id = ?
-		ORDER BY dispatched_at ASC, id ASC
+		ORDER BY rowid ASC
 	`, turnID)
 	if err != nil {
 		return nil, "", fmt.Errorf("query attempts: %w", err)
@@ -314,8 +318,9 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		var row transcriptRow
 		var attemptID string
 		var dispatchedAtStr string
+		var rowid int64
 
-		if err := attemptRows.Scan(&attemptID, &dispatchedAtStr, &row.phase, &row.sender); err != nil {
+		if err := attemptRows.Scan(&attemptID, &dispatchedAtStr, &row.phase, &row.sender, &rowid); err != nil {
 			return nil, "", fmt.Errorf("scan attempt: %w", err)
 		}
 
@@ -328,34 +333,20 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		row.ref = "attempt:" + attemptID
 		row.at = dispatchedAt
 		row.attemptID = &attemptID
-
+		row.sortOrder = rowid
+		row.sortKind = "attempt"
 		allRows = append(allRows, row)
 	}
 	if err := attemptRows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate attempts: %w", err)
 	}
 
-	// Merge by time: attempts have real timestamps, messages stay in sequence order
-	// Place messages before attempts by zeroing message times then sorting
-	for i := len(allRows) - 1; i > 0; i-- {
-		for j := 0; j < i; j++ {
-			isMessageBefore := allRows[j].kind == "message"
-			isMessageAfter := allRows[j+1].kind == "message"
-
-			shouldSwap := false
-			if isMessageBefore && !isMessageAfter {
-				shouldSwap = false
-			} else if !isMessageBefore && isMessageAfter {
-				shouldSwap = true
-			} else if !isMessageBefore && !isMessageAfter && allRows[j].at.After(allRows[j+1].at) {
-				shouldSwap = true
-			}
-
-			if shouldSwap {
-				allRows[j], allRows[j+1] = allRows[j+1], allRows[j]
-			}
+	sort.SliceStable(allRows, func(i, j int) bool {
+		if allRows[i].sortOrder != allRows[j].sortOrder {
+			return allRows[i].sortOrder < allRows[j].sortOrder
 		}
-	}
+		return false
+	})
 
 	var result []TranscriptItem
 	var newCursor string

@@ -512,3 +512,249 @@ func TestListBlocksIncludesOverridden(t *testing.T) {
 		t.Errorf("overridden block %s not found in ListBlocks results", blockID)
 	}
 }
+
+func TestContentRangeLargeAttemptOutput(t *testing.T) {
+	db, cleanup := testOpenDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	content := make([]byte, 700000)
+	for i := range content {
+		switch i % 4 {
+		case 0:
+			content[i] = byte('a' + (i % 26))
+		case 1:
+			if i%3 == 0 {
+				content[i] = '"'
+			} else if i%5 == 0 {
+				content[i] = '\\'
+			} else {
+				content[i] = '\n'
+			}
+		case 2:
+			if i%6 == 0 {
+				content[i] = 0xF0 + byte(i%4)
+			} else {
+				content[i] = byte('A' + (i % 26))
+			}
+		default:
+			if i%7 == 0 {
+				content[i] = 0
+			} else if i%8 == 0 {
+				content[i] = 0x80 + byte(i%64)
+			} else {
+				content[i] = byte(i % 256)
+			}
+		}
+	}
+
+	var runID, turnID, attemptID string
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		runID, _, err = tx.CreateRun([]byte(`{"test":true}`))
+		if err != nil {
+			return err
+		}
+
+		turnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		attemptID, err = tx.BeginAttempt(turnID, "participant", "phase", 0, &now, "")
+		if err != nil {
+			return err
+		}
+
+		contentStr := string(content)
+		return tx.CompleteAttempt(attemptID, contentStr, 0, "unknown", "complete", "", "ok")
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	ref := "attempt:" + attemptID
+	expectedH := sha256.Sum256(content)
+	expectedSHA256 := hex.EncodeToString(expectedH[:])
+
+	var assembled []byte
+	chunkSize := int64(262144)
+
+	for offset := int64(0); offset < int64(len(content)); {
+		data, total, sha256, err := store.ContentRange(ref, offset, chunkSize)
+		if err != nil {
+			t.Fatalf("ContentRange at offset %d failed: %v", offset, err)
+		}
+
+		if total != int64(len(content)) {
+			t.Errorf("ContentRange total mismatch at offset %d: got %d, want %d", offset, total, len(content))
+		}
+
+		if sha256 != expectedSHA256 {
+			t.Errorf("ContentRange SHA256 mismatch: got %s, want %s", sha256, expectedSHA256)
+		}
+
+		assembled = append(assembled, data...)
+		offset += int64(len(data))
+	}
+
+	if !bytes.Equal(assembled, content) {
+		t.Errorf("reassembled large attempt output mismatch")
+	}
+}
+
+func TestTranscriptPageOrderingAndDistinctness(t *testing.T) {
+	db, cleanup := testOpenDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	var runID, turnID string
+	var msgIDs []string
+	var attemptIDs []string
+
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		runID, _, err = tx.CreateRun([]byte(`{"test":true}`))
+		if err != nil {
+			return err
+		}
+
+		turnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return err
+		}
+
+		msgContent := []byte("message 1")
+		msgID, _, _, err := tx.AppendMessage(turnID, "phase1", "sender1", []string{"receiver1"}, msgContent, nil)
+		if err != nil {
+			return err
+		}
+		msgIDs = append(msgIDs, msgID)
+
+		msgContent = []byte("message 2")
+		msgID, _, _, err = tx.AppendMessage(turnID, "phase1", "sender2", []string{"receiver2"}, msgContent, nil)
+		if err != nil {
+			return err
+		}
+		msgIDs = append(msgIDs, msgID)
+
+		now := time.Now().UTC()
+		attemptID, err := tx.BeginAttempt(turnID, "participant-1", "phase1", 0, &now, "")
+		if err != nil {
+			return err
+		}
+		attemptIDs = append(attemptIDs, attemptID)
+
+		attemptID, err = tx.BeginAttempt(turnID, "participant-2", "phase1", 0, &now, "")
+		if err != nil {
+			return err
+		}
+		attemptIDs = append(attemptIDs, attemptID)
+
+		attemptID, err = tx.BeginAttempt(turnID, "participant-3", "phase1", 0, &now, "")
+		if err != nil {
+			return err
+		}
+		attemptIDs = append(attemptIDs, attemptID)
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	allItems, _, err := store.TranscriptPage(turnID, "", 200)
+	if err != nil {
+		t.Fatalf("full page failed: %v", err)
+	}
+
+	if len(allItems) != 5 {
+		t.Fatalf("expected 5 total items, got %d", len(allItems))
+	}
+
+	itemRefs := make(map[string]bool)
+	for _, item := range allItems {
+		if itemRefs[item.Ref] {
+			t.Errorf("duplicate item ref: %s", item.Ref)
+		}
+		itemRefs[item.Ref] = true
+	}
+
+	items1, _, err := store.TranscriptPage(turnID, "", 2)
+	if err != nil {
+		t.Fatalf("first page failed: %v", err)
+	}
+
+	for i, item := range allItems {
+		if i < len(items1) {
+			if item.Ref != items1[i].Ref {
+				t.Errorf("item %d: single-page mismatch with paged: got %s, want %s", i, item.Ref, items1[i].Ref)
+			}
+		}
+	}
+}
+
+func TestTranscriptPageAttemptStatusAndScrubCount(t *testing.T) {
+	db, cleanup := testOpenDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	var runID, turnID, attemptID string
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		runID, _, err = tx.CreateRun([]byte(`{"test":true}`))
+		if err != nil {
+			return err
+		}
+
+		turnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		attemptID, err = tx.BeginAttempt(turnID, "participant", "phase", 0, &now, "")
+		if err != nil {
+			return err
+		}
+
+		return tx.CompleteAttempt(attemptID, "output content", 2, "unknown", "complete", "", "ok")
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	items, _, err := store.TranscriptPage(turnID, "", 200)
+	if err != nil {
+		t.Fatalf("TranscriptPage failed: %v", err)
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+
+	item := items[0]
+	if item.Kind != "attempt" {
+		t.Errorf("expected attempt, got %s", item.Kind)
+	}
+
+	if item.Attempt == nil {
+		t.Fatal("Attempt field is nil")
+	}
+
+	if item.Attempt.RawOutput != nil {
+		t.Error("RawOutput should be nil in TranscriptItem")
+	}
+
+	if item.Attempt.Status == nil || *item.Attempt.Status != "complete" {
+		t.Errorf("expected status 'complete', got %v", item.Attempt.Status)
+	}
+
+	if item.Attempt.ScrubCount == nil || *item.Attempt.ScrubCount != 2 {
+		t.Errorf("expected scrub count 2, got %v", item.Attempt.ScrubCount)
+	}
+}
