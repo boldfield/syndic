@@ -38,8 +38,11 @@ type Adapter struct {
 	requestIDGen int64
 }
 
-// adapterVersion identifies this adapter in capability records.
-const adapterVersion = "openai-v1"
+// AdapterVersion identifies this adapter in capability records.
+const AdapterVersion = "openai-v1"
+
+// adapterVersion is deprecated; use AdapterVersion instead.
+const adapterVersion = AdapterVersion
 
 // probeMarkerSeq keeps head and tail markers unique even on a coarse clock.
 var probeMarkerSeq atomic.Int64
@@ -283,7 +286,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	for _, msg := range req.Messages {
 		if msg.Role != "system" && msg.Role != "user" && msg.Role != "assistant" {
-			return result, fmt.Errorf("invalid message role: %s", msg.Role)
+			return result, fmt.Errorf("%w: invalid message role: %s", transport.ErrNotSent, msg.Role)
 		}
 	}
 
@@ -293,7 +296,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	if a.profile.Auth != nil {
 		authVal, err := a.resolver.Resolve(*a.profile.Auth)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 		}
 		resolvedSecrets = append(resolvedSecrets, authVal)
 		headers.Set("Authorization", "Bearer "+authVal)
@@ -302,7 +305,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	for headerName, secretRef := range a.profile.ExtraHeaders {
 		headerVal, err := a.resolver.Resolve(secretRef)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 		}
 		resolvedSecrets = append(resolvedSecrets, headerVal)
 		headers.Set(headerName, headerVal)
@@ -311,12 +314,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	reqBody := buildRequestBody(req, &a.profile)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 	}
 
 	baseURL, err := url.Parse(a.profile.BaseURL)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 	}
 
 	endpoint := baseURL.JoinPath("/chat/completions")
@@ -330,7 +333,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 	}
 
 	httpReq.Header = headers
