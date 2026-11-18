@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,6 +37,12 @@ type Adapter struct {
 	inFlightReqs map[string]inFlightReq
 	requestIDGen int64
 }
+
+// adapterVersion identifies this adapter in capability records.
+const adapterVersion = "openai-v1"
+
+// probeMarkerSeq keeps head and tail markers unique even on a coarse clock.
+var probeMarkerSeq atomic.Int64
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
@@ -105,6 +112,13 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		return transport.CapabilityRecord{}, fmt.Errorf("endpoint %q does not match profile name %q", endpoint, a.profile.Name)
 	}
 
+	if opts.Timeout <= 0 {
+		opts.Timeout = 60 * time.Second
+	}
+	if opts.AssumedContextLen <= 0 {
+		opts.AssumedContextLen = 131072
+	}
+
 	record := transport.CapabilityRecord{
 		Endpoint:                 endpoint,
 		Model:                    model,
@@ -126,7 +140,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		LatencyMillis:            nil,
 		ToolRestrictions:         []string{"no tool definitions sent"},
 		ServerVersion:            "unknown",
-		AdapterVersion:           "openai-v1",
+		AdapterVersion:           adapterVersion,
 		ObservedAt:               time.Now(),
 		Raw:                      json.RawMessage("{}"),
 	}
@@ -161,11 +175,11 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	probeFinishReasons := make(map[string]transport.CompletionStatus)
 	rawSteps := make(map[string]any)
 
-	if err := a.probeModels(probeCtx, baseURL, &record, resolvedSecrets, rawSteps, opts.Timeout); err != nil {
+	if err := a.probeModels(probeCtx, baseURL, &record, &resolvedSecrets, rawSteps, opts.Timeout); err != nil {
 		return record, err
 	}
 
-	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
+	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout)
 	if step2ServerVersion != "" {
 		serverVersion = step2ServerVersion
 	}
@@ -187,7 +201,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if len(step2Body.Choices) > 0 {
 			finishReason := step2Body.Choices[0].FinishReason
 			if finishReason != "" {
-				probeFinishReasons[finishReason] = a.normalizeFinishReason(finishReason)
+				probeFinishReasons[finishReason] = mapFinishReason(finishReason)
 			}
 
 			if step2Body.Model != "" {
@@ -204,12 +218,12 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		}
 	}
 
-	if err := a.probeSystemRole(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout, probeFinishReasons); err != nil {
+	if err := a.probeSystemRole(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, probeFinishReasons); err != nil {
 		return record, err
 	}
 
 	if !opts.DisableOverLength {
-		a.probeOverLength(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
+		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
 	}
 
 	if len(probeFinishReasons) > 0 {
@@ -450,16 +464,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	result.TransportStatus = transport.TransportStatusOK
 
-	switch finishReason {
-	case "stop":
-		result.Status = transport.StatusComplete
-	case "length":
-		result.Status = transport.StatusTruncated
-	case "content_filter":
-		result.Status = transport.StatusRefused
-	default:
-		result.Status = transport.StatusError
-	}
+	result.Status = mapFinishReason(finishReason)
 
 	if respData.Usage != nil {
 		result.Usage = &transport.Usage{
@@ -612,7 +617,9 @@ func isConnectionRefusedOrDNSErr(err error) bool {
 	return errors.As(err, &dnsErr)
 }
 
-func (a *Adapter) normalizeFinishReason(reason string) transport.CompletionStatus {
+// mapFinishReason maps a native finish_reason to a completion status. It is
+// shared by Complete and Probe so the two cannot drift.
+func mapFinishReason(reason string) transport.CompletionStatus {
 	switch reason {
 	case "stop":
 		return transport.StatusComplete
@@ -625,7 +632,7 @@ func (a *Adapter) normalizeFinishReason(reason string) transport.CompletionStatu
 	}
 }
 
-func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, secrets []string, rawSteps map[string]any, timeout time.Duration) error {
+func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, secrets *[]string, rawSteps map[string]any, timeout time.Duration) error {
 	modelsURL := baseURL.JoinPath("/models")
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -636,7 +643,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return err
 	}
 
-	if err := a.addAuthHeaders(httpReq); err != nil {
+	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return err
 	}
 
@@ -666,18 +673,19 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 			return nil
 		}
 
+		models, ok := modelResp["data"].([]any)
+		if !ok {
+			return nil
+		}
+
 		record.ModelsEndpoint = transport.TriYes
 
 		modelFound := false
-		if data, ok := modelResp["data"]; ok {
-			if models, ok := data.([]any); ok {
-				for _, m := range models {
-					if modelMap, ok := m.(map[string]any); ok {
-						if id, ok := modelMap["id"]; ok && id == record.Model {
-							modelFound = true
-							break
-						}
-					}
+		for _, m := range models {
+			if modelMap, ok := m.(map[string]any); ok {
+				if id, ok := modelMap["id"]; ok && id == record.Model {
+					modelFound = true
+					break
 				}
 			}
 		}
@@ -691,7 +699,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	return nil
 }
 
-func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration) (*ResponseBody, int, string, error) {
+func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration) (*ResponseBody, int, string, error) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	var maxTokensBody *ResponseBody
@@ -700,7 +708,6 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 	for idx, field := range []string{"max_tokens", "max_completion_tokens"} {
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
 
 		messages := []MessageInput{
 			{Role: "user", Content: "test"},
@@ -717,17 +724,20 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
+			cancel()
 			return nil, 0, "", err
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
-		if err := a.addAuthHeaders(httpReq); err != nil {
+		if err := a.addProbeAuth(httpReq, secrets); err != nil {
+			cancel()
 			return nil, 0, "", err
 		}
 
 		startTime := time.Now()
 		httpResp, err := a.client.Do(httpReq)
 		if err != nil {
+			cancel()
 			if isConnectionRefusedOrDNSErr(err) {
 				stepName := "max_tokens"
 				if idx == 1 {
@@ -740,7 +750,9 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		}
 
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-		if err := httpResp.Body.Close(); err != nil {
+		closeErr := httpResp.Body.Close()
+		cancel()
+		if err := closeErr; err != nil {
 			return nil, 0, "", err
 		}
 		latency = int(time.Since(startTime).Milliseconds())
@@ -771,6 +783,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 			return nil, latency, serverVersion, nil
 		}
 
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			// Only a 400 triggers the max_completion_tokens follow-up.
+			return nil, latency, serverVersion, nil
+		}
+
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 			record.MaxTokensField = field
 
@@ -786,7 +803,7 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 	return maxTokensBody, latency, serverVersion, nil
 }
 
-func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration, finishReasons map[string]transport.CompletionStatus) error {
+func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, finishReasons map[string]transport.CompletionStatus) error {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -817,7 +834,7 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if err := a.addAuthHeaders(httpReq); err != nil {
+	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return err
 	}
 
@@ -847,7 +864,7 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 
 				finishReason := respData.Choices[0].FinishReason
 				if finishReason != "" {
-					finishReasons[finishReason] = a.normalizeFinishReason(finishReason)
+					finishReasons[finishReason] = mapFinishReason(finishReason)
 				}
 			}
 		}
@@ -856,13 +873,13 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
-func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
+func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	uniqueSuffix := time.Now().UnixNano()
+	uniqueSuffix := time.Now().UnixNano() + probeMarkerSeq.Add(1)
 	headMarker := fmt.Sprintf("<<<HEAD_%d>>>", uniqueSuffix)
 	tailMarker := fmt.Sprintf("<<<TAIL_%d>>>", uniqueSuffix)
 
@@ -900,7 +917,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if err := a.addAuthHeaders(httpReq); err != nil {
+	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		record.OverLength = "errored"
 		return
 	}
@@ -942,25 +959,36 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 
 	finishReason := respData.Choices[0].FinishReason
 	if finishReason != "" {
-		finishReasons[finishReason] = a.normalizeFinishReason(finishReason)
+		finishReasons[finishReason] = mapFinishReason(finishReason)
 	}
 }
 
-func (a *Adapter) addAuthHeaders(req *http.Request) error {
+// addProbeAuth sets auth headers and appends every secret value resolved for
+// this request to secrets, so Scrub sees what was actually sent.
+func (a *Adapter) addProbeAuth(req *http.Request, secrets *[]string) error {
+	vals, err := a.resolveAuthHeaders(req)
+	*secrets = append(*secrets, vals...)
+	return err
+}
+
+func (a *Adapter) resolveAuthHeaders(req *http.Request) ([]string, error) {
+	var vals []string
 	if a.profile.Auth != nil {
 		authVal, err := a.resolver.Resolve(*a.profile.Auth)
 		if err != nil {
-			return err
+			return vals, err
 		}
+		vals = append(vals, authVal)
 		req.Header.Set("Authorization", "Bearer "+authVal)
 	}
 
 	for headerName, secretRef := range a.profile.ExtraHeaders {
 		headerVal, err := a.resolver.Resolve(secretRef)
 		if err != nil {
-			return err
+			return vals, err
 		}
+		vals = append(vals, headerVal)
 		req.Header.Set(headerName, headerVal)
 	}
-	return nil
+	return vals, nil
 }
