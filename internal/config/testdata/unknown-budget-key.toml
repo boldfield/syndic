@@ -1,0 +1,31 @@
+default_preset = "review"
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2"]
+
+[budgets]
+calibration_safety = 0.75
+unknown_field = 123
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true

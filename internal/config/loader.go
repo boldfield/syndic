@@ -28,5 +28,6 @@ func Load(path string) (*Roster, error) {
 		return nil, fmt.Errorf("unknown keys in TOML: %v", keys)
 	}
 
+	roster.ApplyDefaults()
 	return &roster, nil
 }
