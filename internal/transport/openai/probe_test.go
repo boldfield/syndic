@@ -145,7 +145,7 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 		"Streaming":                {rec.Streaming, transport.TriUnknown},
 		"CancelObservable":         {rec.CancelObservable, transport.TriNo},
 		"ServerVersion":            {rec.ServerVersion, "fake/1.0"},
-		"AdapterVersion":           {rec.AdapterVersion, adapterVersion},
+		"AdapterVersion":           {rec.AdapterVersion, AdapterVersion},
 	}
 	for name, c := range checks {
 		if c[0] != c[1] {
