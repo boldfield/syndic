@@ -669,30 +669,30 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	}
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-		record.ModelsEndpoint = transport.TriYes
-
 		var modelResp map[string]any
 		if err := json.Unmarshal(body, &modelResp); err != nil {
-			record.ModelListed = transport.TriNo
-		} else {
-			modelFound := false
-			if data, ok := modelResp["data"]; ok {
-				if models, ok := data.([]any); ok {
-					for _, m := range models {
-						if modelMap, ok := m.(map[string]any); ok {
-							if id, ok := modelMap["id"]; ok && id == record.Model {
-								modelFound = true
-								break
-							}
+			return nil
+		}
+
+		record.ModelsEndpoint = transport.TriYes
+
+		modelFound := false
+		if data, ok := modelResp["data"]; ok {
+			if models, ok := data.([]any); ok {
+				for _, m := range models {
+					if modelMap, ok := m.(map[string]any); ok {
+						if id, ok := modelMap["id"]; ok && id == record.Model {
+							modelFound = true
+							break
 						}
 					}
 				}
 			}
-			if modelFound {
-				record.ModelListed = transport.TriYes
-			} else {
-				record.ModelListed = transport.TriNo
-			}
+		}
+		if modelFound {
+			record.ModelListed = transport.TriYes
+		} else {
+			record.ModelListed = transport.TriNo
 		}
 	}
 
@@ -706,8 +706,9 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 	var latency int
 	var serverVersion string
 
-	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+	for idx, field := range []string{"max_tokens", "max_completion_tokens"} {
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 
 		messages := []MessageInput{
 			{Role: "user", Content: "test"},
@@ -723,7 +724,6 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		bodyBytes, _ := json.Marshal(requestBody)
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
-		cancel()
 		if err != nil {
 			return err, nil, 0, ""
 		}
@@ -737,7 +737,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		httpResp, err := a.client.Do(httpReq)
 		if err != nil {
 			if isConnectionRefusedOrDNSErr(err) {
-				recordRawStep(rawSteps, "/chat/completions", 0, nil, nil)
+				stepName := "max_tokens"
+				if idx == 1 {
+					stepName = "max_completion_tokens"
+				}
+				recordRawStep(rawSteps, stepName, 0, nil, nil)
 				return transport.ErrUnreachable, nil, 0, ""
 			}
 			return err, nil, 0, ""
@@ -749,7 +753,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
-		recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+		stepName := "max_tokens"
+		if idx == 1 {
+			stepName = "max_completion_tokens"
+		}
+		recordRawStep(rawSteps, stepName, httpResp.StatusCode, httpResp.Header, body)
 
 		if serverVersion == "" && httpResp.Header.Get("Server") != "" {
 			serverVersion = httpResp.Header.Get("Server")
@@ -832,7 +840,7 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		return err
 	}
 
-	recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+	recordRawStep(rawSteps, "system_role", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		var respData ResponseBody
@@ -862,9 +870,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	uniqueSuffix := fmt.Sprintf("%d_%d", time.Now().UnixNano(), time.Now().Nanosecond())
-	headMarker := fmt.Sprintf("<<<HEAD_%s>>>", uniqueSuffix)
-	tailMarker := fmt.Sprintf("<<<TAIL_%s>>>", uniqueSuffix)
+	uniqueSuffix := time.Now().UnixNano()
+	headMarker := fmt.Sprintf("<<<HEAD_%d>>>", uniqueSuffix)
+	tailMarker := fmt.Sprintf("<<<TAIL_%d>>>", uniqueSuffix)
 
 	promptSizeChars := (assumedContextLen * 3 / 2) * 4
 	fillerSize := promptSizeChars - len(headMarker) - len(tailMarker) - len("Please respond with both markers: HEAD and TAIL. ")
@@ -917,7 +925,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return
 	}
 
-	recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+	recordRawStep(rawSteps, "over_length", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		record.OverLength = "errored"
