@@ -93,10 +93,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return false
 	}
-	delete(e.running, t.author)
 	if quarantined {
+		// The turn already ended; release reports the author idle.
 		return false
 	}
+	delete(e.running, t.author)
 	if ended {
 		if e.open == t {
 			e.open = nil

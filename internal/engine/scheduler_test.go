@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -398,5 +399,32 @@ func TestNoTimerFiresAfterTurnEnds(t *testing.T) {
 	again, err := h.Store.GetTurn(turnID)
 	if err != nil || again.TerminalState != row.TerminalState || again.TerminalReason != row.TerminalReason {
 		t.Fatalf("turn changed from %+v to %+v, err %v", row, again, err)
+	}
+}
+
+func TestAttemptDeadlineOnHangReviewAuthorIdle(t *testing.T) {
+	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
+	h := enginetest.New(t, schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
+	turnID := submitReview(t, h, "s1")
+	waitCount(t, h, wire.EventKindAttemptBegun, 1)
+	attemptID := attemptsOf(h, turnID, "author")[0]
+
+	h.Clock.Advance(61 * time.Second)
+	wantEnd(t, h, turnID, engine.StateIncomplete, "deadline:attempt:"+attemptID)
+	if _, err := h.Adapters["author"].Cancel(context.Background(), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	waitParticipantState(t, h, "author", engine.ParticipantIdle)
+
+	var states []string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvParticipantState); ok && p.Participant == "author" {
+			states = append(states, p.State)
+		}
+	}
+	want := []string{engine.ParticipantRunning, engine.ParticipantIdle}
+	if !reflect.DeepEqual(states, want) {
+		t.Fatalf("author participant_state events = %v, want %v", states, want)
 	}
 }
