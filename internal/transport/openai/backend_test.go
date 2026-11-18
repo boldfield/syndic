@@ -1,12 +1,15 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +19,15 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/contracttest"
 )
+
+var logBuffer bytes.Buffer
+
+func TestMain(m *testing.M) {
+	log.SetOutput(&logBuffer)
+	code := m.Run()
+	log.SetOutput(os.Stderr)
+	os.Exit(code)
+}
 
 type testBackend struct {
 	primaryServer *httptest.Server
@@ -41,7 +53,7 @@ func (b *testBackend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fi
 	b.primaryHits.Store(0)
 	b.foreignHits.Store(0)
 
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        "",
 		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
@@ -312,46 +324,51 @@ func TestContractOpenAI(t *testing.T) {
 func TestTableTestCases(t *testing.T) {
 	tests := []struct {
 		name                    string
-		setupFunc               func(*testing.T, *Adapter) (transport.CompleteRequest, transport.Expected)
+		setupFunc               func(*testing.T) (*Adapter, transport.CompleteRequest)
 		expectedStatus          transport.CompletionStatus
 		expectedTransportStatus string
-		verifyScrubbing         bool
 	}{
 		{
 			name: "404_model_unavailable",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusNotFound)
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "",
-					}
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusError,
 			expectedTransportStatus: transport.TransportStatusModelUnavailable,
 		},
 		{
 			name: "missing_finish_reason",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					resp := ResponseBody{
 						Model: "test-model",
@@ -370,33 +387,39 @@ func TestTableTestCases(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "test-model",
-					}
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusError,
 			expectedTransportStatus: transport.TransportStatusOK,
 		},
 		{
 			name: "no_choices",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					resp := ResponseBody{
 						Model:   "test-model",
@@ -407,33 +430,39 @@ func TestTableTestCases(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "test-model",
-					}
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusError,
 			expectedTransportStatus: transport.TransportStatusMalformedBody,
 		},
 		{
 			name: "max_tokens_field_selection",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					resp := ResponseBody{
 						Model: "test-model",
@@ -452,68 +481,117 @@ func TestTableTestCases(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				a.profile.MaxTokensField = "max_completion_tokens"
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_completion_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
 
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "test-model",
-					}
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusComplete,
 			expectedTransportStatus: transport.TransportStatusOK,
 		},
 		{
-			name: "oversize_body",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			name: "oversize_body_default_limit",
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write(make([]byte, 17*1024*1024))
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "",
-					}
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusError,
 			expectedTransportStatus: transport.TransportStatusBodyTooLarge,
 		},
 		{
-			name: "truncated_with_verdict_content",
-			setupFunc: func(t *testing.T, a *Adapter) (transport.CompleteRequest, transport.Expected) {
+			name: "oversize_body_custom_limit",
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(make([]byte, 1024*1024))
+				}))
+				t.Cleanup(server.Close)
+
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := NewWithOptions(profile, &mockResolver{}, WithMaxBodySize(512*1024))
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
+			},
+			expectedStatus:          transport.StatusError,
+			expectedTransportStatus: transport.TransportStatusBodyTooLarge,
+		},
+		{
+			name: "truncated_with_verdict_envelope",
+			setupFunc: func(t *testing.T) (*Adapter, transport.CompleteRequest) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					resp := ResponseBody{
 						Model: "contract-model",
@@ -521,7 +599,7 @@ func TestTableTestCases(t *testing.T) {
 							{
 								Message: ChoiceMessage{
 									Role:    "assistant",
-									Content: `{"approval": true, "confidence": 0.95}`,
+									Content: `{"verdict": "approve", "candidate": "test", "identity": "test"}`,
 								},
 								FinishReason: "length",
 							},
@@ -532,26 +610,32 @@ func TestTableTestCases(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 
-				a.profile.BaseURL = server.URL
-				return transport.CompleteRequest{
-						Envelope: transport.AttemptEnvelope{
-							Participant:   "test",
-							TurnID:        "turn1",
-							Phase:         "phase1",
-							Epoch:         1,
-							AttemptID:     "attempt1",
-							CandidateHash: "hash1",
-						},
-						Model: "test-model",
-						Messages: []transport.Message{
-							{Role: "user", Content: "test"},
-						},
-						MaxOutputTokens: 100,
-						Deadline:        time.Now().Add(2 * time.Second),
-					}, transport.Expected{
-						Identity:      transport.NewUnknownIdentity(),
-						ReportedModel: "contract-model",
-					}
+				profile := config.EndpointProfile{
+					Name:           "test",
+					BaseURL:        server.URL,
+					Auth:           nil,
+					ExtraHeaders:   map[string]config.SecretRef{},
+					Dialect:        "chat_completions_v1",
+					MaxTokensField: "max_tokens",
+				}
+				adapter := New(profile, &mockResolver{})
+
+				return adapter, transport.CompleteRequest{
+					Envelope: transport.AttemptEnvelope{
+						Participant:   "test",
+						TurnID:        "turn1",
+						Phase:         "phase1",
+						Epoch:         1,
+						AttemptID:     "attempt1",
+						CandidateHash: "hash1",
+					},
+					Model: "test-model",
+					Messages: []transport.Message{
+						{Role: "user", Content: "test"},
+					},
+					MaxOutputTokens: 100,
+					Deadline:        time.Now().Add(2 * time.Second),
+				}
 			},
 			expectedStatus:          transport.StatusTruncated,
 			expectedTransportStatus: transport.TransportStatusOK,
@@ -560,18 +644,7 @@ func TestTableTestCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile := &config.EndpointProfile{
-				Name:           "test",
-				BaseURL:        "http://localhost",
-				Auth:           nil,
-				ExtraHeaders:   map[string]config.SecretRef{},
-				Dialect:        "chat_completions_v1",
-				MaxTokensField: "max_tokens",
-			}
-			resolver := &mockResolver{}
-			adapter := New(profile, resolver)
-
-			req, _ := tt.setupFunc(t, adapter)
+			adapter, req := tt.setupFunc(t)
 			result, err := adapter.Complete(context.Background(), req)
 
 			if err != nil {
@@ -590,7 +663,7 @@ func TestTableTestCases(t *testing.T) {
 }
 
 func TestConnectionRefused(t *testing.T) {
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        "http://127.0.0.1:1",
 		Auth:           nil,
@@ -635,6 +708,8 @@ func TestConnectionRefused(t *testing.T) {
 }
 
 func TestSecretLogging(t *testing.T) {
+	logBuffer.Reset()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := ResponseBody{
 			Model: "test-model",
@@ -653,7 +728,7 @@ func TestSecretLogging(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        server.URL,
 		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
@@ -662,7 +737,7 @@ func TestSecretLogging(t *testing.T) {
 		MaxTokensField: "max_tokens",
 	}
 
-	resolver := &mockResolver{secret: "secret-value"}
+	resolver := &mockResolver{secret: "super-secret-token"}
 	adapter := New(profile, resolver)
 
 	req := transport.CompleteRequest{
@@ -684,8 +759,12 @@ func TestSecretLogging(t *testing.T) {
 
 	result, _ := adapter.Complete(context.Background(), req)
 
-	if strings.Contains(result.RawOutput, "secret-value") {
+	if strings.Contains(result.RawOutput, "super-secret-token") {
 		t.Error("raw output contains unredacted secret")
+	}
+
+	if strings.Contains(logBuffer.String(), "super-secret-token") {
+		t.Error("log buffer contains unredacted secret")
 	}
 }
 
@@ -697,7 +776,7 @@ func TestCancel(t *testing.T) {
 	defer server.Close()
 	defer close(done)
 
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        server.URL,
 		Auth:           nil,
@@ -769,7 +848,7 @@ func TestUsage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        server.URL,
 		Auth:           nil,
@@ -866,7 +945,7 @@ func TestRequestBodyFormat(t *testing.T) {
 			}))
 			defer server.Close()
 
-			profile := &config.EndpointProfile{
+			profile := config.EndpointProfile{
 				Name:           "test",
 				BaseURL:        server.URL,
 				Auth:           nil,
@@ -944,7 +1023,7 @@ func BenchmarkComplete(b *testing.B) {
 	}))
 	defer server.Close()
 
-	profile := &config.EndpointProfile{
+	profile := config.EndpointProfile{
 		Name:           "test",
 		BaseURL:        server.URL,
 		Auth:           nil,

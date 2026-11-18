@@ -17,8 +17,13 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
+type inFlightReq struct {
+	cancel    context.CancelFunc
+	requestID int64
+}
+
 type Adapter struct {
-	profile     *config.EndpointProfile
+	profile     config.EndpointProfile
 	resolver    config.SecretResolver
 	client      *http.Client
 	profileHost string
@@ -26,12 +31,13 @@ type Adapter struct {
 
 	mu           sync.Mutex
 	lastUsage    *transport.Usage
-	inFlightReqs map[string]context.CancelFunc
+	inFlightReqs map[string]inFlightReq
+	requestIDGen int64
 }
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
-func New(profile *config.EndpointProfile, resolver config.SecretResolver) *Adapter {
+func New(profile config.EndpointProfile, resolver config.SecretResolver) *Adapter {
 	baseURL, _ := url.Parse(profile.BaseURL)
 	profileHost := baseURL.Host
 
@@ -52,8 +58,26 @@ func New(profile *config.EndpointProfile, resolver config.SecretResolver) *Adapt
 		client:       client,
 		profileHost:  profileHost,
 		maxBodySize:  defaultMaxBodySize,
-		inFlightReqs: make(map[string]context.CancelFunc),
+		inFlightReqs: make(map[string]inFlightReq),
 	}
+}
+
+type AdapterOption func(*Adapter)
+
+func WithMaxBodySize(size int64) AdapterOption {
+	return func(a *Adapter) {
+		if size > 0 {
+			a.maxBodySize = size
+		}
+	}
+}
+
+func NewWithOptions(profile config.EndpointProfile, resolver config.SecretResolver, opts ...AdapterOption) *Adapter {
+	a := New(profile, resolver)
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
@@ -92,7 +116,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		headers.Set(headerName, headerVal)
 	}
 
-	reqBody := buildRequestBody(req, a.profile)
+	reqBody := buildRequestBody(req, &a.profile)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return result, err
@@ -122,12 +146,16 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	a.mu.Lock()
 	cancelFunc, cancel := context.WithCancel(reqCtx)
-	a.inFlightReqs[req.Envelope.AttemptID] = cancel
+	a.requestIDGen++
+	requestID := a.requestIDGen
+	a.inFlightReqs[req.Envelope.AttemptID] = inFlightReq{cancel: cancel, requestID: requestID}
 	a.mu.Unlock()
 
 	defer func() {
 		a.mu.Lock()
-		delete(a.inFlightReqs, req.Envelope.AttemptID)
+		if entry, found := a.inFlightReqs[req.Envelope.AttemptID]; found && entry.requestID == requestID {
+			delete(a.inFlightReqs, req.Envelope.AttemptID)
+		}
 		a.mu.Unlock()
 		cancel()
 	}()
@@ -160,9 +188,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			return result, nil
 		}
 
-		result.Status = transport.StatusError
-		result.TransportStatus = transport.TransportStatusUnreachable
-		return result, nil
+		return result, err
 	}
 
 	defer func() {
@@ -190,9 +216,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			return result, nil
 		}
 
-		result.Status = transport.StatusError
-		result.TransportStatus = transport.TransportStatusUnreachable
-		return result, nil
+		return result, err
 	}
 
 	if int64(len(rawBody)) > a.maxBodySize {
@@ -279,7 +303,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
 	a.mu.Lock()
-	cancel, found := a.inFlightReqs[attemptID]
+	req, found := a.inFlightReqs[attemptID]
 	a.mu.Unlock()
 
 	status := transport.CancelStatus{
@@ -288,7 +312,7 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 	}
 
 	if found {
-		cancel()
+		req.cancel()
 	}
 
 	return status, nil
