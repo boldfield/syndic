@@ -42,6 +42,8 @@ type Client struct {
 	lastSeq    int64
 	eventWake  chan struct{}
 	eventsDone error
+	// done is closed by shutdown so every blocked NextEvent wakes.
+	done chan struct{}
 
 	idCounter uint64
 }
@@ -64,6 +66,7 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 		writer:    wire.NewWriter(conn),
 		pending:   make(map[string]chan result),
 		eventWake: make(chan struct{}, 1),
+		done:      make(chan struct{}),
 	}
 
 	req, err := wire.NewRequest("", wire.RequestHello, wire.HelloRequest{
@@ -130,6 +133,10 @@ func Dial(ctx context.Context, socketPath, clientName, clientVersion string) (*C
 		_ = conn.Close()
 		return nil, fmt.Errorf("unmarshal hello reply: %w", err)
 	}
+	if c.hello.Protocol != wire.ProtocolVersion {
+		_ = conn.Close()
+		return nil, fmt.Errorf("hello: unexpected reply (protocol %d, want %d)", c.hello.Protocol, wire.ProtocolVersion)
+	}
 
 	go c.readLoop()
 
@@ -168,6 +175,7 @@ func (c *Client) shutdown(err error) {
 	c.eventMu.Lock()
 	c.eventsDone = err
 	c.eventMu.Unlock()
+	close(c.done)
 	c.wakeEvents()
 }
 
@@ -399,10 +407,13 @@ func (c *Client) NextEvent(ctx context.Context) (wire.Frame, error) {
 			return wire.Frame{}, done
 		}
 		if !accepting {
+			// Pass the wake on so other waiters also see the stopped stream.
+			c.wakeEvents()
 			return wire.Frame{}, errors.New("not subscribed")
 		}
 
 		select {
+		case <-c.done:
 		case <-c.eventWake:
 		case <-ctx.Done():
 			return wire.Frame{}, ctx.Err()

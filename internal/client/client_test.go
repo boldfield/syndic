@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -688,9 +689,14 @@ func TestErrorFrameWithNoID(t *testing.T) {
 		t.Fatalf("expected lagging error, got %v", err)
 	}
 
-	// Status should also get error
-	if err := <-statusErr; err == nil {
-		t.Fatalf("expected error for status request, got nil")
+	if wireErr.LastSeq == nil || *wireErr.LastSeq != 7 {
+		t.Fatalf("expected last_seq 7 on lagging error, got %v", wireErr.LastSeq)
+	}
+
+	// The waiting request gets the same notice.
+	var statusWireErr *wire.Error
+	if err := <-statusErr; !errors.As(err, &statusWireErr) || statusWireErr.Code != "lagging" {
+		t.Fatalf("expected lagging error for status request, got %v", err)
 	}
 
 	// LastSeq should not change after lagging notice
@@ -750,33 +756,18 @@ func TestConnectionCloseWithWaitingRequest(t *testing.T) {
 }
 
 func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
-	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
-		for {
-			frame, err := r.Read()
-			if err != nil {
-				return
-			}
-			switch frame.Type {
-			case wire.RequestHello:
-				reply, _ := wire.NewReply("", wire.HelloReply{
-					EngineVersion: "1.0",
-					Protocol:      1,
-					RunID:         "run-1",
-					RunFirstSeq:   0,
-					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
-				})
-				_ = w.Write(reply)
-			case wire.RequestSubscribe:
-				reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{
-					OK:          true,
-					LiveFromSeq: 1,
-				})
-				_ = w.Write(reply)
-				return
-			}
+	release := make(chan struct{})
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		switch frame.Type {
+		case wire.RequestSubscribe:
+			reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{OK: true, LiveFromSeq: 1})
+			_ = w.Write(reply)
+		case wire.RequestStatus:
+			<-release
+			return false
 		}
-	})
+		return true
+	}))
 	defer server.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -788,35 +779,63 @@ func TestConnectionCloseWithWaitingNextEvent(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	_, err = client.Subscribe(ctx, 0)
-	if err != nil {
+	if _, err := client.Subscribe(ctx, 0); err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
 
-	// Make a request that will hang, then close the server
+	// Two NextEvent waiters and one request, all in flight before the close.
+	const waiters = 2
+	eventDone := make(chan error, waiters)
+	for i := 0; i < waiters; i++ {
+		go func() {
+			_, err := client.NextEvent(ctx)
+			eventDone <- err
+		}()
+	}
 	statusDone := make(chan error, 1)
 	go func() {
 		_, err := client.Status(ctx)
 		statusDone <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
-	// NextEvent should get ErrClosed when server closes
-	eventDone := make(chan error, 1)
-	go func() {
-		_, err := client.NextEvent(ctx)
-		eventDone <- err
-	}()
-
 	time.Sleep(100 * time.Millisecond)
+	close(release)
 
-	// Both should get ErrClosed
 	if err := <-statusDone; !errors.Is(err, ErrClosed) {
 		t.Fatalf("expected ErrClosed for status, got %v", err)
 	}
-	if err := <-eventDone; !errors.Is(err, ErrClosed) {
-		t.Fatalf("expected ErrClosed for event, got %v", err)
+	for i := 0; i < waiters; i++ {
+		if err := <-eventDone; !errors.Is(err, ErrClosed) {
+			t.Fatalf("expected ErrClosed for NextEvent waiter, got %v", err)
+		}
+	}
+}
+
+func TestDialRejectsNonHelloReply(t *testing.T) {
+	cases := map[string]any{
+		"status reply":   wire.StatusReply{RunID: "not-a-hello"},
+		"wrong protocol": wire.HelloReply{Protocol: 2, RunID: "run-1"},
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+				if _, err := r.Read(); err != nil {
+					return
+				}
+				reply, _ := wire.NewReply("", body)
+				_ = w.Write(reply)
+				_, _ = r.Read()
+			})
+			defer server.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c, err := Dial(ctx, server.addr, "test-client", "1.0")
+			if err == nil {
+				_ = c.Close()
+				t.Fatalf("expected Dial to fail")
+			}
+		})
 	}
 }
 
@@ -1168,5 +1187,52 @@ func TestDialCtxCancelAfterSuccessKeepsClientAlive(t *testing.T) {
 		if err != nil {
 			t.Fatalf("iteration %d: status after cancel: %v", i, err)
 		}
+	}
+}
+
+func TestContentShortFinalPageAfterFullPages(t *testing.T) {
+	const page = wire.MaxContentPageBytes
+	body := make([]byte, 2*page+100)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+	sum := sha256.Sum256(body)
+	sumStr := hex.EncodeToString(sum[:])
+
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestContent {
+			return true
+		}
+		var req wire.ContentRequest
+		_ = json.Unmarshal(frame.Body, &req)
+		var data []byte
+		switch {
+		case req.Offset < 2*page:
+			data = body[req.Offset : req.Offset+page]
+		case req.Offset == 2*page:
+			data = body[req.Offset : req.Offset+50] // short: 50 of the remaining 100
+		}
+		reply, _ := wire.NewReply(frame.ID, wire.ContentReply{
+			Ref:    req.Ref,
+			Offset: req.Offset,
+			Data:   wire.EncodePage(data),
+			Total:  int64(len(body)),
+			SHA256: sumStr,
+		})
+		_ = w.Write(reply)
+		return true
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	if _, err := client.Content(ctx, "ref"); err == nil {
+		t.Fatalf("expected error when the final page falls short and then empties")
 	}
 }
