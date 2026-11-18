@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -140,7 +141,7 @@ func (s *Store) SetTurnTerminal(turnID, state string) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
@@ -283,7 +284,7 @@ func (s *Store) CompleteAttempt(attemptID string, rawScrubbed string, scrubCount
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
@@ -323,7 +324,7 @@ func (s *Store) QuarantineLateOutput(attemptID string, rawScrubbed string, scrub
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
@@ -362,7 +363,7 @@ func (s *Store) SetCancellation(attemptID, cancellationState string) (err error)
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
@@ -390,7 +391,7 @@ func (s *Store) MarkUnknown(attemptID string) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
@@ -426,11 +427,7 @@ func (s *Store) RecoverPending() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if errClose := tx.Rollback(); errClose != nil && err == nil {
-			err = fmt.Errorf("rollback: %w", errClose)
-		}
-	}()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query(`
 		SELECT id FROM attempts WHERE state = 'pending'
@@ -464,26 +461,24 @@ func (s *Store) RecoverPending() ([]string, error) {
 	return attemptIDs, nil
 }
 
-// AppendEvent appends an event to the journal for a turn.
-// Note: The schema requires turn_id NOT NULL; spec specifies AppendEvent(kind, payload) but this cannot
-// be implemented with the current schema. This is a schema incompatibility that requires resolution.
-func (s *Store) AppendEvent(turnID, kind string, payload json.RawMessage) (err error) {
+// AppendEvent appends an event not tied to any turn (events.turn_id is NULL).
+func (s *Store) AppendEvent(kind string, payload json.RawMessage) (err error) {
 	tx, err := s.db.conn.Begin()
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
 			}
 		}
 	}()
 
 	if _, err = tx.Exec(`
-		INSERT INTO events (turn_id, event_type, data)
-		VALUES (?, ?, ?)
-	`, turnID, kind, string(payload)); err != nil {
+		INSERT INTO events (event_type, data)
+		VALUES (?, ?)
+	`, kind, string(payload)); err != nil {
 		return fmt.Errorf("insert event: %w", err)
 	}
 
@@ -521,11 +516,7 @@ func (s *Store) GetAttempt(attemptID string) (*AttemptRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if errClose := tx.Rollback(); errClose != nil && err == nil {
-			err = fmt.Errorf("rollback: %w", errClose)
-		}
-	}()
+	defer func() { _ = tx.Rollback() }()
 
 	var row AttemptRow
 	var dispatchedAtStr string
@@ -544,7 +535,7 @@ func (s *Store) GetAttempt(attemptID string) (*AttemptRow, error) {
 		&row.ID, &row.TurnID, &row.Participant, &row.Phase, &row.Epoch, &dispatchedAtStr, &deadlineStr, &row.State,
 		&status, &row.CancellationState, &row.Quarantined, &row.RawOutput, &scrubCount, &observedIdentity, &nativeFinish, &transportStatus, &repairOf,
 	); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("attempt not found")
 		}
 		return nil, fmt.Errorf("query attempt: %w", err)
@@ -605,11 +596,7 @@ func (s *Store) GetRun(runID string) (*RunRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer func() {
-		if errClose := tx.Rollback(); errClose != nil && err == nil {
-			err = fmt.Errorf("rollback: %w", errClose)
-		}
-	}()
+	defer func() { _ = tx.Rollback() }()
 
 	var row RunRow
 	var manifestStr string
@@ -619,7 +606,7 @@ func (s *Store) GetRun(runID string) (*RunRow, error) {
 		SELECT id, created_at, manifest, manifest_hash
 		FROM runs WHERE id = ?
 	`, runID).Scan(&row.ID, &createdAtStr, &manifestStr, &row.ManifestHash); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("run not found")
 		}
 		return nil, fmt.Errorf("query run: %w", err)
