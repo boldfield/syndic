@@ -229,9 +229,9 @@ func ParseProbeManifest(raw json.RawMessage) (m ProbeManifest, hasFingerprint bo
 			if err := json.Unmarshal(raw, &pm); err != nil {
 				return ProbeManifest{}, false, err
 			}
-			// Validate export is not empty
-			if pm.Export.EndpointName == "" || pm.Export.Model == "" {
-				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: export must contain endpoint_name and model")
+			// Validate export has all required identifying fields (same as bare export validation)
+			if pm.Export.EndpointName == "" || pm.Export.Model == "" || pm.Export.RedactionRule == "" {
+				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: export must contain endpoint_name, model, and redaction_rule")
 			}
 			return pm, true, nil
 		}

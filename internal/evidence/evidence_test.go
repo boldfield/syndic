@@ -1270,6 +1270,15 @@ func TestParseProbeManifestPartialWrappedMissingExport(t *testing.T) {
 	}
 }
 
+// TestParseProbeManifestWrappedIncompleteExport verifies that ParseProbeManifest
+// rejects a wrapped manifest with an incomplete export (missing redaction_rule).
+func TestParseProbeManifestWrappedIncompleteExport(t *testing.T) {
+	_, _, err := ParseProbeManifest(json.RawMessage(`{"export":{"endpoint_name":"ep","model":"m"},"config_fingerprint":"abc","fingerprint_rule":"fingerprint/v1","calibration":"unavailable"}`))
+	if err == nil {
+		t.Errorf("Expected error for wrapped manifest with incomplete export (missing redaction_rule), got nil")
+	}
+}
+
 // TestManifestSentinelInReference verifies that the marshalled manifest's
 // config_fingerprint does not contain resolved sentinel secrets, only reference names.
 func TestManifestSentinelInReference(t *testing.T) {
