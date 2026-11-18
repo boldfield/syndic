@@ -10,7 +10,7 @@ import (
 )
 
 // ErrNoSuchHold is returned when a hold is not found or already released.
-var ErrNoSuchHold = fmt.Errorf("no such hold")
+var ErrNoSuchHold = errors.New("no such hold")
 
 // AttemptParams contains parameters for BeginAttemptWith.
 type AttemptParams struct {
@@ -218,13 +218,13 @@ func (tx *Tx) ReleaseHold(attemptID, how, reason string) error {
 		SELECT released_at FROM capacity_holds WHERE attempt_id = ?
 	`, attemptID).Scan(&currentReleasedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w", ErrNoSuchHold)
+			return ErrNoSuchHold
 		}
 		return fmt.Errorf("query hold: %w", err)
 	}
 
 	if currentReleasedAt.Valid {
-		return fmt.Errorf("%w", ErrNoSuchHold)
+		return ErrNoSuchHold
 	}
 
 	releasedAt := time.Now().UTC().Format(time.RFC3339)
@@ -244,7 +244,7 @@ func (tx *Tx) UnreleasedHolds() ([]Hold, error) {
 		SELECT attempt_id, pool, endpoint_name, model, group_json, held_since
 		FROM capacity_holds
 		WHERE released_at IS NULL
-		ORDER BY held_since ASC
+		ORDER BY held_since ASC, attempt_id ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query unreleased holds: %w", err)
