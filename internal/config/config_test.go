@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -690,6 +691,38 @@ func TestValidateViolations(t *testing.T) {
 				r.Participants[0].Pool = "test"
 			},
 			wantMsgs: []string{},
+		},
+		{
+			name: "calibration_safety NaN",
+			mutate: func(r *Roster) {
+				cs := math.NaN()
+				r.Budgets.CalibrationSafety = &cs
+			},
+			wantMsgs: []string{"calibration_safety", "NaN"},
+		},
+		{
+			name: "context_margin NaN",
+			mutate: func(r *Roster) {
+				cm := math.NaN()
+				r.Budgets.ContextMargin = &cm
+			},
+			wantMsgs: []string{"context_margin", "NaN"},
+		},
+		{
+			name: "tokens_per_byte_max NaN",
+			mutate: func(r *Roster) {
+				tpbm := math.NaN()
+				r.Endpoints[0].TokensPerByteMax = &tpbm
+			},
+			wantMsgs: []string{"tokens_per_byte_max", "NaN"},
+		},
+		{
+			name: "bytes_per_token NaN",
+			mutate: func(r *Roster) {
+				bpt := math.NaN()
+				r.Participants[0].BytesPerToken = &bpt
+			},
+			wantMsgs: []string{"bytes_per_token", "NaN"},
 		},
 	}
 

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 )
 
@@ -274,8 +275,12 @@ func (r *Roster) Validate() error {
 
 	// Validate endpoint tokens_per_byte_max
 	for _, ep := range r.Endpoints {
-		if ep.TokensPerByteMax != nil && *ep.TokensPerByteMax <= 0 {
-			errs = append(errs, fmt.Errorf("endpoint %q tokens_per_byte_max must be greater than 0", ep.Name))
+		if ep.TokensPerByteMax != nil {
+			if math.IsNaN(*ep.TokensPerByteMax) {
+				errs = append(errs, fmt.Errorf("endpoint %q tokens_per_byte_max must not be NaN", ep.Name))
+			} else if *ep.TokensPerByteMax <= 0 {
+				errs = append(errs, fmt.Errorf("endpoint %q tokens_per_byte_max must be greater than 0", ep.Name))
+			}
 		}
 	}
 
@@ -284,8 +289,12 @@ func (r *Roster) Validate() error {
 		if p.ContextTokens != nil && *p.ContextTokens < 1 {
 			errs = append(errs, fmt.Errorf("participant %q context_tokens must be at least 1", p.ID))
 		}
-		if p.BytesPerToken != nil && *p.BytesPerToken <= 0 {
-			errs = append(errs, fmt.Errorf("participant %q bytes_per_token must be greater than 0", p.ID))
+		if p.BytesPerToken != nil {
+			if math.IsNaN(*p.BytesPerToken) {
+				errs = append(errs, fmt.Errorf("participant %q bytes_per_token must not be NaN", p.ID))
+			} else if *p.BytesPerToken <= 0 {
+				errs = append(errs, fmt.Errorf("participant %q bytes_per_token must be greater than 0", p.ID))
+			}
 		}
 	}
 
@@ -308,12 +317,16 @@ func (r *Roster) Validate() error {
 
 	// Validate Budgets
 	if r.Budgets.CalibrationSafety != nil {
-		if *r.Budgets.CalibrationSafety <= 0 || *r.Budgets.CalibrationSafety > 1.0 {
+		if math.IsNaN(*r.Budgets.CalibrationSafety) {
+			errs = append(errs, fmt.Errorf("budgets.calibration_safety must not be NaN"))
+		} else if *r.Budgets.CalibrationSafety <= 0 || *r.Budgets.CalibrationSafety > 1.0 {
 			errs = append(errs, fmt.Errorf("budgets.calibration_safety must be greater than 0 and at most 1.0"))
 		}
 	}
 	if r.Budgets.ContextMargin != nil {
-		if *r.Budgets.ContextMargin < 0 || *r.Budgets.ContextMargin >= 1 {
+		if math.IsNaN(*r.Budgets.ContextMargin) {
+			errs = append(errs, fmt.Errorf("budgets.context_margin must not be NaN"))
+		} else if *r.Budgets.ContextMargin < 0 || *r.Budgets.ContextMargin >= 1 {
 			errs = append(errs, fmt.Errorf("budgets.context_margin must be at least 0 and less than 1"))
 		}
 	}
