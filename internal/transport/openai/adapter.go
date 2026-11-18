@@ -130,6 +130,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		ObservedAt:               time.Now(),
 		Raw:                      json.RawMessage("{}"),
 	}
+	var serverVersion string
 
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -164,7 +165,10 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		return record, err
 	}
 
-	step2Err, step2Body, step2Latency := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
+	step2Err, step2Body, step2Latency, step2ServerVersion := a.probeMaxTokens(probeCtx, baseURL, &record, model, resolvedSecrets, rawSteps, opts.Timeout)
+	if step2ServerVersion != "" {
+		serverVersion = step2ServerVersion
+	}
 
 	if step2Err != nil {
 		if errors.Is(step2Err, transport.ErrUnreachable) {
@@ -228,11 +232,31 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		record.EligibleRequiredReviewer = transport.TriNo
 	}
 
+	if serverVersion != "" {
+		record.ServerVersion = serverVersion
+	}
+
 	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 		return record, err
 	}
 
 	return record, nil
+}
+
+func recordRawStep(rawSteps map[string]any, path string, statusCode int, headers http.Header, body []byte) {
+	step := map[string]any{
+		"path": path,
+	}
+	if statusCode != 0 {
+		step["status"] = statusCode
+		if headers != nil {
+			step["headers"] = headers
+		}
+		if body != nil {
+			step["body"] = string(body)
+		}
+	}
+	rawSteps[path] = step
 }
 
 func scrubAndStore(record *transport.CapabilityRecord, rawSteps map[string]any, resolvedSecrets []string) error {
@@ -620,20 +644,24 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return err
 	}
 
-	a.addAuthHeaders(httpReq)
+	if err := a.addAuthHeaders(httpReq); err != nil {
+		return err
+	}
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
 		if isConnectionRefusedOrDNSErr(err) {
-			record.ModelsEndpoint = transport.TriNo
+			recordRawStep(rawSteps, "/models", 0, nil, nil)
 		}
 		return nil
 	}
+
+	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 	if err := httpResp.Body.Close(); err != nil {
 		return err
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	recordRawStep(rawSteps, "/models", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode == 404 {
 		record.ModelsEndpoint = transport.TriNo
@@ -643,28 +671,43 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		record.ModelsEndpoint = transport.TriYes
 
-		var modelList map[string]any
-		if err := json.Unmarshal(body, &modelList); err == nil {
-			record.ModelListed = transport.TriYes
-		} else {
+		var modelResp map[string]any
+		if err := json.Unmarshal(body, &modelResp); err != nil {
 			record.ModelListed = transport.TriNo
+		} else {
+			modelFound := false
+			if data, ok := modelResp["data"]; ok {
+				if models, ok := data.([]any); ok {
+					for _, m := range models {
+						if modelMap, ok := m.(map[string]any); ok {
+							if id, ok := modelMap["id"]; ok && id == record.Model {
+								modelFound = true
+								break
+							}
+						}
+					}
+				}
+			}
+			if modelFound {
+				record.ModelListed = transport.TriYes
+			} else {
+				record.ModelListed = transport.TriNo
+			}
 		}
-	} else {
-		record.ModelsEndpoint = transport.TriUnknown
 	}
 
 	return nil
 }
 
-func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration) (error, *ResponseBody, int) {
+func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration) (error, *ResponseBody, int, string) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	var maxTokensBody *ResponseBody
 	var latency int
+	var serverVersion string
 
 	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
 		reqCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
 
 		messages := []MessageInput{
 			{Role: "user", Content: "test"},
@@ -680,42 +723,52 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		bodyBytes, _ := json.Marshal(requestBody)
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+		cancel()
 		if err != nil {
-			return err, nil, 0
+			return err, nil, 0, ""
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
-		a.addAuthHeaders(httpReq)
+		if err := a.addAuthHeaders(httpReq); err != nil {
+			return err, nil, 0, ""
+		}
 
 		startTime := time.Now()
 		httpResp, err := a.client.Do(httpReq)
 		if err != nil {
 			if isConnectionRefusedOrDNSErr(err) {
-				return transport.ErrUnreachable, nil, 0
+				recordRawStep(rawSteps, "/chat/completions", 0, nil, nil)
+				return transport.ErrUnreachable, nil, 0, ""
 			}
-			return err, nil, 0
+			return err, nil, 0, ""
 		}
 
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		if err := httpResp.Body.Close(); err != nil {
-			return err, nil, 0
+			return err, nil, 0, ""
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
+		recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+
+		if serverVersion == "" && httpResp.Header.Get("Server") != "" {
+			serverVersion = httpResp.Header.Get("Server")
+		}
+
 		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
 			record.AuthMode = "unknown"
-			return transport.ErrUnauthorized, nil, latency
+			return transport.ErrUnauthorized, nil, latency, serverVersion
 		}
 
 		if httpResp.StatusCode == 404 {
-			return transport.ErrModelUnavailable, nil, latency
+			return transport.ErrModelUnavailable, nil, latency, serverVersion
 		}
 
 		if httpResp.StatusCode == 400 {
 			if field == "max_tokens" {
 				continue
 			}
-			return nil, nil, latency
+			return nil, nil, latency, serverVersion
 		}
 
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
@@ -726,11 +779,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 				maxTokensBody = &respData
 			}
 
-			return nil, maxTokensBody, latency
+			return nil, maxTokensBody, latency, serverVersion
 		}
 	}
 
-	return nil, maxTokensBody, latency
+	return nil, maxTokensBody, latency, serverVersion
 }
 
 func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets []string, rawSteps map[string]any, timeout time.Duration, finishReasons map[string]transport.CompletionStatus) error {
@@ -764,7 +817,9 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	a.addAuthHeaders(httpReq)
+	if err := a.addAuthHeaders(httpReq); err != nil {
+		return err
+	}
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -776,6 +831,8 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	if err := httpResp.Body.Close(); err != nil {
 		return err
 	}
+
+	recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		var respData ResponseBody
@@ -805,8 +862,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	headMarker := fmt.Sprintf("<<<HEAD_%d>>>", time.Now().UnixNano())
-	tailMarker := fmt.Sprintf("<<<TAIL_%d>>>", time.Now().UnixNano())
+	uniqueSuffix := fmt.Sprintf("%d_%d", time.Now().UnixNano(), time.Now().Nanosecond())
+	headMarker := fmt.Sprintf("<<<HEAD_%s>>>", uniqueSuffix)
+	tailMarker := fmt.Sprintf("<<<TAIL_%s>>>", uniqueSuffix)
 
 	promptSizeChars := (assumedContextLen * 3 / 2) * 4
 	fillerSize := promptSizeChars - len(headMarker) - len(tailMarker) - len("Please respond with both markers: HEAD and TAIL. ")
@@ -842,7 +900,10 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	a.addAuthHeaders(httpReq)
+	if err := a.addAuthHeaders(httpReq); err != nil {
+		record.OverLength = "errored"
+		return
+	}
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -855,6 +916,8 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		record.OverLength = "errored"
 		return
 	}
+
+	recordRawStep(rawSteps, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		record.OverLength = "errored"
@@ -883,18 +946,21 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 }
 
-func (a *Adapter) addAuthHeaders(req *http.Request) {
+func (a *Adapter) addAuthHeaders(req *http.Request) error {
 	if a.profile.Auth != nil {
 		authVal, err := a.resolver.Resolve(*a.profile.Auth)
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+authVal)
+		if err != nil {
+			return err
 		}
+		req.Header.Set("Authorization", "Bearer "+authVal)
 	}
 
 	for headerName, secretRef := range a.profile.ExtraHeaders {
 		headerVal, err := a.resolver.Resolve(secretRef)
-		if err == nil {
-			req.Header.Set(headerName, headerVal)
+		if err != nil {
+			return err
 		}
+		req.Header.Set(headerName, headerVal)
 	}
+	return nil
 }
