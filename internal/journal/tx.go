@@ -13,7 +13,7 @@ type Tx struct {
 	tx *sql.Tx
 }
 
-// Store.Tx runs all operations in fn inside a single transaction.
+// Tx runs all operations in fn inside a single transaction.
 // The store holds a mutex for the duration of each Tx, so two goroutines calling Tx
 // at once run one after the other. Calling a Store method from inside fn deadlocks.
 // If fn returns an error, the transaction is rolled back and the error is returned unwrapped.
@@ -45,7 +45,9 @@ func (s *Store) Tx(fn func(tx *Tx) error) error {
 
 	fnErr := fn(wrapper)
 	if fnErr != nil {
-		_ = tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return errors.Join(fnErr, rbErr)
+		}
 		return fnErr
 	}
 
@@ -57,6 +59,7 @@ func (s *Store) Tx(fn func(tx *Tx) error) error {
 }
 
 // CreateRun creates a new run with the given manifest, returning the run ID and manifest hash.
+// The manifest must be valid JSON; the hash is computed by the store.
 func (tx *Tx) CreateRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
 	if !json.Valid(manifest) {
 		return "", "", fmt.Errorf("invalid JSON manifest")
@@ -197,6 +200,7 @@ func (tx *Tx) BeginAttempt(turnID, participant, phase string, epoch int, deadlin
 }
 
 // CompleteAttempt sets an attempt's output and state to completed.
+// It rejects if the attempt is not in pending state.
 func (tx *Tx) CompleteAttempt(attemptID string, rawScrubbed string, scrubCount int, identity, status, nativeFinish, transportStatus string) error {
 	var currentState string
 	if err := tx.tx.QueryRow(`
@@ -254,6 +258,7 @@ func (tx *Tx) SetCancellation(attemptID, cancellationState string) error {
 }
 
 // MarkUnknown sets an attempt's state to unknown.
+// It rejects if the attempt is not in pending state.
 func (tx *Tx) MarkUnknown(attemptID string) error {
 	var currentState string
 	if err := tx.tx.QueryRow(`
