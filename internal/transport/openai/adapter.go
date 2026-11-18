@@ -7,36 +7,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
+	"syscall"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
 type Adapter struct {
-	profile  *config.EndpointProfile
-	resolver config.SecretResolver
-	client   *http.Client
+	profile     *config.EndpointProfile
+	resolver    config.SecretResolver
+	client      *http.Client
+	profileHost string
+	maxBodySize int64
 
 	mu           sync.Mutex
 	lastUsage    *transport.Usage
 	inFlightReqs map[string]context.CancelFunc
-	maxBodySize  int64
 }
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
 func New(profile *config.EndpointProfile, resolver config.SecretResolver) *Adapter {
+	baseURL, _ := url.Parse(profile.BaseURL)
+	profileHost := baseURL.Host
+
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) == 0 {
-				return nil
-			}
-			prevHost := via[len(via)-1].URL.Host
 			newHost := req.URL.Host
-			if prevHost != newHost {
+			if newHost != profileHost {
 				return http.ErrUseLastResponse
 			}
 			return nil
@@ -48,8 +50,9 @@ func New(profile *config.EndpointProfile, resolver config.SecretResolver) *Adapt
 		profile:      profile,
 		resolver:     resolver,
 		client:       client,
-		inFlightReqs: make(map[string]context.CancelFunc),
+		profileHost:  profileHost,
 		maxBodySize:  defaultMaxBodySize,
+		inFlightReqs: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -102,7 +105,14 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	endpoint := baseURL.JoinPath("/chat/completions")
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+	reqCtx := ctx
+	if !req.Deadline.IsZero() {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithDeadline(ctx, req.Deadline)
+		defer cancel()
+	}
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
 		return result, err
 	}
@@ -111,7 +121,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	a.mu.Lock()
-	cancelFunc, cancel := context.WithCancel(ctx)
+	cancelFunc, cancel := context.WithCancel(reqCtx)
 	a.inFlightReqs[req.Envelope.AttemptID] = cancel
 	a.mu.Unlock()
 
@@ -144,7 +154,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			return result, nil
 		}
 
-		if isUnreachableErr(err) {
+		if isConnectionRefusedOrDNSErr(err) {
 			result.Status = transport.StatusError
 			result.TransportStatus = transport.TransportStatusUnreachable
 			return result, nil
@@ -155,16 +165,31 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		return result, nil
 	}
 
-	defer httpResp.Body.Close()
+	defer func() {
+		_ = httpResp.Body.Close()
+	}()
 
 	limitedBody := io.LimitReader(httpResp.Body, a.maxBodySize+1)
 	rawBody, err := io.ReadAll(limitedBody)
 	if err != nil {
+		if isDeadlineExceededErr(err) {
+			result.Status = transport.StatusInterrupted
+			result.TransportStatus = transport.TransportStatusTimeout
+			return result, nil
+		}
+
+		if cancelFunc.Err() != nil {
+			result.Status = transport.StatusInterrupted
+			result.TransportStatus = transport.TransportStatusCancelled
+			return result, nil
+		}
+
 		if isConnectionResetErr(err) {
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusReset
 			return result, nil
 		}
+
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.TransportStatusUnreachable
 		return result, nil
@@ -212,12 +237,6 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		return result, nil
 	}
 
-	if respData.Choices[0].Message.Content == "" && respData.Choices[0].FinishReason == "" {
-		result.Status = transport.StatusError
-		result.TransportStatus = transport.TransportStatusMalformedBody
-		return result, nil
-	}
-
 	textContent := respData.Choices[0].Message.Content
 	scrubbedText, _ := transport.Scrub(textContent, resolvedSecrets)
 	result.Text = scrubbedText
@@ -246,7 +265,10 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			Completion: respData.Usage.CompletionTokens,
 		}
 		a.mu.Lock()
-		a.lastUsage = result.Usage
+		a.lastUsage = &transport.Usage{
+			Prompt:     result.Usage.Prompt,
+			Completion: result.Usage.Completion,
+		}
 		a.mu.Unlock()
 	}
 
@@ -280,15 +302,10 @@ func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
 		return nil, transport.ErrUsageUnavailable
 	}
 
-	return a.lastUsage, nil
-}
-
-type RequestBody struct {
-	Model               string         `json:"model"`
-	Messages            []MessageInput `json:"messages"`
-	Stream              bool           `json:"stream"`
-	MaxTokens           int            `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
+	return &transport.Usage{
+		Prompt:     a.lastUsage.Prompt,
+		Completion: a.lastUsage.Completion,
+	}, nil
 }
 
 type MessageInput struct {
@@ -317,7 +334,7 @@ type UsageData struct {
 	CompletionTokens int `json:"completion_tokens"`
 }
 
-func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointProfile) RequestBody {
+func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointProfile) map[string]any {
 	messages := make([]MessageInput, len(req.Messages))
 	for i, msg := range req.Messages {
 		messages[i] = MessageInput{
@@ -331,17 +348,12 @@ func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointPro
 		maxTokensField = "max_tokens"
 	}
 
-	body := RequestBody{
-		Model:    req.Model,
-		Messages: messages,
-		Stream:   false,
+	body := map[string]any{
+		"model":    req.Model,
+		"messages": messages,
+		"stream":   false,
 	}
-
-	if maxTokensField == "max_tokens" {
-		body.MaxTokens = req.MaxOutputTokens
-	} else {
-		body.MaxCompletionTokens = req.MaxOutputTokens
-	}
+	body[maxTokensField] = req.MaxOutputTokens
 
 	return body
 }
@@ -381,16 +393,21 @@ func isConnectionResetErr(err error) bool {
 	return false
 }
 
-func isUnreachableErr(err error) bool {
+func isConnectionRefusedOrDNSErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if bytes.Contains([]byte(err.Error()), []byte("connection refused")) ||
-		bytes.Contains([]byte(err.Error()), []byte("no such host")) ||
-		bytes.Contains([]byte(err.Error()), []byte("dial tcp")) ||
-		bytes.Contains([]byte(err.Error()), []byte("network is unreachable")) {
-		return true
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Op == "dial" && opErr.Err != nil {
+			var errno syscall.Errno
+			if errors.As(opErr.Err, &errno) && errno == syscall.ECONNREFUSED {
+				return true
+			}
+		}
 	}
 
-	return false
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
 }
