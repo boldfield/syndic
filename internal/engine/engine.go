@@ -22,6 +22,8 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
+var ErrNotImplemented = errors.New("not implemented")
+
 // Clock abstracts time operations for testing.
 type Clock interface {
 	Now() time.Time
@@ -72,6 +74,7 @@ type Engine struct {
 	participants     map[string]manifest.Participant
 	adapters         map[string]transport.Adapter
 	startedAt        time.Time
+	openTurnID       string // tracks the currently open turn
 }
 
 // New creates a new Engine with the given options.
@@ -175,7 +178,7 @@ func (e *Engine) Start() error {
 		return &RosterError{fmt.Errorf("build manifest: %w", err)}
 	}
 
-	// Build adapters for each participant
+	// Build adapters for each participant (once)
 	for _, p := range roster.Participants {
 		endpoint := findEndpoint(roster, p.Endpoint)
 		if endpoint == nil {
@@ -192,6 +195,7 @@ func (e *Engine) Start() error {
 
 	// Write engine run through hub transaction
 	var runID, manifestHash string
+	var runFirstSeq int64
 	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var txErr error
 		runID, manifestHash, txErr = tx.CreateEngineRun(builtManifest.JSON)
@@ -199,7 +203,16 @@ func (e *Engine) Start() error {
 			return txErr
 		}
 
-		// Emit engine_started event
+		// Collect unprobed participants
+		unprobed := []string{}
+		for _, p := range roster.Participants {
+			mp := builtManifest.Participants[p.ID]
+			if !mp.Usable {
+				unprobed = append(unprobed, p.ID)
+			}
+		}
+
+		// Emit engine_started event and capture its seq
 		return emit("", wire.EventKindEngineStarted, wire.EvEngineStarted{
 			RunID:             runID,
 			ManifestHash:      manifestHash,
@@ -207,11 +220,20 @@ func (e *Engine) Start() error {
 			RecoveredAttempts: 0,
 			UncertainCapacity: []string{},
 			OrphanedHolds:     []wire.Hold{},
-			Unprobed:          []string{},
+			Unprobed:          unprobed,
 		})
 	})
 	if err != nil {
 		return fmt.Errorf("write engine run: %w", err)
+	}
+
+	// Get the seq of the engine_started event from the store
+	events, err := e.store.EventsSince(0, 1)
+	if err != nil {
+		return fmt.Errorf("get events: %w", err)
+	}
+	if len(events) > 0 {
+		runFirstSeq = int64(events[len(events)-1].Seq)
 	}
 
 	// Store manifest and other info
@@ -221,14 +243,8 @@ func (e *Engine) Start() error {
 	e.manifest = builtManifest.JSON
 	e.manifestHash = manifestHash
 	e.runID = runID
+	e.runFirstSeq = runFirstSeq
 	e.participants = builtManifest.Participants
-
-	// Get the seq of the engine_started event (which is the max seq after writing the run)
-	maxSeq, err := e.store.MaxSeq()
-	if err != nil {
-		return fmt.Errorf("get max seq: %w", err)
-	}
-	e.runFirstSeq = maxSeq
 
 	return nil
 }
@@ -383,55 +399,55 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, errors.New("engine not started")
 	}
 
-	// Check for existing submission
+	if req.SubmissionID == "" {
+		return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodeInternal, Detail: ptrStr("submission_id required")}
+	}
+
+	// Compute submission hash: canonical JSON of {input, preset, quick_profile, allow_provisional} as sent
+	submissionHash, err := computeSubmissionHash(req)
+	if err != nil {
+		return wire.SubmitReply{}, fmt.Errorf("compute submission hash: %w", err)
+	}
+
+	// Check 1: If the journal has this submission_id
 	existingTurn, found, err := e.store.FindSubmission(req.SubmissionID)
-	if err == nil && found && existingTurn != nil {
-		// Submission already exists; return the original reply
-		return wire.SubmitReply{
-			TurnID:          existingTurn.ID,
-			Preset:          existingTurn.Preset,
-			EstimatedTokens: 0,
-		}, nil
+	if err != nil {
+		return wire.SubmitReply{}, fmt.Errorf("find submission: %w", err)
 	}
-
-	// Check for submission conflict (same ID with different content)
-	if err == nil && found && existingTurn != nil {
-		// Check if submission hash matches
-		submissionData := map[string]interface{}{
-			"input":             req.Input,
-			"preset":            req.Preset,
-			"quick_profile":     req.QuickProfile,
-			"allow_provisional": req.AllowProvisional,
+	if found && existingTurn != nil {
+		// Same hash returns the original reply; different hash is submission_conflict
+		if existingTurn.SubmissionHash == submissionHash {
+			return wire.SubmitReply{
+				TurnID:          existingTurn.ID,
+				Preset:          existingTurn.Preset,
+				EstimatedTokens: 0,
+			}, nil
 		}
-		submissionJSON, _ := json.Marshal(submissionData)
-		submissionHash := computeSHA256(submissionJSON)
-
-		if existingTurn.SubmissionHash != submissionHash {
-			return wire.SubmitReply{}, &wire.Error{
-				Code:   wire.ErrorCodeSubmissionConflict,
-				TurnID: &existingTurn.ID,
-			}
+		return wire.SubmitReply{}, &wire.Error{
+			Code:   wire.ErrorCodeSubmissionConflict,
+			TurnID: &existingTurn.ID,
 		}
 	}
 
-	// Resolve preset
+	// Check 2: busy - if another turn is open
+	if e.openTurnID != "" {
+		return wire.SubmitReply{}, &wire.Error{
+			Code:   wire.ErrorCodeBusy,
+			TurnID: &e.openTurnID,
+		}
+	}
+
+	// Resolve preset (defaults to default_preset or "solo")
 	presetName := e.roster.DefaultPreset
 	if presetName == "" {
 		presetName = "solo"
 	}
-	if req.Preset != nil {
+	if req.Preset != nil && *req.Preset != "" {
 		presetName = *req.Preset
 	}
 
-	preset, hasPreset := e.roster.Presets[presetName]
-	if !hasPreset {
-		return wire.SubmitReply{}, &wire.Error{
-			Code: wire.ErrorCodePresetInvalid,
-		}
-	}
-
-	// Check if quick profile is unknown
-	if req.QuickProfile != nil {
+	// Check 3: quick_profile_unknown
+	if req.QuickProfile != nil && *req.QuickProfile != "" {
 		_, hasQuick := e.roster.Quick[*req.QuickProfile]
 		if !hasQuick {
 			return wire.SubmitReply{}, &wire.Error{
@@ -441,7 +457,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
-	// Find author participant
+	// Check 4: preset_invalid or eligibility rule
+	preset, hasPreset := e.roster.Presets[presetName]
+	if !hasPreset {
+		return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodePresetInvalid}
+	}
+
+	// Find author and check eligibility
 	var author config.Participant
 	authorFound := false
 	for _, p := range e.roster.Participants {
@@ -452,9 +474,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 	if !authorFound {
-		return wire.SubmitReply{}, &wire.Error{
-			Code: wire.ErrorCodePresetInvalid,
-		}
+		return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodePresetInvalid}
 	}
 
 	// Check required reviewers exist and are eligible
@@ -475,35 +495,36 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			}
 		}
 		if !reviewerFound {
-			return wire.SubmitReply{}, &wire.Error{
-				Code: wire.ErrorCodePresetInvalid,
+			return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodePresetInvalid}
+		}
+	}
+
+	// Check 5: unprobed - first participant without usable record
+	for _, p := range e.roster.Participants {
+		if p.ID == preset.Author || containsStr(preset.RequiredReviewers, p.ID) {
+			mp := e.participants[p.ID]
+			if !mp.Usable {
+				return wire.SubmitReply{}, &wire.Error{
+					Code:        wire.ErrorCodeUnprobed,
+					Participant: &p.ID,
+					Detail:      &mp.Detail,
+				}
 			}
 		}
 	}
 
-	// Check provisional deadlines
+	// Check 6: provisional deadlines
 	deadlinesProvisional := false
 	if e.roster.Deadlines.Provisional != nil {
 		deadlinesProvisional = *e.roster.Deadlines.Provisional
 	}
 	if deadlinesProvisional && (req.AllowProvisional == nil || !*req.AllowProvisional) {
-		return wire.SubmitReply{}, &wire.Error{
-			Code: wire.ErrorCodeProvisional,
-		}
+		return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodeProvisional}
 	}
 
 	// Create turn through transaction
 	var turnID string
 	const estimated int64 = 0
-
-	submissionData := map[string]interface{}{
-		"input":             req.Input,
-		"preset":            req.Preset,
-		"quick_profile":     req.QuickProfile,
-		"allow_provisional": req.AllowProvisional,
-	}
-	submissionJSON, _ := json.Marshal(submissionData)
-	submissionHash := computeSHA256(submissionJSON)
 
 	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		params := journal.TurnParams{
@@ -519,13 +540,22 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			return txErr
 		}
 
-		// Emit turn_submitted event
-		return emit(turnID, wire.EventKindTurnSubmitted, wire.EvTurnSubmitted{
+		// Emit turn_submitted event in one transaction
+		if txErr := emit(turnID, wire.EventKindTurnSubmitted, wire.EvTurnSubmitted{
 			TurnID:          turnID,
 			SubmissionID:    req.SubmissionID,
 			Preset:          presetName,
 			QuickProfile:    req.QuickProfile,
 			EstimatedTokens: estimated,
+		}); txErr != nil {
+			return txErr
+		}
+
+		// Emit turn_state{submitted}
+		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: turnID,
+			State:  "submitted",
+			Reason: nil,
 		})
 	})
 
@@ -533,10 +563,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, err
 	}
 
-	// Execute solo path if preset is solo mode
-	if preset.Mode == "solo" {
-		e.executeSolo(turnID, presetName, req.Input, author)
-	}
+	// Track the open turn
+	e.openTurnID = turnID
+
+	// Execute solo or review-mode path asynchronously (not holding the mutex)
+	go e.executeTurn(turnID, preset, author, req)
 
 	return wire.SubmitReply{
 		TurnID:          turnID,
@@ -546,14 +577,22 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	}, nil
 }
 
-// executeSolo executes the solo turn path: append message, dispatch author, complete turn.
-func (e *Engine) executeSolo(turnID, presetName, input string, author config.Participant) {
+// executeTurn handles both solo and review-mode turns.
+func (e *Engine) executeTurn(turnID string, preset config.Preset, author config.Participant, req wire.SubmitRequest) {
+	e.mu.Lock()
+	adapter := e.adapters[author.ID]
+	e.mu.Unlock()
+
+	if adapter == nil {
+		return
+	}
+
 	// Build author prompt
-	messages := prompt.Author(input)
+	messages := prompt.Author(req.Input)
 
 	// Append request message in a transaction
 	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
-		msgID, sha256, byteLen, err := tx.AppendMessage(turnID, "author", "user", nil, []byte(input), nil)
+		msgID, sha256, byteLen, err := tx.AppendMessage(turnID, "author", "user", nil, []byte(req.Input), nil)
 		if err != nil {
 			return err
 		}
@@ -570,41 +609,51 @@ func (e *Engine) executeSolo(turnID, presetName, input string, author config.Par
 		return
 	}
 
-	// Begin attempt for author
-	deadline := time.Now().Add(5 * time.Minute)
-	attemptID, err := e.store.BeginAttemptWith(journal.AttemptParams{
-		TurnID:                turnID,
-		Participant:           author.ID,
-		Phase:                 "author",
-		Epoch:                 0,
-		Deadline:              &deadline,
-		MaxOutputTokens:       4096,
-		EstimatedPromptTokens: 0,
-	})
-	if err != nil {
-		return
-	}
+	// Emit turn_state{author_dispatched} and begin attempt in one transaction
+	var attemptID string
+	now := e.clock.Now()
+	deadline := now.Add(5 * time.Minute) // TODO: use resolved deadlines from roster
+	maxOutput := 4096                     // TODO: use clamped author_max_output_tokens
 
-	// Emit attempt_begun event
-	e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
-		deadline := time.Now().Add(5 * time.Minute)
-		return emit(turnID, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
+	err = e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+		params := journal.AttemptParams{
+			TurnID:                turnID,
+			Participant:           author.ID,
+			Phase:                 "author",
+			Epoch:                 0,
+			Deadline:              &deadline,
+			MaxOutputTokens:       maxOutput,
+			EstimatedPromptTokens: 0,
+		}
+		var txErr error
+		attemptID, txErr = tx.BeginAttemptWith(params)
+		if txErr != nil {
+			return txErr
+		}
+
+		if txErr := emit(turnID, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
 			AttemptID:             attemptID,
 			Participant:           author.ID,
 			Phase:                 "author",
 			Epoch:                 0,
 			Deadline:              deadline.Format(time.RFC3339),
-			MaxOutputTokens:       4096,
+			MaxOutputTokens:       int64(maxOutput),
 			EstimatedPromptTokens: 0,
+		}); txErr != nil {
+			return txErr
+		}
+
+		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: turnID,
+			State:  "author_dispatched",
+			Reason: nil,
 		})
 	})
-
-	// Call adapter to get result
-	adapter := e.adapters[author.ID]
-	if adapter == nil {
+	if err != nil {
 		return
 	}
 
+	// Call adapter to get result (outside the mutex)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -619,15 +668,51 @@ func (e *Engine) executeSolo(turnID, presetName, input string, author config.Par
 		},
 		Model:           author.Model,
 		Messages:        messages,
-		MaxOutputTokens: 4096,
-		Deadline:        time.Now().Add(5 * time.Minute),
+		MaxOutputTokens: maxOutput,
+		Deadline:        deadline,
+	})
+
+	// Handle result or error
+	if err != nil {
+		// Go error from Complete - treated as status error
+		e.endTurnWithError(turnID, attemptID, "author_failed:error")
+		return
+	}
+
+	// End turn with result
+	e.endTurnWithResult(turnID, attemptID, &result, preset.Mode)
+}
+
+// endTurnWithError ends a turn when adapter returns a Go error
+func (e *Engine) endTurnWithError(turnID, attemptID, reason string) {
+	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+		if txErr := emit(turnID, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
+			AttemptID:       attemptID,
+			Status:          "error",
+			ScrubCount:      0,
+			TransportStatus: "adapter_error:error",
+		}); txErr != nil {
+			return txErr
+		}
+
+		if txErr := tx.EndTurn(turnID, "incomplete", reason); txErr != nil {
+			return txErr
+		}
+
+		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: turnID,
+			State:  "incomplete",
+			Reason: &reason,
+		})
 	})
 	if err != nil {
 		return
 	}
+}
 
-	// Handle result
-	e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+// endTurnWithResult processes an adapter result and ends the turn
+func (e *Engine) endTurnWithResult(turnID, attemptID string, result *transport.CompleteResult, mode string) {
+	err := e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		accepted, err := tx.AcceptResult(attemptID, 0, "", journal.AttemptOutput{
 			RawScrubbed:     result.RawOutput,
 			ScrubCount:      result.ScrubCount,
@@ -671,48 +756,56 @@ func (e *Engine) executeSolo(turnID, presetName, input string, author config.Par
 			return txErr
 		}
 
-		// End turn with appropriate state
-		terminalReason := "solo_ok"
-		terminalState := "solo_complete"
-		if result.Status != transport.StatusComplete {
-			terminalReason = fmt.Sprintf("author_failed:%s", result.Status)
+		// Determine terminal state and reason
+		var terminalState, terminalReason string
+		if mode == "review" {
 			terminalState = "incomplete"
+			terminalReason = "author_failed:not_implemented"
+		} else {
+			// solo mode
+			if result.Status != transport.StatusComplete {
+				terminalState = "incomplete"
+				terminalReason = fmt.Sprintf("author_failed:%s", result.Status)
+			} else {
+				terminalState = "solo_complete"
+				terminalReason = "solo_ok"
+			}
 		}
 
-		return tx.EndTurn(turnID, terminalState, terminalReason)
-	})
-
-	// Emit turn_state event
-	e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
-		terminalReason := "solo_ok"
-		terminalState := "solo_complete"
-		if result.Status != transport.StatusComplete {
-			terminalReason = fmt.Sprintf("author_failed:%s", result.Status)
-			terminalState = "incomplete"
+		if txErr := tx.EndTurn(turnID, terminalState, terminalReason); txErr != nil {
+			return txErr
 		}
 
-		reason := terminalReason
 		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
 			TurnID: turnID,
 			State:  terminalState,
-			Reason: &reason,
+			Reason: &terminalReason,
 		})
 	})
+
+	// Clear the open turn
+	e.mu.Lock()
+	e.openTurnID = ""
+	e.mu.Unlock()
+
+	if err != nil {
+		return
+	}
 }
 
 // Cancel is not implemented in this task.
 func (e *Engine) Cancel(turnID string) error {
-	return errors.New("not implemented")
+	return ErrNotImplemented
 }
 
 // Override is not implemented in this task.
 func (e *Engine) Override(turnID, reason string) error {
-	return errors.New("not implemented")
+	return ErrNotImplemented
 }
 
 // Release is not implemented in this task.
 func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
-	return wire.ReleaseReply{}, errors.New("not implemented")
+	return wire.ReleaseReply{}, ErrNotImplemented
 }
 
 // Stop waits for nothing and returns nil in this task.
@@ -750,4 +843,48 @@ func convertInt(v *int) *int64 {
 func computeSHA256(data []byte) string {
 	h := sha256.Sum256(data)
 	return fmt.Sprintf("%x", h[:])
+}
+
+func computeSubmissionHash(req wire.SubmitRequest) (string, error) {
+	// Canonical JSON: sorted keys, as sent by client
+	m := make(map[string]interface{})
+	m["input"] = req.Input
+	if req.Preset != nil {
+		m["preset"] = *req.Preset
+	} else {
+		m["preset"] = nil
+	}
+	if req.QuickProfile != nil {
+		m["quick_profile"] = *req.QuickProfile
+	} else {
+		m["quick_profile"] = nil
+	}
+	if req.AllowProvisional != nil {
+		m["allow_provisional"] = *req.AllowProvisional
+	} else {
+		m["allow_provisional"] = nil
+	}
+
+	data, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return computeSHA256(data), nil
+}
+
+func ptrStr(s string) *string {
+	return &s
+}
+
+func ptrBool(b bool) *bool {
+	return &b
+}
+
+func containsStr(list []string, item string) bool {
+	for _, v := range list {
+		if v == item {
+			return true
+		}
+	}
+	return false
 }

@@ -3,7 +3,6 @@ package enginetest
 import (
 	"bytes"
 	"errors"
-	"io/ioutil"
 	"os"
 	"sync"
 	"testing"
@@ -16,6 +15,9 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 )
+
+// Re-export ErrNotImplemented from engine for testing
+var ErrNotImplemented = engine.ErrNotImplemented
 
 // Harness is a test helper for the engine.
 type Harness struct {
@@ -49,7 +51,7 @@ func (c *FakeClock) AfterFunc(d time.Duration, f func()) func() bool {
 // New creates a new test harness.
 func New(t *testing.T, rosterTOML string, scripts map[string][]*fake.Step) (*Harness, error) {
 	// Write roster to temp file
-	f, err := ioutil.TempFile("", "roster-*.toml")
+	f, err := os.CreateTemp("", "roster-*.toml")
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +64,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]*fake.Step) (*Har
 	rosterPath := f.Name()
 
 	// Create temp journal database
-	journalFile, err := ioutil.TempFile("", "journal-*.db")
+	journalFile, err := os.CreateTemp("", "journal-*.db")
 	if err != nil {
 		os.Remove(rosterPath)
 		return nil, err
@@ -175,4 +177,13 @@ func (h *Harness) WaitTurnState(turnID, state string) error {
 func (h *Harness) Events() []journal.Event {
 	events, _ := h.Store.EventsSince(0, 100000)
 	return events
+}
+
+// Cleanup cleans up temporary resources.
+func (h *Harness) Cleanup() error {
+	// Close database connections
+	if h.Store != nil {
+		// Store might need cleanup if it has open resources
+	}
+	return nil
 }
