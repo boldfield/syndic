@@ -336,13 +336,22 @@ func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 	var nativeFinish sql.NullString
 	var transportStatus sql.NullString
 	var repairOf sql.NullString
+	var gateError sql.NullString
+	var commentary sql.NullString
+	var delimiter sql.NullString
+	var maxOutputTokens sql.NullInt64
+	var estimatedPromptTokens sql.NullInt64
+	var usagePrompt sql.NullInt64
+	var usageCompletion sql.NullInt64
+	var retryCount sql.NullInt64
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, status, cancellation_state, quarantined, raw_output, scrub_count, observed_identity, native_finish, transport_status, repair_of
+		SELECT id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, status, cancellation_state, quarantined, raw_output, scrub_count, observed_identity, native_finish, transport_status, repair_of, gate_error, commentary, delimiter, max_output_tokens, estimated_prompt_tokens, usage_prompt, usage_completion, retry_count
 		FROM attempts WHERE id = ?
 	`, attemptID).Scan(
 		&row.ID, &row.TurnID, &row.Participant, &row.Phase, &row.Epoch, &dispatchedAtStr, &deadlineStr, &row.State,
 		&status, &row.CancellationState, &row.Quarantined, &row.RawOutput, &scrubCount, &observedIdentity, &nativeFinish, &transportStatus, &repairOf,
+		&gateError, &commentary, &delimiter, &maxOutputTokens, &estimatedPromptTokens, &usagePrompt, &usageCompletion, &retryCount,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("attempt not found")
@@ -382,6 +391,35 @@ func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 	}
 	if repairOf.Valid {
 		row.RepairOf = &repairOf.String
+	}
+	if gateError.Valid {
+		row.GateError = &gateError.String
+	}
+	if commentary.Valid {
+		row.Commentary = &commentary.String
+	}
+	if delimiter.Valid {
+		row.Delimiter = &delimiter.String
+	}
+	if maxOutputTokens.Valid {
+		mot := int(maxOutputTokens.Int64)
+		row.MaxOutputTokens = &mot
+	}
+	if estimatedPromptTokens.Valid {
+		ept := int(estimatedPromptTokens.Int64)
+		row.EstimatedPromptTokens = &ept
+	}
+	if usagePrompt.Valid {
+		up := int(usagePrompt.Int64)
+		row.UsagePrompt = &up
+	}
+	if usageCompletion.Valid {
+		uc := int(usageCompletion.Int64)
+		row.UsageCompletion = &uc
+	}
+	if retryCount.Valid {
+		rc := int(retryCount.Int64)
+		row.RetryCount = &rc
 	}
 
 	return &row, nil
@@ -532,7 +570,7 @@ func (tx *Tx) OverrideBlock(blockID string) error {
 // OpenBlocks returns blocks in open state for a turn, across all its candidates.
 func (tx *Tx) OpenBlocks(turnID string) ([]Block, error) {
 	rows, err := tx.tx.Query(`
-		SELECT b.id, b.verdict_id, b.candidate_hash, b.severity, b.evidence, b.remedy, b.state
+		SELECT b.id, b.verdict_id, b.candidate_hash, b.severity, b.evidence, b.remedy, b.state, b.reviewer_block_id
 		FROM blocks b
 		JOIN verdicts v ON b.verdict_id = v.id
 		JOIN attempts a ON v.attempt_id = a.id
@@ -547,8 +585,12 @@ func (tx *Tx) OpenBlocks(turnID string) ([]Block, error) {
 	var blocks []Block
 	for rows.Next() {
 		var block Block
-		if err := rows.Scan(&block.ID, &block.VerdictID, &block.CandidateHash, &block.Severity, &block.Evidence, &block.Remedy, &block.State); err != nil {
+		var reviewerBlockID sql.NullString
+		if err := rows.Scan(&block.ID, &block.VerdictID, &block.CandidateHash, &block.Severity, &block.Evidence, &block.Remedy, &block.State, &reviewerBlockID); err != nil {
 			return nil, fmt.Errorf("scan block: %w", err)
+		}
+		if reviewerBlockID.Valid {
+			block.ReviewerBlockID = reviewerBlockID.String
 		}
 		blocks = append(blocks, block)
 	}
