@@ -421,9 +421,14 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 	for i := startIdx; i < len(allRows) && len(items) < limit; i++ {
 		row := allRows[i]
 
+		refKind := row.kind
+		if row.kind == "message" {
+			refKind = "msg"
+		}
+
 		item := TranscriptItem{
 			Kind:    row.kind,
-			Ref:     row.kind + ":" + row.id,
+			Ref:     refKind + ":" + row.id,
 			Phase:   row.phase,
 			Sender:  row.sender,
 			SHA256:  row.sha256,
@@ -523,13 +528,14 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	} else if len(ref) >= 10 && ref[:10] == "candidate:" {
 		candidateID := ref[10:]
 		if err := tx.tx.QueryRow(`
-			SELECT content, content_hash FROM candidates WHERE id = ?
-		`, candidateID).Scan(&content, &sha256); err != nil {
+			SELECT content FROM candidates WHERE id = ?
+		`, candidateID).Scan(&content); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, 0, "", ErrNoSuchContent
 			}
 			return nil, 0, "", fmt.Errorf("query candidate: %w", err)
 		}
+		sha256 = computeSHA256([]byte(content))
 	} else {
 		return nil, 0, "", ErrNoSuchContent
 	}
