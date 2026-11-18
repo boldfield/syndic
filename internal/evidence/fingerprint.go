@@ -122,40 +122,29 @@ func (c *CalibrationRecord) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("invalid calibration string: %q", v)
 
 	case map[string]interface{}:
-		c.Available = true
-		// Validate required fields
-		if _, hasBytes := v["bytes_per_token"]; !hasBytes {
+		// Decode into a typed struct to validate field types and presence
+		type calRecord struct {
+			BytesPerToken        *float64 `json:"bytes_per_token"`
+			ObservedPromptTokens *int     `json:"observed_prompt_tokens"`
+			BaselinePromptTokens *int     `json:"baseline_prompt_tokens"`
+		}
+		var rec calRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return err
+		}
+		if rec.BytesPerToken == nil {
 			return fmt.Errorf("calibration object missing bytes_per_token")
 		}
-		if _, hasObserved := v["observed_prompt_tokens"]; !hasObserved {
+		if rec.ObservedPromptTokens == nil {
 			return fmt.Errorf("calibration object missing observed_prompt_tokens")
 		}
-		if _, hasBaseline := v["baseline_prompt_tokens"]; !hasBaseline {
+		if rec.BaselinePromptTokens == nil {
 			return fmt.Errorf("calibration object missing baseline_prompt_tokens")
 		}
-
-		// Extract and validate types
-		val, _ := v["bytes_per_token"]
-		f, ok := val.(float64)
-		if !ok {
-			return fmt.Errorf("calibration bytes_per_token must be a number, got %T", val)
-		}
-		c.BytesPerToken = f
-
-		val, _ = v["observed_prompt_tokens"]
-		f, ok = val.(float64)
-		if !ok {
-			return fmt.Errorf("calibration observed_prompt_tokens must be a number, got %T", val)
-		}
-		c.ObservedPromptTokens = int(f)
-
-		val, _ = v["baseline_prompt_tokens"]
-		f, ok = val.(float64)
-		if !ok {
-			return fmt.Errorf("calibration baseline_prompt_tokens must be a number, got %T", val)
-		}
-		c.BaselinePromptTokens = int(f)
-
+		c.Available = true
+		c.BytesPerToken = *rec.BytesPerToken
+		c.ObservedPromptTokens = *rec.ObservedPromptTokens
+		c.BaselinePromptTokens = *rec.BaselinePromptTokens
 		return nil
 
 	default:
@@ -225,21 +214,35 @@ func ParseProbeManifest(raw json.RawMessage) (m ProbeManifest, hasFingerprint bo
 			if !hasConfigFingerprint || !hasFingerprintRule || !hasCalibration || !hasExport {
 				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: incomplete wrapped shape")
 			}
-			// Validate config_fingerprint is non-empty
+			// Validate config_fingerprint is non-empty string
 			fp, ok := objMap["config_fingerprint"].(string)
 			if !ok || fp == "" {
 				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: config_fingerprint must be a non-empty string")
+			}
+			// Validate fingerprint_rule is non-empty string
+			rule, ok := objMap["fingerprint_rule"].(string)
+			if !ok || rule == "" {
+				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: fingerprint_rule must be a non-empty string")
 			}
 
 			var pm ProbeManifest
 			if err := json.Unmarshal(raw, &pm); err != nil {
 				return ProbeManifest{}, false, err
 			}
+			// Validate export is not empty
+			if pm.Export.EndpointName == "" || pm.Export.Model == "" {
+				return ProbeManifest{}, false, fmt.Errorf("invalid probe manifest: export must contain endpoint_name and model")
+			}
 			return pm, true, nil
 		}
 
-		// Check if it looks like a bare Export (has redaction-specific fields)
-		if _, hasRedacted := objMap["redacted"]; hasRedacted {
+		// Check if it looks like a bare Export by validating required fields.
+		// A valid bare export must have the key identifying fields.
+		endpointName, hasEndpointName := objMap["endpoint_name"].(string)
+		model, hasModel := objMap["model"].(string)
+		redactionRule, hasRedactionRule := objMap["redaction_rule"].(string)
+
+		if hasEndpointName && hasModel && hasRedactionRule && endpointName != "" && model != "" && redactionRule != "" {
 			var exp Export
 			if err := json.Unmarshal(raw, &exp); err != nil {
 				return ProbeManifest{}, false, err

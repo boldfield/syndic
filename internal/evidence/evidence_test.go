@@ -1271,8 +1271,10 @@ func TestParseProbeManifestPartialWrappedMissingExport(t *testing.T) {
 }
 
 // TestManifestSentinelInReference verifies that the marshalled manifest's
-// config_fingerprint does not contain resolved secrets, only reference names.
+// config_fingerprint does not contain resolved sentinel secrets, only reference names.
 func TestManifestSentinelInReference(t *testing.T) {
+	const sentinel = "sk-SENTINEL-DoNotUseThisInProduction123456789"
+
 	profile := config.EndpointProfile{
 		Name:              "test-endpoint",
 		BaseURL:           "http://localhost:8000/v1",
@@ -1328,8 +1330,58 @@ func TestManifestSentinelInReference(t *testing.T) {
 
 	manifestStr := string(data)
 
-	// The marshalled manifest should contain the reference but not any sentinel
+	// The marshalled manifest should contain the reference name but not any sentinel
 	if !contains(manifestStr, "API_KEY") {
 		t.Errorf("Manifest should contain reference name API_KEY")
+	}
+	if contains(manifestStr, sentinel) {
+		t.Errorf("Manifest should not contain sentinel value %q", sentinel)
+	}
+}
+
+// TestParseProbeManifestRejectPartialRedacted verifies that ParseProbeManifest
+// rejects objects that only have the redacted field without other required fields.
+func TestParseProbeManifestRejectPartialRedacted(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"only redacted true", `{"redacted":true}`},
+		{"only redacted false", `{"redacted":false}`},
+		{"only redacted null", `{"redacted":null}`},
+		{"redacted with one field", `{"redacted":true,"endpoint_name":"test"}`},
+		{"redacted with two fields", `{"redacted":true,"endpoint_name":"test","model":"gpt-4"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ParseProbeManifest(json.RawMessage(tt.json))
+			if err == nil {
+				t.Errorf("Expected error for %s, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// TestCalibrationRecordRejectNonIntegralTokenCounts verifies that UnmarshalJSON
+// rejects non-integral values for token count fields.
+func TestCalibrationRecordRejectNonIntegralTokenCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"observed_prompt_tokens float", `{"bytes_per_token":0.5,"observed_prompt_tokens":1.5,"baseline_prompt_tokens":80}`},
+		{"baseline_prompt_tokens float", `{"bytes_per_token":0.5,"observed_prompt_tokens":100,"baseline_prompt_tokens":80.9}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cal CalibrationRecord
+			err := json.Unmarshal([]byte(tt.json), &cal)
+			if err == nil {
+				t.Errorf("Expected error for %s (got values: observed=%d, baseline=%d), got nil",
+					tt.name, cal.ObservedPromptTokens, cal.BaselinePromptTokens)
+			}
+		})
 	}
 }
