@@ -17,4 +17,4 @@ lint: fmt-check
 	golangci-lint run ./...
 
 probe:
-	go run ./cmd/syndic probe "$(ENDPOINT)"
+	go run ./cmd/syndic probe --endpoint "$(ENDPOINT)" --model "$(MODEL)"
