@@ -89,20 +89,80 @@ func TestFrameRoundTripWithLargeBody(t *testing.T) {
 }
 
 func TestFrameAtMaxSize(t *testing.T) {
-	// Test that a small frame fits
-	small := Frame{
-		ID:   "test-id",
+	// Test that a frame exactly at MaxFrameBytes is written successfully
+	// Frame structure: {"v":1,"id":"...","type":"...","body":"..."}
+	// We need to construct a body such that the entire frame is exactly MaxFrameBytes long
+
+	// First, build a template frame and marshal it to see the base size
+	template := Frame{
+		V:    1,
+		ID:   "x",
 		Type: "content",
-		Body: json.RawMessage(`{"ref":"test"}`),
+		Body: json.RawMessage(`""`),
+	}
+	templateJSON, _ := json.Marshal(template)
+	templateWithNewline := len(templateJSON) + 1 // +1 for newline
+
+	// Now we need to adjust the body content to make the total exactly MaxFrameBytes
+	// Calculate how much space we have for padding
+	paddingNeeded := MaxFrameBytes - templateWithNewline
+
+	// Create a body that when marshaled will fit exactly
+	// We'll use a simple string with enough characters
+	padding := strings.Repeat("a", paddingNeeded)
+	exactFrame := Frame{
+		V:    1,
+		ID:   "x",
+		Type: "content",
+		Body: json.RawMessage(fmt.Sprintf(`"%s"`, padding)),
 	}
 
-	var buf bytes.Buffer
-	w := NewWriter(&buf)
-	if err := w.Write(small); err != nil {
-		t.Fatalf("Failed to write small frame: %v", err)
+	// Verify the encoded length is exactly MaxFrameBytes
+	encoded, _ := json.Marshal(exactFrame)
+	encoded = append(encoded, '\n')
+
+	if len(encoded) != MaxFrameBytes {
+		// Adjust if needed
+		if len(encoded) > MaxFrameBytes {
+			// Remove characters from padding until we fit exactly
+			diff := len(encoded) - MaxFrameBytes
+			adjustedPadding := strings.Repeat("a", paddingNeeded-diff)
+			exactFrame = Frame{
+				V:    1,
+				ID:   "x",
+				Type: "content",
+				Body: json.RawMessage(fmt.Sprintf(`"%s"`, adjustedPadding)),
+			}
+			encoded, _ = json.Marshal(exactFrame)
+			encoded = append(encoded, '\n')
+		}
 	}
-	if buf.Len() == 0 {
-		t.Error("Small frame should have written something")
+
+	// Write the exact-sized frame - should succeed
+	var buf1 bytes.Buffer
+	w1 := NewWriter(&buf1)
+	if err := w1.Write(exactFrame); err != nil {
+		t.Fatalf("Failed to write frame at exactly MaxFrameBytes: %v", err)
+	}
+	if buf1.Len() != MaxFrameBytes {
+		t.Errorf("Exact frame size mismatch: got %d bytes, expected %d", buf1.Len(), MaxFrameBytes)
+	}
+
+	// Now test one byte over - should fail and write nothing
+	overFrame := Frame{
+		V:    1,
+		ID:   "y",
+		Type: "content",
+		Body: json.RawMessage(fmt.Sprintf(`"%s"`, strings.Repeat("a", paddingNeeded+1))),
+	}
+
+	var buf2 bytes.Buffer
+	w2 := NewWriter(&buf2)
+	if err := w2.Write(overFrame); err != ErrFrameTooLarge {
+		t.Errorf("Expected ErrFrameTooLarge for frame over MaxFrameBytes, got %v", err)
+	}
+	if buf2.Len() != 0 {
+		t.Error("Bytes should not be written for oversized frame")
 	}
 
 	// Test frame significantly over MaxFrameBytes - should fail
@@ -111,19 +171,19 @@ func TestFrameAtMaxSize(t *testing.T) {
 		oversizePadding[i] = 'b'
 	}
 
-	f2 := Frame{
+	f3 := Frame{
 		ID:   "id",
 		Type: "content",
 		Body: json.RawMessage(fmt.Sprintf(`{"data":"%s"}`, string(oversizePadding))),
 	}
-	var buf2 bytes.Buffer
-	w2 := NewWriter(&buf2)
+	var buf3 bytes.Buffer
+	w3 := NewWriter(&buf3)
 
-	if err := w2.Write(f2); err != ErrFrameTooLarge {
-		t.Errorf("Expected ErrFrameTooLarge for oversized frame, got %v", err)
+	if err := w3.Write(f3); err != ErrFrameTooLarge {
+		t.Errorf("Expected ErrFrameTooLarge for massively oversized frame, got %v", err)
 	}
-	if buf2.Len() != 0 {
-		t.Error("Bytes should not be written for oversized frame")
+	if buf3.Len() != 0 {
+		t.Error("Bytes should not be written for massively oversized frame")
 	}
 }
 
@@ -144,6 +204,58 @@ func (bcr *boundedCountingReader) Read(p []byte) (int, error) {
 	n, err := bcr.r.Read(p)
 	bcr.count += n
 	return n, err
+}
+
+func TestReaderExactMaxSize(t *testing.T) {
+	// Create a valid JSON frame that is exactly MaxFrameBytes long (including newline)
+	// This should be read successfully
+
+	// Create a minimal frame and pad it to exactly MaxFrameBytes
+	template := Frame{
+		V:    1,
+		ID:   "x",
+		Type: "content",
+		Body: json.RawMessage(`""`),
+	}
+	templateJSON, _ := json.Marshal(template)
+	templateWithNewline := len(templateJSON) + 1
+
+	paddingNeeded := MaxFrameBytes - templateWithNewline
+	padding := strings.Repeat("a", paddingNeeded)
+	exactFrame := Frame{
+		V:    1,
+		ID:   "x",
+		Type: "content",
+		Body: json.RawMessage(fmt.Sprintf(`"%s"`, padding)),
+	}
+
+	encoded, _ := json.Marshal(exactFrame)
+	encoded = append(encoded, '\n')
+
+	// If not exactly MaxFrameBytes, adjust
+	if len(encoded) != MaxFrameBytes {
+		if len(encoded) > MaxFrameBytes {
+			diff := len(encoded) - MaxFrameBytes
+			adjustedPadding := strings.Repeat("a", paddingNeeded-diff)
+			exactFrame = Frame{
+				V:    1,
+				ID:   "x",
+				Type: "content",
+				Body: json.RawMessage(fmt.Sprintf(`"%s"`, adjustedPadding)),
+			}
+			encoded, _ = json.Marshal(exactFrame)
+			encoded = append(encoded, '\n')
+		}
+	}
+
+	r := NewReader(bytes.NewReader(encoded))
+	f, err := r.Read()
+	if err != nil {
+		t.Fatalf("Failed to read frame at exactly MaxFrameBytes: %v", err)
+	}
+	if f.Type != "content" {
+		t.Errorf("Frame type mismatch: got %s, expected content", f.Type)
+	}
 }
 
 func TestReaderLargeLine(t *testing.T) {
@@ -307,28 +419,33 @@ func TestDecodePageRandomBytes(t *testing.T) {
 }
 
 func TestEventKindsConstant(t *testing.T) {
-	// All event kinds from design should be present
+	// All event kinds from design should be present - literal design strings
 	expectedKinds := []string{
-		EventKindEngineStarted,
-		EventKindEngineStopping,
-		EventKindTurnSubmitted,
-		EventKindTurnState,
-		EventKindParticipantState,
-		EventKindAttemptBegun,
-		EventKindAttemptCompleted,
-		EventKindAttemptUnknown,
-		EventKindMessageAppended,
-		EventKindCandidateFrozen,
-		EventKindVerdictRecorded,
-		EventKindVerdictsDelivered,
-		EventKindBlockOpened,
-		EventKindBlockState,
-		EventKindCapacity,
-		EventKindDeadline,
-		EventKindBudget,
-		EventKindBudgetEstimateExceeded,
-		EventKindBudgetExhausted,
-		EventKindOverride,
+		"engine_started",
+		"engine_stopping",
+		"turn_submitted",
+		"turn_state",
+		"participant_state",
+		"attempt_begun",
+		"attempt_completed",
+		"attempt_unknown",
+		"message_appended",
+		"candidate_frozen",
+		"verdict_recorded",
+		"verdicts_delivered",
+		"block_opened",
+		"block_state",
+		"capacity",
+		"deadline",
+		"budget",
+		"budget_estimate_exceeded",
+		"budget_exhausted",
+		"override",
+	}
+
+	// Check exact set match
+	if len(EventKinds) != len(expectedKinds) {
+		t.Errorf("EventKinds length mismatch: got %d, expected %d", len(EventKinds), len(expectedKinds))
 	}
 
 	for _, kind := range expectedKinds {
@@ -340,13 +457,21 @@ func TestEventKindsConstant(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("EventKinds missing %s", kind)
+			t.Errorf("EventKinds missing design string: %s", kind)
 		}
 	}
 
-	// Check that EventKinds has the right elements
-	if len(EventKinds) != len(expectedKinds) {
-		t.Errorf("EventKinds length mismatch: got %d, expected %d", len(EventKinds), len(expectedKinds))
+	for _, k := range EventKinds {
+		found := false
+		for _, kind := range expectedKinds {
+			if k == kind {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("EventKinds contains unexpected value: %s", k)
+		}
 	}
 }
 
@@ -393,6 +518,32 @@ func TestRequestNames(t *testing.T) {
 }
 
 func TestErrorCodes(t *testing.T) {
+	// All error codes from design - literal design strings
+	expectedCodes := []string{
+		"protocol",
+		"stopping",
+		"busy",
+		"orphaned_holds",
+		"quick_profile_unknown",
+		"preset_invalid",
+		"unprobed",
+		"policy",
+		"budget",
+		"provisional",
+		"not_incomplete",
+		"reason_required",
+		"no_hold",
+		"ambiguous",
+		"no_such_hold",
+		"frame",
+		"lagging",
+		"submission_conflict",
+		"internal",
+		"not_open",
+		"not_found",
+		"bad_request",
+	}
+
 	errorCodes := []string{
 		ErrorCodeProtocol,
 		ErrorCodeStopping,
@@ -418,34 +569,36 @@ func TestErrorCodes(t *testing.T) {
 		ErrorCodeBadRequest,
 	}
 
-	expectedCodes := map[string]bool{
-		"protocol":              true,
-		"stopping":              true,
-		"busy":                  true,
-		"orphaned_holds":        true,
-		"quick_profile_unknown": true,
-		"preset_invalid":        true,
-		"unprobed":              true,
-		"policy":                true,
-		"budget":                true,
-		"provisional":           true,
-		"not_incomplete":        true,
-		"reason_required":       true,
-		"no_hold":               true,
-		"ambiguous":             true,
-		"no_such_hold":          true,
-		"frame":                 true,
-		"lagging":               true,
-		"submission_conflict":   true,
-		"internal":              true,
-		"not_open":              true,
-		"not_found":             true,
-		"bad_request":           true,
+	// Check lengths match
+	if len(errorCodes) != len(expectedCodes) {
+		t.Errorf("Error codes count mismatch: got %d, expected %d", len(errorCodes), len(expectedCodes))
 	}
 
-	for _, code := range errorCodes {
-		if !expectedCodes[code] {
-			t.Errorf("Unexpected error code: %s", code)
+	// Check all expected codes are present
+	for _, code := range expectedCodes {
+		found := false
+		for _, c := range errorCodes {
+			if c == code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Error code missing from constants: %s", code)
+		}
+	}
+
+	// Check no unexpected codes are present
+	for _, c := range errorCodes {
+		found := false
+		for _, code := range expectedCodes {
+			if c == code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Unexpected error code constant: %s", c)
 		}
 	}
 }

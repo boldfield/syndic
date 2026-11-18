@@ -18,6 +18,11 @@ const (
 
 var ErrFrameTooLarge = errors.New("frame exceeds 1 MiB")
 
+type GroupMember struct {
+	EndpointName string `json:"endpoint_name"`
+	Model        string `json:"model"`
+}
+
 type Frame struct {
 	V    int             `json:"v"`
 	ID   string          `json:"id,omitempty"`
@@ -119,20 +124,20 @@ func (r *Reader) Read() (Frame, error) {
 }
 
 type Error struct {
-	Code         string      `json:"code"`
-	Detail       *string     `json:"detail,omitempty"`
-	TurnID       *string     `json:"turn_id,omitempty"`
-	Participant  *string     `json:"participant,omitempty"`
-	QuickProfile *string     `json:"quick_profile,omitempty"`
-	Budget       *string     `json:"budget,omitempty"`
-	Admission    int64       `json:"admission,omitempty"`
-	Estimated    int64       `json:"estimated,omitempty"`
-	Limit        int64       `json:"limit,omitempty"`
-	Missing      *string     `json:"missing,omitempty"`
-	Holds        interface{} `json:"holds,omitempty"`
-	Pool         *string     `json:"pool,omitempty"`
-	AttemptID    *string     `json:"attempt_id,omitempty"`
-	LastSeq      int64       `json:"last_seq,omitempty"`
+	Code         string          `json:"code"`
+	Detail       *string         `json:"detail,omitempty"`
+	TurnID       *string         `json:"turn_id,omitempty"`
+	Participant  *string         `json:"participant,omitempty"`
+	QuickProfile *string         `json:"quick_profile,omitempty"`
+	Budget       *string         `json:"budget,omitempty"`
+	Admission    *int64          `json:"admission,omitempty"`
+	Estimated    *int64          `json:"estimated,omitempty"`
+	Limit        *int64          `json:"limit,omitempty"`
+	Missing      *string         `json:"missing,omitempty"`
+	Holds        json.RawMessage `json:"holds,omitempty"`
+	Pool         *string         `json:"pool,omitempty"`
+	AttemptID    *string         `json:"attempt_id,omitempty"`
+	LastSeq      *int64          `json:"last_seq,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -140,15 +145,15 @@ func (e *Error) Error() string {
 }
 
 type Hold struct {
-	Pool      string `json:"pool"`
-	AttemptID string `json:"attempt_id"`
-	Group     string `json:"group,omitempty"`
+	Pool      string        `json:"pool"`
+	AttemptID string        `json:"attempt_id"`
+	Group     []GroupMember `json:"group"`
 }
 
 type PoolHold struct {
-	AttemptID string `json:"attempt_id"`
-	HeldSince string `json:"held_since"`
-	Group     string `json:"group,omitempty"`
+	AttemptID string        `json:"attempt_id"`
+	HeldSince string        `json:"held_since"`
+	Group     []GroupMember `json:"group"`
 }
 
 func NewRequest(id, typ string, body any) (Frame, error) {
@@ -273,7 +278,7 @@ type QuickProfile struct {
 	Name             string   `json:"name"`
 	Preset           string   `json:"preset"`
 	Drafts           bool     `json:"drafts"`
-	Budgets          *Budgets `json:"budgets,omitempty"`
+	Budgets          *Budgets `json:"budgets"`
 	DefinitionSHA256 string   `json:"definition_sha256"`
 }
 
@@ -326,9 +331,9 @@ type OverrideReply struct {
 }
 
 type ReleaseRequest struct {
-	Pool      string `json:"pool"`
-	AttemptID string `json:"attempt_id,omitempty"`
-	Reason    string `json:"reason"`
+	Pool      string  `json:"pool"`
+	AttemptID *string `json:"attempt_id,omitempty"`
+	Reason    string  `json:"reason"`
 }
 
 type ReleaseReply struct {
@@ -403,9 +408,9 @@ type TurnReply struct {
 }
 
 type TranscriptRequest struct {
-	TurnID string `json:"turn_id"`
-	Cursor string `json:"cursor,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	TurnID string  `json:"turn_id"`
+	Cursor *string `json:"cursor,omitempty"`
+	Limit  *int    `json:"limit,omitempty"`
 }
 
 type TranscriptItem struct {
@@ -417,7 +422,7 @@ type TranscriptItem struct {
 
 type TranscriptReply struct {
 	Items      []TranscriptItem `json:"items"`
-	NextCursor string           `json:"next_cursor,omitempty"`
+	NextCursor *string          `json:"next_cursor,omitempty"`
 }
 
 type ContentRequest struct {
@@ -545,27 +550,27 @@ type EvBlockState struct {
 }
 
 type EvCapacity struct {
-	Pool          string `json:"pool"`
-	HeldByAttempt string `json:"held_by_attempt"`
-	State         string `json:"state"`
-	How           string `json:"how,omitempty"`
-	Reason        string `json:"reason,omitempty"`
+	Pool          string  `json:"pool"`
+	HeldByAttempt string  `json:"held_by_attempt"`
+	State         string  `json:"state"`
+	How           *string `json:"how,omitempty"`
+	Reason        *string `json:"reason,omitempty"`
 }
 
 type EvDeadline struct {
-	TurnID      string `json:"turn_id"`
-	Kind        string `json:"kind"`
-	AttemptID   string `json:"attempt_id,omitempty"`
-	RemainingMs int64  `json:"remaining_ms"`
+	TurnID      string  `json:"turn_id"`
+	Kind        string  `json:"kind"`
+	AttemptID   *string `json:"attempt_id,omitempty"`
+	RemainingMs int64   `json:"remaining_ms"`
 }
 
 type EvBudget struct {
 	TurnID      string  `json:"turn_id"`
 	Budget      string  `json:"budget"`
 	Participant *string `json:"participant,omitempty"`
-	Admission   int64   `json:"admission,omitempty"`
-	Estimated   int64   `json:"estimated,omitempty"`
-	Limit       int64   `json:"limit,omitempty"`
+	Admission   *int64  `json:"admission,omitempty"`
+	Estimated   *int64  `json:"estimated,omitempty"`
+	Limit       int64   `json:"limit"`
 }
 
 type EvBudgetEstimateExceeded struct {
