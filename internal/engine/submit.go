@@ -90,6 +90,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			return wire.SubmitReply{}, conflict
 		}
 		reply := wire.SubmitReply{TurnID: prior.ID, Preset: prior.Preset}
+		stored, ok, err := readBudget(prior)
+		if err != nil {
+			return wire.SubmitReply{}, err
+		}
+		if ok {
+			reply.EstimatedTokens = int64(stored.Projected)
+		}
 		if prior.QuickProfile != "" {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
 		}
@@ -142,6 +149,15 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
+	rec, err := e.projectBudget(eff, req.Input)
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+	budgetJSON, err := json.Marshal(rec)
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+
 	if eff.Deadlines.Provisional != nil && *eff.Deadlines.Provisional &&
 		(req.AllowProvisional == nil || !*req.AllowProvisional) {
 		return wire.SubmitReply{}, refusal(wire.ErrorCodeProvisional)
@@ -164,14 +180,16 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			AttemptDeadlineMS: attempt.Milliseconds(),
 			TurnDeadlineMS:    turn.Milliseconds(),
 			TurnDeadline:      turnDeadline,
+			BudgetJSON:        budgetJSON,
 		})
 		if err != nil {
 			return err
 		}
 		submitted := wire.EvTurnSubmitted{
-			TurnID:       turnID,
-			SubmissionID: req.SubmissionID,
-			Preset:       eff.PresetName,
+			TurnID:          turnID,
+			SubmissionID:    req.SubmissionID,
+			Preset:          eff.PresetName,
+			EstimatedTokens: int64(rec.Projected),
 		}
 		if eff.QuickProfile != "" {
 			submitted.QuickProfile = strPtr(eff.QuickProfile)
@@ -204,7 +222,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName}
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected)}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}

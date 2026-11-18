@@ -894,3 +894,25 @@ func TestOpenHoldDuplicateAttempt(t *testing.T) {
 		t.Errorf("expected error when opening second hold for same attempt")
 	}
 }
+
+func TestSetAttemptEstimate(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	_, turnID, err := createTestRunAndTurn(t, db, store)
+	if err != nil {
+		t.Fatalf("failed to create run/turn: %v", err)
+	}
+	attemptID, err := store.BeginAttemptWith(journal.AttemptParams{TurnID: turnID, Participant: "p1", Phase: "phase1", Epoch: 1})
+	if err != nil {
+		t.Fatalf("failed to begin attempt: %v", err)
+	}
+	if err := store.Tx(func(tx *journal.Tx) error { return tx.SetAttemptEstimate(attemptID, 123) }); err != nil {
+		t.Fatalf("SetAttemptEstimate: %v", err)
+	}
+	row, err := store.GetAttempt(attemptID)
+	if err != nil || row.EstimatedPromptTokens == nil || *row.EstimatedPromptTokens != 123 {
+		t.Fatalf("attempt = %+v, err %v", row, err)
+	}
+}

@@ -130,6 +130,7 @@ type Engine struct {
 	inflight     map[string]int // dispatches holding a pool slot, per participant
 	queued       map[string]bool
 	pools        map[string]*pool
+	exceeded     map[string]bool // participants whose estimate was exceeded this run
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;

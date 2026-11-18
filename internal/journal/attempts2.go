@@ -390,3 +390,14 @@ func (s *Store) OpenBlockFor(verdictID, reviewerBlockID, candidateHash, severity
 	})
 	return blockID, err
 }
+
+// SetAttemptEstimate records the estimated prompt token count of an attempt
+// whose messages could only be built once its row existed.
+func (tx *Tx) SetAttemptEstimate(attemptID string, estimatedPromptTokens int) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE attempts SET estimated_prompt_tokens = ? WHERE id = ?
+	`, estimatedPromptTokens, attemptID); err != nil {
+		return fmt.Errorf("update estimated prompt tokens: %w", err)
+	}
+	return nil
+}

@@ -32,6 +32,11 @@ func (e *Engine) runTurn(t *openTurn) {
 func (e *Engine) startAuthor(t *openTurn) {
 	req, attemptID, err := e.dispatchAuthor(t)
 	if err != nil {
+		if r, ok := asRefusal(err); ok {
+			e.finishBudget(t, r)
+			e.releaseLocked(t.author)
+			return
+		}
 		// Nothing was written for the dispatch; end the turn so the engine
 		// does not stay busy.
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
@@ -80,7 +85,6 @@ func (e *Engine) adapterFor(id string) transport.Adapter {
 // dispatchAuthor records the request message and the attempt, and moves the
 // turn to author_dispatched, all in one transaction. e.mu is held.
 func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string, error) {
-	mp := e.built.Participants[t.author]
 	var p config.Participant
 	for _, candidate := range e.roster.Participants {
 		if candidate.ID == t.author {
@@ -90,13 +94,17 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 	}
 
 	msgs := prompt.Author(t.input)
-	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, mp.OutputBound)
+	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
 	deadline := e.attemptDeadline(t)
 
 	var req transport.CompleteRequest
 	var attemptID string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		turn, err := tx.GetTurn(t.id)
+		if err != nil {
+			return err
+		}
+		estimated, err := e.reserve(tx, t, t.author, msgs, maxOut)
 		if err != nil {
 			return err
 		}
@@ -115,23 +123,25 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 			return err
 		}
 		attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
-			TurnID:          t.id,
-			Participant:     t.author,
-			Phase:           phaseAuthor,
-			Epoch:           turn.Epoch,
-			Deadline:        &deadline,
-			MaxOutputTokens: maxOut,
+			TurnID:                t.id,
+			Participant:           t.author,
+			Phase:                 phaseAuthor,
+			Epoch:                 turn.Epoch,
+			Deadline:              &deadline,
+			MaxOutputTokens:       maxOut,
+			EstimatedPromptTokens: estimated,
 		})
 		if err != nil {
 			return err
 		}
 		if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
-			AttemptID:       attemptID,
-			Participant:     t.author,
-			Phase:           phaseAuthor,
-			Epoch:           int64(turn.Epoch),
-			Deadline:        deadline.Format(time.RFC3339Nano),
-			MaxOutputTokens: int64(maxOut),
+			AttemptID:             attemptID,
+			Participant:           t.author,
+			Phase:                 phaseAuthor,
+			Epoch:                 int64(turn.Epoch),
+			Deadline:              deadline.Format(time.RFC3339Nano),
+			MaxOutputTokens:       int64(maxOut),
+			EstimatedPromptTokens: int64(estimated),
 		}); err != nil {
 			return err
 		}
@@ -176,8 +186,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 
-	quarantined := false
+	quarantined, exceeded := false, false
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		quarantined, exceeded = false, false
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
@@ -193,7 +204,8 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			// A late result for a superseded epoch or a terminal turn is
 			// quarantined and nothing further happens.
 			quarantined = true
-			return nil
+			exceeded, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+			return err
 		}
 
 		var usage *wire.ReportedUsage
@@ -203,6 +215,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			}
 			promptTokens, completionTokens := int64(res.Usage.Prompt), int64(res.Usage.Completion)
 			usage = &wire.ReportedUsage{PromptTokens: &promptTokens, CompletionTokens: &completionTokens}
+		}
+		if exceeded, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
+			return err
 		}
 		if gate != nil {
 			if err := tx.SetAttemptGate(attemptID, gate.Error()); err != nil {
@@ -232,6 +247,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
 	})
 	e.attemptDone(t, attemptID)
+	if err == nil && exceeded {
+		e.markExceeded(t.author)
+	}
 	if quarantined {
 		return
 	}

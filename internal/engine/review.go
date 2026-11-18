@@ -53,16 +53,20 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	gate := transport.CheckResult(req, res, expected)
 
 	var hash string
-	var quarantined, ended bool
+	var quarantined, ended, exceeded bool
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, quarantined, ended = "", false, false
+		hash, quarantined, ended, exceeded = "", false, false, false
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
 		}
 		if !accepted {
 			quarantined = true
-			return nil
+			exceeded, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+			return err
+		}
+		if exceeded, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
+			return err
 		}
 		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, e.lastInflight(t.author)); err != nil {
 			return err
@@ -89,6 +93,9 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateCandidateFrozen})
 	})
 	e.attemptDone(t, attemptID)
+	if err == nil && exceeded {
+		e.markExceeded(t.author)
+	}
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return false
@@ -133,6 +140,11 @@ func (e *Engine) runReviewers(t *openTurn) {
 func (e *Engine) startReviewer(t *openTurn, id string) {
 	d, err := e.beginReviewer(t, id, t.reviewersBegun+1 == len(t.required))
 	if err != nil {
+		if r, ok := asRefusal(err); ok {
+			e.finishBudget(t, r)
+			e.releaseLocked(id)
+			return
+		}
 		e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
 		e.releaseLocked(id)
 		return
@@ -171,7 +183,11 @@ func (e *Engine) startRepair(t *openTurn, orig reviewerDispatch, original string
 		return err
 	})
 	if err != nil {
-		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, orig.participant))
+		if r, ok := asRefusal(err); ok {
+			e.finishBudget(t, r)
+		} else {
+			e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, orig.participant))
+		}
 		e.releaseLocked(orig.participant)
 		return
 	}
@@ -219,6 +235,13 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err != nil {
 			return err
 		}
+		estimated, err := e.reserve(tx, t, id, msgs, maxOut)
+		if err != nil {
+			return err
+		}
+		if err := tx.SetAttemptEstimate(attemptID, estimated); err != nil {
+			return err
+		}
 		// The journaled request is the user message: the request and the
 		// candidate, fenced.
 		content := []byte(msgs[len(msgs)-1].Content)
@@ -237,12 +260,13 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 			return err
 		}
 		if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
-			AttemptID:       attemptID,
-			Participant:     id,
-			Phase:           phaseReview,
-			Epoch:           int64(turn.Epoch),
-			Deadline:        deadline.Format(time.RFC3339Nano),
-			MaxOutputTokens: int64(maxOut),
+			AttemptID:             attemptID,
+			Participant:           id,
+			Phase:                 phaseReview,
+			Epoch:                 int64(turn.Epoch),
+			Deadline:              deadline.Format(time.RFC3339Nano),
+			MaxOutputTokens:       int64(maxOut),
+			EstimatedPromptTokens: int64(estimated),
 		}); err != nil {
 			return err
 		}
@@ -355,6 +379,13 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
+	estimated, err := e.reserve(tx, t, originalDispatch.participant, msgs, maxOut)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.SetAttemptEstimate(repairAttemptID, estimated); err != nil {
+		return nil, err
+	}
 	content := []byte(msgs[len(msgs)-1].Content)
 	msgID, sum, size, err := tx.AppendMessage(t.id, phaseReview, senderEngine, []string{originalDispatch.participant}, content, nil)
 	if err != nil {
@@ -372,13 +403,14 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	}
 	repairOfPtr := &originalDispatch.attemptID
 	if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
-		AttemptID:       repairAttemptID,
-		Participant:     originalDispatch.participant,
-		Phase:           phaseReview,
-		Epoch:           int64(turn.Epoch),
-		Deadline:        deadline.Format(time.RFC3339Nano),
-		MaxOutputTokens: int64(maxOut),
-		RepairOf:        repairOfPtr,
+		AttemptID:             repairAttemptID,
+		Participant:           originalDispatch.participant,
+		Phase:                 phaseReview,
+		Epoch:                 int64(turn.Epoch),
+		Deadline:              deadline.Format(time.RFC3339Nano),
+		MaxOutputTokens:       int64(maxOut),
+		EstimatedPromptTokens: int64(estimated),
+		RepairOf:              repairOfPtr,
 	}); err != nil {
 		return nil, err
 	}
@@ -417,20 +449,26 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
 
-	var quarantined, approvedNow bool
+	var quarantined, approvedNow, exceeded bool
 	var endState, endReason string
 	var repair bool
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, endState, endReason = false, false, "", ""
-		repair = false
+		repair, exceeded = false, false
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
 		}
 		if !accepted {
 			quarantined = true
+			if exceeded, err = e.settleQuarantined(tx, emit, t.id, d.attemptID, res); err != nil {
+				return err
+			}
 			// The slot's release reports the participant idle.
 			return emitCompleted(emit, t.id, d.attemptID, res, nil)
+		}
+		if exceeded, err = e.settle(tx, emit, t.id, d.attemptID, res.Usage, true); err != nil {
+			return err
 		}
 		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate, e.lastInflight(d.participant)); err != nil {
 			return err
@@ -504,6 +542,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		return endTurnIn(tx, emit, t.id, endState, endReason)
 	})
 	e.attemptDone(t, d.attemptID)
+	if err == nil && exceeded {
+		e.markExceeded(d.participant)
+	}
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
 		return nil
