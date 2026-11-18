@@ -200,7 +200,7 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 	manifest := map[string]interface{}{
 		"kind":               "engine",
 		"engine_version":     in.EngineVersion,
-		"started_at":         in.StartedAt.UTC().Format(time.RFC3339),
+		"started_at":         in.StartedAt.UTC().Format(time.RFC3339Nano),
 		"roster":             rosterMap,
 		"roster_path":        in.RosterPath,
 		"roster_file_sha256": rosterFileSHA256,

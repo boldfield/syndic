@@ -1467,3 +1467,44 @@ func sha256hash(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
+
+func TestBuild_SubSecondStartedAtDiffers(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	base := time.Date(2026, 11, 18, 12, 0, 0, 100, time.UTC)
+	build := func(ts time.Time) Built {
+		b, err := Build(Input{
+			Store:          store,
+			Roster:         roster,
+			RosterPath:     "/path/to/roster.toml",
+			RosterFile:     []byte("content"),
+			EngineVersion:  "1.0",
+			StartedAt:      ts,
+			AdapterVersion: func(p config.Participant) string { return "1.0" },
+		})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		return b
+	}
+	b1 := build(base)
+	b2 := build(base.Add(time.Nanosecond))
+	if string(b1.JSON) == string(b2.JSON) {
+		t.Error("manifests for StartedAt differing by 1ns should differ")
+	}
+	if b1.RosterHash != b2.RosterHash {
+		t.Error("RosterHash must not depend on StartedAt")
+	}
+}
