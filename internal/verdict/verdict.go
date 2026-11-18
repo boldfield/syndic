@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+var (
+	fieldNameRegex = regexp.MustCompile(`^[a-z_]+: `)
+	validFields    = map[string]bool{
+		"candidate": true,
+		"attempt":   true,
+		"verdict":   true,
+		"severity":  true,
+		"block_id":  true,
+		"evidence":  true,
+		"remedy":    true,
+		"reason":    true,
+	}
+)
+
 type Classification string
 
 const (
@@ -86,7 +100,6 @@ func Parse(text, candidateHash, attemptID string) Result {
 	// Parse the fields
 	fields := make(map[string]string)
 	lastMultilineField := ""
-	fieldNameRegex := regexp.MustCompile(`^[a-z_]+: `)
 
 	for _, line := range envelopeLines {
 		if fieldNameRegex.MatchString(line) {
@@ -258,16 +271,6 @@ func Parse(text, candidateHash, attemptID string) Result {
 }
 
 func isValidFieldName(name string) bool {
-	validFields := map[string]bool{
-		"candidate": true,
-		"attempt":   true,
-		"verdict":   true,
-		"severity":  true,
-		"block_id":  true,
-		"evidence":  true,
-		"remedy":    true,
-		"reason":    true,
-	}
 	return validFields[name]
 }
 
