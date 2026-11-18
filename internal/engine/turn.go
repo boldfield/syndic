@@ -269,8 +269,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 
 // finishLocked is finishTurn with e.mu held.
 func (e *Engine) finishLocked(t *openTurn, state, reason string) {
+	inflight := e.getInflightAttempts(t)
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return endTurnIn(tx, emit, t.id, state, reason)
+		return e.endTurnTerminalPath(tx, emit, t, state, reason, false, inflight)
 	})
 	if err != nil {
 		return
@@ -279,10 +280,198 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 		e.open = nil
 		e.turnEnded(t)
 	}
+	e.cancelInflightAttempts(inflight)
 }
 
-// endTurnIn is the terminal path: record the state and reason, bump the
-// epoch so no later result is accepted, and emit turn_state.
+// getInflightAttempts returns all in-flight attempts for a turn.
+// In-flight means Complete has been called but result not recorded.
+func (e *Engine) getInflightAttempts(t *openTurn) []string {
+	var ids []string
+	for id := range t.pending {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// getPoolMembers returns the {endpoint_name, model} pairs for all participants in a pool.
+func (e *Engine) getPoolMembers(poolName string) []journal.GroupMember {
+	var members []journal.GroupMember
+	seen := make(map[string]bool)
+	for _, p := range e.roster.Participants {
+		if e.poolOf(p.ID) == poolName {
+			ep := e.endpointFor(p.ID)
+			key := ep.Name + ":" + p.Model
+			if !seen[key] {
+				seen[key] = true
+				members = append(members, journal.GroupMember{
+					EndpointName: ep.Name,
+					Model:        p.Model,
+				})
+			}
+		}
+	}
+	return members
+}
+
+func (e *Engine) endpointFor(participantID string) config.EndpointProfile {
+	for _, p := range e.roster.Participants {
+		if p.ID == participantID {
+			for _, ep := range e.roster.Endpoints {
+				if ep.Name == p.Endpoint {
+					return ep
+				}
+			}
+		}
+	}
+	return config.EndpointProfile{}
+}
+
+// endTurnTerminalPath runs the terminal path for ending a turn with holds and cancellations.
+func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason string, isCancellation bool, inflightIDs []string) error {
+	// 1. Bump epoch so no later result is accepted
+	_, err := tx.BumpEpoch(t.id)
+	if err != nil {
+		return err
+	}
+
+	// 2. For each in-flight attempt, set cancellation and open hold
+	for _, attemptID := range inflightIDs {
+		if err := tx.SetCancellation(attemptID, "requested"); err != nil {
+			return err
+		}
+
+		// Get the attempt's info to find its pool and endpoint
+		attempt, err := tx.GetAttempt(attemptID)
+		if err != nil {
+			return err
+		}
+
+		participantConfig := e.participantConfig(attempt.Participant)
+		poolName := e.poolOf(attempt.Participant)
+		members := e.getPoolMembers(poolName)
+
+		// Open the hold
+		hold := journal.Hold{
+			AttemptID:    attemptID,
+			Pool:         poolName,
+			EndpointName: e.endpointFor(attempt.Participant).Name,
+			Model:        participantConfig.Model,
+			Group:        members,
+			HeldSince:    time.Now(),
+		}
+		if err := tx.OpenHold(hold); err != nil {
+			return err
+		}
+
+		// Emit capacity event: uncertain
+		if err := emit(t.id, wire.EventKindCapacity, wire.EvCapacity{
+			Pool:          poolName,
+			HeldByAttempt: attemptID,
+			State:         "uncertain",
+		}); err != nil {
+			return err
+		}
+
+		// Set participant state to cancelling (temporary during terminal path)
+		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+			Participant: attempt.Participant,
+			State:       ParticipantCancelling,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// 3. If this is a cancellation, set phase_at_cancel
+	if isCancellation {
+		// Get the current phase from an in-flight attempt, or default to empty
+		var phase string
+		for _, attemptID := range inflightIDs {
+			attempt, err := tx.GetAttempt(attemptID)
+			if err == nil {
+				phase = attempt.Phase
+				break
+			}
+		}
+		if phase != "" {
+			if err := tx.SetPhaseAtCancel(t.id, phase); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 4. End turn and emit state
+	if err := tx.EndTurn(t.id, state, reason); err != nil {
+		return err
+	}
+
+	return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: state, Reason: &reason})
+}
+
+// cancelInflightAttempts calls Adapter.Cancel for each in-flight attempt after the terminal transaction commits.
+func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
+	for _, attemptID := range inflightIDs {
+		e.mu.Lock()
+		attempt, err := e.store.GetAttempt(attemptID)
+		if err != nil {
+			e.mu.Unlock()
+			continue
+		}
+		adapter := e.adapters[attempt.Participant]
+		e.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		result, _ := adapter.Cancel(ctx, attemptID)
+		cancel()
+
+		// If server confirmed, release the hold
+		if result.ServerConfirmed == transport.TriYes {
+			e.mu.Lock()
+			err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				if err := tx.SetCancellation(attemptID, "confirmed"); err != nil {
+					return err
+				}
+				// Query the hold to get the pool name
+				holds, err := tx.UnreleasedHolds()
+				if err != nil {
+					return err
+				}
+				var poolName string
+				for _, h := range holds {
+					if h.AttemptID == attemptID {
+						poolName = h.Pool
+						break
+					}
+				}
+				if err := tx.ReleaseHold(attemptID, "server_confirmed", ""); err != nil {
+					return err
+				}
+				if poolName != "" {
+					return emit("", wire.EventKindCapacity, wire.EvCapacity{
+						Pool:          poolName,
+						HeldByAttempt: attemptID,
+						State:         "released",
+						How:           strPtr("server_confirmed"),
+					})
+				}
+				return nil
+			})
+			e.mu.Unlock()
+			if err != nil {
+				continue
+			}
+		} else {
+			// Mark as unknown, hold stays
+			e.mu.Lock()
+			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				return tx.SetCancellation(attemptID, "unknown")
+			})
+			e.mu.Unlock()
+		}
+	}
+}
+
+// endTurnIn is a simpler terminal path for use when no holds/cancellations needed.
+// Deprecated: use endTurnTerminalPath instead.
 func endTurnIn(tx *journal.Tx, emit hub.Emit, turnID, state, reason string) error {
 	if err := tx.EndTurn(turnID, state, reason); err != nil {
 		return err

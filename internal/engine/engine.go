@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,14 +35,17 @@ const (
 	StateApproved            = "approved"
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
+	StateCancelled           = "cancelled"
 )
 
 // Participant states.
 const (
-	ParticipantIdle     = "idle"
-	ParticipantQueued   = "queued"
-	ParticipantRunning  = "running"
-	ParticipantUnprobed = "unprobed"
+	ParticipantIdle       = "idle"
+	ParticipantQueued     = "queued"
+	ParticipantRunning    = "running"
+	ParticipantUnprobed   = "unprobed"
+	ParticipantCancelling = "cancelling"
+	ParticipantUnknown    = "unknown"
 )
 
 // Attempt phases and message senders.
@@ -60,6 +64,9 @@ const (
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
+	reasonCancelled       = "cancelled"
+	reasonEngineStop      = "engine_stop"
+	reasonEngineRestart   = "engine_restart"
 )
 
 const defaultPool = "default"
@@ -326,13 +333,124 @@ func (e *Engine) Hello() wire.HelloReply {
 	}
 }
 
-// Cancel is implemented by a later task.
-func (e *Engine) Cancel(turnID string) error { return ErrNotImplemented }
+// Cancel ends a turn with state cancelled, idempotent.
+func (e *Engine) Cancel(turnID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.started {
+		return errors.New("engine: not started")
+	}
+
+	t := e.open
+	if t == nil || t.id != turnID {
+		// Turn is not open, check if it's already terminal
+		turn, err := e.store.GetTurn(turnID)
+		if err != nil {
+			return &wire.Error{Code: wire.ErrorCodeNotFound}
+		}
+		// If already in a terminal state, check if it's already cancelled
+		if turn.TerminalState == StateCancelled {
+			// Already cancelled, idempotent
+			return nil
+		}
+		if turn.TerminalState != "" {
+			// Terminal in another state
+			return &wire.Error{Code: wire.ErrorCodeNotOpen}
+		}
+		// Need to handle closed turn - this is not the open one
+		return &wire.Error{Code: wire.ErrorCodeNotOpen}
+	}
+
+	// Cancel the open turn
+	inflight := e.getInflightAttempts(t)
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return e.endTurnTerminalPath(tx, emit, t, StateCancelled, reasonCancelled, true, inflight)
+	})
+	if err != nil {
+		return err
+	}
+
+	e.open = nil
+	e.turnEnded(t)
+	e.cancelInflightAttempts(inflight)
+	return nil
+}
 
 // Override is implemented by a later task.
 func (e *Engine) Override(turnID, reason string) error { return ErrNotImplemented }
 
-// Release is implemented by a later task.
+// Release releases a capacity hold.
 func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
-	return wire.ReleaseReply{}, ErrNotImplemented
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.started {
+		return wire.ReleaseReply{}, errors.New("engine: not started")
+	}
+
+	if req.Reason == "" {
+		return wire.ReleaseReply{}, &wire.Error{Code: wire.ErrorCodeReasonRequired}
+	}
+
+	// Find the hold(s) for this pool
+	holds, err := e.store.UnreleasedHolds()
+	if err != nil {
+		return wire.ReleaseReply{}, err
+	}
+
+	var targetHolds []journal.Hold
+	for _, h := range holds {
+		if h.Pool == req.Pool {
+			if req.AttemptID == nil {
+				targetHolds = append(targetHolds, h)
+			} else if h.AttemptID == *req.AttemptID {
+				targetHolds = append(targetHolds, h)
+			}
+		}
+	}
+
+	// Check for errors
+	if len(targetHolds) == 0 {
+		if req.AttemptID != nil {
+			return wire.ReleaseReply{}, &wire.Error{Code: wire.ErrorCodeNoSuchHold, Detail: strPtr(req.Pool)}
+		}
+		return wire.ReleaseReply{}, &wire.Error{Code: wire.ErrorCodeNoHold, Detail: strPtr(req.Pool)}
+	}
+
+	if req.AttemptID == nil && len(targetHolds) > 1 {
+		// Ambiguous - multiple holds without attempt_id specified
+		ambiguousHolds := make([]string, len(targetHolds))
+		for i, h := range targetHolds {
+			ambiguousHolds[i] = h.AttemptID
+		}
+		return wire.ReleaseReply{}, &wire.Error{
+			Code:   wire.ErrorCodeAmbiguous,
+			Detail: strPtr(req.Pool),
+		}
+	}
+
+	// Release each hold
+	var released []string
+	for _, h := range targetHolds {
+		err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+			if err := tx.ReleaseHold(h.AttemptID, "operator", req.Reason); err != nil {
+				return err
+			}
+			return emit("", wire.EventKindCapacity, wire.EvCapacity{
+				Pool:          h.Pool,
+				HeldByAttempt: h.AttemptID,
+				State:         "released",
+				How:           strPtr("operator"),
+				Reason:        strPtr(req.Reason),
+			})
+		})
+		if err != nil {
+			return wire.ReleaseReply{}, err
+		}
+		released = append(released, h.AttemptID)
+	}
+
+	sort.Strings(released)
+	return wire.ReleaseReply{Released: released}, nil
 }
