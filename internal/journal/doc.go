@@ -7,6 +7,7 @@
 //     attempt state/status/cancellation_state, verdict parsed values and validation statuses,
 //     block severity and state.
 //   - Foreign key constraints link messages, attempts, candidates, verdicts, and blocks to their parent turns and attempts.
+//     Events may optionally reference a turn via turn_id; some events have no turn.
 //   - Immutability triggers abort any UPDATE or DELETE on messages, candidates, and events.
 //   - Triggers prevent UPDATE of runs.manifest, runs.manifest_hash, and prevent setting attempts.raw_output twice.
 //
