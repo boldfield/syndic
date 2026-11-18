@@ -63,7 +63,7 @@ func TestBeginAttemptWithRoundTrip(t *testing.T) {
 			Phase:                 "phase1",
 			Epoch:                 42,
 			Deadline:              &deadline,
-			RepairOf:              "", // No repair for this test
+			RepairOf:              "",
 			Delimiter:             "delimiter-value",
 			MaxOutputTokens:       2000,
 			EstimatedPromptTokens: 1000,
@@ -113,6 +113,13 @@ func TestBeginAttemptWithRoundTrip(t *testing.T) {
 	}
 	if row.Deadline == nil {
 		t.Errorf("expected Deadline to be set")
+	}
+	// Deadline should round-trip correctly
+	if row.Deadline != nil {
+		diff := row.Deadline.Sub(deadline)
+		if diff < -1*time.Second || diff > 1*time.Second {
+			t.Errorf("expected Deadline close to %v, got %v (diff: %v)", deadline, row.Deadline, diff)
+		}
 	}
 	if row.RetryCount == nil || *row.RetryCount != 0 {
 		t.Errorf("expected RetryCount 0, got %v", row.RetryCount)
@@ -180,6 +187,29 @@ func TestRecordRetryDispatch(t *testing.T) {
 	}
 	if dispatchCount != 2 {
 		t.Errorf("expected 2 dispatch rows, got %d", dispatchCount)
+	}
+
+	// Verify dispatch indexes are 0 and 1
+	rows, err := conn.Query(`SELECT dispatch_index FROM attempt_dispatches WHERE attempt_id = ? ORDER BY dispatch_index`, attemptID)
+	if err != nil {
+		t.Fatalf("failed to query dispatch indexes: %v", err)
+	}
+	defer rows.Close()
+
+	var expectedIndexes []int
+	for rows.Next() {
+		var idx int
+		if err := rows.Scan(&idx); err != nil {
+			t.Fatalf("failed to scan dispatch index: %v", err)
+		}
+		expectedIndexes = append(expectedIndexes, idx)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows error: %v", err)
+	}
+
+	if len(expectedIndexes) != 2 || expectedIndexes[0] != 0 || expectedIndexes[1] != 1 {
+		t.Errorf("expected dispatch indexes [0, 1], got %v", expectedIndexes)
 	}
 
 	// Verify row via GetAttempt
@@ -498,6 +528,19 @@ func TestReleaseHold(t *testing.T) {
 		t.Errorf("expected 0 unreleased holds after release, got %d", len(holds))
 	}
 
+	// Verify released_how and released_reason are persisted
+	var releasedHow, releasedReason string
+	err = db.Conn().QueryRow(`SELECT released_how, released_reason FROM capacity_holds WHERE attempt_id = ?`, attemptID).Scan(&releasedHow, &releasedReason)
+	if err != nil {
+		t.Fatalf("failed to query released hold: %v", err)
+	}
+	if releasedHow != "server_confirmed" {
+		t.Errorf("expected released_how server_confirmed, got %s", releasedHow)
+	}
+	if releasedReason != "confirmed by server" {
+		t.Errorf("expected released_reason 'confirmed by server', got %s", releasedReason)
+	}
+
 	// Try to release again - should error with ErrNoSuchHold
 	err = store.ReleaseHold(attemptID, "server_confirmed", "confirmed by server")
 	if !errors.Is(err, journal.ErrNoSuchHold) {
@@ -679,9 +722,10 @@ func TestOpenBlockFor(t *testing.T) {
 	// Find our two blocks
 	var block1, block2 *journal.Block
 	for i := range blocks {
-		if blocks[i].ID == blockID1 {
+		switch blocks[i].ID {
+		case blockID1:
 			block1 = &blocks[i]
-		} else if blocks[i].ID == blockID2 {
+		case blockID2:
 			block2 = &blocks[i]
 		}
 	}
