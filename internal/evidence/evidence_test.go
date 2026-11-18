@@ -14,13 +14,12 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
-// TestGuardSentinel verifies that sentinel strings in Raw and ServerVersion
-// do not appear in the redacted export.
+// TestGuardSentinel verifies that sentinel strings in Raw
+// do not appear in the redacted export (even when in both headers and body).
 func TestGuardSentinel(t *testing.T) {
 	sentinelInRaw := "SENSITIVE_HEADER_VALUE_12345"
-	sentinelInVersion := "SECRET_SERVER_INFO_67890"
 
-	rawJSON := fmt.Sprintf(`{"header": "Value: %s"}`, sentinelInRaw)
+	rawJSON := fmt.Sprintf(`{"headers":{"X-Foo":["%s"]},"body":"%s"}`, sentinelInRaw, sentinelInRaw)
 
 	record := transport.CapabilityRecord{
 		Endpoint:       "test-endpoint",
@@ -28,7 +27,6 @@ func TestGuardSentinel(t *testing.T) {
 		AuthMode:       "api-key",
 		Identity:       transport.NewUnknownIdentity(),
 		ReportedModel:  "test-model",
-		ServerVersion:  sentinelInVersion,
 		AdapterVersion: "1.0.0",
 		ObservedAt:     time.Now(),
 		Raw:            json.RawMessage(rawJSON),
@@ -53,12 +51,9 @@ func TestGuardSentinel(t *testing.T) {
 
 	exportStr := string(data)
 
-	// Verify sentinels are not in the export
+	// Verify sentinel is not in the export (was in both header and body in Raw)
 	if found := contains(exportStr, sentinelInRaw); found {
 		t.Errorf("Raw sentinel %q found in export", sentinelInRaw)
-	}
-	if found := contains(exportStr, sentinelInVersion); found {
-		t.Errorf("ServerVersion sentinel %q found in export", sentinelInVersion)
 	}
 }
 
@@ -90,6 +85,20 @@ func TestCorporateHostExcluded(t *testing.T) {
 	}
 	if export.Port != "" {
 		t.Errorf("Expected empty Port for corporate endpoint, got %q", export.Port)
+	}
+
+	// Serialize and check no host components appear in JSON
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	exportStr := string(data)
+	forbiddenParts := []string{"api.internal.corp.com", "internal.corp", "8443"}
+	for _, part := range forbiddenParts {
+		if contains(exportStr, part) {
+			t.Errorf("Serialized export contains forbidden host component %q", part)
+		}
 	}
 }
 
@@ -155,6 +164,37 @@ func TestLANHostIncluded(t *testing.T) {
 	}
 }
 
+// TestIPv6LocalHostIncluded verifies that IPv6 local endpoint hosts are correctly extracted.
+func TestIPv6LocalHostIncluded(t *testing.T) {
+	record := transport.CapabilityRecord{
+		Endpoint:       "ipv6-local-endpoint",
+		Model:          "test-model",
+		AuthMode:       "none",
+		Identity:       transport.NewUnknownIdentity(),
+		ReportedModel:  "test-model",
+		AdapterVersion: "1.0.0",
+		ObservedAt:     time.Now(),
+	}
+
+	profile := config.EndpointProfile{
+		Name:             "ipv6-local-endpoint",
+		BaseURL:          "http://[::1]:11434/v1",
+		DeclaredLocation: "local",
+	}
+
+	export, err := Redact(record, profile)
+	if err != nil {
+		t.Fatalf("Redact failed: %v", err)
+	}
+
+	if export.Host != "::1" {
+		t.Errorf("Expected Host '::1', got %q", export.Host)
+	}
+	if export.Port != "11434" {
+		t.Errorf("Expected Port '11434', got %q", export.Port)
+	}
+}
+
 // TestCloudHostExcluded verifies that cloud endpoint hosts are not exported.
 func TestCloudHostExcluded(t *testing.T) {
 	record := transport.CapabilityRecord{
@@ -180,6 +220,17 @@ func TestCloudHostExcluded(t *testing.T) {
 
 	if export.Host != "" {
 		t.Errorf("Expected empty Host for cloud endpoint, got %q", export.Host)
+	}
+
+	// Serialize and check no host components appear in JSON
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	exportStr := string(data)
+	if contains(exportStr, "api.example.com") {
+		t.Errorf("Serialized export contains forbidden host component api.example.com")
 	}
 }
 

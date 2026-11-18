@@ -7,12 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/transport"
 )
+
+var sanitizeRE = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
 // Export is the redacted evidence record suitable for public repository commit.
 type Export struct {
@@ -88,10 +89,11 @@ func Redact(record transport.CapabilityRecord, profile config.EndpointProfile) (
 	// Extract host from base URL only for local or lan locations
 	if profile.DeclaredLocation == "local" || profile.DeclaredLocation == "lan" {
 		host, port, err := extractHostPort(profile.BaseURL)
-		if err == nil {
-			export.Host = host
-			export.Port = port
+		if err != nil {
+			return Export{}, err
 		}
+		export.Host = host
+		export.Port = port
 	}
 
 	// Add auth secret reference if present
@@ -117,16 +119,8 @@ func extractHostPort(baseURL string) (host, port string, err error) {
 		return "", "", err
 	}
 
-	// Get host and port
-	hostPort := u.Host
-	if strings.Contains(hostPort, ":") {
-		parts := strings.Split(hostPort, ":")
-		host = parts[0]
-		port = parts[1]
-	} else {
-		host = hostPort
-	}
-
+	host = u.Hostname()
+	port = u.Port()
 	return host, port, nil
 }
 
@@ -138,12 +132,7 @@ func WriteRaw(record transport.CapabilityRecord, dir string) (string, error) {
 	}
 
 	filename := generateFilename(record.Endpoint, record.Model, ".raw.json")
-	filepath := filepath.Join(dir, filename)
-
-	// Check if file already exists
-	if _, err := os.Stat(filepath); err == nil {
-		return "", fmt.Errorf("file already exists: %s", filepath)
-	}
+	filePath := filepath.Join(dir, filename)
 
 	// Marshal the record
 	data, err := json.MarshalIndent(record, "", "  ")
@@ -151,12 +140,18 @@ func WriteRaw(record transport.CapabilityRecord, dir string) (string, error) {
 		return "", err
 	}
 
-	// Write the file with mode 0600
-	if err := os.WriteFile(filepath, data, 0600); err != nil {
+	// Open file with O_EXCL to prevent overwriting
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := file.Write(data); err != nil {
 		return "", err
 	}
 
-	return filepath, nil
+	return filePath, nil
 }
 
 // WriteExport writes the export as indented JSON to a file.
@@ -167,12 +162,7 @@ func WriteExport(export Export, dir string) (string, error) {
 	}
 
 	filename := generateFilename(export.EndpointName, export.Model, ".json")
-	filepath := filepath.Join(dir, filename)
-
-	// Check if file already exists
-	if _, err := os.Stat(filepath); err == nil {
-		return "", fmt.Errorf("file already exists: %s", filepath)
-	}
+	filePath := filepath.Join(dir, filename)
 
 	// Marshal the export
 	data, err := json.MarshalIndent(export, "", "  ")
@@ -180,12 +170,18 @@ func WriteExport(export Export, dir string) (string, error) {
 		return "", err
 	}
 
-	// Write the file with mode 0600
-	if err := os.WriteFile(filepath, data, 0600); err != nil {
+	// Open file with O_EXCL to prevent overwriting
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := file.Write(data); err != nil {
 		return "", err
 	}
 
-	return filepath, nil
+	return filePath, nil
 }
 
 // generateFilename generates a filename from endpoint, model, and suffix.
@@ -194,14 +190,8 @@ func generateFilename(endpoint, model, suffix string) string {
 	now := time.Now().UTC()
 	timestamp := now.Format("20060102T150405Z")
 
-	// Replace invalid characters with dashes
-	sanitize := func(s string) string {
-		re := regexp.MustCompile(`[^a-zA-Z0-9._-]`)
-		return re.ReplaceAllString(s, "-")
-	}
-
-	endpoint = sanitize(endpoint)
-	model = sanitize(model)
+	endpoint = sanitizeRE.ReplaceAllString(endpoint, "-")
+	model = sanitizeRE.ReplaceAllString(model, "-")
 
 	return fmt.Sprintf("%s-%s-%s%s", endpoint, model, timestamp, suffix)
 }
