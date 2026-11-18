@@ -13,12 +13,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/lockfile"
+	"github.com/boldfield/syndic/internal/transport"
 )
 
 func TestProbeSuccess(t *testing.T) {
@@ -308,6 +311,36 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("parsed manifest fingerprint mismatch")
 	}
 
+	// Verify exact fingerprint value by extracting adapter version from raw record
+	var rawRecord transport.CapabilityRecord
+	if err := json.Unmarshal(rawData, &rawRecord); err != nil {
+		t.Fatalf("failed to parse raw record JSON: %v", err)
+	}
+
+	// Reconstruct the endpoint profile to compute expected fingerprint
+	tokensPerByteMax := 1.0
+	testEndpointProfile := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           server.URL,
+		Dialect:           "chat_completions_v1",
+		Models:            []string{"test-model"},
+		DeclaredLocation:  "local",
+		DeclaredExecution: "remote",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		MaxTokensField:    "max_tokens",
+		TokensPerByteMax:  &tokensPerByteMax,
+	}
+
+	expectedFingerprint, err := evidence.ConfigFingerprint(testEndpointProfile, "test-model", rawRecord.AdapterVersion)
+	if err != nil {
+		t.Fatalf("failed to compute expected fingerprint: %v", err)
+	}
+
+	if manifest.ConfigFingerprint != expectedFingerprint {
+		t.Fatalf("config_fingerprint mismatch: expected %q, got %q", expectedFingerprint, manifest.ConfigFingerprint)
+	}
+
 	var eventCount int
 	if err := db.Conn().QueryRow("SELECT COUNT(*) FROM events WHERE event_type = ?", "probe_completed").Scan(&eventCount); err != nil {
 		t.Fatalf("failed to query events: %v", err)
@@ -404,11 +437,17 @@ required_reviewers = ["reviewer"]
 
 func TestProbeUnreachable(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -645,11 +684,17 @@ func TestProbeInvalidRoster(t *testing.T) {
 
 func TestProbeEndpointNotFound(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -717,11 +762,17 @@ required_reviewers = ["reviewer"]
 
 func TestProbeUnauthorized(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -823,6 +874,7 @@ required_reviewers = ["reviewer"]
 func TestProbeRawDirInGitWorktreeWithHttptest(t *testing.T) {
 	// Create temporary directory with .git subdirectory
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	gitDir := filepath.Join(tmpDir, ".git")
 	if err := os.Mkdir(gitDir, 0700); err != nil {
 		t.Fatalf("failed to create .git: %v", err)
@@ -831,6 +883,11 @@ func TestProbeRawDirInGitWorktreeWithHttptest(t *testing.T) {
 	rawDir := filepath.Join(tmpDir, "raw")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -925,11 +982,17 @@ required_reviewers = ["reviewer"]
 
 func TestProbeInvalidRosterValidation(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -1085,11 +1148,17 @@ required_reviewers = ["reviewer"]
 
 func TestProbeMeteringEndpointRefused(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
 	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -1200,11 +1269,17 @@ required_reviewers = ["reviewer"]
 
 func TestProbeJournalParentDirDoesNotExist(t *testing.T) {
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	rawDir := filepath.Join(tmpDir, "raw")
 	exportDir := filepath.Join(tmpDir, "export")
 	journalPath := filepath.Join(tmpDir, "nonexistent", "subdir", "journal.sqlite")
 	secretsDir := filepath.Join(tmpDir, "secrets")
 	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
@@ -1596,7 +1671,11 @@ required_reviewers = ["reviewer"]
 	if err != nil {
 		t.Fatalf("failed to acquire test lock: %v", err)
 	}
-	defer testLock.Release()
+	t.Cleanup(func() {
+		if err := testLock.Release(); err != nil {
+			t.Errorf("failed to release test lock: %v", err)
+		}
+	})
 
 	// Run the probe command
 	var stderr bytes.Buffer
@@ -1629,22 +1708,47 @@ required_reviewers = ["reviewer"]
 	}
 
 	output := stderr.String()
-	if !strings.Contains(output, "PID") {
-		t.Fatalf("expected PID in stderr, got: %s", output)
+	expectedPIDStr := fmt.Sprintf("%d", os.Getpid())
+	if !strings.Contains(output, expectedPIDStr) {
+		t.Fatalf("expected PID %s in stderr, got: %s", expectedPIDStr, output)
+	}
+
+	// Verify export and raw record exist after exit 5
+	rawFiles, err := os.ReadDir(rawDir)
+	if err != nil {
+		t.Fatalf("failed to read raw dir: %v", err)
+	}
+	if len(rawFiles) != 1 {
+		t.Fatalf("expected 1 raw file, got %d", len(rawFiles))
+	}
+
+	exportFiles, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("failed to read export dir: %v", err)
+	}
+	if len(exportFiles) != 1 {
+		t.Fatalf("expected 1 export file, got %d", len(exportFiles))
 	}
 
 	// Verify journal has no new run
 	_, err = os.Stat(journalPath)
 	if err == nil {
 		db, err := journal.Open(journalPath)
-		if err == nil {
-			var runCount int
-			if err := db.Conn().QueryRow("SELECT COUNT(*) FROM runs").Scan(&runCount); err == nil {
-				if runCount > 0 {
-					t.Fatalf("expected no runs in journal when lock is held, got %d", runCount)
-				}
+		if err != nil {
+			t.Fatalf("failed to open journal: %v", err)
+		}
+		defer func() {
+			if err := db.Close(); err != nil {
+				t.Errorf("failed to close journal: %v", err)
 			}
-			db.Close()
+		}()
+
+		var runCount int
+		if err := db.Conn().QueryRow("SELECT COUNT(*) FROM runs").Scan(&runCount); err != nil {
+			t.Fatalf("failed to query runs: %v", err)
+		}
+		if runCount > 0 {
+			t.Fatalf("expected no runs in journal when lock is held, got %d", runCount)
 		}
 	}
 }
@@ -1811,7 +1915,11 @@ required_reviewers = ["reviewer"]
 	if err != nil {
 		t.Fatalf("failed to acquire lock after probe run: %v", err)
 	}
-	defer lock.Release()
+	t.Cleanup(func() {
+		if err := lock.Release(); err != nil {
+			t.Errorf("failed to release lock: %v", err)
+		}
+	})
 }
 
 func TestProbeSkipCalibration(t *testing.T) {
@@ -1835,7 +1943,7 @@ func TestProbeSkipCalibration(t *testing.T) {
 	}
 
 	// Create a test server that tracks calibration requests
-	calibrationRequests := 0
+	var calibrationRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/models") {
 			if err := json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1855,7 +1963,7 @@ func TestProbeSkipCalibration(t *testing.T) {
 					if ok && mm["role"] == "user" {
 						userMsg, _ := mm["content"].(string)
 						if userMsg == "" || len(userMsg) == 4096 {
-							calibrationRequests++
+							calibrationRequests.Add(1)
 						}
 						break
 					}
@@ -1948,8 +2056,8 @@ required_reviewers = ["reviewer"]
 	}
 
 	// Verify no calibration requests were made
-	if calibrationRequests > 0 {
-		t.Fatalf("expected no calibration requests with --skip-calibration, got %d", calibrationRequests)
+	if calibrationRequests.Load() > 0 {
+		t.Fatalf("expected no calibration requests with --skip-calibration, got %d", calibrationRequests.Load())
 	}
 
 	// Verify manifest has unavailable calibration
@@ -1975,5 +2083,153 @@ required_reviewers = ["reviewer"]
 
 	if manifest.Calibration.Available {
 		t.Fatal("manifest calibration should be unavailable with --skip-calibration")
+	}
+}
+
+func TestProbeResolverSecretNotLeaked(t *testing.T) {
+	// Create temporary directories
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Set XDG_RUNTIME_DIR to temp directory
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Write a sentinel secret to a file
+	sentinelSecret := "secret-sentinel-value-99999"
+	secretFilePath := filepath.Join(secretsDir, "test-auth-secret")
+	if err := os.WriteFile(secretFilePath, []byte(sentinelSecret), 0600); err != nil {
+		t.Fatalf("failed to write secret file: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Create roster with auth reference to the secret file
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[endpoints.auth]
+source = "file"
+name = "test-auth-secret"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	output, _ := io.ReadAll(r)
+	outputStr := string(output)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Verify manifest does not contain the sentinel secret
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runManifest sql.NullString
+	if err := db.Conn().QueryRow("SELECT manifest FROM runs").Scan(&runManifest); err != nil {
+		t.Fatalf("failed to query run manifest: %v", err)
+	}
+
+	if strings.Contains(runManifest.String, sentinelSecret) {
+		t.Fatalf("manifest should not contain resolver secret, but got: %s", runManifest.String)
 	}
 }
