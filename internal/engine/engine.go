@@ -27,11 +27,13 @@ const (
 
 // Turn states carried by turn_state events and the turns table.
 const (
-	StateSubmitted        = "submitted"
-	StateAuthorDispatched = "author_dispatched"
-	StateSoloComplete     = "solo_complete"
-	StateIncomplete       = "incomplete"
-	StateApproved         = "approved"
+	StateSubmitted           = "submitted"
+	StateAuthorDispatched    = "author_dispatched"
+	StateCandidateFrozen     = "candidate_frozen"
+	StateReviewersDispatched = "reviewers_dispatched"
+	StateSoloComplete        = "solo_complete"
+	StateIncomplete          = "incomplete"
+	StateApproved            = "approved"
 )
 
 // Participant states.

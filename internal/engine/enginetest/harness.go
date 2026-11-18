@@ -172,6 +172,31 @@ func VerdictApproveFromRequest() fake.Step {
 	}
 }
 
+// ReplyWithRequestInfo creates a step that uses a function to build the reply based on the request.
+func ReplyWithRequestInfo(buildText func(transport.CompleteRequest) string) fake.Step {
+	return fake.Step{
+		Kind: fake.StepKindReply,
+		BuildFunc: func(req transport.CompleteRequest) fake.Step {
+			return fake.Step{
+				Kind:            fake.StepKindReply,
+				Text:            buildText(req),
+				Status:          transport.StatusComplete,
+				TransportStatus: transport.TransportStatusOK,
+			}
+		},
+	}
+}
+
+// StatusResponse creates a step that returns a specific status.
+func StatusResponse(status transport.CompletionStatus, text string) fake.Step {
+	return fake.Step{
+		Kind:            fake.StepKindReply,
+		Text:            text,
+		Status:          status,
+		TransportStatus: transport.TransportStatusOK,
+	}
+}
+
 // New writes rosterTOML to a temporary file, opens a temporary journal,
 // seeds a usable probe record for every participant (except those passed to
 // SkipProbe), builds one fake adapter per participant from scripts, starts

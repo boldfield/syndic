@@ -309,20 +309,26 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
 		}
 
-		authorOutput = res.RawOutput
-		hash, err := hashCandidate(manifestHash, t.id, attemptID, res.RawOutput)
+		authorOutput = res.Text
+		hash, err := hashCandidate(manifestHash, t.id, attemptID, res.Text)
 		if err != nil {
 			return err
 		}
 		candidateHash = hash
 
-		_, err = tx.FreezeCandidate(t.id, res.RawOutput, hash)
+		_, err = tx.FreezeCandidate(t.id, res.Text, hash)
 		if err != nil {
 			return err
 		}
 		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{
 			TurnID:        t.id,
 			CandidateHash: hash,
+		}); err != nil {
+			return err
+		}
+		if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: t.id,
+			State:  StateCandidateFrozen,
 		}); err != nil {
 			return err
 		}
@@ -333,11 +339,13 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		return
 	}
 	if err != nil {
-		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
 		return
 	}
 
+	e.mu.Lock()
 	delete(e.running, t.author)
+	e.mu.Unlock()
 
 	reviewers := t.eff.Preset.RequiredReviewers
 	dispatchReviewers(e, t, candidateHash, authorOutput, reviewers)
@@ -406,21 +414,38 @@ func hashCandidate(manifestHash, turnID, authorAttemptID, authorOutput string) (
 
 // dispatchReviewers dispatches all required reviewers in parallel goroutines.
 func dispatchReviewers(e *Engine, t *openTurn, candidateHash, authorOutput string, reviewers []string) {
-	var wg sync.WaitGroup
-	wg.Add(len(reviewers))
+	var wgDispatch sync.WaitGroup
+	wgDispatch.Add(len(reviewers))
+	readyCh := make(chan struct{}, len(reviewers))
 
 	for _, reviewerID := range reviewers {
 		go func(revID string) {
-			defer wg.Done()
-			e.dispatchReviewerOnce(t, revID, candidateHash, authorOutput)
+			defer wgDispatch.Done()
+			e.dispatchReviewerOnce(t, revID, candidateHash, authorOutput, readyCh)
 		}(reviewerID)
 	}
 
-	wg.Wait()
+	// Wait for all reviewers to be dispatched (ready).
+	for i := 0; i < len(reviewers); i++ {
+		<-readyCh
+	}
+
+	// All reviewers have been dispatched; emit the turn state event.
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: t.id,
+			State:  StateReviewersDispatched,
+		})
+	})
+	if err != nil {
+		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+	}
+
+	wgDispatch.Wait()
 }
 
 // dispatchReviewerOnce dispatches a single reviewer.
-func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, authorOutput string) {
+func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, authorOutput string, readyCh chan struct{}) {
 	var delimiter string
 	var req transport.CompleteRequest
 	var attemptID string
@@ -487,6 +512,21 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 				return err
 			}
 
+			msgID, sum, size, err := tx.AppendMessage(t.id, "review", "system", []string{reviewerID}, []byte(t.input), nil)
+			if err != nil {
+				return err
+			}
+			if err := emit(t.id, wire.EventKindMessageAppended, wire.EvMessageAppended{
+				MsgID:   msgID,
+				TurnID:  t.id,
+				Phase:   "review",
+				Sender:  "system",
+				SHA256:  sum,
+				ByteLen: int64(size),
+			}); err != nil {
+				return err
+			}
+
 			req = transport.CompleteRequest{
 				Envelope: transport.AttemptEnvelope{
 					Participant:   reviewerID,
@@ -532,9 +572,12 @@ func (e *Engine) dispatchReviewerOnce(t *openTurn, reviewerID, candidateHash, au
 		}
 		break
 	}
-	e.mu.Unlock()
 
 	e.running[reviewerID] = true
+	e.mu.Unlock()
+
+	readyCh <- struct{}{}
+
 	res, err := e.adapterFor(reviewerID).Complete(context.Background(), req)
 	if err != nil {
 		res = transport.CompleteResult{
@@ -611,10 +654,10 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 				return err
 			}
 			failed = true
-			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":gate:identity mismatch")
+			return endTurnIn(tx, emit, t.id, StateIncomplete, "reviewer_failed:"+reviewerID+":"+fmt.Sprintf("gate:%v", gate))
 		}
 
-		vd := verdict.Parse(res.RawOutput, candidateHash, attemptID)
+		vd := verdict.Parse(res.Text, candidateHash, attemptID)
 
 		if err := tx.SetAttemptCommentary(attemptID, vd.Commentary); err != nil {
 			return err
@@ -654,7 +697,8 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 
 		switch vd.Classification {
 		case verdict.Valid:
-			if vd.Verdict.Decision == "approve" {
+			switch vd.Verdict.Decision {
+			case "approve":
 				approved = true
 				allApprov, err := allReviewersApproved(tx, t.id, candidateHash, t.eff.Preset.RequiredReviewers)
 				if err != nil {
@@ -663,7 +707,7 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 				if allApprov {
 					return endTurnIn(tx, emit, t.id, StateApproved, "all_approved")
 				}
-			} else if vd.Verdict.Decision == "block" {
+			case "block":
 				blockID, err := tx.OpenBlockFor(verdictID, vd.Verdict.BlockID, candidateHash, vd.Verdict.Severity, vd.Verdict.Evidence, vd.Verdict.Remedy)
 				if err != nil {
 					return err

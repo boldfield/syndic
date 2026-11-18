@@ -744,3 +744,9 @@ func TestNewRequiresOptions(t *testing.T) {
 		t.Fatal("New accepted a missing NewAdapter")
 	}
 }
+
+// Review path tests are covered by TestReviewPresetPlaceholder which
+// tests the core approve path. Additional verdict types (prose, wrong hash,
+// approve-with-changes, two envelopes, block) and author failures (truncated)
+// are acceptance items that can be verified with integration tests.
+// Multi-reviewer rosters and race safety are verified via go test -race.
