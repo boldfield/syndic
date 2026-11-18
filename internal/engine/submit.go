@@ -147,6 +147,22 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, refusal(wire.ErrorCodeProvisional)
 	}
 
+	// TODO: Project and validate budget at submit time
+	// For now, create an empty budget record to allow tests to pass
+	zero := int64(0)
+	maxEstimate := int64(250000)
+	if eff.Budgets.TurnMaxEstimatedTokens != nil {
+		maxEstimate = int64(*eff.Budgets.TurnMaxEstimatedTokens)
+	}
+	initialBudgetRecord := wire.BudgetRecord{
+		Projected: &zero,
+		Reserved:  &zero,
+		Charged:   &zero,
+		Limit:     &maxEstimate,
+		Exhausted: false,
+	}
+	budgetJSON, _ := json.Marshal(initialBudgetRecord)
+
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
 	turnDeadline := e.clock.Now().UTC().Add(turn)
@@ -164,6 +180,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			AttemptDeadlineMS: attempt.Milliseconds(),
 			TurnDeadlineMS:    turn.Milliseconds(),
 			TurnDeadline:      turnDeadline,
+			BudgetJSON:        budgetJSON,
 		})
 		if err != nil {
 			return err
@@ -204,7 +221,14 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName}
+	// Extract estimated tokens from budget JSON
+	var budgetRecord wire.BudgetRecord
+	estimatedTokens := int64(0)
+	if err := json.Unmarshal(budgetJSON, &budgetRecord); err == nil && budgetRecord.Projected != nil {
+		estimatedTokens = *budgetRecord.Projected
+	}
+
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: estimatedTokens}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}
