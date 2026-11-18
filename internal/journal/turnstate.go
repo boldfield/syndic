@@ -78,8 +78,8 @@ func (tx *Tx) OverrideTurn(turnID, reason string) error {
 		return fmt.Errorf("reason is required")
 	}
 
-	// Step 1: EndTurn with "overridden" state
-	if err := tx.EndTurn(turnID, "overridden", reason); err != nil {
+	// Step 1: EndTurn with "overridden" state and "override" as terminal_reason
+	if err := tx.EndTurn(turnID, "overridden", "override"); err != nil {
 		return err
 	}
 
@@ -96,13 +96,16 @@ func (tx *Tx) OverrideTurn(turnID, reason string) error {
 		}
 	}
 
-	// Step 4: Emit override event
-	payload, _ := json.Marshal(map[string]string{
+	// Step 4: Emit override event tied to the turn
+	payload, err := json.Marshal(map[string]string{
 		"turn_id": turnID,
 		"reason":  reason,
 	})
-	if err := tx.AppendEvent("override", payload); err != nil {
-		return fmt.Errorf("append override event: %w", err)
+	if err != nil {
+		return fmt.Errorf("marshal override event: %w", err)
+	}
+	if _, err := tx.Emit(turnID, "override", payload); err != nil {
+		return fmt.Errorf("emit override event: %w", err)
 	}
 
 	return nil
@@ -207,11 +210,11 @@ func (tx *Tx) AcceptResult(attemptID string, expectedEpoch int, expectedTerminal
 			return false, fmt.Errorf("complete attempt: %w", err)
 		}
 		return true, nil
-	} else {
-		// Quarantine the result
-		if err := tx.QuarantineLateOutput(attemptID, out.RawScrubbed, out.ScrubCount, out.Identity, out.Status, out.NativeFinish, out.TransportStatus); err != nil {
-			return false, fmt.Errorf("quarantine late output: %w", err)
-		}
-		return false, nil
 	}
+
+	// Quarantine the result
+	if err := tx.QuarantineLateOutput(attemptID, out.RawScrubbed, out.ScrubCount, out.Identity, out.Status, out.NativeFinish, out.TransportStatus); err != nil {
+		return false, fmt.Errorf("quarantine late output: %w", err)
+	}
+	return false, nil
 }
