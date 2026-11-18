@@ -71,6 +71,12 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
+	// Check if endpoint has metered billing
+	if endpointProfile.DeclaredBilling == "metered" {
+		fmt.Fprintf(os.Stderr, "error: endpoint %q has metered billing; no spending ceiling exists in the alpha\n", *endpointName)
+		return 2
+	}
+
 	// Check if --raw-dir is inside a git worktree
 	if isInsideGitWorktree(raw) {
 		fmt.Fprintf(os.Stderr, "error: --raw-dir is inside a git worktree\n")

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 )
 
@@ -141,12 +142,6 @@ func (r *Roster) Validate() error {
 					ep.Name, headerName, secretRef.Source))
 			}
 		}
-
-		// Check for metered billing
-		if ep.DeclaredBilling == "metered" {
-			errs = append(errs, fmt.Errorf("endpoint %q has metered billing; metered endpoints cannot be dispatched until the spending ceiling exists and no ceiling is implemented in the alpha",
-				ep.Name))
-		}
 	}
 
 	// Validate presets
@@ -274,6 +269,110 @@ func (r *Roster) Validate() error {
 							p.Endpoint, ep.DeclaredLocation, p.ID))
 					}
 				}
+			}
+		}
+	}
+
+	// Validate endpoint tokens_per_byte_max
+	for _, ep := range r.Endpoints {
+		if ep.TokensPerByteMax != nil {
+			if math.IsNaN(*ep.TokensPerByteMax) {
+				errs = append(errs, fmt.Errorf("endpoint %q tokens_per_byte_max must not be NaN", ep.Name))
+			} else if *ep.TokensPerByteMax <= 0 {
+				errs = append(errs, fmt.Errorf("endpoint %q tokens_per_byte_max must be greater than 0", ep.Name))
+			}
+		}
+	}
+
+	// Validate participant context_tokens and bytes_per_token
+	for _, p := range r.Participants {
+		if p.ContextTokens != nil && *p.ContextTokens < 1 {
+			errs = append(errs, fmt.Errorf("participant %q context_tokens must be at least 1", p.ID))
+		}
+		if p.BytesPerToken != nil {
+			if math.IsNaN(*p.BytesPerToken) {
+				errs = append(errs, fmt.Errorf("participant %q bytes_per_token must not be NaN", p.ID))
+			} else if *p.BytesPerToken <= 0 {
+				errs = append(errs, fmt.Errorf("participant %q bytes_per_token must be greater than 0", p.ID))
+			}
+		}
+	}
+
+	// Validate Deadlines
+	if r.Deadlines.Attempt != nil && r.Deadlines.Attempt.Duration <= 0 {
+		errs = append(errs, fmt.Errorf("deadlines.attempt must be positive"))
+	}
+	if r.Deadlines.Turn != nil && r.Deadlines.Turn.Duration <= 0 {
+		errs = append(errs, fmt.Errorf("deadlines.turn must be positive"))
+	}
+	if r.Deadlines.Delivery != nil && r.Deadlines.Delivery.Duration <= 0 {
+		errs = append(errs, fmt.Errorf("deadlines.delivery must be positive"))
+	}
+	// Validate turn >= attempt
+	if r.Deadlines.Turn != nil && r.Deadlines.Attempt != nil {
+		if r.Deadlines.Turn.Duration < r.Deadlines.Attempt.Duration {
+			errs = append(errs, fmt.Errorf("deadlines.turn must be at least deadlines.attempt"))
+		}
+	}
+
+	// Validate Budgets
+	if r.Budgets.CalibrationSafety != nil {
+		if math.IsNaN(*r.Budgets.CalibrationSafety) {
+			errs = append(errs, fmt.Errorf("budgets.calibration_safety must not be NaN"))
+		} else if *r.Budgets.CalibrationSafety <= 0 || *r.Budgets.CalibrationSafety > 1.0 {
+			errs = append(errs, fmt.Errorf("budgets.calibration_safety must be greater than 0 and at most 1.0"))
+		}
+	}
+	if r.Budgets.ContextMargin != nil {
+		if math.IsNaN(*r.Budgets.ContextMargin) {
+			errs = append(errs, fmt.Errorf("budgets.context_margin must not be NaN"))
+		} else if *r.Budgets.ContextMargin < 0 || *r.Budgets.ContextMargin >= 1 {
+			errs = append(errs, fmt.Errorf("budgets.context_margin must be at least 0 and less than 1"))
+		}
+	}
+	if r.Budgets.MessageOverheadTokens != nil && *r.Budgets.MessageOverheadTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.message_overhead_tokens must be at least 1"))
+	}
+	if r.Budgets.RequestOverheadTokens != nil && *r.Budgets.RequestOverheadTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.request_overhead_tokens must be at least 1"))
+	}
+	if r.Budgets.AuthorMaxOutputTokens != nil && *r.Budgets.AuthorMaxOutputTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.author_max_output_tokens must be at least 1"))
+	}
+	if r.Budgets.ReviewerMaxOutputTokens != nil && *r.Budgets.ReviewerMaxOutputTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.reviewer_max_output_tokens must be at least 1"))
+	}
+	if r.Budgets.DeliveryMaxTokens != nil && *r.Budgets.DeliveryMaxTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.delivery_max_tokens must be at least 1"))
+	}
+	if r.Budgets.TurnMaxEstimatedTokens != nil && *r.Budgets.TurnMaxEstimatedTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.turn_max_estimated_tokens must be at least 1"))
+	}
+
+	// Validate Engine
+	if r.Engine.StopGrace != nil && r.Engine.StopGrace.Duration <= 0 {
+		errs = append(errs, fmt.Errorf("engine.stop_grace must be positive"))
+	}
+
+	// Validate Pools
+	for name, pool := range r.Pools {
+		if pool.Concurrency != nil && *pool.Concurrency < 1 {
+			errs = append(errs, fmt.Errorf("pools[%q].concurrency must be at least 1", name))
+		}
+		if pool.UncertainReleaseAfter != nil && pool.UncertainReleaseAfter.Duration < 0 {
+			errs = append(errs, fmt.Errorf("pools[%q].uncertain_release_after must not be negative", name))
+		}
+	}
+
+	// Validate that all participant pools reference declared pools or use default
+	for _, p := range r.Participants {
+		poolName := p.Pool
+		if poolName == "" {
+			poolName = "default"
+		}
+		if poolName != "default" {
+			if _, ok := r.Pools[poolName]; !ok {
+				errs = append(errs, fmt.Errorf("participant %q references non-existent pool: %q", p.ID, poolName))
 			}
 		}
 	}
