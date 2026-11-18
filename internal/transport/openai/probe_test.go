@@ -32,11 +32,13 @@ type probeServer struct {
 	noUsage     bool
 	overLength  string // "both", "head", "error"
 	// calibration response control: prompt tokens for baseline and calibration
-	calibrationBaseline   int  // 0 means use default (1)
-	calibrationObserved   int  // 0 means use default (based on text size)
-	calibrationStatus     int  // non-zero means return this status code for all calibration requests
-	calibrationTextStatus int  // non-zero means return this status code for calibration text request only (overrides calibrationStatus for text)
-	echoAuthInResponse    bool // when true, echo Authorization header in response for calibration requests
+	calibrationBaseline      int  // 0 means use default (1)
+	calibrationObserved      int  // 0 means use default (based on text size)
+	calibrationStatus        int  // non-zero means return this status code for all calibration requests
+	calibrationTextStatus    int  // non-zero means return this status code for calibration text request only (overrides calibrationStatus for text)
+	echoAuthInResponse       bool // when true, echo Authorization header in response for calibration requests
+	omitBaselinePromptTokens bool // when true, omit prompt_tokens from baseline response usage
+	omitTextPromptTokens     bool // when true, omit prompt_tokens from calibration text response usage
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
 }
@@ -146,7 +148,17 @@ func (p *probeServer) handler() http.Handler {
 			}},
 		}
 		if !p.noUsage {
-			resp["usage"] = map[string]any{"prompt_tokens": promptTokens, "completion_tokens": 1}
+			usage := map[string]any{"completion_tokens": 1}
+			// Conditionally include prompt_tokens based on the request type
+			if isCalibration && !p.omitBaselinePromptTokens {
+				usage["prompt_tokens"] = promptTokens
+			} else if isCalibrationText && !p.omitTextPromptTokens {
+				usage["prompt_tokens"] = promptTokens
+			} else if !isCalibration && !isCalibrationText {
+				// Always include prompt_tokens for non-calibration requests
+				usage["prompt_tokens"] = promptTokens
+			}
+			resp["usage"] = usage
 		}
 		// Echo Authorization header in response for calibration requests when testing scrubbing
 		if p.echoAuthInResponse && (isCalibration || isCalibrationText) {
@@ -587,4 +599,68 @@ func TestCalibrationWithSentinelSecret(t *testing.T) {
 	if strings.Contains(rawJSON, "tok-123") {
 		t.Errorf("Raw JSON contains unscrubbed secret 'tok-123'")
 	}
+}
+
+func TestCalibrationMissingBaselinePromptTokens(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline:      10,
+		calibrationObserved:      1034,
+		omitBaselinePromptTokens: true,
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (missing baseline prompt_tokens)")
+	}
+}
+
+func TestCalibrationMissingTextPromptTokens(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline:  10,
+		calibrationObserved:  1034,
+		omitTextPromptTokens: true,
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (missing text prompt_tokens)")
+	}
+}
+
+// failingReader returns valid data until the read limit is exceeded, then returns an error.
+type failingReader struct {
+	data      []byte
+	failAfter int
+	read      int
+}
+
+func (r *failingReader) Read(p []byte) (n int, err error) {
+	if r.read >= r.failAfter {
+		return 0, errors.New("simulated read error")
+	}
+	remaining := r.failAfter - r.read
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	n = copy(p, r.data[r.read:])
+	r.read += n
+	if r.read >= r.failAfter && r.read < len(r.data) {
+		// Next read will fail
+		return n, nil
+	}
+	return n, nil
 }

@@ -603,10 +603,10 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	result.Status = mapFinishReason(finishReason)
 
-	if respData.Usage != nil {
+	if respData.Usage != nil && respData.Usage.PromptTokens != nil && respData.Usage.CompletionTokens != nil {
 		result.Usage = &transport.Usage{
-			Prompt:     respData.Usage.PromptTokens,
-			Completion: respData.Usage.CompletionTokens,
+			Prompt:     *respData.Usage.PromptTokens,
+			Completion: *respData.Usage.CompletionTokens,
 		}
 		a.mu.Lock()
 		a.lastUsage = &transport.Usage{
@@ -672,8 +672,8 @@ type ChoiceMessage struct {
 }
 
 type UsageData struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
 }
 
 func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointProfile) map[string]any {
@@ -1108,13 +1108,13 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		maxTokensField = "max_tokens"
 	}
 
-	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, _ := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
+	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody)
 
-	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, _ := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
+	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
 
-	if baselineStatusCode == 0 || calibrationStatusCode == 0 {
+	if baselineErr != nil || calibrationErr != nil || baselineStatusCode == 0 || calibrationStatusCode == 0 {
 		record.Calibration.Available = false
 		return
 	}
@@ -1130,19 +1130,19 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	}
 
 	var baselineData ResponseBody
-	if err := json.Unmarshal(baselineBody, &baselineData); err != nil || baselineData.Usage == nil {
+	if err := json.Unmarshal(baselineBody, &baselineData); err != nil || baselineData.Usage == nil || baselineData.Usage.PromptTokens == nil {
 		record.Calibration.Available = false
 		return
 	}
 
 	var calibrationData ResponseBody
-	if err := json.Unmarshal(calibrationBody, &calibrationData); err != nil || calibrationData.Usage == nil {
+	if err := json.Unmarshal(calibrationBody, &calibrationData); err != nil || calibrationData.Usage == nil || calibrationData.Usage.PromptTokens == nil {
 		record.Calibration.Available = false
 		return
 	}
 
-	baselineTokens := baselineData.Usage.PromptTokens
-	calibrationTokens := calibrationData.Usage.PromptTokens
+	baselineTokens := *baselineData.Usage.PromptTokens
+	calibrationTokens := *calibrationData.Usage.PromptTokens
 
 	if calibrationTokens <= baselineTokens {
 		record.Calibration.Available = false
@@ -1189,7 +1189,10 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 
 	defer func() { _ = httpResp.Body.Close() }()
 
-	respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
 
 	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil
 }

@@ -40,6 +40,10 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func intPtr(i int) *int {
+	return &i
+}
+
 type testBackend struct {
 	primaryServer *httptest.Server
 	foreignServer *httptest.Server
@@ -176,8 +180,8 @@ func (b *testBackend) handleSuccess(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Usage: &UsageData{
-			PromptTokens:     10,
-			CompletionTokens: 5,
+			PromptTokens:     intPtr(10),
+			CompletionTokens: intPtr(5),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -221,8 +225,8 @@ func (b *testBackend) handleTruncated(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Usage: &UsageData{
-			PromptTokens:     10,
-			CompletionTokens: 5,
+			PromptTokens:     intPtr(10),
+			CompletionTokens: intPtr(5),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -242,8 +246,8 @@ func (b *testBackend) handleRefused(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Usage: &UsageData{
-			PromptTokens:     10,
-			CompletionTokens: 5,
+			PromptTokens:     intPtr(10),
+			CompletionTokens: intPtr(5),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -273,8 +277,8 @@ func (b *testBackend) handleIdentityMismatch(w http.ResponseWriter, r *http.Requ
 			},
 		},
 		Usage: &UsageData{
-			PromptTokens:     10,
-			CompletionTokens: 5,
+			PromptTokens:     intPtr(10),
+			CompletionTokens: intPtr(5),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -315,8 +319,8 @@ func (b *testBackend) handleSecretEcho(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		Usage: &UsageData{
-			PromptTokens:     10,
-			CompletionTokens: 5,
+			PromptTokens:     intPtr(10),
+			CompletionTokens: intPtr(5),
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -888,8 +892,8 @@ func TestUsage(t *testing.T) {
 				},
 			},
 			Usage: &UsageData{
-				PromptTokens:     15,
-				CompletionTokens: 10,
+				PromptTokens:     intPtr(15),
+				CompletionTokens: intPtr(10),
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1063,8 +1067,8 @@ func BenchmarkComplete(b *testing.B) {
 				},
 			},
 			Usage: &UsageData{
-				PromptTokens:     10,
-				CompletionTokens: 5,
+				PromptTokens:     intPtr(10),
+				CompletionTokens: intPtr(5),
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1127,7 +1131,7 @@ func TestProbeBehaviorTable(t *testing.T) {
 						Choices: []ChoiceBody{
 							{Message: ChoiceMessage{Content: "test"}, FinishReason: "stop"},
 						},
-						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+						Usage: &UsageData{PromptTokens: intPtr(10), CompletionTokens: intPtr(5)},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
@@ -1161,7 +1165,7 @@ func TestProbeBehaviorTable(t *testing.T) {
 						Choices: []ChoiceBody{
 							{Message: ChoiceMessage{Content: "test"}, FinishReason: "stop"},
 						},
-						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+						Usage: &UsageData{PromptTokens: intPtr(10), CompletionTokens: intPtr(5)},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
@@ -1206,7 +1210,7 @@ func TestProbeBehaviorTable(t *testing.T) {
 						Choices: []ChoiceBody{
 							{Message: ChoiceMessage{Content: "Response ignored system role"}, FinishReason: "stop"},
 						},
-						Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+						Usage: &UsageData{PromptTokens: intPtr(10), CompletionTokens: intPtr(5)},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
@@ -1346,7 +1350,7 @@ func TestProbeSecretScrubbing(t *testing.T) {
 					FinishReason: "stop",
 				},
 			},
-			Usage: &UsageData{PromptTokens: 10, CompletionTokens: 5},
+			Usage: &UsageData{PromptTokens: intPtr(10), CompletionTokens: intPtr(5)},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Secret", secret)
