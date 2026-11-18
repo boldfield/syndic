@@ -39,6 +39,7 @@ const (
 // Participant states.
 const (
 	ParticipantIdle     = "idle"
+	ParticipantQueued   = "queued"
 	ParticipantRunning  = "running"
 	ParticipantUnprobed = "unprobed"
 )
@@ -56,6 +57,9 @@ const (
 	reasonSoloOK       = "solo_ok"
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
+
+	reasonDeadlineTurn    = "deadline:turn"
+	reasonDeadlineAttempt = "deadline:attempt:"
 )
 
 const defaultPool = "default"
@@ -123,6 +127,8 @@ type Engine struct {
 	startedAt    time.Time
 	open         *openTurn
 	running      map[string]bool
+	queued       map[string]bool
+	pools        map[string]*pool
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -147,6 +153,8 @@ func New(o Options) (*Engine, error) {
 		rand:       o.Rand,
 		newAdapter: o.NewAdapter,
 		running:    make(map[string]bool),
+		queued:     make(map[string]bool),
+		pools:      make(map[string]*pool),
 	}
 	if e.clock == nil {
 		e.clock = realClock{}

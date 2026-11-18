@@ -1,7 +1,6 @@
 package enginetest
 
 import (
-	"sort"
 	"sync"
 	"time"
 )
@@ -53,31 +52,36 @@ func (c *FakeClock) AfterFunc(d time.Duration, f func()) func() bool {
 	}
 }
 
-// Advance moves the clock forward by d and runs every timer that became due,
-// in order of due time, on the calling goroutine.
+// Advance moves the clock forward by d, running every timer that comes due
+// along the way in order of due time, on the calling goroutine. The clock
+// reads each timer's due time while its function runs, so a function that
+// schedules another timer inside the window sees it run too.
 func (c *FakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	target := c.now.Add(d)
-	var due []*fakeTimer
-	for _, t := range c.timers {
-		if !t.at.After(target) {
-			due = append(due, t)
-		}
-	}
-	sort.Slice(due, func(i, j int) bool {
-		if due[i].at.Equal(due[j].at) {
-			return due[i].id < due[j].id
-		}
-		return due[i].at.Before(due[j].at)
-	})
-	for _, t := range due {
-		t.done = true
-		delete(c.timers, t.id)
-	}
-	c.now = target
 	c.mu.Unlock()
-
-	for _, t := range due {
-		t.f()
+	for {
+		c.mu.Lock()
+		var next *fakeTimer
+		for _, t := range c.timers {
+			if t.at.After(target) {
+				continue
+			}
+			if next == nil || t.at.Before(next.at) || (t.at.Equal(next.at) && t.id < next.id) {
+				next = t
+			}
+		}
+		if next == nil {
+			c.now = target
+			c.mu.Unlock()
+			return
+		}
+		next.done = true
+		delete(c.timers, next.id)
+		if next.at.After(c.now) {
+			c.now = next.at
+		}
+		c.mu.Unlock()
+		next.f()
 	}
 }

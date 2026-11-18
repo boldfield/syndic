@@ -14,26 +14,47 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// runTurn carries a submitted turn to a terminal state. It runs on its own
-// goroutine and holds the engine mutex only around journal transactions and
-// the in-memory state they change, never across the adapter call.
+// runTurn hands the turn's author dispatch to the scheduler. The dispatch
+// runs at once when the author's pool has a free slot and queues otherwise.
 func (e *Engine) runTurn(t *openTurn) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.open != t {
+		return
+	}
+	if err := e.schedule(t, t.author, func() { e.startAuthor(t) }); err != nil {
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+	}
+}
+
+// startAuthor begins the author's attempt and calls the adapter on its own
+// goroutine. It runs with e.mu held and the pool slot taken.
+func (e *Engine) startAuthor(t *openTurn) {
 	req, attemptID, err := e.dispatchAuthor(t)
 	if err != nil {
 		// Nothing was written for the dispatch; end the turn so the engine
 		// does not stay busy.
-		e.finishTurn(t, StateIncomplete, reasonAuthorFailed+"error")
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		e.releaseLocked(t.author)
 		return
 	}
+	go e.runAuthor(t, req, attemptID)
+}
 
+// runAuthor calls the author, handles its result and gives back the pool slot
+// before anything else is dispatched.
+func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
 	res := e.complete(t.author, req)
 	if t.mode != modeSolo {
-		if e.completeAuthorReview(t, attemptID, req, res) {
+		proceed := e.completeAuthorReview(t, attemptID, req, res)
+		e.release(t.author)
+		if proceed {
 			e.runReviewers(t)
 		}
 		return
 	}
 	e.completeAuthor(t, attemptID, req, res)
+	e.release(t.author)
 }
 
 // complete calls the participant's adapter and turns a Go error into an
@@ -57,11 +78,8 @@ func (e *Engine) adapterFor(id string) transport.Adapter {
 }
 
 // dispatchAuthor records the request message and the attempt, and moves the
-// turn to author_dispatched, all in one transaction.
+// turn to author_dispatched, all in one transaction. e.mu is held.
 func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	mp := e.built.Participants[t.author]
 	var p config.Participant
 	for _, candidate := range e.roster.Participants {
@@ -73,10 +91,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 
 	msgs := prompt.Author(t.input)
 	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, mp.OutputBound)
-	deadline := e.clock.Now().UTC().Add(t.attemptDeadline)
-	if t.turnDeadline.Before(deadline) {
-		deadline = t.turnDeadline
-	}
+	deadline := e.attemptDeadline(t)
 
 	var req transport.CompleteRequest
 	var attemptID string
@@ -148,6 +163,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		return transport.CompleteRequest{}, "", err
 	}
 	e.running[t.author] = true
+	e.armAttempt(t, attemptID, deadline)
 	return req, attemptID, nil
 }
 
@@ -213,6 +229,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		}
 		return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
 	})
+	e.attemptDone(t, attemptID)
 	if quarantined {
 		return
 	}
@@ -225,13 +242,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	}
 	delete(e.running, t.author)
 	e.open = nil
-}
-
-// finishTurn ends a turn that has no result to record.
-func (e *Engine) finishTurn(t *openTurn, state, reason string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.finishLocked(t, state, reason)
+	e.turnEnded(t)
 }
 
 // finishLocked is finishTurn with e.mu held.
@@ -242,9 +253,9 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 	if err != nil {
 		return
 	}
-	delete(e.running, t.author)
 	if e.open == t {
 		e.open = nil
+		e.turnEnded(t)
 	}
 }
 

@@ -119,6 +119,12 @@ func WithEligibleRequiredReviewer(id string, v transport.Tri) Option {
 	return func(o *options) { o.eligible[id] = v }
 }
 
+// ClockStart sets the fake clock's initial reading. A test that needs a
+// scripted Hang to outlast the real wall clock starts it in the far future.
+func ClockStart(t time.Time) Option {
+	return func(o *options) { o.clockStart = t }
+}
+
 // NoStart builds the engine without starting it.
 func NoStart() Option {
 	return func(o *options) { o.noStart = true }

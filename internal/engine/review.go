@@ -88,6 +88,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateCandidateFrozen})
 	})
+	e.attemptDone(t, attemptID)
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return false
@@ -99,6 +100,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	if ended {
 		if e.open == t {
 			e.open = nil
+			e.turnEnded(t)
 		}
 		return false
 	}
@@ -107,53 +109,54 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	return true
 }
 
-// runReviewers begins an attempt for every required reviewer, then calls
-// them all at once, each on its own goroutine, and returns without waiting.
+// runReviewers hands every required reviewer's dispatch to the scheduler, in
+// order. Each runs when its pool has room and queues otherwise.
 func (e *Engine) runReviewers(t *openTurn) {
-	ds, ok := e.dispatchReviewers(t)
-	if !ok {
-		return
-	}
-	for _, d := range ds {
-		go func() {
-			res := e.complete(d.participant, d.req)
-			e.completeReviewer(t, d, res)
-		}()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range t.required {
+		if e.open != t {
+			return
+		}
+		if err := e.schedule(t, id, func() { e.startReviewer(t, id) }); err != nil {
+			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+			return
+		}
 	}
 }
 
-// dispatchReviewers begins the attempts. turn_state{reviewers_dispatched}
-// commits with the last of them, so it precedes every reviewer result.
-func (e *Engine) dispatchReviewers(t *openTurn) ([]reviewerDispatch, bool) {
-	ds := make([]reviewerDispatch, 0, len(t.required))
-	for i, id := range t.required {
-		d, err := e.beginReviewer(t, id, i == len(t.required)-1)
-		if err != nil {
-			e.mu.Lock()
-			for _, begun := range ds {
-				delete(e.running, begun.participant)
-			}
-			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
-			e.mu.Unlock()
-			return nil, false
-		}
-		ds = append(ds, d)
+// startReviewer begins the reviewer's attempt and calls the adapter on its
+// own goroutine. It runs with e.mu held and the pool slot taken.
+func (e *Engine) startReviewer(t *openTurn, id string) {
+	d, err := e.beginReviewer(t, id, t.reviewersBegun+1 == len(t.required))
+	if err != nil {
+		e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+		e.releaseLocked(id)
+		return
 	}
-	return ds, true
+	t.reviewersBegun++
+	go e.runReviewer(t, d)
+}
+
+// runReviewer calls the reviewer and handles its result. A repair keeps the
+// slot, so a pool never runs more than its concurrency and the repair cannot
+// be overtaken by a queued dispatch; otherwise the slot is given back when
+// Complete has returned and its result handled.
+func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
+	res := e.complete(d.participant, d.req)
+	if next := e.completeReviewer(t, d, res); next != nil {
+		go e.runReviewer(t, *next)
+		return
+	}
+	e.release(d.participant)
 }
 
 // beginReviewer records the request message and the attempt for one
-// reviewer in one transaction.
+// reviewer in one transaction. e.mu is held.
 func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispatch, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	p := e.participantConfig(id)
 	maxOut := budget.ClampOutput(*t.eff.Budgets.ReviewerMaxOutputTokens, e.built.Participants[id].OutputBound)
-	deadline := e.clock.Now().UTC().Add(t.attemptDeadline)
-	if t.turnDeadline.Before(deadline) {
-		deadline = t.turnDeadline
-	}
+	deadline := e.attemptDeadline(t)
 
 	var d reviewerDispatch
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -249,6 +252,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		return reviewerDispatch{}, err
 	}
 	e.running[id] = true
+	e.armAttempt(t, d.attemptID, d.req.Deadline)
 	return d, nil
 }
 
@@ -281,10 +285,7 @@ func (e *Engine) newDelimiter(t *openTurn) (string, error) {
 func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, originalDispatch reviewerDispatch, originalOutput string) (*reviewerDispatch, error) {
 	p := e.participantConfig(originalDispatch.participant)
 	maxOut := budget.ClampOutput(*t.eff.Budgets.ReviewerMaxOutputTokens, e.built.Participants[originalDispatch.participant].OutputBound)
-	deadline := e.clock.Now().UTC().Add(t.attemptDeadline)
-	if t.turnDeadline.Before(deadline) {
-		deadline = t.turnDeadline
-	}
+	deadline := e.attemptDeadline(t)
 
 	turn, err := tx.GetTurn(t.id)
 	if err != nil {
@@ -380,7 +381,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 
 // completeReviewer runs accept, gate, parse and the decision for one
 // reviewer's result in one transaction.
-func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult) {
+func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult) *reviewerDispatch {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -480,27 +481,27 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		return endTurnIn(tx, emit, t.id, endState, endReason)
 	})
 	delete(e.running, d.participant)
+	e.attemptDone(t, d.attemptID)
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
-		return
+		return nil
 	}
 	if quarantined {
-		return
+		return nil
 	}
 	if repairDispatch != nil {
 		e.running[d.participant] = true
-		go func() {
-			res := e.complete(repairDispatch.participant, repairDispatch.req)
-			e.completeReviewer(t, *repairDispatch, res)
-		}()
-		return
+		e.armAttempt(t, repairDispatch.attemptID, repairDispatch.req.Deadline)
+		return repairDispatch
 	}
 	if approvedNow {
 		t.approved[d.participant] = true
 	}
 	if endState != "" && e.open == t {
 		e.open = nil
+		e.turnEnded(t)
 	}
+	return nil
 }
 
 // allApproved reports whether every required reviewer has a valid approve

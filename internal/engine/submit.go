@@ -25,6 +25,14 @@ type openTurn struct {
 	attemptDeadline time.Duration
 	turnDeadline    time.Time
 
+	// Timers and in-flight attempts, owned by Engine.mu.
+	stopTurn    func() bool
+	stopTick    func() bool
+	stopAttempt map[string]func() bool
+	pending     map[string]time.Time // attempt id to its deadline
+
+	reviewersBegun int
+
 	// Review state, owned by Engine.mu.
 	required      []string
 	candidate     string
@@ -187,8 +195,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		turnDeadline:    turnDeadline,
 		required:        eff.Preset.RequiredReviewers,
 		approved:        map[string]bool{},
+		stopAttempt:     map[string]func() bool{},
+		pending:         map[string]time.Time{},
 	}
 	e.open = t
+	e.armTurn(t, turn)
 	go e.runTurn(t)
 
 	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName}

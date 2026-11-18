@@ -126,6 +126,8 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		}
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning
+	case e.queued[p.ID]:
+		ws.State = ParticipantQueued
 	default:
 		ws.State = ParticipantIdle
 	}
