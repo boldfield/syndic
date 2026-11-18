@@ -15,9 +15,10 @@ type Tx struct {
 
 // Tx runs all operations in fn inside a single transaction.
 // The store holds a mutex for the duration of each Tx, so two goroutines calling Tx
-// at once run one after the other. Calling a Store method from inside fn deadlocks.
-// If fn returns an error, the transaction is rolled back and the error is returned unwrapped.
-// If fn panics, the transaction is rolled back and the panic is re-raised.
+// at once run one after the other. fn must use the *Tx it is given; calling a Store
+// method from inside fn deadlocks. If fn returns an error, the transaction is rolled back
+// and the error is returned unwrapped. If fn panics, the transaction is rolled back and
+// the panic is re-raised.
 func (s *Store) Tx(fn func(tx *Tx) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,7 +170,7 @@ func (tx *Tx) AppendMessage(turnID, phase, sender string, recipients []string, c
 	return msgID, sha256, byteLen, nil
 }
 
-// BeginAttempt creates a pending attempt. The row is committed before the function returns.
+// BeginAttempt creates a pending attempt.
 func (tx *Tx) BeginAttempt(turnID, participant, phase string, epoch int, deadline *time.Time, repairOf string) (attemptID string, err error) {
 	attemptID, err = generateID()
 	if err != nil {
@@ -224,6 +225,7 @@ func (tx *Tx) CompleteAttempt(attemptID string, rawScrubbed string, scrubCount i
 }
 
 // QuarantineLateOutput sets an attempt to completed with the same output as CompleteAttempt, but marks it quarantined.
+// It accepts pending or unknown state and rejects other states.
 func (tx *Tx) QuarantineLateOutput(attemptID string, rawScrubbed string, scrubCount int, identity, status, nativeFinish, transportStatus string) error {
 	var currentState string
 	if err := tx.tx.QueryRow(`

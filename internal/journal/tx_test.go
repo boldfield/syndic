@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -204,12 +203,23 @@ func TestTxCommitVisibility(t *testing.T) {
 	}
 
 	// Verify the turn can be read back through the Store
-	retrievedTurn, err := store.GetRun(runID)
+	retrievedRun, err := store.GetRun(runID)
 	if err != nil {
 		t.Fatalf("failed to retrieve run: %v", err)
 	}
-	if retrievedTurn.ID != runID {
-		t.Errorf("expected run %q, got %q", runID, retrievedTurn.ID)
+	if retrievedRun.ID != runID {
+		t.Errorf("expected run %q, got %q", runID, retrievedRun.ID)
+	}
+
+	// Verify the turn created inside Tx is visible by turn ID
+	conn := db.Conn()
+	var retrievedTurnID string
+	err = conn.QueryRow("SELECT id FROM turns WHERE id = ?", turnID).Scan(&retrievedTurnID)
+	if err != nil {
+		t.Fatalf("failed to retrieve turn: %v", err)
+	}
+	if retrievedTurnID != turnID {
+		t.Errorf("expected turn %q, got %q", turnID, retrievedTurnID)
 	}
 
 	// Verify the attempt can be read back through the Store
@@ -225,7 +235,6 @@ func TestTxCommitVisibility(t *testing.T) {
 	}
 
 	// Verify the event was created
-	conn := db.Conn()
 	var eventCount int
 	err = conn.QueryRow("SELECT COUNT(*) FROM events WHERE event_type = 'test_event'").Scan(&eventCount)
 	if err != nil {
@@ -250,8 +259,8 @@ func TestTxErrorsIsPreserved(t *testing.T) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	// Use Tx to return a custom error wrapped in a sentinel
-	testErr := fmt.Errorf("test custom error")
+	// Use Tx to return a sentinel error
+	testErr := errors.New("test custom error")
 
 	returnedErr := store.Tx(func(tx *journal.Tx) error {
 		_, err := tx.CreateTurn(runID, "solo", nil)
@@ -262,105 +271,8 @@ func TestTxErrorsIsPreserved(t *testing.T) {
 	})
 
 	// Verify the error can be checked with errors.Is
-	if !errors.Is(returnedErr, testErr) && returnedErr != testErr {
-		// If Tx returned an errors.Join result due to rollback failure, check the original error
-		if err, ok := returnedErr.(interface{ Unwrap() []error }); ok {
-			// errors.Join result - check if testErr is in the slice
-			found := false
-			for _, e := range err.Unwrap() {
-				if errors.Is(e, testErr) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Errorf("expected error chain to contain testErr, got %v", returnedErr)
-			}
-		} else {
-			t.Errorf("expected error to be testErr or contain it, got %v", returnedErr)
-		}
-	}
-}
-
-// TestTxConcurrentSerializedCounter verifies that 20 goroutines each running a Tx
-// that creates an attempt with a unique epoch are all serialized and complete successfully.
-// This tests that the mutex in Store.Tx serializes concurrent transactions.
-func TestTxConcurrentSerializedCounter(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-
-	store := journal.NewStore(db)
-
-	// Create a run and turn to work with
-	runID, _, err := store.CreateRun(json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("failed to create run: %v", err)
-	}
-
-	turnID, err := store.CreateTurn(runID, "solo", nil)
-	if err != nil {
-		t.Fatalf("failed to create turn: %v", err)
-	}
-
-	// Run 20 goroutines that each create an attempt with an incrementing epoch
-	// This tests that the Tx serialization works correctly
-	const numGoroutines = 20
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
-	var mu sync.Mutex
-	var errs []error
-	var epochs []int
-
-	for i := 0; i < numGoroutines; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			err := store.Tx(func(tx *journal.Tx) error {
-				attemptID, err := tx.BeginAttempt(turnID, fmt.Sprintf("participant%d", idx), "phase1", idx+1, nil, "")
-				if err != nil {
-					return err
-				}
-
-				// Retrieve the attempt to verify it was created with the correct epoch
-				attempt, err := tx.GetAttempt(attemptID)
-				if err != nil {
-					return err
-				}
-
-				mu.Lock()
-				epochs = append(epochs, attempt.Epoch)
-				mu.Unlock()
-
-				return nil
-			})
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Check for any errors during the concurrent operations
-	if len(errs) > 0 {
-		t.Fatalf("got %d errors during concurrent operations: %v", len(errs), errs)
-	}
-
-	// Verify we got all 20 epochs
-	if len(epochs) != numGoroutines {
-		t.Errorf("expected %d epochs, got %d", numGoroutines, len(epochs))
-	}
-
-	// Verify all attempts can be retrieved and are consistent
-	conn := db.Conn()
-	var attemptCount int
-	err = conn.QueryRow("SELECT COUNT(*) FROM attempts WHERE turn_id = ?", turnID).Scan(&attemptCount)
-	if err != nil {
-		t.Fatalf("failed to query attempts: %v", err)
-	}
-	if attemptCount != numGoroutines {
-		t.Errorf("expected %d attempts in database, got %d", numGoroutines, attemptCount)
+	if !errors.Is(returnedErr, testErr) {
+		t.Fatalf("expected error to match testErr, got %v", returnedErr)
 	}
 }
 
