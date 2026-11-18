@@ -469,6 +469,25 @@ func TestTranscriptAttemptItemMetadata(t *testing.T) {
 	}
 }
 
+func TestTranscriptCompletedEmptyOutputHash(t *testing.T) {
+	f := newQFixture(t)
+	ref, id := f.attempt(t)
+	if err := f.store.CompleteAttempt(id, "", 0, "ident", "complete", "stop", "200"); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := f.store.TranscriptPage(f.turnID, "", 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items %d, err %v", len(items), err)
+	}
+	_, total, sum, err := f.store.ContentRange(ref, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].SHA256 != sum || items[0].ByteLen != total || sum == "" {
+		t.Errorf("item sha/len %q/%d vs content %q/%d", items[0].SHA256, items[0].ByteLen, sum, total)
+	}
+}
+
 func TestTranscriptMessageItemRefUsableForContent(t *testing.T) {
 	f := newQFixture(t)
 	ref := f.msg(t, "héllo")

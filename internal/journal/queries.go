@@ -447,7 +447,7 @@ func (tx *Tx) transcriptItem(r transcriptRef) (TranscriptItem, error) {
 		Phase:  attempt.Phase,
 		Sender: attempt.Participant,
 	}
-	if attempt.RawOutput != nil && *attempt.RawOutput != "" {
+	if attempt.RawOutput != nil {
 		body := []byte(*attempt.RawOutput)
 		item.SHA256 = computeSHA256(body)
 		item.ByteLen = int64(len(body))
