@@ -15,7 +15,7 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
-func TestBuild_CalibrationSafety(t *testing.T) {
+func TestBuild_CalibrationSafety_Default(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
 
@@ -58,6 +58,57 @@ func TestBuild_CalibrationSafety(t *testing.T) {
 	}
 
 	expected := 3.0
+	if *p.BytesPerToken != expected {
+		t.Errorf("expected %v, got %v", expected, *p.BytesPerToken)
+	}
+	if p.BytesPerTokenSource != "probe" {
+		t.Errorf("expected source probe, got %q", p.BytesPerTokenSource)
+	}
+}
+
+func TestBuild_CalibrationSafety_NonDefault(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	safety := 0.5
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{CalibrationSafety: &safety},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 4.0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	p := built.Participants["p1"]
+	if !p.Usable {
+		t.Error("participant should be usable")
+	}
+
+	if p.BytesPerToken == nil {
+		t.Fatal("BytesPerToken should not be nil")
+	}
+
+	expected := 2.0
 	if *p.BytesPerToken != expected {
 		t.Errorf("expected %v, got %v", expected, *p.BytesPerToken)
 	}
@@ -265,9 +316,15 @@ func TestBuild_UnusableParticipantsOmitted(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	// Debug: check the participants
 	if !built.Participants["p1"].Usable {
-		t.Logf("p1 not usable, detail: %s", built.Participants["p1"].Detail)
+		t.Fatalf("p1 should be usable, detail: %s", built.Participants["p1"].Detail)
+	}
+
+	if built.Participants["p2"].Usable {
+		t.Fatal("p2 should not be usable")
+	}
+	if built.Participants["p2"].Detail != "no_record" {
+		t.Errorf("p2 detail should be no_record, got %q", built.Participants["p2"].Detail)
 	}
 
 	var manifest_out map[string]interface{}
@@ -408,11 +465,7 @@ func TestBuild_DifferentStartedAt_SameRosterHash(t *testing.T) {
 }
 
 func TestRosterFileChanged(t *testing.T) {
-	dir, err := os.MkdirTemp("", "manifest_test")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	path := filepath.Join(dir, "roster.toml")
 	content := []byte("original content")
@@ -443,7 +496,9 @@ func TestRosterFileChanged(t *testing.T) {
 		t.Error("modified file should be reported as changed")
 	}
 
-	os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("failed to remove file: %v", err)
+	}
 
 	changed, err = RosterFileChanged(path, hash)
 	if err != nil {
@@ -451,6 +506,405 @@ func TestRosterFileChanged(t *testing.T) {
 	}
 	if !changed {
 		t.Error("removed file should be reported as changed")
+	}
+
+	// Restore the file and verify it's not reported as changed
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatalf("failed to restore file: %v", err)
+	}
+
+	changed, err = RosterFileChanged(path, hash)
+	if err != nil {
+		t.Fatalf("RosterFileChanged failed: %v", err)
+	}
+	if changed {
+		t.Error("restored file should not be reported as changed")
+	}
+}
+
+func TestBuild_ExpectedValues(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	p := built.Participants["p1"]
+	if !p.Usable {
+		t.Error("participant should be usable")
+	}
+
+	if p.Expected.ReportedModel != "test-model" {
+		t.Errorf("expected reported model test-model, got %q", p.Expected.ReportedModel)
+	}
+
+	var manifest_out map[string]interface{}
+	err = json.Unmarshal(built.JSON, &manifest_out)
+	if err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	expectedMap := manifest_out["expected"].(map[string]interface{})
+	if expectedMap["p1"] == nil {
+		t.Fatal("p1 should be in expected")
+	}
+
+	expectedObj := expectedMap["p1"].(map[string]interface{})
+	if expectedObj["reported_model"] != "test-model" {
+		t.Errorf("expected reported_model test-model, got %v", expectedObj["reported_model"])
+	}
+}
+
+func TestBuild_NoFingerprint(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants: []config.Participant{
+			{ID: "p1", Endpoint: "ep1", Model: "m1"},
+			{ID: "p2", Endpoint: "ep2", Model: "m2"},
+		},
+		Endpoints: []config.EndpointProfile{
+			{Name: "ep1", BaseURL: "http://test"},
+			{Name: "ep2", BaseURL: "http://test2"},
+		},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+	createTestProbeRunWithoutFingerprint(t, store, "ep2", "m2")
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if built.Participants["p2"].Usable {
+		t.Error("p2 without fingerprint should not be usable")
+	}
+	if built.Participants["p2"].Detail != "no_fingerprint" {
+		t.Errorf("p2 detail should be no_fingerprint, got %q", built.Participants["p2"].Detail)
+	}
+}
+
+func TestBuild_FingerprintMismatchBaseURL(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants: []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints: []config.EndpointProfile{{
+			Name:    "ep1",
+			BaseURL: "http://changed-url",
+		}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if built.Participants["p1"].Usable {
+		t.Error("p1 with mismatched base URL should not be usable")
+	}
+	if built.Participants["p1"].Detail != "fingerprint_mismatch" {
+		t.Errorf("p1 detail should be fingerprint_mismatch, got %q", built.Participants["p1"].Detail)
+	}
+}
+
+func TestBuild_FingerprintMismatchAdapterVersion(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "2.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if built.Participants["p1"].Usable {
+		t.Error("p1 with mismatched adapter version should not be usable")
+	}
+	if built.Participants["p1"].Detail != "fingerprint_mismatch" {
+		t.Errorf("p1 detail should be fingerprint_mismatch, got %q", built.Participants["p1"].Detail)
+	}
+}
+
+func TestBuild_ContextBoundRosterFallback(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	contextTokens := 2000
+	roster := &config.Roster{
+		Participants: []config.Participant{{
+			ID:            "p1",
+			Endpoint:      "ep1",
+			Model:         "m1",
+			ContextTokens: &contextTokens,
+		}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRunWithoutContext(t, store, "ep1", "m1")
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	p := built.Participants["p1"]
+	if p.ContextBound == nil || *p.ContextBound != 2000 {
+		t.Errorf("expected context bound 2000, got %v", p.ContextBound)
+	}
+	if p.ContextSource != "roster" {
+		t.Errorf("expected source roster, got %q", p.ContextSource)
+	}
+}
+
+func TestBuild_BytesPerTokenRosterFallback(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	bytesPerToken := 2.5
+	roster := &config.Roster{
+		Participants: []config.Participant{{
+			ID:            "p1",
+			Endpoint:      "ep1",
+			Model:         "m1",
+			BytesPerToken: &bytesPerToken,
+		}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRunWithoutCalibration(t, store, "ep1", "m1")
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	p := built.Participants["p1"]
+	if p.BytesPerToken == nil || *p.BytesPerToken != 2.5 {
+		t.Errorf("expected bytes per token 2.5, got %v", p.BytesPerToken)
+	}
+	if p.BytesPerTokenSource != "roster" {
+		t.Errorf("expected source roster, got %q", p.BytesPerTokenSource)
+	}
+}
+
+func TestBuild_ModelChangesRosterHash(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster1 := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	roster2 := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m2"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	now := time.Now().Truncate(time.Second)
+
+	in1 := Input{
+		Store:          store,
+		Roster:         roster1,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      now,
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built1, err := Build(in1)
+	if err != nil {
+		t.Fatalf("first Build failed: %v", err)
+	}
+
+	in2 := Input{
+		Store:          store,
+		Roster:         roster2,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      now,
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built2, err := Build(in2)
+	if err != nil {
+		t.Fatalf("second Build failed: %v", err)
+	}
+
+	if built1.RosterHash == built2.RosterHash {
+		t.Error("different model should produce different roster hash")
+	}
+}
+
+func TestBuild_NewerMismatchingRecordOverridesOlder(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://changed-url"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if built.Participants["p1"].Usable {
+		t.Error("p1 should not be usable when newer record has fingerprint mismatch")
+	}
+	if built.Participants["p1"].Detail != "fingerprint_mismatch" {
+		t.Errorf("p1 detail should be fingerprint_mismatch, got %q", built.Participants["p1"].Detail)
 	}
 }
 
@@ -560,6 +1014,127 @@ func createTestProbeRunWithContext(t *testing.T, store *journal.Store, endpoint,
 	}
 
 	_, _, err = store.CreateRun(data)
+	if err != nil {
+		t.Fatalf("failed to create probe run: %v", err)
+	}
+}
+
+func createTestProbeRunWithoutContext(t *testing.T, store *journal.Store, endpoint, model string) {
+	profile := config.EndpointProfile{
+		Name:    endpoint,
+		BaseURL: "http://test",
+	}
+
+	export := evidence.Export{
+		Redacted:                 true,
+		RedactionRule:            "redaction/v1",
+		EndpointName:             endpoint,
+		DeclaredLocation:         "local",
+		DeclaredExecution:        "local",
+		DeclaredBilling:          "none",
+		NetworkDependency:        "none",
+		Model:                    model,
+		AuthMode:                 "api-key",
+		Identity:                 transport.NewUnknownIdentity(),
+		ReportedModel:            "test-model",
+		Streaming:                transport.TriUnknown,
+		CancelObservable:         transport.TriUnknown,
+		UsageAvailable:           transport.TriUnknown,
+		ModelsEndpoint:           transport.TriUnknown,
+		ModelListed:              transport.TriUnknown,
+		SystemRoleHonored:        transport.TriUnknown,
+		EligibleRequiredReviewer: transport.TriUnknown,
+	}
+
+	cal := transport.Calibration{}
+	manifest, err := evidence.NewProbeManifest(export, profile, model, "1.0", cal)
+	if err != nil {
+		t.Fatalf("failed to create probe manifest: %v", err)
+	}
+
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+
+	_, _, err = store.CreateRun(data)
+	if err != nil {
+		t.Fatalf("failed to create probe run: %v", err)
+	}
+}
+
+func createTestProbeRunWithoutCalibration(t *testing.T, store *journal.Store, endpoint, model string) {
+	profile := config.EndpointProfile{
+		Name:    endpoint,
+		BaseURL: "http://test",
+	}
+
+	export := evidence.Export{
+		Redacted:                 true,
+		RedactionRule:            "redaction/v1",
+		EndpointName:             endpoint,
+		DeclaredLocation:         "local",
+		DeclaredExecution:        "local",
+		DeclaredBilling:          "none",
+		NetworkDependency:        "none",
+		Model:                    model,
+		AuthMode:                 "api-key",
+		Identity:                 transport.NewUnknownIdentity(),
+		ReportedModel:            "test-model",
+		Streaming:                transport.TriUnknown,
+		CancelObservable:         transport.TriUnknown,
+		UsageAvailable:           transport.TriUnknown,
+		ModelsEndpoint:           transport.TriUnknown,
+		ModelListed:              transport.TriUnknown,
+		SystemRoleHonored:        transport.TriUnknown,
+		EligibleRequiredReviewer: transport.TriUnknown,
+	}
+
+	cal := transport.Calibration{}
+	manifest, err := evidence.NewProbeManifest(export, profile, model, "1.0", cal)
+	if err != nil {
+		t.Fatalf("failed to create probe manifest: %v", err)
+	}
+
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("failed to marshal manifest: %v", err)
+	}
+
+	_, _, err = store.CreateRun(data)
+	if err != nil {
+		t.Fatalf("failed to create probe run: %v", err)
+	}
+}
+
+func createTestProbeRunWithoutFingerprint(t *testing.T, store *journal.Store, endpoint, model string) {
+	export := evidence.Export{
+		Redacted:                 true,
+		RedactionRule:            "redaction/v1",
+		EndpointName:             endpoint,
+		DeclaredLocation:         "local",
+		DeclaredExecution:        "local",
+		DeclaredBilling:          "none",
+		NetworkDependency:        "none",
+		Model:                    model,
+		AuthMode:                 "api-key",
+		Identity:                 transport.NewUnknownIdentity(),
+		ReportedModel:            "test-model",
+		Streaming:                transport.TriUnknown,
+		CancelObservable:         transport.TriUnknown,
+		UsageAvailable:           transport.TriUnknown,
+		ModelsEndpoint:           transport.TriUnknown,
+		ModelListed:              transport.TriUnknown,
+		SystemRoleHonored:        transport.TriUnknown,
+		EligibleRequiredReviewer: transport.TriUnknown,
+	}
+
+	bareJSON, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("failed to marshal bare export: %v", err)
+	}
+
+	_, _, err = store.CreateRun(bareJSON)
 	if err != nil {
 		t.Fatalf("failed to create probe run: %v", err)
 	}
