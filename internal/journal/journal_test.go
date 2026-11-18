@@ -1,7 +1,9 @@
 package journal_test
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"testing"
 
@@ -1142,5 +1144,698 @@ func setupTestData(t *testing.T, conn *sql.DB, runID, turnID string) {
 	`, turnID, runID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
+	}
+}
+
+func TestStoreCreateRunHashCorrectness(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{"test": "data"}`)
+	runID, hash, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	if runID == "" {
+		t.Errorf("expected non-empty runID")
+	}
+
+	sum := sha256.Sum256(manifest)
+	expectedHash := hex.EncodeToString(sum[:])
+	if hash != expectedHash {
+		t.Errorf("hash mismatch: got %q, expected %q", hash, expectedHash)
+	}
+}
+
+func TestStoreCreateRunInvalidJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	_, _, err = store.CreateRun([]byte(`invalid json`))
+	if err == nil {
+		t.Errorf("expected error for invalid JSON, but got none")
+	}
+}
+
+func TestStoreCreateRunSecondConnectionVisibility(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db1, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db1.Close(); err != nil {
+			t.Logf("failed to close db1: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db1)
+	manifest := []byte(`{"test": "data"}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	db2, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open second connection: %v", err)
+	}
+	defer func() {
+		if err := db2.Close(); err != nil {
+			t.Logf("failed to close db2: %v", err)
+		}
+	}()
+
+	conn := db2.Conn()
+	var count int
+	err = conn.QueryRow("SELECT COUNT(*) FROM runs WHERE id = ?", runID).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query run: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected run to be visible from second connection, but count=%d", count)
+	}
+}
+
+func TestStoreCompleteAttemptTwiceError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = store.CompleteAttempt(attemptID, "output1", 0, "model-id", "complete", "stop", "success")
+	if err != nil {
+		t.Fatalf("first CompleteAttempt failed: %v", err)
+	}
+
+	err = store.CompleteAttempt(attemptID, "output2", 0, "model-id", "complete", "stop", "success")
+	if err == nil {
+		t.Errorf("expected second CompleteAttempt to fail, but got none")
+	}
+
+	attempt, err := store.GetAttempt(attemptID)
+	if err != nil {
+		t.Fatalf("GetAttempt failed: %v", err)
+	}
+	if attempt.RawOutput == nil || *attempt.RawOutput != "output1" {
+		t.Errorf("expected first output to be unchanged, got %v", attempt.RawOutput)
+	}
+}
+
+func TestStoreCompleteAttemptRejectsNonPending(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = store.MarkUnknown(attemptID)
+	if err != nil {
+		t.Fatalf("MarkUnknown failed: %v", err)
+	}
+
+	err = store.CompleteAttempt(attemptID, "output", 0, "model-id", "complete", "stop", "success")
+	if err == nil {
+		t.Errorf("expected CompleteAttempt on non-pending to fail, but got none")
+	}
+}
+
+func TestStoreMarkUnknownRejectsNonPending(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = store.CompleteAttempt(attemptID, "output", 0, "model-id", "complete", "stop", "success")
+	if err != nil {
+		t.Fatalf("CompleteAttempt failed: %v", err)
+	}
+
+	err = store.MarkUnknown(attemptID)
+	if err == nil {
+		t.Errorf("expected MarkUnknown on non-pending to fail, but got none")
+	}
+}
+
+func TestStoreAppendMessageHashAndSequence(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	content := []byte("test message")
+	msgID1, hash1, len1, err := store.AppendMessage(turnID, "phase-1", "sender-1", []string{"all"}, content, nil)
+	if err != nil {
+		t.Fatalf("first AppendMessage failed: %v", err)
+	}
+
+	sum := sha256.Sum256(content)
+	expectedHash := hex.EncodeToString(sum[:])
+	if hash1 != expectedHash {
+		t.Errorf("hash mismatch: got %q, expected %q", hash1, expectedHash)
+	}
+
+	if len1 != len(content) {
+		t.Errorf("length mismatch: got %d, expected %d", len1, len(content))
+	}
+
+	msgID2, hash2, len2, err := store.AppendMessage(turnID, "phase-1", "sender-2", []string{"all"}, content, nil)
+	if err != nil {
+		t.Fatalf("second AppendMessage failed: %v", err)
+	}
+
+	if msgID1 == msgID2 {
+		t.Errorf("expected different message IDs for identical content from different senders")
+	}
+
+	if hash1 != hash2 {
+		t.Errorf("expected identical content to have same hash, got %q and %q", hash1, hash2)
+	}
+
+	if len1 != len2 {
+		t.Errorf("expected identical content to have same length, got %d and %d", len1, len2)
+	}
+
+	conn := db.Conn()
+	var seq1, seq2 int
+	err = conn.QueryRow("SELECT sequence FROM messages WHERE id = ?", msgID1).Scan(&seq1)
+	if err != nil {
+		t.Fatalf("failed to query sequence for message 1: %v", err)
+	}
+	err = conn.QueryRow("SELECT sequence FROM messages WHERE id = ?", msgID2).Scan(&seq2)
+	if err != nil {
+		t.Fatalf("failed to query sequence for message 2: %v", err)
+	}
+
+	if seq2 <= seq1 {
+		t.Errorf("expected increasing sequences: %d, %d", seq1, seq2)
+	}
+}
+
+func TestStoreRecoverPending(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db1, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+
+	store := journal.NewStore(db1)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = db1.Close()
+	if err != nil {
+		t.Fatalf("failed to close database: %v", err)
+	}
+
+	db2, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen database: %v", err)
+	}
+	defer func() {
+		if err := db2.Close(); err != nil {
+			t.Logf("failed to close db2: %v", err)
+		}
+	}()
+
+	store2 := journal.NewStore(db2)
+
+	pendingAttempts, err := store2.RecoverPending()
+	if err != nil {
+		t.Fatalf("RecoverPending failed: %v", err)
+	}
+
+	if len(pendingAttempts) != 1 || pendingAttempts[0] != attemptID {
+		t.Errorf("expected to recover attempt %q, got %v", attemptID, pendingAttempts)
+	}
+
+	err = store2.MarkUnknown(attemptID)
+	if err != nil {
+		t.Fatalf("MarkUnknown failed: %v", err)
+	}
+
+	pendingAttempts, err = store2.RecoverPending()
+	if err != nil {
+		t.Fatalf("second RecoverPending failed: %v", err)
+	}
+
+	if len(pendingAttempts) != 0 {
+		t.Errorf("expected no pending attempts after MarkUnknown, got %v", pendingAttempts)
+	}
+}
+
+func TestStoreSetTurnTerminalRejectsAlreadyTerminal(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	err = store.SetTurnTerminal(turnID, "approved")
+	if err != nil {
+		t.Fatalf("first SetTurnTerminal failed: %v", err)
+	}
+
+	err = store.SetTurnTerminal(turnID, "incomplete")
+	if err == nil {
+		t.Errorf("expected SetTurnTerminal on already-terminal to fail, but got none")
+	}
+}
+
+func TestStoreQuarantineLateOutputPreservesTerminalState(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	err = store.SetTurnTerminal(turnID, "approved")
+	if err != nil {
+		t.Fatalf("SetTurnTerminal failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = store.QuarantineLateOutput(attemptID, "late output", 0, "model-id", "complete", "stop", "success")
+	if err != nil {
+		t.Fatalf("QuarantineLateOutput failed: %v", err)
+	}
+
+	conn := db.Conn()
+	var terminalState sql.NullString
+	err = conn.QueryRow("SELECT terminal_state FROM turns WHERE id = ?", turnID).Scan(&terminalState)
+	if err != nil {
+		t.Fatalf("failed to query terminal state: %v", err)
+	}
+
+	if !terminalState.Valid || terminalState.String != "approved" {
+		t.Errorf("terminal state was changed, expected 'approved', got %v", terminalState)
+	}
+}
+
+func TestStoreQuarantineLateOutputRejectsCompleted(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	err = store.CompleteAttempt(attemptID, "output", 0, "model-id", "complete", "stop", "success")
+	if err != nil {
+		t.Fatalf("CompleteAttempt failed: %v", err)
+	}
+
+	err = store.QuarantineLateOutput(attemptID, "late output", 0, "model-id", "complete", "stop", "success")
+	if err == nil {
+		t.Errorf("expected QuarantineLateOutput on completed attempt to fail, but got none")
+	}
+}
+
+func TestStoreGetRunParsesCURRENT_TIMESTAMP(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	run, err := store.GetRun(runID)
+	if err != nil {
+		t.Fatalf("GetRun failed: %v", err)
+	}
+
+	if run.CreatedAt.IsZero() {
+		t.Errorf("expected non-zero created_at timestamp")
+	}
+}
+
+func TestStoreGetAttemptParsesDates(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+
+	manifest := []byte(`{}`)
+	runID, _, err := store.CreateRun(manifest)
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+
+	attemptID, err := store.BeginAttempt(turnID, "participant-1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	attempt, err := store.GetAttempt(attemptID)
+	if err != nil {
+		t.Fatalf("GetAttempt failed: %v", err)
+	}
+
+	if attempt.DispatchedAt.IsZero() {
+		t.Errorf("expected non-zero dispatched_at timestamp")
+	}
+}
+
+func TestStoreBeginAttemptVisibleFromSecondConnection(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	db1, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db1.Close(); err != nil {
+			t.Logf("failed to close db1: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db1)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+	attemptID, err := store.BeginAttempt(turnID, "p1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+
+	db2, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open second connection: %v", err)
+	}
+	defer func() {
+		if err := db2.Close(); err != nil {
+			t.Logf("failed to close db2: %v", err)
+		}
+	}()
+
+	var state string
+	if err := db2.Conn().QueryRow("SELECT state FROM attempts WHERE id = ?", attemptID).Scan(&state); err != nil {
+		t.Fatalf("attempt not visible from second connection: %v", err)
+	}
+	if state != "pending" {
+		t.Errorf("expected state pending, got %q", state)
+	}
+}
+
+func TestStoreQuarantineLateOutputOnUnknownAttempt(t *testing.T) {
+	db, err := journal.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun failed: %v", err)
+	}
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn failed: %v", err)
+	}
+	if err := store.SetTurnTerminal(turnID, "approved"); err != nil {
+		t.Fatalf("SetTurnTerminal failed: %v", err)
+	}
+	attemptID, err := store.BeginAttempt(turnID, "p1", "phase-1", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt failed: %v", err)
+	}
+	if err := store.MarkUnknown(attemptID); err != nil {
+		t.Fatalf("MarkUnknown failed: %v", err)
+	}
+	if err := store.QuarantineLateOutput(attemptID, "late", 0, "model", "complete", "stop", "ok"); err != nil {
+		t.Fatalf("QuarantineLateOutput on unknown attempt failed: %v", err)
+	}
+
+	var quarantined bool
+	var terminal sql.NullString
+	if err := db.Conn().QueryRow("SELECT quarantined FROM attempts WHERE id = ?", attemptID).Scan(&quarantined); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if !quarantined {
+		t.Error("expected attempt to be quarantined")
+	}
+	if err := db.Conn().QueryRow("SELECT terminal_state FROM turns WHERE id = ?", turnID).Scan(&terminal); err != nil {
+		t.Fatalf("query turn: %v", err)
+	}
+	if terminal.String != "approved" {
+		t.Errorf("turn terminal state changed: %v", terminal)
+	}
+}
+
+func TestStoreAppendEventWithoutTurn(t *testing.T) {
+	db, err := journal.Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close db: %v", err)
+		}
+	}()
+
+	store := journal.NewStore(db)
+	if err := store.AppendEvent("startup", []byte(`{"a":1}`)); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+	var n int
+	if err := db.Conn().QueryRow("SELECT COUNT(*) FROM events WHERE turn_id IS NULL AND event_type = 'startup'").Scan(&n); err != nil {
+		t.Fatalf("query events: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 event, got %d", n)
 	}
 }
