@@ -51,6 +51,8 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["author"]
 pool = "default"
+context_tokens = 128000
+bytes_per_token = 4.0
 
 [[participants]]
 id = "reviewer"
@@ -59,6 +61,8 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
+context_tokens = 128000
+bytes_per_token = 4.0
 
 [[endpoints]]
 name = "local"
@@ -276,6 +280,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 				profile = ep
 			}
 		}
+		contextBound := 4096
 		export := evidence.Export{
 			Redacted:                 true,
 			RedactionRule:            "redaction/v1",
@@ -288,6 +293,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 			AuthMode:                 "none",
 			Identity:                 transport.NewUnknownIdentity(),
 			ReportedModel:            DefaultReportedModel,
+			ContextBound:             &contextBound,
 			Streaming:                transport.TriUnknown,
 			CancelObservable:         transport.TriUnknown,
 			UsageAvailable:           transport.TriUnknown,
@@ -304,7 +310,13 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 		if v, ok := o.eligible[p.ID]; ok {
 			export.EligibleRequiredReviewer = v
 		}
-		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, transport.Calibration{})
+		calibration := transport.Calibration{
+			Available:            true,
+			BytesPerToken:        4.0,
+			ObservedPromptTokens: 100,
+			BaselinePromptTokens: 10,
+		}
+		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, calibration)
 		if err != nil {
 			t.Fatalf("probe manifest for %s: %v", p.ID, err)
 		}

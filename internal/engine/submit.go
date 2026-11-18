@@ -147,21 +147,31 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, refusal(wire.ErrorCodeProvisional)
 	}
 
-	// TODO: Project and validate budget at submit time
-	// For now, create an empty budget record to allow tests to pass
-	zero := int64(0)
+	// Check budget at submit time
+	budgetRefusal, projected, err := e.projectAndValidateBudget(req.Input, eff)
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+	if budgetRefusal != nil {
+		return wire.SubmitReply{}, budgetRefusal
+	}
+
 	maxEstimate := int64(250000)
 	if eff.Budgets.TurnMaxEstimatedTokens != nil {
 		maxEstimate = int64(*eff.Budgets.TurnMaxEstimatedTokens)
 	}
-	initialBudgetRecord := wire.BudgetRecord{
-		Projected: &zero,
-		Reserved:  &zero,
-		Charged:   &zero,
+
+	budgetRecord := wire.BudgetRecord{
+		Projected: &projected,
+		Reserved:  &projected,
+		Charged:   &projected,
 		Limit:     &maxEstimate,
 		Exhausted: false,
 	}
-	budgetJSON, _ := json.Marshal(initialBudgetRecord)
+	budgetJSON, err := json.Marshal(budgetRecord)
+	if err != nil {
+		return wire.SubmitReply{}, fmt.Errorf("engine: marshal budget: %w", err)
+	}
 
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
@@ -222,15 +232,35 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	}
 
 	// Extract estimated tokens from budget JSON
-	var budgetRecord wire.BudgetRecord
-	estimatedTokens := int64(0)
-	if err := json.Unmarshal(budgetJSON, &budgetRecord); err == nil && budgetRecord.Projected != nil {
-		estimatedTokens = *budgetRecord.Projected
-	}
+	estimatedTokens := projected
 
 	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: estimatedTokens}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}
 	return reply, nil
+}
+
+// projectAndValidateBudget validates basic budget requirements.
+// TODO: Implement full budget projection with real prompt builders and all validation checks.
+func (e *Engine) projectAndValidateBudget(input string, eff config.Effective) (*wire.Error, int64, error) {
+	// For now, just validate that all participants in the preset are probed
+	// Full projection and validation will be implemented in the next iteration
+
+	// Check that all required participants are usable
+	for _, id := range append([]string{eff.Preset.Author}, eff.Preset.RequiredReviewers...) {
+		if p, ok := e.built.Participants[id]; !ok || !p.Usable {
+			err := refusal(wire.ErrorCodeUnprobed)
+			err.Participant = strPtr(id)
+			if !ok {
+				err.Detail = strPtr("not_found")
+			} else {
+				err.Detail = strPtr(p.Detail)
+			}
+			return err, 0, nil
+		}
+	}
+
+	// Placeholder projection of 0 for now - this will be replaced with full projection
+	return nil, 0, nil
 }
