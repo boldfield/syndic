@@ -14,13 +14,16 @@ import (
 // Store provides the durable-intent and recovery API over the journal schema.
 // All methods run in a single transaction.
 type Store struct {
-	db *DB
-	mu sync.Mutex
+	db      *DB
+	mu      sync.Mutex
+	nextSeq int64
 }
 
 // NewStore creates a Store from a database handle.
 func NewStore(db *DB) *Store {
-	return &Store{db: db}
+	var maxSeq int64
+	_ = db.conn.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM events`).Scan(&maxSeq)
+	return &Store{db: db, nextSeq: maxSeq}
 }
 
 func generateID() (string, error) {

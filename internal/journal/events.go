@@ -3,7 +3,6 @@ package journal
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -35,18 +34,19 @@ func (tx *Tx) Emit(turnID, kind string, payload json.RawMessage) (Event, error) 
 	now := time.Now().UTC()
 	nowStr := now.Format(time.RFC3339Nano)
 
-	// Insert event and get back the auto-generated sequence number
-	result, err := tx.tx.Exec(`
-		INSERT INTO events (turn_id, event_type, timestamp, data)
-		VALUES (?, ?, ?, ?)
-	`, turnIDPtr, kind, nowStr, string(payload))
+	// Allocate next sequence number. The store's mu protects nextSeq,
+	// and nextSeq is incremented before the transaction executes, so if the
+	// transaction rolls back, the number is never reused.
+	tx.store.nextSeq++
+	seq := tx.store.nextSeq
+
+	// Insert event with explicit sequence number
+	_, err := tx.tx.Exec(`
+		INSERT INTO events (id, turn_id, event_type, timestamp, data)
+		VALUES (?, ?, ?, ?, ?)
+	`, seq, turnIDPtr, kind, nowStr, string(payload))
 	if err != nil {
 		return Event{}, fmt.Errorf("insert event: %w", err)
-	}
-
-	seq, err := result.LastInsertId()
-	if err != nil {
-		return Event{}, fmt.Errorf("get last insert id: %w", err)
 	}
 
 	return Event{
@@ -60,7 +60,7 @@ func (tx *Tx) Emit(turnID, kind string, payload json.RawMessage) (Event, error) 
 
 // EventsSince returns events with Seq > sinceSeq in ascending Seq order,
 // at most limit events. It must read rows written by the existing AppendEvent
-// without error.
+// without error. Pure read; goes through Tx for consistency but does not modify state.
 func (s *Store) EventsSince(sinceSeq int64, limit int) ([]Event, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("limit must be at least 1")
@@ -120,15 +120,13 @@ func (s *Store) EventsSince(sinceSeq int64, limit int) ([]Event, error) {
 }
 
 // MaxSeq returns the largest Seq, or 0 for an empty table.
+// Pure read; goes through Tx for consistency but does not modify state.
 func (s *Store) MaxSeq() (int64, error) {
 	var maxSeq int64
 	err := s.Tx(func(tx *Tx) error {
 		if err := tx.tx.QueryRow(`
 			SELECT COALESCE(MAX(id), 0) FROM events
 		`).Scan(&maxSeq); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil
-			}
 			return fmt.Errorf("query max seq: %w", err)
 		}
 		return nil
