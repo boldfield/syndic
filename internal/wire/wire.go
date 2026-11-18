@@ -95,14 +95,15 @@ func (r *Reader) Read() (Frame, error) {
 		return Frame{}, err
 	}
 
-	// Remove newline
-	if len(line) > 0 && line[len(line)-1] == '\n' {
-		line = line[:len(line)-1]
-	}
-
+	// Check encoded length including newline before modifying
 	if len(line) > MaxFrameBytes {
 		r.tooLarge = true
 		return Frame{}, ErrFrameTooLarge
+	}
+
+	// Remove newline
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
 	}
 
 	var f Frame
@@ -118,20 +119,20 @@ func (r *Reader) Read() (Frame, error) {
 }
 
 type Error struct {
-	Code         string `json:"code"`
-	Detail       string `json:"detail,omitempty"`
-	TurnID       string `json:"turn_id,omitempty"`
-	Participant  string `json:"participant,omitempty"`
-	QuickProfile string `json:"quick_profile,omitempty"`
-	Budget       string `json:"budget,omitempty"`
-	Admission    int64  `json:"admission,omitempty"`
-	Estimated    int64  `json:"estimated,omitempty"`
-	Limit        int64  `json:"limit,omitempty"`
-	Missing      string `json:"missing,omitempty"`
-	Holds        []Hold `json:"holds,omitempty"`
-	Pool         string `json:"pool,omitempty"`
-	AttemptID    string `json:"attempt_id,omitempty"`
-	LastSeq      int64  `json:"last_seq,omitempty"`
+	Code         string      `json:"code"`
+	Detail       *string     `json:"detail,omitempty"`
+	TurnID       *string     `json:"turn_id,omitempty"`
+	Participant  *string     `json:"participant,omitempty"`
+	QuickProfile *string     `json:"quick_profile,omitempty"`
+	Budget       *string     `json:"budget,omitempty"`
+	Admission    int64       `json:"admission,omitempty"`
+	Estimated    int64       `json:"estimated,omitempty"`
+	Limit        int64       `json:"limit,omitempty"`
+	Missing      *string     `json:"missing,omitempty"`
+	Holds        interface{} `json:"holds,omitempty"`
+	Pool         *string     `json:"pool,omitempty"`
+	AttemptID    *string     `json:"attempt_id,omitempty"`
+	LastSeq      int64       `json:"last_seq,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -141,6 +142,12 @@ func (e *Error) Error() string {
 type Hold struct {
 	Pool      string `json:"pool"`
 	AttemptID string `json:"attempt_id"`
+	Group     string `json:"group,omitempty"`
+}
+
+type PoolHold struct {
+	AttemptID string `json:"attempt_id"`
+	HeldSince string `json:"held_since"`
 	Group     string `json:"group,omitempty"`
 }
 
@@ -231,10 +238,10 @@ type Participant struct {
 	ReportedModel            string   `json:"reported_model"`
 	Identity                 string   `json:"identity"`
 	State                    string   `json:"state"`
-	Detail                   string   `json:"detail,omitempty"`
+	Detail                   *string  `json:"detail,omitempty"`
 	Pool                     string   `json:"pool"`
 	EligibleRoles            []string `json:"eligible_roles"`
-	ProbeObservedAt          string   `json:"probe_observed_at,omitempty"`
+	ProbeObservedAt          *string  `json:"probe_observed_at,omitempty"`
 	ContextBound             *int64   `json:"context_bound,omitempty"`
 	OutputBound              *int64   `json:"output_bound,omitempty"`
 	DeclaredBilling          string   `json:"declared_billing"`
@@ -246,17 +253,28 @@ type Participant struct {
 }
 
 type Pool struct {
-	Name        string `json:"name"`
-	Concurrency int    `json:"concurrency"`
-	Holds       []Hold `json:"holds"`
+	Name        string     `json:"name"`
+	Concurrency int        `json:"concurrency"`
+	Holds       []PoolHold `json:"holds"`
+}
+
+type Budgets struct {
+	CalibrationSafety       *float64 `json:"calibration_safety,omitempty"`
+	MessageOverheadTokens   *int64   `json:"message_overhead_tokens,omitempty"`
+	RequestOverheadTokens   *int64   `json:"request_overhead_tokens,omitempty"`
+	ContextMargin           *float64 `json:"context_margin,omitempty"`
+	AuthorMaxOutputTokens   *int64   `json:"author_max_output_tokens,omitempty"`
+	ReviewerMaxOutputTokens *int64   `json:"reviewer_max_output_tokens,omitempty"`
+	DeliveryMaxTokens       *int64   `json:"delivery_max_tokens,omitempty"`
+	TurnMaxEstimatedTokens  *int64   `json:"turn_max_estimated_tokens,omitempty"`
 }
 
 type QuickProfile struct {
-	Name             string          `json:"name"`
-	Preset           string          `json:"preset"`
-	Drafts           bool            `json:"drafts"`
-	Budgets          json.RawMessage `json:"budgets,omitempty"`
-	DefinitionSHA256 string          `json:"definition_sha256"`
+	Name             string   `json:"name"`
+	Preset           string   `json:"preset"`
+	Drafts           bool     `json:"drafts"`
+	Budgets          *Budgets `json:"budgets,omitempty"`
+	DefinitionSHA256 string   `json:"definition_sha256"`
 }
 
 type StatusReply struct {
@@ -276,18 +294,18 @@ type StatusReply struct {
 }
 
 type SubmitRequest struct {
-	SubmissionID     string `json:"submission_id"`
-	Input            string `json:"input"`
-	Preset           string `json:"preset,omitempty"`
-	QuickProfile     string `json:"quick_profile,omitempty"`
-	AllowProvisional bool   `json:"allow_provisional,omitempty"`
+	SubmissionID     string  `json:"submission_id"`
+	Input            string  `json:"input"`
+	Preset           *string `json:"preset,omitempty"`
+	QuickProfile     *string `json:"quick_profile,omitempty"`
+	AllowProvisional *bool   `json:"allow_provisional,omitempty"`
 }
 
 type SubmitReply struct {
-	TurnID          string `json:"turn_id"`
-	Preset          string `json:"preset"`
-	QuickProfile    string `json:"quick_profile,omitempty"`
-	EstimatedTokens int64  `json:"estimated_tokens"`
+	TurnID          string  `json:"turn_id"`
+	Preset          string  `json:"preset"`
+	QuickProfile    *string `json:"quick_profile,omitempty"`
+	EstimatedTokens int64   `json:"estimated_tokens"`
 }
 
 type CancelRequest struct {
@@ -321,21 +339,67 @@ type TurnRequest struct {
 	TurnID string `json:"turn_id"`
 }
 
+type TurnDeadlines struct {
+	Attempt int64 `json:"attempt"`
+	Turn    int64 `json:"turn"`
+}
+
+type AttemptRecord struct {
+	ID                    string         `json:"id"`
+	Participant           string         `json:"participant"`
+	Phase                 string         `json:"phase"`
+	Epoch                 int64          `json:"epoch"`
+	Deadline              string         `json:"deadline"`
+	MaxOutputTokens       int64          `json:"max_output_tokens"`
+	EstimatedPromptTokens int64          `json:"estimated_prompt_tokens"`
+	RepairOf              *string        `json:"repair_of,omitempty"`
+	Status                string         `json:"status"`
+	ScrubCount            int            `json:"scrub_count"`
+	TransportStatus       string         `json:"transport_status"`
+	Usage                 *ReportedUsage `json:"usage,omitempty"`
+}
+
+type ReportedUsage struct {
+	PromptTokens     *int64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+}
+
+type VerdictRecord struct {
+	ID               string `json:"id"`
+	AttemptID        string `json:"attempt_id"`
+	Parsed           bool   `json:"parsed"`
+	ValidationStatus string `json:"validation_status"`
+}
+
+type OpenBlock struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	State    string `json:"state"`
+}
+
+type BudgetRecord struct {
+	Projected *int64 `json:"projected,omitempty"`
+	Reserved  *int64 `json:"reserved,omitempty"`
+	Charged   *int64 `json:"charged,omitempty"`
+	Limit     *int64 `json:"limit,omitempty"`
+	Exhausted bool   `json:"exhausted"`
+}
+
 type TurnReply struct {
-	State                 string        `json:"state"`
-	Mode                  string        `json:"mode"`
-	Preset                string        `json:"preset"`
-	QuickProfile          string        `json:"quick_profile,omitempty"`
-	Deadlines             interface{}   `json:"deadlines"`
-	CandidateHash         string        `json:"candidate_hash,omitempty"`
-	Attempts              []interface{} `json:"attempts"`
-	ScrubCount            int           `json:"scrub_count"`
-	EstimatedPromptTokens int64         `json:"estimated_prompt_tokens"`
-	ReportedUsage         interface{}   `json:"reported_usage,omitempty"`
-	Verdicts              []interface{} `json:"verdicts"`
-	OpenBlocks            []interface{} `json:"open_blocks"`
-	TerminalReason        string        `json:"terminal_reason,omitempty"`
-	Budget                interface{}   `json:"budget"`
+	State                 string          `json:"state"`
+	Mode                  string          `json:"mode"`
+	Preset                string          `json:"preset"`
+	QuickProfile          *string         `json:"quick_profile,omitempty"`
+	Deadlines             TurnDeadlines   `json:"deadlines"`
+	CandidateHash         *string         `json:"candidate_hash,omitempty"`
+	Attempts              []AttemptRecord `json:"attempts"`
+	ScrubCount            int             `json:"scrub_count"`
+	EstimatedPromptTokens int64           `json:"estimated_prompt_tokens"`
+	ReportedUsage         *ReportedUsage  `json:"reported_usage,omitempty"`
+	Verdicts              []VerdictRecord `json:"verdicts"`
+	OpenBlocks            []OpenBlock     `json:"open_blocks"`
+	TerminalReason        *string         `json:"terminal_reason,omitempty"`
+	Budget                BudgetRecord    `json:"budget"`
 }
 
 type TranscriptRequest struct {
@@ -402,42 +466,42 @@ type EvEngineStopping struct {
 }
 
 type EvTurnSubmitted struct {
-	TurnID          string `json:"turn_id"`
-	SubmissionID    string `json:"submission_id"`
-	Preset          string `json:"preset"`
-	QuickProfile    string `json:"quick_profile,omitempty"`
-	EstimatedTokens int64  `json:"estimated_tokens"`
+	TurnID          string  `json:"turn_id"`
+	SubmissionID    string  `json:"submission_id"`
+	Preset          string  `json:"preset"`
+	QuickProfile    *string `json:"quick_profile,omitempty"`
+	EstimatedTokens int64   `json:"estimated_tokens"`
 }
 
 type EvTurnState struct {
-	TurnID string `json:"turn_id"`
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
+	TurnID string  `json:"turn_id"`
+	State  string  `json:"state"`
+	Reason *string `json:"reason,omitempty"`
 }
 
 type EvParticipantState struct {
-	Participant string `json:"participant"`
-	State       string `json:"state"`
-	Detail      string `json:"detail,omitempty"`
+	Participant string  `json:"participant"`
+	State       string  `json:"state"`
+	Detail      *string `json:"detail,omitempty"`
 }
 
 type EvAttemptBegun struct {
-	AttemptID             string `json:"attempt_id"`
-	Participant           string `json:"participant"`
-	Phase                 string `json:"phase"`
-	Epoch                 int64  `json:"epoch"`
-	Deadline              string `json:"deadline"`
-	MaxOutputTokens       int64  `json:"max_output_tokens"`
-	EstimatedPromptTokens int64  `json:"estimated_prompt_tokens"`
-	RepairOf              string `json:"repair_of,omitempty"`
+	AttemptID             string  `json:"attempt_id"`
+	Participant           string  `json:"participant"`
+	Phase                 string  `json:"phase"`
+	Epoch                 int64   `json:"epoch"`
+	Deadline              string  `json:"deadline"`
+	MaxOutputTokens       int64   `json:"max_output_tokens"`
+	EstimatedPromptTokens int64   `json:"estimated_prompt_tokens"`
+	RepairOf              *string `json:"repair_of,omitempty"`
 }
 
 type EvAttemptCompleted struct {
-	AttemptID       string      `json:"attempt_id"`
-	Status          string      `json:"status"`
-	ScrubCount      int         `json:"scrub_count"`
-	TransportStatus string      `json:"transport_status"`
-	Usage           interface{} `json:"usage,omitempty"`
+	AttemptID       string         `json:"attempt_id"`
+	Status          string         `json:"status"`
+	ScrubCount      int            `json:"scrub_count"`
+	TransportStatus string         `json:"transport_status"`
+	Usage           *ReportedUsage `json:"usage,omitempty"`
 }
 
 type EvAttemptUnknown struct {
@@ -496,12 +560,12 @@ type EvDeadline struct {
 }
 
 type EvBudget struct {
-	TurnID      string `json:"turn_id"`
-	Budget      string `json:"budget"`
-	Participant string `json:"participant,omitempty"`
-	Admission   int64  `json:"admission,omitempty"`
-	Estimated   int64  `json:"estimated,omitempty"`
-	Limit       int64  `json:"limit,omitempty"`
+	TurnID      string  `json:"turn_id"`
+	Budget      string  `json:"budget"`
+	Participant *string `json:"participant,omitempty"`
+	Admission   int64   `json:"admission,omitempty"`
+	Estimated   int64   `json:"estimated,omitempty"`
+	Limit       int64   `json:"limit,omitempty"`
 }
 
 type EvBudgetEstimateExceeded struct {

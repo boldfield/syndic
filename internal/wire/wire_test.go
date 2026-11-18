@@ -89,9 +89,8 @@ func TestFrameRoundTripWithLargeBody(t *testing.T) {
 }
 
 func TestFrameAtMaxSize(t *testing.T) {
-	// Create a frame that will fit exactly at the boundary
-	// Start with a frame that should fit
-	f := Frame{
+	// Test that a small frame fits
+	small := Frame{
 		ID:   "test-id",
 		Type: "content",
 		Body: json.RawMessage(`{"ref":"test"}`),
@@ -99,31 +98,32 @@ func TestFrameAtMaxSize(t *testing.T) {
 
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
-	if err := w.Write(f); err != nil {
+	if err := w.Write(small); err != nil {
 		t.Fatalf("Failed to write small frame: %v", err)
 	}
-	smallSize := buf.Len()
-
-	// Now create a frame that is too large - over MaxFrameBytes
-	// Create padding to make the frame exceed MaxFrameBytes
-	oversizePadding := make([]byte, MaxFrameBytes)
-	for i := range oversizePadding {
-		oversizePadding[i] = 'x'
+	if buf.Len() == 0 {
+		t.Error("Small frame should have written something")
 	}
 
-	f.Body = json.RawMessage(fmt.Sprintf(`{"data":"%s"}`, string(oversizePadding)))
+	// Test frame significantly over MaxFrameBytes - should fail
+	oversizePadding := make([]byte, MaxFrameBytes)
+	for i := range oversizePadding {
+		oversizePadding[i] = 'b'
+	}
+
+	f2 := Frame{
+		ID:   "id",
+		Type: "content",
+		Body: json.RawMessage(fmt.Sprintf(`{"data":"%s"}`, string(oversizePadding))),
+	}
 	var buf2 bytes.Buffer
 	w2 := NewWriter(&buf2)
 
-	if err := w2.Write(f); err != ErrFrameTooLarge {
+	if err := w2.Write(f2); err != ErrFrameTooLarge {
 		t.Errorf("Expected ErrFrameTooLarge for oversized frame, got %v", err)
 	}
 	if buf2.Len() != 0 {
 		t.Error("Bytes should not be written for oversized frame")
-	}
-
-	if smallSize == 0 {
-		t.Error("Small frame should have written something")
 	}
 }
 
@@ -353,6 +353,7 @@ func TestEventKindsConstant(t *testing.T) {
 func TestRequestNames(t *testing.T) {
 	// All request types should have string constants
 	requests := []string{
+		RequestHello,
 		RequestStatus,
 		RequestSubmit,
 		RequestCancel,
@@ -366,6 +367,7 @@ func TestRequestNames(t *testing.T) {
 	}
 
 	expectedNames := map[string]bool{
+		"hello":       true,
 		"status":      true,
 		"submit":      true,
 		"cancel":      true,
@@ -382,6 +384,11 @@ func TestRequestNames(t *testing.T) {
 		if !expectedNames[r] {
 			t.Errorf("Unexpected request type: %s", r)
 		}
+	}
+
+	// Check that all expected names are present
+	if len(requests) != len(expectedNames) {
+		t.Errorf("Request names length mismatch: got %d, expected %d", len(requests), len(expectedNames))
 	}
 }
 
@@ -444,10 +451,11 @@ func TestErrorCodes(t *testing.T) {
 }
 
 func TestSubmitReplyJSON(t *testing.T) {
+	qp := "fast"
 	reply := SubmitReply{
 		TurnID:          "turn-123",
 		Preset:          "review",
-		QuickProfile:    "fast",
+		QuickProfile:    &qp,
 		EstimatedTokens: 50000,
 	}
 
@@ -484,7 +492,7 @@ func TestSubmitRequestWithoutPreset(t *testing.T) {
 	req := SubmitRequest{
 		SubmissionID: "sub-123",
 		Input:        "test input",
-		// Preset is omitted
+		// Preset is nil
 	}
 
 	data, err := json.Marshal(req)
@@ -498,7 +506,22 @@ func TestSubmitRequestWithoutPreset(t *testing.T) {
 	}
 
 	if _, ok := m["preset"]; ok {
-		t.Error("Empty preset should be omitted from JSON")
+		t.Error("Nil preset should be omitted from JSON")
+	}
+
+	// Also verify the present fields
+	expectedKeys := map[string]bool{
+		"submission_id": true,
+		"input":         true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("SubmitRequest has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in SubmitRequest: %s", key)
+		}
 	}
 }
 
@@ -641,7 +664,9 @@ func TestSetObserver(t *testing.T) {
 		Type: "submit",
 	}
 
-	w.Write(f)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
 
 	if encodedLength == 0 {
 		t.Error("Observer was not called")
@@ -702,9 +727,10 @@ func TestNewReply(t *testing.T) {
 }
 
 func TestNewError(t *testing.T) {
+	detail := "another turn is open"
 	err := &Error{
 		Code:   ErrorCodeBusy,
-		Detail: "another turn is open",
+		Detail: &detail,
 	}
 
 	f, ferr := NewError("id-1", err)
@@ -795,9 +821,14 @@ func TestFrameOmitEmpty(t *testing.T) {
 		Body: nil, // should be omitted
 	}
 
-	data, _ := json.Marshal(f)
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
 	var m map[string]interface{}
-	json.Unmarshal(data, &m)
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
 
 	if _, ok := m["id"]; ok {
 		t.Error("Empty id should be omitted")
