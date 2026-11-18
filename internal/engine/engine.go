@@ -154,6 +154,23 @@ func (e *Engine) Start() error {
 		return &RosterError{fmt.Errorf("validate roster: %w", err)}
 	}
 
+	// Build adapters for each participant (once) and cache versions
+	adapterVersions := make(map[string]string)
+	for _, p := range roster.Participants {
+		endpoint := findEndpoint(roster, p.Endpoint)
+		if endpoint == nil {
+			continue
+		}
+		adapter, version, err := e.newAdapter(p, *endpoint)
+		if err != nil {
+			return fmt.Errorf("create adapter for %s: %w", p.ID, err)
+		}
+		if adapter != nil {
+			e.adapters[p.ID] = adapter
+			adapterVersions[p.ID] = version
+		}
+	}
+
 	// Build manifest
 	builtManifest, err := manifest.Build(manifest.Input{
 		Store:         e.store,
@@ -163,34 +180,11 @@ func (e *Engine) Start() error {
 		EngineVersion: e.engineVersion,
 		StartedAt:     e.startedAt,
 		AdapterVersion: func(p config.Participant) string {
-			endpoint := findEndpoint(roster, p.Endpoint)
-			if endpoint == nil {
-				return ""
-			}
-			_, version, err := e.newAdapter(p, *endpoint)
-			if err != nil {
-				return ""
-			}
-			return version
+			return adapterVersions[p.ID]
 		},
 	})
 	if err != nil {
 		return &RosterError{fmt.Errorf("build manifest: %w", err)}
-	}
-
-	// Build adapters for each participant (once)
-	for _, p := range roster.Participants {
-		endpoint := findEndpoint(roster, p.Endpoint)
-		if endpoint == nil {
-			continue
-		}
-		adapter, _, err := e.newAdapter(p, *endpoint)
-		if err != nil {
-			return fmt.Errorf("create adapter for %s: %w", p.ID, err)
-		}
-		if adapter != nil {
-			e.adapters[p.ID] = adapter
-		}
 	}
 
 	// Write engine run through hub transaction
@@ -227,14 +221,12 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("write engine run: %w", err)
 	}
 
-	// Get the seq of the engine_started event from the store
-	events, err := e.store.EventsSince(0, 1)
+	// Get the seq of the engine_started event (the last event emitted in the transaction)
+	maxSeq, err := e.store.MaxSeq()
 	if err != nil {
-		return fmt.Errorf("get events: %w", err)
+		return fmt.Errorf("get max seq: %w", err)
 	}
-	if len(events) > 0 {
-		runFirstSeq = int64(events[len(events)-1].Seq)
-	}
+	runFirstSeq = maxSeq
 
 	// Store manifest and other info
 	e.roster = roster
