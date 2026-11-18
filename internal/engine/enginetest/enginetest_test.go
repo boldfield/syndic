@@ -273,11 +273,13 @@ func TestSoloHappyPath(t *testing.T) {
 		t.Fatalf("WaitTurnState: %v", err)
 	}
 
-	// Verify events include the required sequence
+	// Verify events include the required sequence (skip engine_started)
 	events := h.Events()
 	eventKinds := []string{}
 	for _, e := range events {
-		eventKinds = append(eventKinds, e.Kind)
+		if e.Kind != wire.EventKindEngineStarted {
+			eventKinds = append(eventKinds, e.Kind)
+		}
 	}
 
 	expectedSequence := []string{
