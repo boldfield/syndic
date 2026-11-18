@@ -372,6 +372,7 @@ func TestProbeRawDirInGitWorktree(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
 
 	// Create minimal roster
 	rosterContent := `
@@ -581,6 +582,11 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("failed to write roster: %v", err)
 	}
 
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
+
 	// Run without --model flag
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -636,6 +642,11 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("failed to write roster: %v", err)
 	}
 
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
+
 	// Run without --endpoint flag
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -662,6 +673,7 @@ func TestProbeInvalidRoster(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
 
 	// Write invalid TOML
 	if err := os.WriteFile(rosterPath, []byte("this is not valid [toml"), 0600); err != nil {
@@ -1087,6 +1099,7 @@ func TestProbeRawDirRelativePathFromNestedWorkingDirectory(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
 
 	// Create roster
 	rosterContent := `
@@ -2232,4 +2245,116 @@ required_reviewers = ["reviewer"]
 	if strings.Contains(runManifest.String, sentinelSecret) {
 		t.Fatalf("manifest should not contain resolver secret, but got: %s", runManifest.String)
 	}
+}
+
+func TestProbeJournalFailureLockRelease(t *testing.T) {
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a file at the journal parent path to force journal creation to fail
+	journalParent := filepath.Join(tmpDir, "journal-parent")
+	if err := os.WriteFile(journalParent, []byte("not-a-directory"), 0600); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+	journalPath := filepath.Join(journalParent, "journal.sqlite")
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"id": "test-run",
+			"model": "test-model",
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"stop_reason": "end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe - should fail because journal directory can't be created
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1 (error), got %d", exitCode)
+	}
+
+	// Verify lock was released by acquiring it
+	paths, err := lockfile.Resolve(os.Getenv, tmpDir)
+	if err != nil {
+		t.Fatalf("failed to resolve paths: %v", err)
+	}
+
+	lock, err := lockfile.Acquire(paths.Lock, time.Now())
+	if err != nil {
+		t.Fatalf("lock was not released after journal failure: %v", err)
+	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			t.Logf("failed to release lock: %v", err)
+		}
+	}()
 }

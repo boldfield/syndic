@@ -161,6 +161,15 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 1
 	}
 
+	lockReleased := false
+	defer func() {
+		if !lockReleased {
+			if err := lock.Release(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to release engine lock: %v\n", err)
+			}
+		}
+	}()
+
 	// Create journal parent directory
 	if err := os.MkdirAll(filepath.Dir(jnl), 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to create journal directory: %v\n", err)
@@ -203,6 +212,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	if err := lock.Release(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to release engine lock: %v\n", err)
 	}
+	lockReleased = true
 
 	// Print summary
 	printSummary(*endpointName, *modelName, record, rawPath, exportPath, probeManifest.Calibration)
