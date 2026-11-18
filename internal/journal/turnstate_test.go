@@ -120,20 +120,119 @@ func TestEndTurnFreshTurnToCancelled(t *testing.T) {
 }
 
 func TestEndTurnSecondEndTurnErrors(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-	_, turnID, _ := setupTurnstateTestData(t, conn)
+	tests := []struct {
+		name          string
+		firstState    string
+		firstReason   string
+		secondState   string
+		secondReason  string
+		needCandidate bool
+	}{
+		{
+			name:         "approved to incomplete",
+			firstState:   "approved",
+			firstReason:  "first",
+			secondState:  "incomplete",
+			secondReason: "second",
+		},
+		{
+			name:         "solo_complete to approved",
+			firstState:   "solo_complete",
+			firstReason:  "done",
+			secondState:  "approved",
+			secondReason: "try again",
+		},
+		{
+			name:         "incomplete to cancelled",
+			firstState:   "incomplete",
+			firstReason:  "needs review",
+			secondState:  "cancelled",
+			secondReason: "user cancelled",
+		},
+		{
+			name:         "cancelled to approved",
+			firstState:   "cancelled",
+			firstReason:  "user cancel",
+			secondState:  "approved",
+			secondReason: "override",
+		},
+		{
+			name:          "overridden to approved",
+			firstState:    "incomplete",
+			firstReason:   "needs review",
+			secondState:   "overridden",
+			secondReason:  "override",
+			needCandidate: true,
+		},
+	}
 
-	store := journal.NewStore(db)
-	err := store.Tx(func(tx *journal.Tx) error {
-		if err := tx.EndTurn(turnID, "approved", "first"); err != nil {
-			return err
-		}
-		return tx.EndTurn(turnID, "incomplete", "second")
-	})
-	if err == nil {
-		t.Error("second EndTurn should have errored")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, cleanup := openTestDB(t)
+			defer cleanup()
+			conn := db.Conn()
+			_, turnID, _ := setupTurnstateTestData(t, conn)
+
+			store := journal.NewStore(db)
+
+			// First EndTurn - should succeed
+			err := store.Tx(func(tx *journal.Tx) error {
+				return tx.EndTurn(turnID, tt.firstState, tt.firstReason)
+			})
+			if err != nil {
+				t.Fatalf("first EndTurn failed: %v", err)
+			}
+
+			// For incomplete→overridden with candidate, freeze the candidate and do second EndTurn
+			if tt.firstState == "incomplete" && tt.needCandidate {
+				err = store.Tx(func(tx *journal.Tx) error {
+					_, err := tx.FreezeCandidate(turnID, "content", "hash123")
+					return err
+				})
+				if err != nil {
+					t.Fatalf("FreezeCandidate failed: %v", err)
+				}
+
+				// Second EndTurn should succeed
+				err = store.Tx(func(tx *journal.Tx) error {
+					return tx.EndTurn(turnID, tt.secondState, tt.secondReason)
+				})
+				if err != nil {
+					t.Fatalf("second EndTurn should have succeeded: %v", err)
+				}
+
+				// Verify state is set correctly
+				var state sql.NullString
+				err = conn.QueryRow(`SELECT terminal_state FROM turns WHERE id = ?`, turnID).Scan(&state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !state.Valid || state.String != "overridden" {
+					t.Errorf("terminal_state = %v, want 'overridden'", state)
+				}
+			} else {
+				// For all other cases, second EndTurn should error
+				err = store.Tx(func(tx *journal.Tx) error {
+					return tx.EndTurn(turnID, tt.secondState, tt.secondReason)
+				})
+				if err == nil {
+					t.Error("second EndTurn should have errored")
+				}
+
+				// Verify that terminal_state and terminal_reason remain from first call
+				var state, reason sql.NullString
+				err = conn.QueryRow(`SELECT terminal_state, terminal_reason FROM turns WHERE id = ?`, turnID).Scan(&state, &reason)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !state.Valid || state.String != tt.firstState {
+					t.Errorf("after failed EndTurn, terminal_state = %v, want %v", state, tt.firstState)
+				}
+				if !reason.Valid || reason.String != tt.firstReason {
+					t.Errorf("after failed EndTurn, terminal_reason = %v, want %v", reason, tt.firstReason)
+				}
+			}
+		})
 	}
 }
 
@@ -298,13 +397,20 @@ func TestOverrideTurnIncompleteWithTwoBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	for rows.Next() {
 		var s string
 		if err := rows.Scan(&s); err != nil {
 			t.Fatal(err)
 		}
 		blockStates = append(blockStates, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	if len(blockStates) != 2 {
 		t.Errorf("expected 2 blocks, got %d", len(blockStates))
@@ -349,24 +455,73 @@ func TestOverrideTurnWithoutCandidateRollback(t *testing.T) {
 	_, turnID, _ := setupTurnstateTestData(t, conn)
 
 	store := journal.NewStore(db)
+
+	// Create a second attempt and open blocks
+	attemptID2 := "test-attempt-2-" + t.Name()
+	mustExec(t, conn, `INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at) VALUES (?, ?, 'p2', 'review', 0, '2026-11-18T10:00:00Z')`, attemptID2, turnID)
+
+	var verdictID1, blockID1 string
+
+	// Set up the turn with blocks but no candidate (first transaction - should succeed)
 	err := store.Tx(func(tx *journal.Tx) error {
 		if err := tx.EndTurn(turnID, "incomplete", "needs review"); err != nil {
 			return err
 		}
+
+		// Create verdict and open block
+		vid, err := tx.RecordVerdict(attemptID2, "hash123", "block", "reason1", "valid")
+		if err != nil {
+			return err
+		}
+		verdictID1 = vid
+
+		blockID1 = "v1:b1"
+		if err := tx.OpenBlock(verdictID1, blockID1, "hash123", "high", "evidence1", "remedy1"); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	// Verify setup succeeded: turn is incomplete, block is open
+	var setupState sql.NullString
+	err = conn.QueryRow(`SELECT terminal_state FROM turns WHERE id = ?`, turnID).Scan(&setupState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !setupState.Valid || setupState.String != "incomplete" {
+		t.Errorf("after setup, terminal_state = %v, want 'incomplete'", setupState)
+	}
+
+	// Now try to override without candidate (separate transaction - should fail and not change anything)
+	err = store.Tx(func(tx *journal.Tx) error {
 		return tx.OverrideTurn(turnID, "test override")
 	})
 	if err == nil {
 		t.Error("OverrideTurn without candidate should have errored")
 	}
 
-	// Verify the transaction was rolled back: turn should be unchanged (NULL terminal_state)
+	// Verify the OverrideTurn call didn't change anything: turn should still be incomplete
 	var state sql.NullString
 	err = conn.QueryRow(`SELECT terminal_state FROM turns WHERE id = ?`, turnID).Scan(&state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Valid {
-		t.Errorf("after rollback, terminal_state = %v, want NULL (rollback should have reverted EndTurn)", state)
+	if !state.Valid || state.String != "incomplete" {
+		t.Errorf("after failed OverrideTurn, terminal_state = %v, want 'incomplete'", state)
+	}
+
+	// Verify block state is still open (unchanged)
+	var blockState string
+	err = conn.QueryRow(`SELECT state FROM blocks WHERE id = ?`, blockID1).Scan(&blockState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockState != "open" {
+		t.Errorf("after failed OverrideTurn, block state = %v, want 'open'", blockState)
 	}
 
 	// No override event should exist
@@ -376,7 +531,7 @@ func TestOverrideTurnWithoutCandidateRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if count != 0 {
-		t.Errorf("after rollback, found %d override events, want 0", count)
+		t.Errorf("after failed OverrideTurn, found %d override events, want 0", count)
 	}
 }
 
