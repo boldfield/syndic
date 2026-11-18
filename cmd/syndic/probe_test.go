@@ -2276,7 +2276,7 @@ func TestProbeJournalFailureLockRelease(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{
+		_, _ = io.WriteString(w, `{
 			"id": "test-run",
 			"model": "test-model",
 			"input_tokens": 100,
