@@ -87,7 +87,11 @@ func (h *Hub) Tx(fn func(tx *journal.Tx, emit Emit) error) error {
 
 	var laggingSubs []*Subscription
 	for sub := range h.subs {
+		skipThisSub := false
 		for _, event := range emittedEvents {
+			if skipThisSub {
+				break
+			}
 			select {
 			case sub.queue <- event:
 			default:
@@ -95,7 +99,7 @@ func (h *Hub) Tx(fn func(tx *journal.Tx, emit Emit) error) error {
 				sub.lagging = true
 				sub.mu.Unlock()
 				laggingSubs = append(laggingSubs, sub)
-				break
+				skipThisSub = true
 			}
 		}
 	}
@@ -152,11 +156,17 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 			if err != nil {
 				return journal.Event{}, err
 			}
+			var filtered []journal.Event
+			for _, e := range events {
+				if e.Seq <= s.watermark {
+					filtered = append(filtered, e)
+				}
+			}
 			s.mu.Lock()
-			s.replayBuffer = events
+			s.replayBuffer = filtered
 			s.replayIdx = 0
 			s.mu.Unlock()
-			if len(events) > 0 {
+			if len(filtered) > 0 {
 				continue
 			}
 		}
@@ -168,9 +178,11 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 					return journal.Event{}, ErrClosed
 				}
 				s.mu.Lock()
-				if event.Seq > s.watermark {
-					s.lastSeq = event.Seq
+				if event.Seq <= s.watermark {
+					s.mu.Unlock()
+					continue
 				}
+				s.lastSeq = event.Seq
 				s.mu.Unlock()
 				return event, nil
 			default:
@@ -184,10 +196,11 @@ func (s *Subscription) Next(ctx context.Context) (journal.Event, error) {
 				return journal.Event{}, ErrClosed
 			}
 			s.mu.Lock()
-			if event.Seq > s.watermark {
-				s.lastSeq = event.Seq
+			if event.Seq <= s.watermark {
+				s.mu.Unlock()
+				continue
 			}
-			lagging = s.lagging
+			s.lastSeq = event.Seq
 			s.mu.Unlock()
 			return event, nil
 		case <-ctx.Done():

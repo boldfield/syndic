@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -581,7 +582,7 @@ func TestLaggingErrorWithResume(t *testing.T) {
 		t.Fatalf("Next after resume failed: %v", err)
 	}
 	if event.Seq != lastEvent.Seq+1 {
-		t.Errorf("resume got seq %d, expected %d", event.Seq, lastEvent.Seq+1)
+		t.Errorf("resume event seq %d, expected %d", event.Seq, lastEvent.Seq+1)
 	}
 }
 
@@ -589,7 +590,11 @@ func TestConcurrent5000EventHandoff(t *testing.T) {
 	store := setupTestDB(t)
 	hub := New(store, 1024)
 
-	const numEvents = 500
+	const numEvents = 5000
+	const subscribeAfter = 2500
+
+	seenSeqs := make(map[int64]bool)
+	seenSeqsMu := &sync.Mutex{}
 
 	done := make(chan int)
 	go func() {
@@ -606,17 +611,20 @@ func TestConcurrent5000EventHandoff(t *testing.T) {
 		done <- 1
 	}()
 
-	sub, _, err := hub.Subscribe(0)
+	time.Sleep(10 * time.Millisecond)
+
+	sub, _, err := hub.Subscribe(subscribeAfter - 1)
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
 	defer sub.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var prevSeq int64
-	for i := 0; i < numEvents; i++ {
+	expectedCount := numEvents - subscribeAfter + 1
+	for i := 0; i < expectedCount; i++ {
 		event, err := sub.Next(ctx)
 		if err != nil {
 			t.Fatalf("Next %d failed: %v", i, err)
@@ -624,7 +632,17 @@ func TestConcurrent5000EventHandoff(t *testing.T) {
 		if event.Seq <= prevSeq {
 			t.Errorf("event %d: seq %d not strictly increasing after %d", i, event.Seq, prevSeq)
 		}
+		seenSeqsMu.Lock()
+		if seenSeqs[event.Seq] {
+			t.Errorf("seq %d seen twice", event.Seq)
+		}
+		seenSeqs[event.Seq] = true
+		seenSeqsMu.Unlock()
 		prevSeq = event.Seq
+	}
+
+	if len(seenSeqs) != expectedCount {
+		t.Errorf("expected %d unique sequences, got %d", expectedCount, len(seenSeqs))
 	}
 
 	<-done
@@ -672,8 +690,15 @@ func TestTenStaggeredSubscribers(t *testing.T) {
 				}
 				t.Fatalf("sub %d Next failed: %v", i, err)
 			}
+			if event.Seq <= maxSeqs[i] {
+				t.Errorf("sub %d: seq %d not strictly increasing after %d", i, event.Seq, maxSeqs[i])
+			}
 			maxSeqs[i] = event.Seq
 		}
+	}
+
+	if maxSeqs[0] == 0 {
+		t.Fatal("no events received by any subscriber")
 	}
 
 	for i := 1; i < subscribers; i++ {
@@ -687,7 +712,7 @@ func TestReplayLargeWithStalledSubscriber(t *testing.T) {
 	store := setupTestDB(t)
 	hub := New(store, 1024)
 
-	const totalSeeded = 1000
+	const totalSeeded = 5000
 	for i := 0; i < totalSeeded; i++ {
 		n := i
 		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
@@ -701,24 +726,28 @@ func TestReplayLargeWithStalledSubscriber(t *testing.T) {
 	}
 	defer stalledSub.Close()
 
-	readerSub, _, err := hub.Subscribe(500)
+	readerSub, _, err := hub.Subscribe(2500)
 	if err != nil {
 		t.Fatalf("reader subscribe failed: %v", err)
 	}
 	defer readerSub.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	for i := 0; i < 50; i++ {
+	txStartTime := time.Now()
+	const numTxCalls = 200
+	for i := 0; i < numTxCalls; i++ {
 		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
 			return emit("", "event", map[string]int{"n": totalSeeded + i})
 		})
 	}
+	txEndTime := time.Now()
+	txElapsed := txEndTime.Sub(txStartTime)
 
 	var prevSeq int64
 	eventCount := 0
-	expectedCount := totalSeeded - 500 + 50
+	expectedCount := totalSeeded - 2500 + numTxCalls
 	for eventCount < expectedCount {
 		event, err := readerSub.Next(ctx)
 		if err != nil {
@@ -736,6 +765,11 @@ func TestReplayLargeWithStalledSubscriber(t *testing.T) {
 
 	if eventCount != expectedCount {
 		t.Errorf("reader got %d events, expected %d", eventCount, expectedCount)
+	}
+
+	const txTimeout = 10 * time.Second
+	if txElapsed > txTimeout {
+		t.Errorf("Tx calls took %v, exceeded timeout %v (stalled subscriber should not block)", txElapsed, txTimeout)
 	}
 }
 
