@@ -626,3 +626,251 @@ func (s *Store) GetRun(runID string) (*RunRow, error) {
 
 	return &row, nil
 }
+
+// CreateCandidate stores a new candidate with a caller-provided hash.
+func (s *Store) CreateCandidate(turnID, content, hash string) (candidateID string, err error) {
+	candidateID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return "", fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+			}
+		}
+	}()
+
+	if _, err = tx.Exec(`
+		INSERT INTO candidates (id, turn_id, content, content_hash)
+		VALUES (?, ?, ?, ?)
+	`, candidateID, turnID, content, hash); err != nil {
+		return "", fmt.Errorf("insert candidate: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return candidateID, nil
+}
+
+// RecordVerdict stores a verdict from an attempt.
+func (s *Store) RecordVerdict(attemptID, echoedCandidateHash, parsed, reason, validationStatus string) (verdictID string, err error) {
+	verdictID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return "", fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+			}
+		}
+	}()
+
+	var parsedVerdict *string
+	if parsed != "" {
+		parsedVerdict = &parsed
+	}
+
+	if _, err = tx.Exec(`
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, reason, validation_status)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, verdictID, attemptID, echoedCandidateHash, parsedVerdict, reason, validationStatus); err != nil {
+		return "", fmt.Errorf("insert verdict: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return verdictID, nil
+}
+
+// OpenBlock opens a block from a verdict. Rejects if the verdict's parsed value is not block.
+func (s *Store) OpenBlock(verdictID, blockID, candidateHash, severity, evidence, remedy string) (err error) {
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+			}
+		}
+	}()
+
+	var parsedVerdict sql.NullString
+	if err = tx.QueryRow(`
+		SELECT parsed_verdict FROM verdicts WHERE id = ?
+	`, verdictID).Scan(&parsedVerdict); err != nil {
+		return fmt.Errorf("query verdict: %w", err)
+	}
+
+	if !parsedVerdict.Valid || parsedVerdict.String != "block" {
+		return fmt.Errorf("verdict is not a block")
+	}
+
+	if _, err = tx.Exec(`
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state)
+		VALUES (?, ?, ?, ?, ?, ?, 'open')
+	`, blockID, verdictID, candidateHash, severity, evidence, remedy); err != nil {
+		return fmt.Errorf("insert block: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// WithdrawBlock withdraws a block against a new candidate hash.
+// Rejects unless the block is open, and rejects when againstCandidateHash is empty or equals the hash the block was opened against.
+func (s *Store) WithdrawBlock(blockID, againstCandidateHash string) (err error) {
+	if againstCandidateHash == "" {
+		return fmt.Errorf("againstCandidateHash cannot be empty")
+	}
+
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+			}
+		}
+	}()
+
+	var state string
+	var originalHash string
+	if err = tx.QueryRow(`
+		SELECT state, candidate_hash FROM blocks WHERE id = ?
+	`, blockID).Scan(&state, &originalHash); err != nil {
+		return fmt.Errorf("query block: %w", err)
+	}
+
+	if state != "open" {
+		return fmt.Errorf("block is not in open state: %s", state)
+	}
+
+	if againstCandidateHash == originalHash {
+		return fmt.Errorf("cannot withdraw block against the same candidate hash")
+	}
+
+	if _, err = tx.Exec(`
+		UPDATE blocks SET state = 'withdrawn', withdrawn_against_hash = ? WHERE id = ?
+	`, againstCandidateHash, blockID); err != nil {
+		return fmt.Errorf("update block: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// OverrideBlock overrides a block. Rejects unless the block is open.
+func (s *Store) OverrideBlock(blockID string) (err error) {
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+			}
+		}
+	}()
+
+	var state string
+	if err = tx.QueryRow(`
+		SELECT state FROM blocks WHERE id = ?
+	`, blockID).Scan(&state); err != nil {
+		return fmt.Errorf("query block: %w", err)
+	}
+
+	if state != "open" {
+		return fmt.Errorf("block is not in open state: %s", state)
+	}
+
+	if _, err = tx.Exec(`
+		UPDATE blocks SET state = 'overridden' WHERE id = ?
+	`, blockID); err != nil {
+		return fmt.Errorf("update block: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// Block represents a row from the blocks table.
+type Block struct {
+	ID            string
+	VerdictID     string
+	CandidateHash string
+	Severity      string
+	Evidence      string
+	Remedy        string
+	State         string
+}
+
+// OpenBlocks returns blocks in open state for a turn, across all its candidates.
+func (s *Store) OpenBlocks(turnID string) ([]Block, error) {
+	tx, err := s.db.conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`
+		SELECT b.id, b.verdict_id, b.candidate_hash, b.severity, b.evidence, b.remedy, b.state
+		FROM blocks b
+		JOIN verdicts v ON b.verdict_id = v.id
+		JOIN attempts a ON v.attempt_id = a.id
+		WHERE a.turn_id = ? AND b.state = 'open'
+		ORDER BY b.id
+	`, turnID)
+	if err != nil {
+		return nil, fmt.Errorf("query blocks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var blocks []Block
+	for rows.Next() {
+		var block Block
+		if err := rows.Scan(&block.ID, &block.VerdictID, &block.CandidateHash, &block.Severity, &block.Evidence, &block.Remedy, &block.State); err != nil {
+			return nil, fmt.Errorf("scan block: %w", err)
+		}
+		blocks = append(blocks, block)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return blocks, nil
+}
