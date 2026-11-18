@@ -16,6 +16,8 @@ const (
 	StepKindReply StepKind = iota
 	StepKindHang
 	StepKindEcho
+	StepKindError
+	StepKindNotSent
 )
 
 // Step represents a single step in a script that determines what Complete returns.
@@ -30,6 +32,8 @@ type Step struct {
 	ReportedModel      string
 	Delay              time.Duration
 	EchoedString       string
+	Err                error
+	Usage              *transport.Usage
 }
 
 // CompleteCall records a single Complete call with all its details.
@@ -158,6 +162,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			Status:          step.Status,
 			NativeFinish:    step.NativeFinishReason,
 			TransportStatus: step.TransportStatus,
+			Usage:           step.Usage,
 		}, nil
 
 	case StepKindEcho:
@@ -178,7 +183,23 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			Status:          step.Status,
 			NativeFinish:    step.NativeFinishReason,
 			TransportStatus: step.TransportStatus,
+			Usage:           step.Usage,
 		}, nil
+
+	case StepKindError:
+		return transport.CompleteResult{
+			Envelope: req.Envelope,
+		}, step.Err
+
+	case StepKindNotSent:
+		if step.Err == nil {
+			return transport.CompleteResult{
+				Envelope: req.Envelope,
+			}, transport.ErrNotSent
+		}
+		return transport.CompleteResult{
+			Envelope: req.Envelope,
+		}, fmt.Errorf("%w: %w", transport.ErrNotSent, step.Err)
 
 	case StepKindHang:
 		// Block until context is done, Cancel is called, or req.Deadline passes.
