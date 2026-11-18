@@ -633,7 +633,7 @@ func (e *Engine) dispatchReviewerSetup(t *openTurn, reviewerID, candidateHash, a
 		}
 
 		// Need to get the epoch from the turn again.
-		e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 			turn, err := tx.GetTurn(t.id)
 			if err != nil {
 				return err
@@ -641,6 +641,11 @@ func (e *Engine) dispatchReviewerSetup(t *openTurn, reviewerID, candidateHash, a
 			setup.req.Envelope.Epoch = turn.Epoch
 			return nil
 		})
+		if err != nil {
+			setup.err = err
+			setupCh <- setup
+			return
+		}
 
 		setupCh <- setup
 		return
@@ -795,6 +800,7 @@ func (e *Engine) completeReviewerResult(t *openTurn, reviewerID, attemptID strin
 	})
 
 	if quarantined {
+		delete(e.running, reviewerID)
 		return
 	}
 	if err != nil {

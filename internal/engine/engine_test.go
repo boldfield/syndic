@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -681,11 +682,49 @@ func TestReviewVerdictWrongHash(t *testing.T) {
 	if n := countEvents(h, wire.EventKindAttemptBegun); n != 2 {
 		t.Fatalf("want 2 attempt_begun, got %d", n)
 	}
+	// Verify the reviewer adapter was called exactly once.
+	calls := h.Adapters["reviewer"].Calls()
+	if len(calls) != 1 {
+		t.Fatalf("want 1 reviewer call, got %d", len(calls))
+	}
+	// Verify a rejected verdict row exists.
+	verdicts, err := h.Store.ListVerdicts(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, v := range verdicts {
+		if v.ValidationStatus == string(verdict.Rejected) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("want rejected verdict row, got %+v", verdicts)
+	}
 }
 
-// TODO: TestReviewVerdictApproveWithChanges needs debugging with ReplyWithRequestInfo
-// func TestReviewVerdictApproveWithChanges(t *testing.T) {
-// }
+func TestReviewVerdictApproveWithChanges(t *testing.T) {
+	script := map[string][]fake.Step{
+		"author": {enginetest.Reply("the answer")},
+		"reviewer": {enginetest.ReplyWithRequestInfo(func(req transport.CompleteRequest) string {
+			return fake.VerdictApproveWithChanges(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})},
+	}
+	h := enginetest.New(t, enginetest.RosterTOML, script)
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.WaitTurnState(reply.TurnID, engine.StateIncomplete)
+	last := lastTurnState(t, h, reply.TurnID)
+	if last.Reason == nil || !strings.HasPrefix(*last.Reason, "revision_request:") {
+		t.Fatalf("want revision_request, got %+v", last)
+	}
+	if n := countEvents(h, wire.EventKindAttemptBegun); n != 2 {
+		t.Fatalf("want 2 attempt_begun, got %d", n)
+	}
+}
 
 func TestReviewVerdictTwoEnvelopes(t *testing.T) {
 	script := map[string][]fake.Step{
@@ -703,6 +742,9 @@ func TestReviewVerdictTwoEnvelopes(t *testing.T) {
 	verdicts, err := h.Store.ListVerdicts(reply.TurnID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(verdicts) == 0 {
+		t.Fatal("want at least one verdict row, got none")
 	}
 	for _, v := range verdicts {
 		if v.ValidationStatus != string(verdict.Malformed) {
@@ -730,6 +772,10 @@ func TestReviewVerdictBlockWithEndMarker(t *testing.T) {
 			t.Fatalf("want block:, got nil reason")
 		}
 		t.Fatalf("want block:, got reason=%q", *last.Reason)
+	}
+	// Verify the reason contains the verdict id:b1 format.
+	if !strings.Contains(*last.Reason, ":b1") {
+		t.Errorf("want block reason to contain :b1, got %q", *last.Reason)
 	}
 	blocks, err := h.Store.OpenBlocks(reply.TurnID)
 	if err != nil || len(blocks) != 1 {
@@ -859,9 +905,250 @@ allowed_destinations = []
 	}
 }
 
-// TODO: TestReviewTwoReviewersBlockAfterApprove needs debugging with ReplyWithRequestInfo
-// func TestReviewTwoReviewersBlockAfterApprove(t *testing.T) {
-// }
+func TestReviewTwoReviewersBlockAfterApprove(t *testing.T) {
+	reviewerROTOML := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer1", "reviewer2"]
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	script := map[string][]fake.Step{
+		"author": {enginetest.Reply("the answer")},
+		"reviewer1": {enginetest.ReplyWithRequestInfo(func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})},
+		"reviewer2": {enginetest.ReplyWithRequestInfo(func(req transport.CompleteRequest) string {
+			return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "critical", "evidence", "remedy", "reason")
+		})},
+	}
+	h := enginetest.New(t, reviewerROTOML, script)
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.WaitTurnState(reply.TurnID, engine.StateIncomplete)
+	last := lastTurnState(t, h, reply.TurnID)
+	if last.Reason == nil || !strings.HasPrefix(*last.Reason, "block:") {
+		t.Fatalf("want block:, got reason=%q", last.Reason)
+	}
+	blocks, err := h.Store.OpenBlocks(reply.TurnID)
+	if err != nil || len(blocks) != 1 {
+		t.Fatalf("want 1 open block, got %d, err %v", len(blocks), err)
+	}
+}
+
+func TestReviewThreeParticipantsApprove(t *testing.T) {
+	threeReviewerROTOML := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer1", "reviewer2"]
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	script := map[string][]fake.Step{
+		"author":    {enginetest.Reply("the answer")},
+		"reviewer1": {enginetest.VerdictApproveFromRequest()},
+		"reviewer2": {enginetest.VerdictApproveFromRequest()},
+	}
+	h := enginetest.New(t, threeReviewerROTOML, script)
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.WaitTurnState(reply.TurnID, engine.StateApproved)
+	last := lastTurnState(t, h, reply.TurnID)
+	if last.Reason == nil || *last.Reason != "all_approved" {
+		t.Fatalf("last = %+v", last)
+	}
+	if n := countEvents(h, wire.EventKindAttemptBegun); n != 3 {
+		t.Fatalf("want 3 attempt_begun, got %d", n)
+	}
+}
+
+func TestReviewFiveParticipantsApprove(t *testing.T) {
+	fiveReviewerROTOML := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer3"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer4"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer1", "reviewer2", "reviewer3", "reviewer4"]
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	script := map[string][]fake.Step{
+		"author":    {enginetest.Reply("the answer")},
+		"reviewer1": {enginetest.VerdictApproveFromRequest()},
+		"reviewer2": {enginetest.VerdictApproveFromRequest()},
+		"reviewer3": {enginetest.VerdictApproveFromRequest()},
+		"reviewer4": {enginetest.VerdictApproveFromRequest()},
+	}
+	h := enginetest.New(t, fiveReviewerROTOML, script)
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.WaitTurnState(reply.TurnID, engine.StateApproved)
+	last := lastTurnState(t, h, reply.TurnID)
+	if last.Reason == nil || *last.Reason != "all_approved" {
+		t.Fatalf("last = %+v", last)
+	}
+	if n := countEvents(h, wire.EventKindAttemptBegun); n != 5 {
+		t.Fatalf("want 5 attempt_begun, got %d", n)
+	}
+}
 
 func TestReviewCandidateHashVerification(t *testing.T) {
 	script := map[string][]fake.Step{
@@ -900,6 +1187,44 @@ func TestReviewCandidateHashVerification(t *testing.T) {
 
 	if frozenHash != reqHash {
 		t.Fatalf("candidate hash mismatch: frozen %q vs request %q", frozenHash, reqHash)
+	}
+
+	// Independently compute the candidate hash and verify it matches.
+	turn, err := h.Store.GetTurn(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := h.Store.ListAttempts(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authorOutput string
+	var authorAttemptID string
+	for _, a := range attempts {
+		if a.Participant == "author" {
+			authorAttemptID = a.AttemptID
+			authorOutput = a.Output
+			break
+		}
+	}
+	if authorOutput == "" {
+		t.Fatal("no author output found")
+	}
+
+	// Use the same hash computation as the engine.
+	computedHash, err := candidate.Hash(candidate.Identity{
+		ManifestHash:    turn.ManifestHash,
+		TurnID:          reply.TurnID,
+		AuthorAttemptID: authorAttemptID,
+		Content:         []byte(authorOutput),
+		EvidenceIDs:     nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if computedHash != frozenHash {
+		t.Fatalf("candidate hash mismatch: computed %q vs frozen %q", computedHash, frozenHash)
 	}
 }
 
@@ -971,12 +1296,11 @@ func TestReviewRequestContainsCandidate(t *testing.T) {
 	}
 
 	// Should not contain the author participant id in the user message.
-	// (This is a bit tricky to test precisely, but we can check that the
-	// author id is not in the messages in a suspicious way.)
 	for _, msg := range req.Messages {
-		if msg.Role == "user" && strings.Contains(msg.Content, "author") && !strings.Contains(msg.Content, "author's") {
-			// This is a heuristic - the author id shouldn't appear as "author" in the message.
-			// But it's hard to test precisely without more context.
+		if msg.Role == "user" {
+			if strings.Contains(msg.Content, "author") {
+				t.Errorf("user message contains author id")
+			}
 		}
 	}
 }
