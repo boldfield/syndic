@@ -1719,9 +1719,10 @@ func TestToolRoleNotAllowed(t *testing.T) {
 // TestAdapterVersionEqualsProbeVersion verifies adapter.AdapterVersion matches probe record.
 func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/models" {
+		switch r.URL.Path {
+		case "/models":
 			w.WriteHeader(http.StatusNotFound)
-		} else if r.URL.Path == "/chat/completions" {
+		case "/chat/completions":
 			resp := ResponseBody{
 				Model: "test-model",
 				Choices: []ChoiceBody{
