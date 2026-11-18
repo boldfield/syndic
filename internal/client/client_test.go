@@ -1057,3 +1057,116 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+// helloThen answers hello and then runs rest for each later frame.
+func helloThen(rest func(frame wire.Frame, w *wire.Writer) bool) func(*wire.Reader, *wire.Writer) {
+	return func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply("", wire.HelloReply{Protocol: 1, RunID: "run-1"})
+				_ = w.Write(reply)
+				continue
+			}
+			if !rest(frame, w) {
+				return
+			}
+		}
+	}
+}
+
+func TestEventsRightAfterSubscribeReplyStayOrdered(t *testing.T) {
+	const n = 300
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestSubscribe {
+			return true
+		}
+		reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{OK: true, LiveFromSeq: 1})
+		_ = w.Write(reply)
+		for i := int64(1); i <= n; i++ {
+			_ = w.Write(wire.Frame{Type: "event", Seq: i, Kind: "k", Body: json.RawMessage(`{}`)})
+		}
+		return true
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, server.addr, "t", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Subscribe(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(1); i <= n; i++ {
+		f, err := c.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Seq != i {
+			t.Fatalf("want seq %d got %d", i, f.Seq)
+		}
+	}
+}
+
+func TestPeerCloseDuringSubscribeFlood(t *testing.T) {
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestSubscribe {
+			return true
+		}
+		reply, _ := wire.NewReply(frame.ID, wire.SubscribeReply{OK: true, LiveFromSeq: 1})
+		_ = w.Write(reply)
+		for i := int64(1); i <= 50; i++ {
+			_ = w.Write(wire.Frame{Type: "event", Seq: i, Kind: "k", Body: json.RawMessage(`{}`)})
+		}
+		return false
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, server.addr, "t", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_, _ = c.Subscribe(ctx, 0)
+	for {
+		if _, err := c.NextEvent(ctx); err != nil {
+			if !errors.Is(err, ErrClosed) {
+				t.Fatalf("want ErrClosed, got %v", err)
+			}
+			return
+		}
+	}
+}
+
+func TestDialCtxCancelAfterSuccessKeepsClientAlive(t *testing.T) {
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		reply, _ := wire.NewReply(frame.ID, wire.StatusReply{})
+		_ = w.Write(reply)
+		return true
+	}))
+	defer server.Close()
+
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		c, err := Dial(ctx, server.addr, "t", "1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err = c.Status(ctx2)
+		cancel2()
+		_ = c.Close()
+		if err != nil {
+			t.Fatalf("iteration %d: status after cancel: %v", i, err)
+		}
+	}
+}
