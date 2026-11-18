@@ -10,6 +10,9 @@ import (
 // ErrNoSuchContent is returned when a ref cannot be found or resolved to content.
 var ErrNoSuchContent = errors.New("no such content")
 
+// ErrOutOfRange is returned when the offset is outside the content range.
+var ErrOutOfRange = errors.New("offset out of range")
+
 // VerdictRow represents a verdict from an attempt.
 type VerdictRow struct {
 	ID               string
@@ -254,7 +257,7 @@ func (s *Store) GetCandidate(candidateID string) (*CandidateRow, error) {
 func (tx *Tx) GetCandidate(candidateID string) (*CandidateRow, error) {
 	var row CandidateRow
 	if err := tx.tx.QueryRow(`
-		SELECT id, turn_id, content_hash, LENGTH(content)
+		SELECT id, turn_id, content_hash, LENGTH(CAST(content AS BLOB))
 		FROM candidates WHERE id = ?
 	`, candidateID).Scan(&row.ID, &row.TurnID, &row.ContentHash, &row.ByteLen); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -297,89 +300,149 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		limit = 200
 	}
 
-	var startSeq int64 = 0
-	if cursor != "" {
-		if _, err := fmt.Sscanf(cursor, "%d", &startSeq); err != nil {
-			return nil, "", fmt.Errorf("invalid cursor: %w", err)
-		}
+	type rawRow struct {
+		kind            string
+		id              string
+		phase           string
+		sender          string
+		sha256          string
+		byteLen         int64
+		journalSeq      sql.NullInt64
+		sequence        sql.NullInt64
+		dispatchedAtStr sql.NullString
+		isNullRow       bool
 	}
+
+	var allRows []rawRow
 
 	rows, err := tx.tx.Query(`
 		WITH combined AS (
-			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as participant, NULL as dispatched_at, NULL as raw_output, m.rowid as orig_rowid
+			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 1 as is_null_row
 			FROM messages m
-			WHERE m.turn_id = ? AND (m.journal_seq IS NULL OR m.journal_seq > ?)
+			WHERE m.turn_id = ? AND m.journal_seq IS NULL
 			UNION ALL
-			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', COALESCE(LENGTH(a.raw_output), 0), a.journal_seq, NULL, a.participant, a.dispatched_at, a.raw_output, a.rowid
+			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 1 as is_null_row
 			FROM attempts a
-			WHERE a.turn_id = ? AND (a.journal_seq IS NULL OR a.journal_seq > ?)
+			WHERE a.turn_id = ? AND a.journal_seq IS NULL
+			UNION ALL
+			SELECT 'message' as kind, m.id, m.phase, m.sender, m.content_hash as sha256, m.byte_length, m.journal_seq, m.sequence, NULL as dispatched_at, 0 as is_null_row
+			FROM messages m
+			WHERE m.turn_id = ? AND m.journal_seq IS NOT NULL
+			UNION ALL
+			SELECT 'attempt' as kind, a.id, a.phase, a.participant, '', LENGTH(CAST(COALESCE(a.raw_output, '') AS BLOB)), a.journal_seq, NULL, a.dispatched_at, 0 as is_null_row
+			FROM attempts a
+			WHERE a.turn_id = ? AND a.journal_seq IS NOT NULL
 		)
-		SELECT kind, id, phase, sender, sha256, byte_length, journal_seq, sequence, participant, dispatched_at, COALESCE(raw_output, '')
+		SELECT kind, id, phase, sender, sha256, byte_length, journal_seq, sequence, dispatched_at, is_null_row
 		FROM combined
 		ORDER BY
-			CASE WHEN journal_seq IS NULL THEN 0 ELSE 1 END,
-			CASE WHEN journal_seq IS NULL AND kind = 'message' THEN 0 WHEN journal_seq IS NULL AND kind = 'attempt' THEN 1 ELSE 2 END,
-			CASE WHEN journal_seq IS NULL THEN sequence END,
-			CASE WHEN journal_seq IS NULL THEN dispatched_at END,
-			orig_rowid
-		LIMIT ?
-	`, turnID, startSeq, turnID, startSeq, limit+1)
+			is_null_row DESC,
+			CASE WHEN is_null_row = 1 AND kind = 'message' THEN 0 WHEN is_null_row = 1 AND kind = 'attempt' THEN 1 ELSE 2 END,
+			CASE WHEN is_null_row = 1 AND kind = 'message' THEN COALESCE(sequence, 0) END,
+			CASE WHEN is_null_row = 1 AND kind = 'attempt' THEN dispatched_at END,
+			journal_seq
+	`, turnID, turnID, turnID, turnID)
 
 	if err != nil {
 		return nil, "", fmt.Errorf("query transcript: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var items []TranscriptItem
-	var maxSeq int64 = startSeq
-
 	for rows.Next() {
 		var kind, id, phase, sender, sha256 string
 		var byteLen int64
 		var journalSeq sql.NullInt64
 		var sequence sql.NullInt64
-		var participant sql.NullString
 		var dispatchedAtStr sql.NullString
-		var rawOutput string
+		var isNullRow int
 
-		if err := rows.Scan(&kind, &id, &phase, &sender, &sha256, &byteLen, &journalSeq, &sequence, &participant, &dispatchedAtStr, &rawOutput); err != nil {
+		if err := rows.Scan(&kind, &id, &phase, &sender, &sha256, &byteLen, &journalSeq, &sequence, &dispatchedAtStr, &isNullRow); err != nil {
 			return nil, "", fmt.Errorf("scan transcript row: %w", err)
 		}
 
-		if journalSeq.Valid && journalSeq.Int64 > maxSeq {
-			maxSeq = journalSeq.Int64
-		}
-
-		ref := kind + ":" + id
-		item := TranscriptItem{
-			Kind:    kind,
-			Ref:     ref,
-			Phase:   phase,
-			Sender:  sender,
-			SHA256:  sha256,
-			ByteLen: byteLen,
-		}
-
-		if kind == "attempt" {
-			attempt, err := tx.GetAttempt(id)
-			if err != nil {
-				return nil, "", fmt.Errorf("get attempt for transcript: %w", err)
-			}
-			attempt.RawOutput = nil
-			item.Attempt = attempt
-		}
-
-		items = append(items, item)
+		allRows = append(allRows, rawRow{
+			kind:            kind,
+			id:              id,
+			phase:           phase,
+			sender:          sender,
+			sha256:          sha256,
+			byteLen:         byteLen,
+			journalSeq:      journalSeq,
+			sequence:        sequence,
+			dispatchedAtStr: dispatchedAtStr,
+			isNullRow:       isNullRow == 1,
+		})
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, "", fmt.Errorf("iterate transcript: %w", err)
 	}
 
+	var startIdx int
+	if cursor != "" {
+		for i, row := range allRows {
+			var sortKey string
+			if row.isNullRow {
+				if row.kind == "message" && row.sequence.Valid {
+					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
+				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
+					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
+				}
+			} else if row.journalSeq.Valid {
+				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
+			}
+			if sortKey == cursor {
+				startIdx = i + 1
+				break
+			}
+		}
+	}
+
+	var items []TranscriptItem
 	var nextCursor string
-	if len(items) > limit {
-		items = items[:limit]
-		nextCursor = fmt.Sprintf("%d", maxSeq)
+
+	for i := startIdx; i < len(allRows) && len(items) < limit; i++ {
+		row := allRows[i]
+
+		item := TranscriptItem{
+			Kind:    row.kind,
+			Ref:     row.kind + ":" + row.id,
+			Phase:   row.phase,
+			Sender:  row.sender,
+			SHA256:  row.sha256,
+			ByteLen: row.byteLen,
+		}
+
+		if row.kind == "attempt" {
+			attempt, err := tx.GetAttempt(row.id)
+			if err != nil {
+				return nil, "", fmt.Errorf("get attempt for transcript: %w", err)
+			}
+			attempt.RawOutput = nil
+			item.Attempt = attempt
+			if row.dispatchedAtStr.Valid {
+				t, err := parseTime(row.dispatchedAtStr.String)
+				if err == nil {
+					item.At = t
+				}
+			}
+		}
+
+		items = append(items, item)
+
+		if len(items) == limit && i+1 < len(allRows) {
+			var sortKey string
+			if row.isNullRow {
+				if row.kind == "message" && row.sequence.Valid {
+					sortKey = fmt.Sprintf("null:m:%d", row.sequence.Int64)
+				} else if row.kind == "attempt" && row.dispatchedAtStr.Valid {
+					sortKey = fmt.Sprintf("null:a:%s", row.dispatchedAtStr.String)
+				}
+			} else if row.journalSeq.Valid {
+				sortKey = fmt.Sprintf("seq:%d", row.journalSeq.Int64)
+			}
+			nextCursor = sortKey
+		}
 	}
 
 	return items, nextCursor, nil
@@ -404,6 +467,10 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	}
 	if limit > 262144 {
 		limit = 262144
+	}
+
+	if offset < 0 {
+		return nil, 0, "", fmt.Errorf("offset must be >= 0: %w", ErrOutOfRange)
 	}
 
 	var content string
@@ -456,7 +523,7 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	total := int64(len(contentBytes))
 
 	if offset > total {
-		return nil, 0, "", ErrNoSuchContent
+		return nil, 0, "", fmt.Errorf("offset beyond content: %w", ErrOutOfRange)
 	}
 
 	if offset == total {
