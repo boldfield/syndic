@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -521,6 +521,46 @@ func TestPayloadMarshaling(t *testing.T) {
 	sub.Close()
 }
 
+// emitN emits n single-event transactions.
+func emitN(t *testing.T, h *Hub, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		i := i
+		err := h.Tx(func(tx *journal.Tx, emit Emit) error {
+			return emit("", "event", map[string]int{"n": i})
+		})
+		if err != nil {
+			t.Errorf("Tx %d failed: %v", i, err)
+			return
+		}
+	}
+}
+
+// readTail reads events until seq upTo has been returned, checking that every
+// Seq from from+1 to upTo arrives exactly once and in order, then checks that
+// nothing further arrives.
+func readTail(t *testing.T, sub *Subscription, from, upTo int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	want := from + 1
+	for want <= upTo {
+		ev, err := sub.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next failed waiting for seq %d: %v", want, err)
+		}
+		if ev.Seq != want {
+			t.Fatalf("got seq %d, want %d", ev.Seq, want)
+		}
+		want++
+	}
+	quiet, qcancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer qcancel()
+	if ev, err := sub.Next(quiet); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected no further event, got seq %d err %v", ev.Seq, err)
+	}
+}
+
 func TestLaggingErrorWithResume(t *testing.T) {
 	store := setupTestDB(t)
 	hub := New(store, 8)
@@ -529,61 +569,55 @@ func TestLaggingErrorWithResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
+	defer sub.Close()
 
-	err = hub.Tx(func(tx *journal.Tx, emit Emit) error {
-		for i := 0; i < 9; i++ {
-			if err := emit("", "event", map[string]int{"n": i}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Tx failed: %v", err)
-	}
+	// Nine events with nobody reading: the ninth overflows the queue of 8.
+	emitN(t, hub, 9)
+	// Later events must not be delivered to the lagging subscriber.
+	emitN(t, hub, 5)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var lastEvent journal.Event
+	var last int64
 	for i := 0; i < 8; i++ {
-		event, err := sub.Next(ctx)
+		ev, err := sub.Next(ctx)
 		if err != nil {
 			t.Fatalf("Next %d failed: %v", i, err)
 		}
-		lastEvent = event
+		last = ev.Seq
+	}
+	if last != 8 {
+		t.Fatalf("last queued seq %d, want 8", last)
 	}
 
-	_, err = sub.Next(ctx)
-	if !errors.Is(err, ErrLagging) {
-		t.Fatalf("expected ErrLagging, got %v", err)
+	for i := 0; i < 3; i++ {
+		_, err = sub.Next(ctx)
+		if !errors.Is(err, ErrLagging) {
+			t.Fatalf("call %d: expected ErrLagging, got %v", i, err)
+		}
+		var lagErr *LaggingError
+		if !errors.As(err, &lagErr) {
+			t.Fatalf("call %d: expected *LaggingError, got %T", i, err)
+		}
+		if lagErr.LastSeq != last {
+			t.Fatalf("call %d: LastSeq %d, want %d", i, lagErr.LastSeq, last)
+		}
 	}
 
-	var lagErr *LaggingError
-	if !errors.As(err, &lagErr) {
-		t.Fatalf("expected *LaggingError, got %T", err)
+	max, err := store.MaxSeq()
+	if err != nil {
+		t.Fatalf("MaxSeq: %v", err)
 	}
-
-	resumeSeq := lagErr.LastSeq
-	if resumeSeq != lastEvent.Seq {
-		t.Errorf("LaggingError.LastSeq %d != lastEvent.Seq %d", resumeSeq, lastEvent.Seq)
-	}
-
-	sub.Close()
-
-	sub2, _, err := hub.Subscribe(resumeSeq)
+	sub2, liveFrom, err := hub.Subscribe(last)
 	if err != nil {
 		t.Fatalf("Subscribe resume failed: %v", err)
 	}
 	defer sub2.Close()
-
-	event, err := sub2.Next(ctx)
-	if err != nil {
-		t.Fatalf("Next after resume failed: %v", err)
+	if liveFrom != max+1 {
+		t.Fatalf("liveFromSeq %d, want %d", liveFrom, max+1)
 	}
-	if event.Seq != lastEvent.Seq+1 {
-		t.Errorf("resume event seq %d, expected %d", event.Seq, lastEvent.Seq+1)
-	}
+	readTail(t, sub2, last, max)
 }
 
 func TestConcurrent5000EventHandoff(t *testing.T) {
@@ -591,60 +625,39 @@ func TestConcurrent5000EventHandoff(t *testing.T) {
 	hub := New(store, 1024)
 
 	const numEvents = 5000
-	const subscribeAfter = 2500
+	const midway = 2500
 
-	seenSeqs := make(map[int64]bool)
-	seenSeqsMu := &sync.Mutex{}
-
-	done := make(chan int)
+	var emitted atomic.Int64
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for i := 0; i < numEvents; i++ {
-			n := i
+			i := i
 			err := hub.Tx(func(tx *journal.Tx, emit Emit) error {
-				return emit("", "event", map[string]int{"n": n})
+				return emit("", "event", map[string]int{"n": i})
 			})
 			if err != nil {
 				t.Errorf("Tx %d failed: %v", i, err)
 				return
 			}
+			emitted.Store(int64(i + 1))
 		}
-		done <- 1
 	}()
 
-	time.Sleep(10 * time.Millisecond)
+	// Wait for the writer to pass the midpoint, then resume from a Seq the
+	// reader "last saw" while the writer is still going.
+	for emitted.Load() < midway {
+		time.Sleep(time.Millisecond)
+	}
+	since := emitted.Load()
 
-	sub, _, err := hub.Subscribe(subscribeAfter - 1)
+	sub, _, err := hub.Subscribe(since)
 	if err != nil {
 		t.Fatalf("Subscribe failed: %v", err)
 	}
 	defer sub.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var prevSeq int64
-	expectedCount := numEvents - subscribeAfter + 1
-	for i := 0; i < expectedCount; i++ {
-		event, err := sub.Next(ctx)
-		if err != nil {
-			t.Fatalf("Next %d failed: %v", i, err)
-		}
-		if event.Seq <= prevSeq {
-			t.Errorf("event %d: seq %d not strictly increasing after %d", i, event.Seq, prevSeq)
-		}
-		seenSeqsMu.Lock()
-		if seenSeqs[event.Seq] {
-			t.Errorf("seq %d seen twice", event.Seq)
-		}
-		seenSeqs[event.Seq] = true
-		seenSeqsMu.Unlock()
-		prevSeq = event.Seq
-	}
-
-	if len(seenSeqs) != expectedCount {
-		t.Errorf("expected %d unique sequences, got %d", expectedCount, len(seenSeqs))
-	}
-
+	readTail(t, sub, since, numEvents)
 	<-done
 }
 
@@ -652,124 +665,125 @@ func TestTenStaggeredSubscribers(t *testing.T) {
 	store := setupTestDB(t)
 	hub := New(store, 1024)
 
-	const totalEvents = 100
+	const totalEvents = 200
 	const subscribers = 10
+	const step = totalEvents / subscribers
 
-	for i := 0; i < totalEvents; i++ {
-		n := i
-		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
-			return emit("", "event", map[string]int{"n": n})
-		})
+	type result struct {
+		since int64
+		seqs  []int64
 	}
+	subs := make([]*Subscription, 0, subscribers)
+	sinces := make([]int64, 0, subscribers)
 
-	subs := make([]*Subscription, subscribers)
+	// Attach one subscriber every `step` events while emitting; each
+	// resumes from a Seq at or before its attach point.
 	for i := 0; i < subscribers; i++ {
-		sinceSeq := int64((i * totalEvents) / subscribers)
-		sub, _, err := hub.Subscribe(sinceSeq)
+		emitN(t, hub, step)
+		max, err := store.MaxSeq()
+		if err != nil {
+			t.Fatalf("MaxSeq: %v", err)
+		}
+		since := max - int64(i) // mix of replayed and live starts
+		if since < 0 {
+			since = 0
+		}
+		sub, _, err := hub.Subscribe(since)
 		if err != nil {
 			t.Fatalf("Subscribe %d failed: %v", i, err)
 		}
-		subs[i] = sub
+		defer sub.Close()
+		subs = append(subs, sub)
+		sinces = append(sinces, since)
 	}
-	defer func() {
-		for _, sub := range subs {
-			sub.Close()
-		}
-	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	results := make([]result, subscribers)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	var maxSeqs [subscribers]int64
-	for i := 0; i < subscribers; i++ {
-		for {
-			event, err := subs[i].Next(ctx)
+	for i, sub := range subs {
+		results[i].since = sinces[i]
+		for seq := sinces[i] + 1; seq <= totalEvents; seq++ {
+			ev, err := sub.Next(ctx)
 			if err != nil {
-				if err == context.DeadlineExceeded {
-					break
-				}
 				t.Fatalf("sub %d Next failed: %v", i, err)
 			}
-			if event.Seq <= maxSeqs[i] {
-				t.Errorf("sub %d: seq %d not strictly increasing after %d", i, event.Seq, maxSeqs[i])
+			results[i].seqs = append(results[i].seqs, ev.Seq)
+			if ev.Seq != seq {
+				t.Fatalf("sub %d got seq %d, want %d", i, ev.Seq, seq)
 			}
-			maxSeqs[i] = event.Seq
 		}
+		quiet, qcancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		if ev, err := sub.Next(quiet); !errors.Is(err, context.DeadlineExceeded) {
+			qcancel()
+			t.Fatalf("sub %d: expected no further event, got seq %d err %v", i, ev.Seq, err)
+		}
+		qcancel()
 	}
 
-	if maxSeqs[0] == 0 {
-		t.Fatal("no events received by any subscriber")
-	}
-
-	for i := 1; i < subscribers; i++ {
-		if maxSeqs[i] != maxSeqs[0] {
-			t.Errorf("sub %d final seq %d != sub 0 final seq %d", i, maxSeqs[i], maxSeqs[0])
+	// All tails agree where they overlap: each is the suffix of the longest.
+	longest := results[0].seqs
+	for i, r := range results {
+		off := len(longest) - len(r.seqs)
+		for j, s := range r.seqs {
+			if longest[off+j] != s {
+				t.Fatalf("sub %d tail differs at %d: %d vs %d", i, j, s, longest[off+j])
+			}
 		}
 	}
 }
 
 func TestReplayLargeWithStalledSubscriber(t *testing.T) {
 	store := setupTestDB(t)
-	hub := New(store, 1024)
+	hub := New(store, 256)
 
-	const totalSeeded = 5000
-	for i := 0; i < totalSeeded; i++ {
-		n := i
-		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
-			return emit("", "event", map[string]int{"n": n})
-		})
+	const totalSeeded = 50000
+	err := hub.Tx(func(tx *journal.Tx, emit Emit) error {
+		for i := 0; i < totalSeeded; i++ {
+			if err := emit("", "event", map[string]int{"n": i}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seeding failed: %v", err)
 	}
 
-	stalledSub, _, err := hub.Subscribe(0)
+	// Never reads.
+	stalled, _, err := hub.Subscribe(0)
 	if err != nil {
 		t.Fatalf("stalled subscribe failed: %v", err)
 	}
-	defer stalledSub.Close()
+	defer stalled.Close()
 
-	readerSub, _, err := hub.Subscribe(2500)
+	reader, _, err := hub.Subscribe(0)
 	if err != nil {
 		t.Fatalf("reader subscribe failed: %v", err)
 	}
-	defer readerSub.Close()
+	defer reader.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	txStartTime := time.Now()
 	const numTxCalls = 200
-	for i := 0; i < numTxCalls; i++ {
-		_ = hub.Tx(func(tx *journal.Tx, emit Emit) error {
-			return emit("", "event", map[string]int{"n": totalSeeded + i})
-		})
-	}
-	txEndTime := time.Now()
-	txElapsed := txEndTime.Sub(txStartTime)
+	txDone := make(chan struct{})
+	go func() {
+		defer close(txDone)
+		emitN(t, hub, numTxCalls)
+	}()
 
-	var prevSeq int64
-	eventCount := 0
-	expectedCount := totalSeeded - 2500 + numTxCalls
-	for eventCount < expectedCount {
-		event, err := readerSub.Next(ctx)
-		if err != nil {
-			if err == context.DeadlineExceeded {
-				break
-			}
-			t.Fatalf("reader Next failed: %v", err)
-		}
-		if event.Seq <= prevSeq {
-			t.Errorf("seq %d not strictly increasing after %d", event.Seq, prevSeq)
-		}
-		prevSeq = event.Seq
-		eventCount++
-	}
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		readTail(t, reader, 0, totalSeeded+numTxCalls)
+	}()
 
-	if eventCount != expectedCount {
-		t.Errorf("reader got %d events, expected %d", eventCount, expectedCount)
+	select {
+	case <-txDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("Tx calls did not complete: blocked on a subscriber")
 	}
-
-	const txTimeout = 10 * time.Second
-	if txElapsed > txTimeout {
-		t.Errorf("Tx calls took %v, exceeded timeout %v (stalled subscriber should not block)", txElapsed, txTimeout)
+	select {
+	case <-readDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("reader did not finish replay")
 	}
 }
 
