@@ -242,6 +242,49 @@ func TestParseVerdicts(t *testing.T) {
 			expectedClass:   Malformed,
 			expectedProblem: true,
 		},
+		{
+			name:             "ContinuationLineWithColon",
+			text:             strings.Join([]string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: block", "severity: low", "block_id: b1", "evidence: see main.go:42 for details", "remedy: fix it", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    Valid,
+			expectedDecision: "block",
+			checks: func(t *testing.T, r Result) {
+				if r.Verdict.Evidence != "see main.go:42 for details" {
+					t.Errorf("expected evidence with colon, got %q", r.Verdict.Evidence)
+				}
+			},
+		},
+		{
+			name:            "SecondVerdictInsideEnvelope",
+			text:            strings.Join([]string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: approve", "reason: r", "VERDICT v1", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "MalformedWithProseAndPartialVerdict",
+			text:            strings.Join([]string{"Some prose before", "VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: maybe", "reason: test", "END VERDICT", "Some prose after"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Commentary, "Some prose before") {
+					t.Errorf("expected commentary before in malformed result")
+				}
+				if !strings.Contains(r.Commentary, "Some prose after") {
+					t.Errorf("expected commentary after in malformed result")
+				}
+				if r.Verdict.Candidate != "hash123" {
+					t.Errorf("expected partial verdict filled, got candidate %q", r.Verdict.Candidate)
+				}
+				if r.Verdict.Attempt != "attempt1" {
+					t.Errorf("expected partial verdict filled, got attempt %q", r.Verdict.Attempt)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -286,17 +329,18 @@ func TestParseMultilineFields(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			lines := strings.Split(tt.fieldValue, "\n")
-			envelope := []string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: block", "severity: low", "block_id: b1"}
 
 			// Build the envelope with multiline field
-			if tt.fieldName == "reason" {
+			var envelope []string
+			switch tt.fieldName {
+			case "reason":
 				envelope = []string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: block", "severity: low", "block_id: b1", "evidence: test", "remedy: fix", tt.fieldName + ": " + lines[0]}
 				envelope = append(envelope, lines[1:]...)
-			} else if tt.fieldName == "evidence" {
+			case "evidence":
 				envelope = []string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: block", "severity: low", "block_id: b1", tt.fieldName + ": " + lines[0]}
 				envelope = append(envelope, lines[1:]...)
 				envelope = append(envelope, "remedy: fix", "reason: test")
-			} else if tt.fieldName == "remedy" {
+			case "remedy":
 				envelope = []string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "verdict: block", "severity: low", "block_id: b1", "evidence: test", tt.fieldName + ": " + lines[0]}
 				envelope = append(envelope, lines[1:]...)
 				envelope = append(envelope, "reason: test")

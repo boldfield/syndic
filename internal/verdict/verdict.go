@@ -2,6 +2,7 @@ package verdict
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -45,16 +46,15 @@ func Parse(text, candidateHash, attemptID string) Result {
 	for i, line := range lines {
 		if line == "VERDICT v1" {
 			verdictCount++
-			if openIdx == -1 {
-				openIdx = i
-			} else if closeIdx != -1 {
-				// A second VERDICT v1 outside the envelope is malformed
+			// A second VERDICT v1 anywhere is malformed
+			if verdictCount > 1 {
 				return Result{
 					Classification: Malformed,
 					Commentary:     text,
 					Problem:        "multiple VERDICT v1 lines found",
 				}
 			}
+			openIdx = i
 		}
 		if line == "END VERDICT" && openIdx != -1 && closeIdx == -1 {
 			closeIdx = i
@@ -70,13 +70,12 @@ func Parse(text, candidateHash, attemptID string) Result {
 		}
 	}
 
-	// Check for leading/trailing spaces on VERDICT v1 (opening line must be exactly)
-	if strings.HasSuffix(strings.TrimPrefix(lines[openIdx], "VERDICT v1"), " ") {
-		// This shouldn't happen since we check for exact match
+	// Opening line must be exactly "VERDICT v1" with no leading or trailing spaces
+	if lines[openIdx] != "VERDICT v1" {
 		return Result{
 			Classification: Malformed,
 			Commentary:     text,
-			Problem:        "opening line has trailing space",
+			Problem:        "opening line has incorrect format",
 		}
 	}
 
@@ -97,22 +96,32 @@ func Parse(text, candidateHash, attemptID string) Result {
 
 	// Parse the fields
 	fields := make(map[string]string)
-	fieldOrder := []string{}
 	lastMultilineField := ""
-	problem := ""
+	fieldNameRegex := regexp.MustCompile(`^[a-z_]+: `)
 
 	for _, line := range envelopeLines {
-		if strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			name := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
+		if fieldNameRegex.MatchString(line) {
+			// This is a field line
+			parts := strings.SplitN(line, ": ", 2)
+			name := parts[0]
+			value := parts[1]
 
 			// Check if name is valid (lowercase letters and underscores)
 			if !isValidFieldName(name) {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
-					Problem:        fmt.Sprintf("unknown field: %s", name),
+					Commentary:     commentary,
+					Verdict: Verdict{
+						Candidate: strings.TrimSpace(fields["candidate"]),
+						Attempt:   strings.TrimSpace(fields["attempt"]),
+						Decision:  fields["verdict"],
+						Severity:  strings.TrimSpace(fields["severity"]),
+						BlockID:   strings.TrimSpace(fields["block_id"]),
+						Evidence:  strings.TrimSpace(fields["evidence"]),
+						Remedy:    strings.TrimSpace(fields["remedy"]),
+						Reason:    strings.TrimSpace(fields["reason"]),
+					},
+					Problem: fmt.Sprintf("unknown field: %s", name),
 				}
 			}
 
@@ -120,20 +129,29 @@ func Parse(text, candidateHash, attemptID string) Result {
 			if _, exists := fields[name]; exists {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
-					Problem:        fmt.Sprintf("duplicate field: %s", name),
+					Commentary:     commentary,
+					Verdict: Verdict{
+						Candidate: strings.TrimSpace(fields["candidate"]),
+						Attempt:   strings.TrimSpace(fields["attempt"]),
+						Decision:  fields["verdict"],
+						Severity:  strings.TrimSpace(fields["severity"]),
+						BlockID:   strings.TrimSpace(fields["block_id"]),
+						Evidence:  strings.TrimSpace(fields["evidence"]),
+						Remedy:    strings.TrimSpace(fields["remedy"]),
+						Reason:    strings.TrimSpace(fields["reason"]),
+					},
+					Problem: fmt.Sprintf("duplicate field: %s", name),
 				}
 			}
 
 			fields[name] = value
-			fieldOrder = append(fieldOrder, name)
 			lastMultilineField = name
 		} else {
 			// Continuation line
 			if lastMultilineField == "" {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
+					Commentary:     commentary,
 					Problem:        "continuation line without preceding field",
 				}
 			}
@@ -142,8 +160,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 			if lastMultilineField != "evidence" && lastMultilineField != "remedy" && lastMultilineField != "reason" {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
-					Problem:        fmt.Sprintf("continuation line after single-line field: %s", lastMultilineField),
+					Commentary:     commentary,
+					Verdict: Verdict{
+						Candidate: strings.TrimSpace(fields["candidate"]),
+						Attempt:   strings.TrimSpace(fields["attempt"]),
+						Decision:  fields["verdict"],
+						Severity:  strings.TrimSpace(fields["severity"]),
+						BlockID:   strings.TrimSpace(fields["block_id"]),
+						Evidence:  strings.TrimSpace(fields["evidence"]),
+						Remedy:    strings.TrimSpace(fields["remedy"]),
+						Reason:    strings.TrimSpace(fields["reason"]),
+					},
+					Problem: fmt.Sprintf("continuation line after single-line field: %s", lastMultilineField),
 				}
 			}
 
@@ -158,8 +186,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 		if !exists || strings.TrimSpace(val) == "" {
 			return Result{
 				Classification: Malformed,
-				Commentary:     text,
-				Problem:        fmt.Sprintf("missing or empty required field: %s", field),
+				Commentary:     commentary,
+				Verdict: Verdict{
+					Candidate: strings.TrimSpace(fields["candidate"]),
+					Attempt:   strings.TrimSpace(fields["attempt"]),
+					Decision:  fields["verdict"],
+					Severity:  strings.TrimSpace(fields["severity"]),
+					BlockID:   strings.TrimSpace(fields["block_id"]),
+					Evidence:  strings.TrimSpace(fields["evidence"]),
+					Remedy:    strings.TrimSpace(fields["remedy"]),
+					Reason:    strings.TrimSpace(fields["reason"]),
+				},
+				Problem: fmt.Sprintf("missing or empty required field: %s", field),
 			}
 		}
 	}
@@ -169,8 +207,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 	if verdict != "approve" && verdict != "block" && verdict != "approve-with-changes" {
 		return Result{
 			Classification: Malformed,
-			Commentary:     text,
-			Problem:        fmt.Sprintf("invalid verdict value: %s", verdict),
+			Commentary:     commentary,
+			Verdict: Verdict{
+				Candidate: strings.TrimSpace(fields["candidate"]),
+				Attempt:   strings.TrimSpace(fields["attempt"]),
+				Decision:  verdict,
+				Severity:  strings.TrimSpace(fields["severity"]),
+				BlockID:   strings.TrimSpace(fields["block_id"]),
+				Evidence:  strings.TrimSpace(fields["evidence"]),
+				Remedy:    strings.TrimSpace(fields["remedy"]),
+				Reason:    strings.TrimSpace(fields["reason"]),
+			},
+			Problem: fmt.Sprintf("invalid verdict value: %s", verdict),
 		}
 	}
 
@@ -183,8 +231,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 			if !exists || strings.TrimSpace(val) == "" {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
-					Problem:        fmt.Sprintf("missing or empty required block field: %s", field),
+					Commentary:     commentary,
+					Verdict: Verdict{
+						Candidate: strings.TrimSpace(fields["candidate"]),
+						Attempt:   strings.TrimSpace(fields["attempt"]),
+						Decision:  verdict,
+						Severity:  strings.TrimSpace(fields["severity"]),
+						BlockID:   strings.TrimSpace(fields["block_id"]),
+						Evidence:  strings.TrimSpace(fields["evidence"]),
+						Remedy:    strings.TrimSpace(fields["remedy"]),
+						Reason:    strings.TrimSpace(fields["reason"]),
+					},
+					Problem: fmt.Sprintf("missing or empty required block field: %s", field),
 				}
 			}
 		}
@@ -194,8 +252,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 		if severity != "low" && severity != "medium" && severity != "high" {
 			return Result{
 				Classification: Malformed,
-				Commentary:     text,
-				Problem:        fmt.Sprintf("invalid severity value: %s", severity),
+				Commentary:     commentary,
+				Verdict: Verdict{
+					Candidate: strings.TrimSpace(fields["candidate"]),
+					Attempt:   strings.TrimSpace(fields["attempt"]),
+					Decision:  verdict,
+					Severity:  severity,
+					BlockID:   strings.TrimSpace(fields["block_id"]),
+					Evidence:  strings.TrimSpace(fields["evidence"]),
+					Remedy:    strings.TrimSpace(fields["remedy"]),
+					Reason:    strings.TrimSpace(fields["reason"]),
+				},
+				Problem: fmt.Sprintf("invalid severity value: %s", severity),
 			}
 		}
 	} else {
@@ -204,8 +272,14 @@ func Parse(text, candidateHash, attemptID string) Result {
 			if _, exists := fields[field]; exists {
 				return Result{
 					Classification: Malformed,
-					Commentary:     text,
-					Problem:        fmt.Sprintf("%s field not allowed for %s verdict", field, verdict),
+					Commentary:     commentary,
+					Verdict: Verdict{
+						Candidate: strings.TrimSpace(fields["candidate"]),
+						Attempt:   strings.TrimSpace(fields["attempt"]),
+						Decision:  verdict,
+						Reason:    strings.TrimSpace(fields["reason"]),
+					},
+					Problem: fmt.Sprintf("%s field not allowed for %s verdict", field, verdict),
 				}
 			}
 		}
@@ -247,10 +321,6 @@ func Parse(text, candidateHash, attemptID string) Result {
 		result.Classification = RevisionRequest
 	} else {
 		result.Classification = Valid
-	}
-
-	if problem != "" {
-		result.Problem = problem
 	}
 
 	return result
