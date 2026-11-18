@@ -1081,8 +1081,8 @@ required_reviewers = ["reviewer"]
 	}
 
 	output := stderr.String()
-	if !strings.Contains(output, "metered") || !strings.Contains(output, "spending ceiling") {
-		t.Fatalf("expected metered/spending ceiling error message, got: %s", output)
+	if !strings.Contains(output, "metered") || !strings.Contains(output, "spending ceiling") || !strings.Contains(output, "test-endpoint") {
+		t.Fatalf("expected metered/spending ceiling/test-endpoint error message, got: %s", output)
 	}
 
 	// Verify the test server received zero requests (probe was rejected before adapter was built)

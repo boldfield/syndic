@@ -964,6 +964,74 @@ func TestApplyDefaultsPreservesExisting(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsLoadedRosterNoNewTables(t *testing.T) {
+	r, err := Load("testdata/no-new-tables.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if err := r.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	// Verify all defaults are applied
+	if r.Deadlines.Attempt == nil || r.Deadlines.Attempt.Duration != 300*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 300s", r.Deadlines.Attempt)
+	}
+	if r.Deadlines.Turn == nil || r.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", r.Deadlines.Turn)
+	}
+	if r.Deadlines.Delivery == nil || r.Deadlines.Delivery.Duration != 60*time.Second {
+		t.Errorf("Deadlines.Delivery = %v, want 60s", r.Deadlines.Delivery)
+	}
+	if r.Deadlines.Provisional == nil || !*r.Deadlines.Provisional {
+		t.Errorf("Deadlines.Provisional = %v, want true", r.Deadlines.Provisional)
+	}
+
+	if r.Budgets.CalibrationSafety == nil || *r.Budgets.CalibrationSafety != 0.75 {
+		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", r.Budgets.CalibrationSafety)
+	}
+	if r.Budgets.MessageOverheadTokens == nil || *r.Budgets.MessageOverheadTokens != 8 {
+		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", r.Budgets.MessageOverheadTokens)
+	}
+	if r.Budgets.RequestOverheadTokens == nil || *r.Budgets.RequestOverheadTokens != 16 {
+		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", r.Budgets.RequestOverheadTokens)
+	}
+	if r.Budgets.ContextMargin == nil || *r.Budgets.ContextMargin != 0.10 {
+		t.Errorf("Budgets.ContextMargin = %v, want 0.10", r.Budgets.ContextMargin)
+	}
+	if r.Budgets.AuthorMaxOutputTokens == nil || *r.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", r.Budgets.AuthorMaxOutputTokens)
+	}
+	if r.Budgets.ReviewerMaxOutputTokens == nil || *r.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", r.Budgets.ReviewerMaxOutputTokens)
+	}
+	if r.Budgets.DeliveryMaxTokens == nil || *r.Budgets.DeliveryMaxTokens != 64 {
+		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", r.Budgets.DeliveryMaxTokens)
+	}
+	if r.Budgets.TurnMaxEstimatedTokens == nil || *r.Budgets.TurnMaxEstimatedTokens != 250000 {
+		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", r.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	if r.Engine.StopGrace == nil || r.Engine.StopGrace.Duration != 5*time.Second {
+		t.Errorf("Engine.StopGrace = %v, want 5s", r.Engine.StopGrace)
+	}
+
+	// Verify absent-pool behavior
+	if r.Pools != nil {
+		t.Errorf("Pools = %v, want nil", r.Pools)
+	}
+
+	// Verify PoolFor for undeclared pool returns defaults
+	conc, release := r.PoolFor("default")
+	if conc != 1 {
+		t.Errorf("PoolFor(default) concurrency = %d, want 1", conc)
+	}
+	if release != 0 {
+		t.Errorf("PoolFor(default) release = %v, want 0", release)
+	}
+}
+
 func TestPoolFor(t *testing.T) {
 	r := &Roster{
 		Pools: map[string]Pool{
