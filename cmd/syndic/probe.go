@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -52,6 +52,12 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
+	// Validate roster
+	if err := r.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: roster validation failed:\n%v\n", err)
+		return 2
+	}
+
 	// Find the endpoint profile
 	var endpointProfile *config.EndpointProfile
 	for i := range r.Endpoints {
@@ -67,6 +73,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 
 	// Check if --raw-dir is inside a git worktree
 	if isInsideGitWorktree(raw) {
+		fmt.Fprintf(os.Stderr, "error: --raw-dir is inside a git worktree\n")
 		return 4
 	}
 
@@ -78,10 +85,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	probeOpts := openai.ProbeOptions{
 		Timeout:           60 * time.Second,
 		DisableOverLength: *skipOverLength,
-		AssumedContextLen: 131072,
-	}
-	if *contextTokens > 0 {
-		probeOpts.AssumedContextLen = *contextTokens
+		AssumedContextLen: *contextTokens,
 	}
 
 	// Run probe
@@ -215,14 +219,31 @@ func resolveSecretsDir(custom string) string {
 }
 
 func isInsideGitWorktree(path string) bool {
-	// Walk up from path to find the nearest existing ancestor
+	// Find the nearest existing ancestor and evaluate symlinks
 	current := path
 	for {
-		// Check if .git exists in this directory
-		gitPath := filepath.Join(current, ".git")
-		if _, err := os.Stat(gitPath); err == nil {
-			// Found a git directory
-			return true
+		// Check if this path exists
+		if _, err := os.Stat(current); err == nil {
+			// Found an existing path, evaluate symlinks
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				// If we can't resolve, continue with lexical path
+				resolved = current
+			}
+			// Walk up from the resolved path
+			checkPath := resolved
+			for {
+				gitPath := filepath.Join(checkPath, ".git")
+				if _, err := os.Stat(gitPath); err == nil {
+					return true
+				}
+				parent := filepath.Dir(checkPath)
+				if parent == checkPath {
+					break
+				}
+				checkPath = parent
+			}
+			return false
 		}
 
 		// Try parent directory
@@ -237,10 +258,9 @@ func isInsideGitWorktree(path string) bool {
 }
 
 func getOperationalErrorCode(err error) int {
-	// Check if it's one of the operational errors
-	if strings.Contains(err.Error(), transport.ErrUnreachable.Error()) ||
-		strings.Contains(err.Error(), transport.ErrUnauthorized.Error()) ||
-		strings.Contains(err.Error(), transport.ErrModelUnavailable.Error()) {
+	if errors.Is(err, transport.ErrUnreachable) ||
+		errors.Is(err, transport.ErrUnauthorized) ||
+		errors.Is(err, transport.ErrModelUnavailable) {
 		return 3
 	}
 	return 1
@@ -254,6 +274,7 @@ func printSummary(endpoint, model string, record transport.CapabilityRecord, raw
 	if record.ContextBound != nil {
 		fmt.Printf("  Max context:      %d tokens\n", *record.ContextBound)
 	}
+	fmt.Printf("  Max-tokens field: %s\n", record.MaxTokensField)
 	fmt.Printf("  Usage available:  %s\n", record.UsageAvailable)
 	fmt.Printf("  System role:      %s\n", record.SystemRoleHonored)
 	fmt.Printf("  Over-length:      %s\n", record.OverLength)

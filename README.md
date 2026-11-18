@@ -19,7 +19,7 @@ Check with `shasum -a 256 docs/design/*.md`. The design is the hashed text.
 
 ## Status
 
-Milestone A (foundations) is complete. See `docs/evidence/` for redacted endpoint probe exports.
+Milestone A (foundations) is complete. See [`docs/evidence/README.md`](docs/evidence/README.md) for redacted endpoint probe exports.
 
 ## License
 
