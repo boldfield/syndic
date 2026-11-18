@@ -65,10 +65,15 @@ func (tx *Tx) BeginAttemptWith(p AttemptParams) (string, error) {
 
 	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
 
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", err
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, delimiter, max_output_tokens, estimated_prompt_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-	`, attemptID, p.TurnID, p.Participant, p.Phase, p.Epoch, dispatchedAt, deadlineStr, repairOfPtr, p.Delimiter, p.MaxOutputTokens, p.EstimatedPromptTokens); err != nil {
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, delimiter, max_output_tokens, estimated_prompt_tokens, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+	`, attemptID, p.TurnID, p.Participant, p.Phase, p.Epoch, dispatchedAt, deadlineStr, repairOfPtr, p.Delimiter, p.MaxOutputTokens, p.EstimatedPromptTokens, journalSeq); err != nil {
 		return "", fmt.Errorf("insert attempt: %w", err)
 	}
 

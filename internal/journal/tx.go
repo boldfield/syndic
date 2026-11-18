@@ -161,10 +161,15 @@ func (tx *Tx) AppendMessage(turnID, phase, sender string, recipients []string, c
 		return "", "", 0, fmt.Errorf("get next sequence: %w", err)
 	}
 
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", "", 0, err
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, parent_ids)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, msgID, turnID, phase, sender, string(recipientSet), nextSeq, string(content), sha256, byteLen, parentIDs); err != nil {
+		INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, parent_ids, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, msgID, turnID, phase, sender, string(recipientSet), nextSeq, string(content), sha256, byteLen, parentIDs, journalSeq); err != nil {
 		return "", "", 0, fmt.Errorf("insert message: %w", err)
 	}
 
@@ -191,10 +196,15 @@ func (tx *Tx) BeginAttempt(turnID, participant, phase string, epoch int, deadlin
 
 	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
 
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", err
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-	`, attemptID, turnID, participant, phase, epoch, dispatchedAt, deadlineStr, repairOfPtr); err != nil {
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, repair_of, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+	`, attemptID, turnID, participant, phase, epoch, dispatchedAt, deadlineStr, repairOfPtr, journalSeq); err != nil {
 		return "", fmt.Errorf("insert attempt: %w", err)
 	}
 
@@ -600,4 +610,18 @@ func (tx *Tx) OpenBlocks(turnID string) ([]Block, error) {
 	}
 
 	return blocks, nil
+}
+
+// nextJournalSeq takes the next value of the journal-wide ordering counter and
+// advances it. It runs inside the caller's transaction, so a rollback leaves
+// the counter unchanged.
+func (tx *Tx) nextJournalSeq() (int64, error) {
+	var seq int64
+	if err := tx.tx.QueryRow(`SELECT next FROM journal_counter WHERE id = 1`).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("get journal sequence: %w", err)
+	}
+	if _, err := tx.tx.Exec(`UPDATE journal_counter SET next = next + 1 WHERE id = 1`); err != nil {
+		return 0, fmt.Errorf("increment journal counter: %w", err)
+	}
+	return seq, nil
 }
