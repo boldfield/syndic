@@ -1,17 +1,26 @@
--- Add kind column to runs table
-ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'probe';
+-- Add kind column to runs table with CHECK constraint
+-- SQLite does not support ALTER TABLE ADD COLUMN with CHECK,
+-- so we recreate the table. Foreign key constraints are temporarily
+-- disabled by journal.go during this migration.
 
--- Add check constraint for kind values
-CREATE TRIGGER runs_kind_check_insert BEFORE INSERT ON runs
-WHEN NOT (NEW.kind IN ('probe', 'engine'))
-BEGIN
-	SELECT RAISE(ABORT, 'kind must be probe or engine');
-END;
+CREATE TABLE runs_new (
+	id TEXT PRIMARY KEY,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	manifest TEXT NOT NULL,
+	manifest_hash TEXT NOT NULL,
+	kind TEXT NOT NULL DEFAULT 'probe' CHECK (kind IN ('probe', 'engine'))
+);
 
-CREATE TRIGGER runs_kind_check_update BEFORE UPDATE ON runs
-WHEN NOT (NEW.kind IN ('probe', 'engine'))
+INSERT INTO runs_new SELECT id, created_at, manifest, manifest_hash, 'probe' FROM runs;
+
+DROP TABLE runs;
+
+ALTER TABLE runs_new RENAME TO runs;
+
+-- Restore the manifest immutability trigger
+CREATE TRIGGER runs_manifest_immutable BEFORE UPDATE OF manifest, manifest_hash ON runs
 BEGIN
-	SELECT RAISE(ABORT, 'kind must be probe or engine');
+	SELECT RAISE(ABORT, 'runs manifest is immutable');
 END;
 
 -- Add columns to turns table

@@ -98,6 +98,20 @@ func (db *DB) migrate() error {
 			return fmt.Errorf("read migration %s: %w", mig.Name(), err)
 		}
 
+		// Migration 004 recreates the runs table with a CHECK constraint,
+		// which requires temporarily disabling foreign key constraints at the connection level
+		if version == 4 {
+			if _, err := db.conn.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+				return fmt.Errorf("disable foreign keys for migration %s: %w", mig.Name(), err)
+			}
+			defer func() {
+				// Re-enable foreign keys after migration 004
+				if _, err := db.conn.Exec("PRAGMA foreign_keys = ON"); err != nil {
+					fmt.Printf("warning: failed to re-enable foreign keys: %v\n", err)
+				}
+			}()
+		}
+
 		tx, err := db.conn.Begin()
 		if err != nil {
 			return fmt.Errorf("begin transaction for migration %s: %w", mig.Name(), err)

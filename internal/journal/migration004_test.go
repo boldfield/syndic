@@ -58,6 +58,28 @@ func TestMigration004RunsKindColumn(t *testing.T) {
 	}
 }
 
+func TestMigration004RunsKindSchemaConstraint(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Verify CHECK constraint exists in the schema
+	var createSQL string
+	err := conn.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'").Scan(&createSQL)
+	if err != nil {
+		t.Fatalf("failed to query runs table definition: %v", err)
+	}
+
+	if createSQL == "" {
+		t.Fatal("failed to get runs table CREATE statement")
+	}
+
+	// Verify the CREATE TABLE contains the CHECK constraint
+	if !contains(createSQL, "CHECK") || !contains(createSQL, "kind") {
+		t.Errorf("runs table missing CHECK constraint on kind column.\nSchema: %s", createSQL)
+	}
+}
+
 func TestMigration004RunsKindConstraint(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -556,4 +578,13 @@ func TestMigration004V3UpgradePreservesRuns(t *testing.T) {
 	if version != 4 {
 		t.Errorf("expected schema version 4, got %d", version)
 	}
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
