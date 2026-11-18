@@ -1613,3 +1613,202 @@ func TestProbeEndpointMismatch(t *testing.T) {
 		t.Errorf("error should mention endpoint mismatch, got: %v", err)
 	}
 }
+
+// TestUnresolvableAuthSecret verifies unresolvable auth secret returns ErrNotSent and no request is sent.
+func TestUnresolvableAuthSecret(t *testing.T) {
+	requestReceived := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "missing-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	failingResolver := &mockResolver{secret: ""}
+
+	adapter := New(profile, failingResolver)
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not ErrNotSent: %v", err)
+	}
+	if requestReceived {
+		t.Errorf("request was sent despite auth resolution failure")
+	}
+}
+
+// TestToolRoleNotAllowed verifies tool role returns ErrNotSent and no request is sent.
+func TestToolRoleNotAllowed(t *testing.T) {
+	requestReceived := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "tool", Content: "tool response"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not ErrNotSent: %v", err)
+	}
+	if requestReceived {
+		t.Errorf("request was sent despite invalid tool role")
+	}
+}
+
+// TestAdapterVersionEqualsProbeVersion verifies adapter.AdapterVersion matches probe record.
+func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			w.WriteHeader(http.StatusNotFound)
+		case "/chat/completions":
+			resp := ResponseBody{
+				Model: "test-model",
+				Choices: []ChoiceBody{
+					{
+						Message: ChoiceMessage{
+							Role:    "assistant",
+							Content: "Response",
+						},
+						FinishReason: "stop",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	record, err := adapter.Probe(context.Background(), "test", "test-model")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	if record.AdapterVersion != AdapterVersion {
+		t.Errorf("probe record AdapterVersion: %q, want %q", record.AdapterVersion, AdapterVersion)
+	}
+
+	if AdapterVersion != "openai-v1" {
+		t.Errorf("AdapterVersion: %q, want openai-v1", AdapterVersion)
+	}
+}
+
+// TestMidBodyFailureUnwrapped verifies mid-body read failures are not wrapped with ErrNotSent.
+func TestMidBodyFailureUnwrapped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1000")
+		_, _ = w.Write([]byte(`{"incomplete": "resp`))
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if err != nil && errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("mid-body failure incorrectly wrapped with ErrNotSent")
+	}
+}
