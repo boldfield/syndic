@@ -348,36 +348,51 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 }
 
 // QuickDefinitionSHA256 returns the SHA-256 hash of the quick profile's fully resolved definition.
-// It hashes {"preset": ..., "drafts": ..., "budgets": {...}} in canonical JSON form.
+// It hashes {"preset": ..., "drafts": ..., "budgets": {...}} with budget keys using TOML names.
 func (r *Roster) QuickDefinitionSHA256(name string) (string, error) {
 	resolved, err := r.Resolve("", name)
 	if err != nil {
 		return "", err
 	}
 
-	// Build the JSON object to hash
+	// Build budget object using TOML key names
+	budgetsMap := make(map[string]interface{})
+	if resolved.Budgets.CalibrationSafety != nil {
+		budgetsMap["calibration_safety"] = *resolved.Budgets.CalibrationSafety
+	}
+	if resolved.Budgets.MessageOverheadTokens != nil {
+		budgetsMap["message_overhead_tokens"] = *resolved.Budgets.MessageOverheadTokens
+	}
+	if resolved.Budgets.RequestOverheadTokens != nil {
+		budgetsMap["request_overhead_tokens"] = *resolved.Budgets.RequestOverheadTokens
+	}
+	if resolved.Budgets.ContextMargin != nil {
+		budgetsMap["context_margin"] = *resolved.Budgets.ContextMargin
+	}
+	if resolved.Budgets.AuthorMaxOutputTokens != nil {
+		budgetsMap["author_max_output_tokens"] = *resolved.Budgets.AuthorMaxOutputTokens
+	}
+	if resolved.Budgets.ReviewerMaxOutputTokens != nil {
+		budgetsMap["reviewer_max_output_tokens"] = *resolved.Budgets.ReviewerMaxOutputTokens
+	}
+	if resolved.Budgets.DeliveryMaxTokens != nil {
+		budgetsMap["delivery_max_tokens"] = *resolved.Budgets.DeliveryMaxTokens
+	}
+	if resolved.Budgets.TurnMaxEstimatedTokens != nil {
+		budgetsMap["turn_max_estimated_tokens"] = *resolved.Budgets.TurnMaxEstimatedTokens
+	}
+
+	// Build the JSON object to hash with TOML key names
 	hashObj := map[string]interface{}{
 		"preset":  resolved.PresetName,
 		"drafts":  resolved.Drafts,
-		"budgets": resolved.Budgets,
+		"budgets": budgetsMap,
 	}
 
-	// Marshal to JSON with canonical form (sorted keys, no extra whitespace)
+	// json.Marshal sorts map keys, producing canonical form
 	jsonBytes, err := json.Marshal(hashObj)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal quick profile definition: %w", err)
-	}
-
-	// Parse and re-marshal to ensure canonical form
-	var obj map[string]interface{}
-	err = json.Unmarshal(jsonBytes, &obj)
-	if err != nil {
-		return "", fmt.Errorf("failed to unmarshal quick profile definition: %w", err)
-	}
-
-	jsonBytes, err = json.Marshal(obj)
-	if err != nil {
-		return "", fmt.Errorf("failed to remarshal quick profile definition: %w", err)
 	}
 
 	hash := sha256.Sum256(jsonBytes)

@@ -98,6 +98,9 @@ required_reviewers = []
 [presets.solo.deadlines]
 attempt = "150s"
 
+[presets.review.budgets]
+reviewer_max_output_tokens = 1024
+
 # quick: quick profiles with preset assignments and budget overrides
 [quick.fast]
 preset = "solo"

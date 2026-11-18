@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -1152,6 +1153,375 @@ func TestUnknownBudgetKey(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestResolveDefaults(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+		},
+		Deadlines: Deadlines{
+			Attempt: &Duration{300 * time.Second},
+			Turn:    &Duration{900 * time.Second},
+		},
+		Budgets: Budgets{
+			ReviewerMaxOutputTokens: ptr(2048),
+		},
+	}
+
+	resolved, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if resolved.PresetName != "review" {
+		t.Errorf("PresetName = %q, want %q", resolved.PresetName, "review")
+	}
+	if resolved.QuickProfile != "" {
+		t.Errorf("QuickProfile = %q, want empty", resolved.QuickProfile)
+	}
+	if resolved.Deadlines.Attempt.Duration != 300*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 300s", resolved.Deadlines.Attempt.Duration)
+	}
+	if resolved.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", resolved.Deadlines.Turn.Duration)
+	}
+}
+
+func TestResolvePresetOverride(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {
+				Mode:   "review",
+				Author: "a", RequiredReviewers: []string{"r"},
+				Budgets: &Budgets{
+					ReviewerMaxOutputTokens: ptr(1024),
+				},
+			},
+		},
+		Budgets: Budgets{
+			ReviewerMaxOutputTokens: ptr(2048),
+			AuthorMaxOutputTokens:   ptr(4096),
+		},
+	}
+
+	resolved, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if *resolved.Budgets.ReviewerMaxOutputTokens != 1024 {
+		t.Errorf("ReviewerMaxOutputTokens = %d, want 1024", *resolved.Budgets.ReviewerMaxOutputTokens)
+	}
+	if *resolved.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("AuthorMaxOutputTokens = %d, want 4096 (unchanged)", *resolved.Budgets.AuthorMaxOutputTokens)
+	}
+}
+
+func TestResolveQuickProfileOverridePrecedence(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+		},
+		Budgets: Budgets{
+			ReviewerMaxOutputTokens: ptr(2048),
+		},
+		Quick: map[string]QuickProfile{
+			"fast": {
+				Preset: "review",
+				Budgets: &Budgets{
+					ReviewerMaxOutputTokens: ptr(512),
+				},
+			},
+		},
+	}
+
+	resolved, err := r.Resolve("", "fast")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if *resolved.Budgets.ReviewerMaxOutputTokens != 512 {
+		t.Errorf("ReviewerMaxOutputTokens = %d, want 512 (quick profile override)", *resolved.Budgets.ReviewerMaxOutputTokens)
+	}
+}
+
+func TestResolveExplicitPresetWinsOverQuickProfile(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+			"solo":   {Mode: "solo", Author: "a"},
+		},
+		Quick: map[string]QuickProfile{
+			"fast": {
+				Preset:  "solo",
+				Drafts:  true,
+				Budgets: &Budgets{ReviewerMaxOutputTokens: ptr(512)},
+			},
+		},
+	}
+
+	resolved, err := r.Resolve("review", "fast")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if resolved.PresetName != "review" {
+		t.Errorf("PresetName = %q, want review", resolved.PresetName)
+	}
+	if resolved.QuickProfile != "fast" {
+		t.Errorf("QuickProfile = %q, want fast", resolved.QuickProfile)
+	}
+	if !resolved.Drafts {
+		t.Errorf("Drafts = %v, want true (from quick profile)", resolved.Drafts)
+	}
+	if *resolved.Budgets.ReviewerMaxOutputTokens != 512 {
+		t.Errorf("ReviewerMaxOutputTokens = %d, want 512 (quick profile override)", *resolved.Budgets.ReviewerMaxOutputTokens)
+	}
+}
+
+func TestResolveQuickProfileToPreset(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+			"solo":   {Mode: "solo", Author: "a"},
+		},
+		Quick: map[string]QuickProfile{
+			"fast": {
+				Preset:  "solo",
+				Drafts:  false,
+				Budgets: &Budgets{ReviewerMaxOutputTokens: ptr(512)},
+			},
+		},
+	}
+
+	resolved, err := r.Resolve("", "fast")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if resolved.PresetName != "solo" {
+		t.Errorf("PresetName = %q, want solo", resolved.PresetName)
+	}
+	if resolved.QuickProfile != "fast" {
+		t.Errorf("QuickProfile = %q, want fast", resolved.QuickProfile)
+	}
+}
+
+func TestResolveUnknownPreset(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+		},
+	}
+
+	_, err := r.Resolve("nonexistent", "")
+	if err == nil {
+		t.Fatal("expected error for unknown preset")
+	}
+	if !errors.Is(err, ErrUnknownPreset) {
+		t.Errorf("error not ErrUnknownPreset: %v", err)
+	}
+}
+
+func TestResolveUnknownQuickProfile(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "a", RequiredReviewers: []string{"r"}},
+		},
+	}
+
+	_, err := r.Resolve("", "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for unknown quick profile")
+	}
+	if !errors.Is(err, ErrUnknownQuickProfile) {
+		t.Errorf("error not ErrUnknownQuickProfile: %v", err)
+	}
+}
+
+func TestValidateQuickProfileUnimplementedProperties(t *testing.T) {
+	tests := []struct {
+		name     string
+		propName string
+		setProp  func(*QuickProfile)
+	}{
+		{
+			name:     "protected_paths",
+			propName: "protected_paths",
+			setProp: func(qp *QuickProfile) {
+				qp.ProtectedPaths = map[string]interface{}{}
+			},
+		},
+		{
+			name:     "eligible_request_categories",
+			propName: "eligible_request_categories",
+			setProp: func(qp *QuickProfile) {
+				qp.EligibleRequestCategories = []string{}
+			},
+		},
+		{
+			name:     "required_review_triggers",
+			propName: "required_review_triggers",
+			setProp: func(qp *QuickProfile) {
+				qp.RequiredReviewTriggers = []string{}
+			},
+		},
+		{
+			name:     "output_escalation_rules",
+			propName: "output_escalation_rules",
+			setProp: func(qp *QuickProfile) {
+				qp.OutputEscalationRules = []interface{}{}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roster := makeBaseRoster()
+			roster.Presets["solo"] = Preset{Mode: "solo", Author: "author"}
+			qp := QuickProfile{Preset: "solo"}
+			tt.setProp(&qp)
+			roster.Quick = map[string]QuickProfile{
+				"test": qp,
+			}
+
+			err := roster.Validate()
+			if err == nil {
+				t.Fatalf("expected validation error for %s", tt.propName)
+			}
+
+			errStr := err.Error()
+			if !strings.Contains(errStr, "test") {
+				t.Errorf("error doesn't contain profile name: %v", err)
+			}
+			if !strings.Contains(errStr, tt.propName) {
+				t.Errorf("error doesn't contain property name %q: %v", tt.propName, err)
+			}
+		})
+	}
+}
+
+func TestValidateQuickProfilePresetMustExist(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Quick = map[string]QuickProfile{
+		"test": {Preset: "nonexistent"},
+	}
+
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for nonexistent preset")
+	}
+	if !strings.Contains(err.Error(), "test") {
+		t.Errorf("error doesn't contain profile name: %v", err)
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error doesn't contain preset name: %v", err)
+	}
+}
+
+func TestQuickDefinitionSHA256Stability(t *testing.T) {
+	r, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	hash1, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	hash2, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	if hash1 != hash2 {
+		t.Errorf("hash not stable: %q != %q", hash1, hash2)
+	}
+}
+
+func TestQuickDefinitionSHA256Changes(t *testing.T) {
+	r, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	hash1, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	qp := r.Quick["fast"]
+	qp.Drafts = true
+	r.Quick["fast"] = qp
+
+	hash2, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Errorf("hash didn't change when drafts changed: %q == %q", hash1, hash2)
+	}
+}
+
+func TestQuickDefinitionSHA256ChangesWithPresetOverride(t *testing.T) {
+	r, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	hash1, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	// Add a budgets override to the solo preset
+	solo := r.Presets["solo"]
+	if solo.Budgets == nil {
+		solo.Budgets = &Budgets{}
+	}
+	v := 1024
+	solo.Budgets.ReviewerMaxOutputTokens = &v
+	r.Presets["solo"] = solo
+
+	hash2, err := r.QuickDefinitionSHA256("fast")
+	if err != nil {
+		t.Fatalf("QuickDefinitionSHA256 failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Errorf("hash didn't change when preset budgets changed: %q == %q", hash1, hash2)
+	}
+}
+
+func TestResolveEffectiveDeadlineValidation(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Deadlines = Deadlines{
+		Attempt: &Duration{300 * time.Second},
+		Turn:    &Duration{900 * time.Second},
+	}
+	review := roster.Presets["review"]
+	review.Deadlines = &Deadlines{
+		Attempt: &Duration{20 * time.Minute},
+	}
+	roster.Presets["review"] = review
+
+	err := roster.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for turn < attempt")
+	}
+	if !strings.Contains(err.Error(), "turn") || !strings.Contains(err.Error(), "attempt") {
+		t.Errorf("error doesn't describe deadline issue: %v", err)
+	}
 }
 
 func BenchmarkValidate(b *testing.B) {

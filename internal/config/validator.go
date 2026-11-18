@@ -426,10 +426,20 @@ func (r *Roster) Validate() error {
 			}
 		}
 
-		// Validate turn >= attempt for preset
-		if preset.Deadlines != nil && preset.Deadlines.Turn != nil && preset.Deadlines.Attempt != nil {
-			if preset.Deadlines.Turn.Duration < preset.Deadlines.Attempt.Duration {
-				errs = append(errs, fmt.Errorf("presets[%q].deadlines.turn must be at least presets[%q].deadlines.attempt", name, name))
+		// Validate turn >= attempt for preset (using effective merged values)
+		effAttempt := r.Deadlines.Attempt
+		effTurn := r.Deadlines.Turn
+		if preset.Deadlines != nil {
+			if preset.Deadlines.Attempt != nil {
+				effAttempt = preset.Deadlines.Attempt
+			}
+			if preset.Deadlines.Turn != nil {
+				effTurn = preset.Deadlines.Turn
+			}
+		}
+		if effTurn != nil && effAttempt != nil {
+			if effTurn.Duration < effAttempt.Duration {
+				errs = append(errs, fmt.Errorf("presets[%q]: effective turn deadline must be at least effective attempt deadline", name))
 			}
 		}
 	}
@@ -443,16 +453,19 @@ func (r *Roster) Validate() error {
 			errs = append(errs, fmt.Errorf("quick profile %q: preset %q does not exist", profileName, qp.Preset))
 		}
 
-		// Check for unimplemented properties
-		unimplementedProps := map[string]any{
-			"eligible_request_categories": qp.EligibleRequestCategories,
-			"protected_paths":             qp.ProtectedPaths,
-			"required_review_triggers":    qp.RequiredReviewTriggers,
-			"output_escalation_rules":     qp.OutputEscalationRules,
+		// Check for unimplemented properties (iterate in fixed order for deterministic errors)
+		unimplementedProps := []struct {
+			name  string
+			value any
+		}{
+			{"eligible_request_categories", qp.EligibleRequestCategories},
+			{"protected_paths", qp.ProtectedPaths},
+			{"required_review_triggers", qp.RequiredReviewTriggers},
+			{"output_escalation_rules", qp.OutputEscalationRules},
 		}
-		for propName, propValue := range unimplementedProps {
-			if propValue != nil {
-				errs = append(errs, fmt.Errorf("quick profile %q: %s is not yet implemented", profileName, propName))
+		for _, prop := range unimplementedProps {
+			if prop.value != nil {
+				errs = append(errs, fmt.Errorf("quick profile %q: %s is not yet implemented", profileName, prop.name))
 			}
 		}
 
