@@ -13,6 +13,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/lockfile"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/openai"
 )
@@ -27,6 +28,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	secretsDir := fs.String("secrets-dir", "", "directory for file secret references (default: $XDG_CONFIG_HOME/syndic/secrets)")
 	contextTokens := fs.Int("context-tokens", 0, "assumed context length for over-length test")
 	skipOverLength := fs.Bool("skip-overlength", false, "do not run the over-length test")
+	skipCalibration := fs.Bool("skip-calibration", false, "do not run calibration")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -89,9 +91,10 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 
 	// Build probe options
 	probeOpts := openai.ProbeOptions{
-		Timeout:           60 * time.Second,
-		DisableOverLength: *skipOverLength,
-		AssumedContextLen: *contextTokens,
+		Timeout:            60 * time.Second,
+		DisableOverLength:  *skipOverLength,
+		DisableCalibration: *skipCalibration,
+		AssumedContextLen:  *contextTokens,
 	}
 
 	// Run probe with per-request timeouts, not an outer deadline
@@ -126,6 +129,39 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 1
 	}
 
+	// Create ProbeManifest with fingerprint and calibration
+	probeManifest, err := evidence.NewProbeManifest(exp, *endpointProfile, *modelName, record.AdapterVersion, record.Calibration)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to create probe manifest: %v\n", err)
+		return 1
+	}
+
+	manifestData, err := json.Marshal(probeManifest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to marshal manifest: %v\n", err)
+		return 1
+	}
+
+	// Resolve runtime paths
+	paths, err := lockfile.Resolve(os.Getenv, os.Getenv("HOME"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to resolve runtime paths: %v\n", err)
+		return 1
+	}
+
+	// Acquire engine lock (non-blocking)
+	lock, err := lockfile.Acquire(paths.Lock, time.Now())
+	if err != nil {
+		var heldErr *lockfile.HeldError
+		if errors.As(err, &heldErr) {
+			fmt.Fprintf(os.Stderr, "error: engine with PID %d holds the journal; stop it before recording the probe\n", heldErr.Holder.PID)
+			return 5
+		}
+		fmt.Fprintf(os.Stderr, "error: failed to acquire engine lock: %v\n", err)
+		return 1
+	}
+	defer lock.Release()
+
 	// Create journal parent directory
 	if err := os.MkdirAll(filepath.Dir(jnl), 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to create journal directory: %v\n", err)
@@ -146,13 +182,6 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 
 	store := journal.NewStore(db)
 
-	// Create manifest from export (not raw record)
-	manifestData, err := json.Marshal(exp)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to marshal manifest: %v\n", err)
-		return 1
-	}
-
 	runID, _, err := store.CreateRun(manifestData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to create run: %v\n", err)
@@ -172,7 +201,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	}
 
 	// Print summary
-	printSummary(*endpointName, *modelName, record, rawPath, exportPath)
+	printSummary(*endpointName, *modelName, record, rawPath, exportPath, probeManifest.Calibration)
 
 	return 0
 }
@@ -284,7 +313,7 @@ func getOperationalErrorCode(err error) int {
 	return 1
 }
 
-func printSummary(endpoint, model string, record transport.CapabilityRecord, rawPath, exportPath string) {
+func printSummary(endpoint, model string, record transport.CapabilityRecord, rawPath, exportPath string, cal evidence.CalibrationRecord) {
 	fmt.Printf("Probe completed for %s/%s\n", endpoint, model)
 	fmt.Printf("  Auth mode:        %s\n", record.AuthMode)
 	fmt.Printf("  Identity:         %s\n", record.Identity)
@@ -299,6 +328,11 @@ func printSummary(endpoint, model string, record transport.CapabilityRecord, raw
 	fmt.Printf("  Eligible reviewer: %s\n", record.EligibleRequiredReviewer)
 	if record.LatencyMillis != nil {
 		fmt.Printf("  Latency:          %d ms\n", *record.LatencyMillis)
+	}
+	if cal.Available {
+		fmt.Printf("  Calibration:      %.2f bytes/token\n", cal.BytesPerToken)
+	} else {
+		fmt.Printf("  Calibration:      unavailable\n")
 	}
 	fmt.Printf("  Raw record:       %s\n", rawPath)
 	fmt.Printf("  Export:           %s\n", exportPath)

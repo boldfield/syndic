@@ -46,6 +46,48 @@ func TestProbeSuccess(t *testing.T) {
 			}
 		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			w.Header().Set("X-Sentinel", sentinelValue)
+
+			// Parse request to detect calibration requests
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				msgs, _ := body["messages"].([]interface{})
+				var userMsg string
+				for _, m := range msgs {
+					mm, ok := m.(map[string]interface{})
+					if ok && mm["role"] == "user" {
+						userMsg, _ = mm["content"].(string)
+						break
+					}
+				}
+
+				// Handle calibration requests
+				isBaseline := userMsg == ""
+				isCalibrationText := len(userMsg) == 4096
+
+				if isBaseline {
+					// Baseline calibration: 1 prompt token
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": ""}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode baseline response: %v", err)
+					}
+					return
+				} else if isCalibrationText {
+					// Calibration text: 1034 prompt tokens (matches acceptance test)
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1034, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode calibration text response: %v", err)
+					}
+					return
+				}
+			}
+
+			// Regular chat request
 			if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":      "chatcmpl-123",
 				"object":  "chat.completion",
@@ -83,6 +125,7 @@ declared_execution = "remote"
 declared_billing = "none"
 network_dependency = "none"
 max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
 
 [[participants]]
 id = "reviewer"
@@ -207,6 +250,24 @@ required_reviewers = ["reviewer"]
 
 	if strings.Contains(runManifest.String, sentinelValue) {
 		t.Fatal("run manifest contains sentinel value")
+	}
+
+	// Verify manifest is a ProbeManifest with fingerprint and calibration
+	var manifest evidence.ProbeManifest
+	if err := json.Unmarshal([]byte(runManifest.String), &manifest); err != nil {
+		t.Fatalf("failed to parse manifest JSON: %v", err)
+	}
+
+	if manifest.ConfigFingerprint == "" {
+		t.Fatal("manifest should have config_fingerprint")
+	}
+
+	if manifest.FingerprintRule != evidence.FingerprintRule {
+		t.Fatalf("expected fingerprint_rule %q, got %q", evidence.FingerprintRule, manifest.FingerprintRule)
+	}
+
+	if !manifest.Calibration.Available {
+		t.Fatal("manifest should have available calibration")
 	}
 
 	var eventCount int
