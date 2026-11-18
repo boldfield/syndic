@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -30,6 +31,17 @@ type probeServer struct {
 	chatStatus  int // when non-zero, every chat request gets this status
 	noUsage     bool
 	overLength  string // "both", "head", "error"
+	// calibration response control: prompt tokens for baseline and calibration
+	calibrationBaseline      int  // 0 means use default (1)
+	calibrationObserved      int  // 0 means use default (based on text size)
+	calibrationStatus        int  // non-zero means return this status code for all calibration requests
+	calibrationTextStatus    int  // non-zero means return this status code for calibration text request only (overrides calibrationStatus for text)
+	echoAuthInResponse       bool // when true, echo Authorization header in response for calibration requests
+	omitBaselinePromptTokens bool // when true, omit prompt_tokens from baseline response usage
+	omitTextPromptTokens     bool // when true, omit prompt_tokens from calibration text response usage
+	truncateCalibrationText  bool // when true, the calibration text response is cut short after its headers
+	// calibration request tracking
+	calibrationRequests []*map[string]any // captured request bodies for calibration requests
 }
 
 func (p *probeServer) count(k string) int {
@@ -78,10 +90,53 @@ func (p *probeServer) handler() http.Handler {
 				user, _ = mm["content"].(string)
 			}
 		}
+
+		isCalibration := user == ""            // empty = baseline calibration request
+		isCalibrationText := len(user) == 4096 // calibration text is exactly 4096 bytes
+
+		if isCalibration || isCalibrationText {
+			p.mu.Lock()
+			reqCopy := req
+			p.calibrationRequests = append(p.calibrationRequests, &reqCopy)
+			p.mu.Unlock()
+		}
+
+		if isCalibrationText && p.truncateCalibrationText {
+			if conn, buf, err := w.(http.Hijacker).Hijack(); err == nil {
+				_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"usage\":")
+				_ = buf.Flush()
+				_ = conn.Close()
+			}
+			return
+		}
+
+		// Handle calibration-specific error responses
+		if isCalibrationText && p.calibrationTextStatus != 0 {
+			w.WriteHeader(p.calibrationTextStatus)
+			return
+		}
+		if p.calibrationStatus != 0 && (isCalibration || isCalibrationText) {
+			w.WriteHeader(p.calibrationStatus)
+			return
+		}
+
 		answer := "ok"
+		promptTokens := 1
 		switch {
 		case system != "":
 			answer = "PING"
+		case isCalibration:
+			// baseline calibration request
+			if p.calibrationBaseline != 0 {
+				promptTokens = p.calibrationBaseline
+			}
+		case isCalibrationText:
+			// full calibration text request
+			if p.calibrationObserved != 0 {
+				promptTokens = p.calibrationObserved
+			} else {
+				promptTokens = 1034 // default: matches acceptance test
+			}
 		case len(user) > 100000:
 			markers := markerRe.FindAllString(user, -1)
 			switch p.overLength {
@@ -103,7 +158,21 @@ func (p *probeServer) handler() http.Handler {
 			}},
 		}
 		if !p.noUsage {
-			resp["usage"] = map[string]any{"prompt_tokens": 1, "completion_tokens": 1}
+			usage := map[string]any{"completion_tokens": 1}
+			// Conditionally include prompt_tokens based on the request type
+			if isCalibration && !p.omitBaselinePromptTokens {
+				usage["prompt_tokens"] = promptTokens
+			} else if isCalibrationText && !p.omitTextPromptTokens {
+				usage["prompt_tokens"] = promptTokens
+			} else if !isCalibration && !isCalibrationText {
+				// Always include prompt_tokens for non-calibration requests
+				usage["prompt_tokens"] = promptTokens
+			}
+			resp["usage"] = usage
+		}
+		// Echo Authorization header in response for calibration requests when testing scrubbing
+		if p.echoAuthInResponse && (isCalibration || isCalibrationText) {
+			resp["auth"] = r.Header.Get("Authorization")
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -174,13 +243,13 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"models", "max_tokens", "system_role", "over_length"} {
+	for _, k := range []string{"models", "max_tokens", "system_role", "over_length", "calibration_baseline", "calibration"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("Raw missing step %q", k)
 		}
 	}
-	if p.count("models") != 1 || p.count("chat") != 3 {
-		t.Errorf("request counts: models=%d chat=%d, want 1 and 3", p.count("models"), p.count("chat"))
+	if p.count("models") != 1 || p.count("chat") != 5 {
+		t.Errorf("request counts: models=%d chat=%d, want 1 and 5", p.count("models"), p.count("chat"))
 	}
 }
 
@@ -205,7 +274,7 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 			srv, a := newProbeServer(tt.p)
 			defer srv.Close()
 			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
-				Timeout: 0, DisableOverLength: tt.skipOver, AssumedContextLen: 131072,
+				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: true, AssumedContextLen: 131072,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -250,7 +319,7 @@ func TestProbeModelsVariants(t *testing.T) {
 	s2 := httptest.NewServer(mux)
 	defer s2.Close()
 	a2 := New(config.EndpointProfile{Name: "test", BaseURL: s2.URL}, &mockResolver{})
-	rec, err = a2.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{DisableOverLength: true})
+	rec, err = a2.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{DisableOverLength: true, DisableCalibration: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,5 +376,293 @@ func TestProbeNoUsageBlock(t *testing.T) {
 	}
 	if rec.UsageAvailable != transport.TriNo {
 		t.Errorf("UsageAvailable: %v", rec.UsageAvailable)
+	}
+}
+
+func TestCalibrationSuccessful(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got false, want true")
+	}
+	if rec.Calibration.BaselinePromptTokens != 10 {
+		t.Errorf("BaselinePromptTokens: got %d, want 10", rec.Calibration.BaselinePromptTokens)
+	}
+	if rec.Calibration.ObservedPromptTokens != 1034 {
+		t.Errorf("ObservedPromptTokens: got %d, want 1034", rec.Calibration.ObservedPromptTokens)
+	}
+	if rec.Calibration.BytesPerToken != 4.0 {
+		t.Errorf("BytesPerToken: got %f, want 4.0", rec.Calibration.BytesPerToken)
+	}
+}
+
+func TestCalibrationNoUsage(t *testing.T) {
+	p := &probeServer{noUsage: true}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false")
+	}
+	// Verify that probe itself succeeds despite calibration failure
+	if rec.ModelsEndpoint == transport.TriUnknown {
+		t.Errorf("Probe failed: ModelsEndpoint is still unknown")
+	}
+}
+
+func TestCalibrationSameTokenCount(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 100, calibrationObserved: 100}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (same count)")
+	}
+}
+
+func TestCalibrationServerError(t *testing.T) {
+	// Return 500 to calibration text request only (baseline should succeed)
+	p := &probeServer{calibrationTextStatus: http.StatusInternalServerError}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (500 error)")
+	}
+
+	// Compare with disabled calibration to verify rest of record is unchanged
+	p2 := &probeServer{}
+	srv2, a2 := newProbeServer(p2)
+	defer srv2.Close()
+	recDisabled, errDisabled := a2.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength:  true,
+		DisableCalibration: true,
+	})
+	if errDisabled != nil {
+		t.Fatal(errDisabled)
+	}
+
+	// Compare all fields except Calibration, Raw, LatencyMillis, and ObservedAt (which legitimately differ)
+	// Use reflect.DeepEqual for comprehensive comparison
+	rec.Calibration = transport.Calibration{} // zero out for comparison
+	rec.Raw = nil
+	rec.LatencyMillis = nil
+	rec.ObservedAt = recDisabled.ObservedAt // use same timestamp for comparison
+	recDisabled.Calibration = transport.Calibration{}
+	recDisabled.Raw = nil
+	recDisabled.LatencyMillis = nil
+	if !reflect.DeepEqual(rec, recDisabled) {
+		t.Errorf("Records differ (excluding Calibration, Raw, LatencyMillis, ObservedAt).\nWith error:\n%+v\nWithout:\n%+v", rec, recDisabled)
+	}
+}
+
+func TestCalibrationDisabled(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength:  true,
+		DisableCalibration: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (disabled)")
+	}
+	var raw map[string]map[string]any
+	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["calibration"]; ok {
+		t.Errorf("Raw should not contain calibration step when disabled")
+	}
+	if _, ok := raw["calibration_baseline"]; ok {
+		t.Errorf("Raw should not contain calibration_baseline step when disabled")
+	}
+	if len(p.calibrationRequests) != 0 {
+		t.Errorf("Server received %d calibration requests, want 0", len(p.calibrationRequests))
+	}
+}
+
+func TestCalibrationTextLength(t *testing.T) {
+	if len([]byte(calibrationText)) != 4096 {
+		t.Errorf("calibrationText length: got %d, want 4096", len([]byte(calibrationText)))
+	}
+}
+
+func TestCalibrationRequestBody(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	_, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.calibrationRequests) != 2 {
+		t.Fatalf("Expected 2 calibration requests, got %d", len(p.calibrationRequests))
+	}
+
+	// Check baseline request (empty message)
+	baselineReq := p.calibrationRequests[0]
+	msgs, _ := (*baselineReq)["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("No messages in baseline request")
+	}
+	msg := msgs[0].(map[string]any)
+	content, _ := msg["content"].(string)
+	if content != "" {
+		t.Errorf("Baseline request content: got %q, want empty", content)
+	}
+
+	// Check calibration text request
+	calibReq := p.calibrationRequests[1]
+	msgs, _ = (*calibReq)["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("No messages in calibration request")
+	}
+	msg = msgs[0].(map[string]any)
+	content, _ = msg["content"].(string)
+	if len([]byte(content)) != 4096 {
+		t.Errorf("Calibration request text length: got %d, want 4096", len([]byte(content)))
+	}
+	if content != calibrationText {
+		t.Errorf("Calibration request text does not match calibrationText constant")
+	}
+}
+
+func TestCalibrationWithSentinelSecret(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		echoAuthInResponse:  true, // Server echoes Authorization header in response
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Calibration.Available {
+		t.Fatal("Calibration not available")
+	}
+
+	// Check that the raw steps contain scrubbed secrets
+	var raw map[string]map[string]any
+	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Convert the entire raw steps JSON to string to check for unscrubbedSecret
+	rawJSON := string(rec.Raw)
+
+	// Check calibration_baseline raw step
+	if baselineStep, ok := raw["calibration_baseline"]; !ok {
+		t.Fatal("calibration_baseline not in raw steps")
+	} else {
+		// Check that neither the response body nor the whole step contains the secret
+		body, _ := baselineStep["body"].(string)
+		if strings.Contains(body, "tok-123") {
+			t.Errorf("calibration_baseline raw step body contains unscrubbed secret 'tok-123'")
+		}
+	}
+
+	// Check calibration raw step
+	if calibStep, ok := raw["calibration"]; !ok {
+		t.Fatal("calibration not in raw steps")
+	} else {
+		// Check that neither the response body nor the whole step contains the secret
+		body, _ := calibStep["body"].(string)
+		if strings.Contains(body, "tok-123") {
+			t.Errorf("calibration raw step body contains unscrubbed secret 'tok-123'")
+		}
+	}
+
+	// Check the whole JSON to ensure the secret is scrubbed everywhere
+	if strings.Contains(rawJSON, "tok-123") {
+		t.Errorf("Raw JSON contains unscrubbed secret 'tok-123'")
+	}
+}
+
+func TestCalibrationMissingBaselinePromptTokens(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline:      10,
+		calibrationObserved:      1034,
+		omitBaselinePromptTokens: true,
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (missing baseline prompt_tokens)")
+	}
+}
+
+func TestCalibrationMissingTextPromptTokens(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline:  10,
+		calibrationObserved:  1034,
+		omitTextPromptTokens: true,
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Calibration.Available {
+		t.Errorf("Calibration.Available: got true, want false (missing text prompt_tokens)")
+	}
+}
+
+func TestCalibrationResponseReadFailure(t *testing.T) {
+	p := &probeServer{truncateCalibrationText: true}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		DisableOverLength: true,
+	})
+	if err != nil {
+		t.Fatalf("probe should still succeed: %v", err)
+	}
+	if rec.Calibration != (transport.Calibration{}) {
+		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)
 	}
 }
