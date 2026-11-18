@@ -864,16 +864,36 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 		t.Errorf("expected schema version 3 after upgrade, got %d", version)
 	}
 
-	// Check that the block still exists with null withdrawn_against_hash
+	// Check that the block still exists with null withdrawn_against_hash and other fields unchanged
 	var blockID string
 	var state string
 	var withdrawnHash interface{}
-	err = conn.QueryRow("SELECT id, state, withdrawn_against_hash FROM blocks WHERE id = 'block-1'").Scan(&blockID, &state, &withdrawnHash)
+	var verdictID string
+	var candidateHash string
+	var severity string
+	var evidence string
+	var remedy string
+	err = conn.QueryRow("SELECT id, verdict_id, candidate_hash, severity, evidence, remedy, state, withdrawn_against_hash FROM blocks WHERE id = 'block-1'").Scan(&blockID, &verdictID, &candidateHash, &severity, &evidence, &remedy, &state, &withdrawnHash)
 	if err != nil {
 		t.Fatalf("failed to query block: %v", err)
 	}
 	if blockID != "block-1" {
 		t.Errorf("expected block id 'block-1', got %q", blockID)
+	}
+	if verdictID != "verdict-1" {
+		t.Errorf("expected verdict_id 'verdict-1', got %q", verdictID)
+	}
+	if candidateHash != "hash" {
+		t.Errorf("expected candidate_hash 'hash', got %q", candidateHash)
+	}
+	if severity != "low" {
+		t.Errorf("expected severity 'low', got %q", severity)
+	}
+	if evidence != "evidence" {
+		t.Errorf("expected evidence 'evidence', got %q", evidence)
+	}
+	if remedy != "remedy" {
+		t.Errorf("expected remedy 'remedy', got %q", remedy)
 	}
 	if state != "open" {
 		t.Errorf("expected block state 'open', got %q", state)
@@ -1089,6 +1109,134 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		if entry1["type"] != entry2["type"] || entry1["name"] != entry2["name"] || entry1["sql"] != entry2["sql"] {
 			t.Errorf("sqlite_master entry %d changed: %v -> %v", i, entry1, entry2)
 		}
+	}
+}
+
+func TestUpgradePathV1ToV2(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := tempDir + "/test.db"
+
+	// Create v1 database manually
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+
+	// Enable foreign keys
+	_, err = conn.Exec("PRAGMA foreign_keys = ON")
+	if err != nil {
+		t.Fatalf("failed to enable foreign keys: %v", err)
+	}
+
+	// Create schema_version table
+	_, err = conn.Exec(`
+		CREATE TABLE schema_version (
+			version INTEGER PRIMARY KEY,
+			applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		t.Fatalf("failed to create schema_version table: %v", err)
+	}
+
+	// Apply migration 001
+	migration001Content, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("failed to read migration 001: %v", err)
+	}
+
+	_, err = conn.Exec(string(migration001Content))
+	if err != nil {
+		t.Fatalf("failed to apply migration 001: %v", err)
+	}
+
+	// Record version 1
+	_, err = conn.Exec("INSERT INTO schema_version (version) VALUES (1)")
+	if err != nil {
+		t.Fatalf("failed to record schema version: %v", err)
+	}
+
+	// Insert test run and turn
+	_, err = conn.Exec("INSERT INTO runs (id, manifest, manifest_hash) VALUES ('run-1', '{}', 'hash')")
+	if err != nil {
+		t.Fatalf("failed to insert run: %v", err)
+	}
+
+	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
+	if err != nil {
+		t.Fatalf("failed to insert turn: %v", err)
+	}
+
+	// Insert test event at v1
+	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'test_event', 'event data')")
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	var eventID1 int64
+	var eventType1, data1 string
+	err = conn.QueryRow("SELECT id, event_type, data FROM events WHERE event_type = 'test_event'").Scan(&eventID1, &eventType1, &data1)
+	if err != nil {
+		t.Fatalf("failed to query event: %v", err)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("failed to close connection: %v", err)
+	}
+
+	// Now open with journal.Open which applies migrations 002 and 003
+	db, err := journal.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database with journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close database: %v", err)
+		}
+	}()
+
+	conn = db.Conn()
+
+	// Check schema version is 3
+	var version int
+	err = conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version)
+	if err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("expected schema version 3 after upgrade, got %d", version)
+	}
+
+	// Check that the event still exists with original data preserved
+	var eventID2 int64
+	var eventType2, data2 string
+	var turnID interface{}
+	err = conn.QueryRow("SELECT id, turn_id, event_type, data FROM events WHERE event_type = 'test_event'").Scan(&eventID2, &turnID, &eventType2, &data2)
+	if err != nil {
+		t.Fatalf("failed to query event after upgrade: %v", err)
+	}
+	if eventID2 != eventID1 {
+		t.Errorf("expected event id %d, got %d", eventID1, eventID2)
+	}
+	if turnID != "turn-1" {
+		t.Errorf("expected turn_id 'turn-1', got %v", turnID)
+	}
+	if eventType2 != eventType1 {
+		t.Errorf("expected event_type %q, got %q", eventType1, eventType2)
+	}
+	if data2 != data1 {
+		t.Errorf("expected data %q, got %q", data1, data2)
+	}
+
+	// Test immutability triggers still work after migration
+	_, err = conn.Exec("UPDATE events SET data = ? WHERE id = ?", "new data", eventID2)
+	if err == nil {
+		t.Errorf("expected UPDATE on events to fail after migration, but succeeded")
+	}
+
+	_, err = conn.Exec("DELETE FROM events WHERE id = ?", eventID2)
+	if err == nil {
+		t.Errorf("expected DELETE on events to fail after migration, but succeeded")
 	}
 }
 
