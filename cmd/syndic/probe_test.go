@@ -909,14 +909,7 @@ func TestProbeRawDirRelativePathFromNestedWorkingDirectory(t *testing.T) {
 	}
 
 	// Set working directory to the nested directory
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-	if err := os.Chdir(nestedDir); err != nil {
-		t.Fatalf("failed to change directory: %v", err)
-	}
-	defer os.Chdir(oldWd)
+	t.Chdir(nestedDir)
 
 	// Create relative raw dir
 	secretsDir := filepath.Join(tmpDir, "secrets")
