@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -232,15 +233,14 @@ func (tx *Tx) GetCandidate(candidateID string) (*CandidateRow, error) {
 }
 
 type transcriptRow struct {
-	kind        string
-	ref         string
-	at          time.Time
-	phase       string
-	sender      string
-	sha256      string
-	byteLen     int64
-	attemptID   *string
-	attemptData *AttemptRow
+	kind      string
+	ref       string
+	at        time.Time
+	phase     string
+	sender    string
+	sha256    string
+	byteLen   int64
+	attemptID *string
 }
 
 func (s *Store) TranscriptPage(turnID, cursor string, limit int) (items []TranscriptItem, nextCursor string, err error) {
@@ -262,7 +262,6 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 
 	var cursorOffset int
 	if cursor != "" {
-		// Parse cursor to get offset
 		if _, err := fmt.Sscanf(cursor, "%d", &cursorOffset); err != nil {
 			return nil, "", fmt.Errorf("parse cursor: %w", err)
 		}
@@ -292,8 +291,7 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 
 		row.kind = "message"
 		row.ref = "msg:" + msgID
-		// Use sequence as a proxy for the message's logical time (assigns earlier times to lower sequences)
-		row.at = time.Unix(int64(sequence), 0)
+		row.at = time.Time{}
 
 		allRows = append(allRows, row)
 	}
@@ -337,10 +335,23 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 		return nil, "", fmt.Errorf("iterate attempts: %w", err)
 	}
 
-	// Merge by time, keeping insertion order for ties
+	// Merge by time: attempts have real timestamps, messages stay in sequence order
+	// Place messages before attempts by zeroing message times then sorting
 	for i := len(allRows) - 1; i > 0; i-- {
 		for j := 0; j < i; j++ {
-			if allRows[j].at.After(allRows[j+1].at) {
+			isMessageBefore := allRows[j].kind == "message"
+			isMessageAfter := allRows[j+1].kind == "message"
+
+			shouldSwap := false
+			if isMessageBefore && !isMessageAfter {
+				shouldSwap = false
+			} else if !isMessageBefore && isMessageAfter {
+				shouldSwap = true
+			} else if !isMessageBefore && !isMessageAfter && allRows[j].at.After(allRows[j+1].at) {
+				shouldSwap = true
+			}
+
+			if shouldSwap {
 				allRows[j], allRows[j+1] = allRows[j+1], allRows[j]
 			}
 		}
@@ -367,7 +378,6 @@ func (tx *Tx) TranscriptPage(turnID, cursor string, limit int) ([]TranscriptItem
 				return nil, "", fmt.Errorf("get attempt: %w", err)
 			}
 			if attemptRow != nil {
-				// Set SHA256 and ByteLen for the attempt's output
 				if attemptRow.RawOutput != nil && *attemptRow.RawOutput != "" {
 					h := sha256.Sum256([]byte(*attemptRow.RawOutput))
 					item.SHA256 = hex.EncodeToString(h[:])
@@ -410,11 +420,13 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 		limit = 262144
 	}
 
-	var contentType string
-	var contentID string
+	if offset < 0 {
+		return nil, 0, "", fmt.Errorf("offset must be non-negative")
+	}
 
-	if _, err := fmt.Sscanf(ref, "%[^:]:%s", &contentType, &contentID); err != nil {
-		return nil, 0, "", fmt.Errorf("parse ref: %w", err)
+	contentType, contentID, found := strings.Cut(ref, ":")
+	if !found {
+		return nil, 0, "", ErrNoSuchContent
 	}
 
 	var fullContent string
@@ -435,10 +447,9 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 
 	case "attempt":
 		err := tx.tx.QueryRow(`
-			SELECT COALESCE(raw_output, ''),
-			       CASE WHEN raw_output IS NOT NULL THEN lower(hex(sha256(raw_output))) ELSE '' END
+			SELECT COALESCE(raw_output, '')
 			FROM attempts WHERE id = ?
-		`, contentID).Scan(&fullContent, &fullSHA256)
+		`, contentID).Scan(&fullContent)
 
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, "", ErrNoSuchContent
