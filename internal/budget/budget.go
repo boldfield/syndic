@@ -127,6 +127,9 @@ func EstimateTokens(msgs []transport.Message, bytesPerToken float64, o Overheads
 // The product is taken exactly over the shortest decimal forms of the inputs
 // and then rounded to the nearest float64, so 1.07 × 0.51 is 0.5457 rather
 // than its binary approximation and the downstream ceilings stay integer-safe.
+// A non-finite input (NaN or ±Inf) is not validated here: the result is the
+// plain float64 product, which the downstream functions then reject or treat
+// as their own preconditions dictate.
 func EffectiveBytesPerToken(calibrated float64, calibrationSafety float64) float64 {
 	if !isFinite(calibrated) || !isFinite(calibrationSafety) {
 		return calibrated * calibrationSafety
@@ -152,7 +155,15 @@ func UsableBound(contextBound int, contextMargin float64) int {
 
 // Fits determines whether admission tokens plus max output tokens fit within the usable bound.
 // It returns true if admissionTokens + maxOutputTokens ≤ usableBound.
+// The sum is compared exactly: a sum beyond the int range does not wrap, so a
+// saturated admission bound never fits.
 func Fits(admissionTokens, maxOutputTokens, usableBound int) bool {
+	if maxOutputTokens > 0 && admissionTokens > math.MaxInt-maxOutputTokens {
+		return false // sum exceeds math.MaxInt, which is at least usableBound
+	}
+	if maxOutputTokens < 0 && admissionTokens < math.MinInt-maxOutputTokens {
+		return true // sum is below math.MinInt, which is at most usableBound
+	}
 	return admissionTokens+maxOutputTokens <= usableBound
 }
 

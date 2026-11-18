@@ -351,6 +351,34 @@ func TestFits(t *testing.T) {
 			usableBound:     29491,
 			want:            false,
 		},
+		{
+			name:            "saturated admission never fits",
+			admissionTokens: math.MaxInt,
+			maxOutputTokens: 1,
+			usableBound:     math.MaxInt,
+			want:            false,
+		},
+		{
+			name:            "near-max admission does not wrap",
+			admissionTokens: math.MaxInt - 10,
+			maxOutputTokens: 4096,
+			usableBound:     29491,
+			want:            false,
+		},
+		{
+			name:            "saturated admission with zero output fits a max bound",
+			admissionTokens: math.MaxInt,
+			maxOutputTokens: 0,
+			usableBound:     math.MaxInt,
+			want:            true,
+		},
+		{
+			name:            "sum below MinInt fits",
+			admissionTokens: math.MinInt,
+			maxOutputTokens: -1,
+			usableBound:     math.MinInt,
+			want:            true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -578,5 +606,19 @@ func TestOverflowSaturates(t *testing.T) {
 	}
 	if got := UsableBound(math.MaxInt, 1e300); got != math.MinInt {
 		t.Errorf("UsableBound = %d, want MinInt", got)
+	}
+}
+
+func TestSaturatedAdmissionDoesNotFit(t *testing.T) {
+	msg := []transport.Message{{Role: "user", Content: string(make([]byte, 100))}}
+	admission := AdmissionTokens(msg, 1e20, Overheads{MessageTokens: 8, RequestTokens: 16})
+	if admission != math.MaxInt {
+		t.Fatalf("AdmissionTokens = %d, want MaxInt", admission)
+	}
+	if Fits(admission, 4096, 29491) {
+		t.Errorf("Fits(saturated admission, 4096, 29491) = true, want false")
+	}
+	if Fits(admission, 4096, UsableBound(32768, 0.10)) {
+		t.Errorf("Fits(saturated admission, 4096, UsableBound) = true, want false")
 	}
 }
