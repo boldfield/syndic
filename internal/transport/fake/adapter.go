@@ -1,0 +1,284 @@
+package fake
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/boldfield/syndic/internal/transport"
+)
+
+// StepKind represents the type of step in a script.
+type StepKind int
+
+const (
+	StepKindReply StepKind = iota
+	StepKindHang
+	StepKindEcho
+)
+
+// Step represents a single step in a script that determines what Complete returns.
+type Step struct {
+	Kind               StepKind
+	Text               string
+	RawOutput          string
+	Status             transport.CompletionStatus
+	NativeFinishReason string
+	TransportStatus    string
+	Identity           transport.ModelIdentity
+	ReportedModel      string
+	Delay              time.Duration
+	EchoedString       string
+}
+
+// CompleteCall records a single Complete call with all its details.
+type CompleteCall struct {
+	Request transport.CompleteRequest
+}
+
+// Adapter is a scripted fake adapter for testing.
+type Adapter struct {
+	script               []Step
+	defaultIdentity      transport.ModelIdentity
+	defaultReportedModel string
+	capability           transport.CapabilityRecord
+	resolvedSecrets      []string
+	cancelUnconfirmed    bool
+	usageAvailable       bool
+
+	mu             sync.Mutex
+	calls          []CompleteCall
+	current        int
+	hangingAttempt map[string]context.CancelFunc
+}
+
+// New creates a new fake adapter with the given script and options.
+func New(script []Step, opts Options) *Adapter {
+	if opts.DefaultIdentity == (transport.ModelIdentity{}) {
+		opts.DefaultIdentity = transport.NewUnknownIdentity()
+	}
+	if opts.DefaultReportedModel == "" {
+		opts.DefaultReportedModel = "unknown"
+	}
+
+	return &Adapter{
+		script:               script,
+		defaultIdentity:      opts.DefaultIdentity,
+		defaultReportedModel: opts.DefaultReportedModel,
+		capability:           opts.Capability,
+		resolvedSecrets:      opts.ResolvedSecrets,
+		cancelUnconfirmed:    opts.CancelUnconfirmed,
+		usageAvailable:       opts.UsageAvailable,
+		hangingAttempt:       make(map[string]context.CancelFunc),
+	}
+}
+
+// Options holds configuration for the fake adapter.
+type Options struct {
+	DefaultIdentity      transport.ModelIdentity
+	DefaultReportedModel string
+	Capability           transport.CapabilityRecord
+	ResolvedSecrets      []string
+	CancelUnconfirmed    bool
+	UsageAvailable       bool
+}
+
+// Probe returns the configured capability record.
+func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
+	return a.capability, nil
+}
+
+// Complete consumes one step from the script and returns the result.
+func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
+	a.mu.Lock()
+
+	// Record the call with a deep copy of the entire request including messages.
+	msgCopy := make([]transport.Message, len(req.Messages))
+	copy(msgCopy, req.Messages)
+	req.Messages = msgCopy
+	a.calls = append(a.calls, CompleteCall{
+		Request: req,
+	})
+
+	// Check if script is exhausted.
+	if a.current >= len(a.script) {
+		a.mu.Unlock()
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       "",
+			Text:            "",
+			ScrubCount:      0,
+			Identity:        a.defaultIdentity,
+			ReportedModel:   "",
+			Status:          transport.StatusError,
+			NativeFinish:    "",
+			TransportStatus: "script_exhausted",
+		}, nil
+	}
+
+	step := a.script[a.current]
+	a.current++
+
+	identity := step.Identity
+	if identity == (transport.ModelIdentity{}) {
+		identity = a.defaultIdentity
+	}
+
+	reportedModel := step.ReportedModel
+	if reportedModel == "" {
+		reportedModel = a.defaultReportedModel
+	}
+
+	a.mu.Unlock()
+
+	switch step.Kind {
+	case StepKindReply:
+		// Apply delay for reply steps.
+		if step.Delay > 0 {
+			time.Sleep(step.Delay)
+		}
+
+		rawOutput := step.RawOutput
+		if rawOutput == "" {
+			rawOutput = step.Text
+		}
+		scrubbed, count := transport.Scrub(rawOutput, a.resolvedSecrets)
+		text := step.Text
+		if text != "" {
+			text, _ = transport.Scrub(text, a.resolvedSecrets)
+		}
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       scrubbed,
+			Text:            text,
+			ScrubCount:      count,
+			Identity:        identity,
+			ReportedModel:   reportedModel,
+			Status:          step.Status,
+			NativeFinish:    step.NativeFinishReason,
+			TransportStatus: step.TransportStatus,
+		}, nil
+
+	case StepKindEcho:
+		// Apply delay for echo steps.
+		if step.Delay > 0 {
+			time.Sleep(step.Delay)
+		}
+
+		responseText := fmt.Sprintf("Echo: %s", step.EchoedString)
+		scrubbed, count := transport.Scrub(responseText, a.resolvedSecrets)
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       scrubbed,
+			Text:            scrubbed,
+			ScrubCount:      count,
+			Identity:        identity,
+			ReportedModel:   reportedModel,
+			Status:          step.Status,
+			NativeFinish:    step.NativeFinishReason,
+			TransportStatus: step.TransportStatus,
+		}, nil
+
+	case StepKindHang:
+		// Block until context is done, Cancel is called, or req.Deadline passes.
+		attemptID := req.Envelope.AttemptID
+		hangCtx := ctx
+		if !req.Deadline.IsZero() {
+			var cancel context.CancelFunc
+			hangCtx, cancel = context.WithDeadline(ctx, req.Deadline)
+			defer cancel()
+		}
+		hangCtxCancel, cancelFunc := context.WithCancel(hangCtx)
+		a.mu.Lock()
+		a.hangingAttempt[attemptID] = cancelFunc
+		a.mu.Unlock()
+
+		<-hangCtxCancel.Done()
+
+		a.mu.Lock()
+		delete(a.hangingAttempt, attemptID)
+		a.mu.Unlock()
+
+		ts := transport.TransportStatusTimeout
+		if hangCtxCancel.Err() == context.Canceled {
+			ts = transport.TransportStatusCancelled
+		} else if hangCtxCancel.Err() == context.DeadlineExceeded {
+			ts = transport.TransportStatusTimeout
+		}
+
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       "",
+			Text:            "",
+			ScrubCount:      0,
+			Identity:        identity,
+			ReportedModel:   reportedModel,
+			Status:          transport.StatusInterrupted,
+			NativeFinish:    "",
+			TransportStatus: ts,
+		}, nil
+
+	default:
+		return transport.CompleteResult{
+			Envelope:        req.Envelope,
+			RawOutput:       "",
+			Text:            "",
+			ScrubCount:      0,
+			Identity:        a.defaultIdentity,
+			ReportedModel:   "",
+			Status:          transport.StatusError,
+			NativeFinish:    "",
+			TransportStatus: "unknown_step_kind",
+		}, nil
+	}
+}
+
+// Cancel records a cancellation request and unblocks any hanging attempt with that ID.
+func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	confirmed := transport.TriYes
+	if a.cancelUnconfirmed {
+		confirmed = transport.TriUnknown
+	}
+
+	if cancel, exists := a.hangingAttempt[attemptID]; exists {
+		cancel()
+	}
+
+	return transport.CancelStatus{
+		Requested:       true,
+		ServerConfirmed: confirmed,
+	}, nil
+}
+
+// Usage returns usage information if available.
+func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
+	if !a.usageAvailable {
+		return nil, transport.ErrUsageUnavailable
+	}
+	return &transport.Usage{
+		Prompt:     10,
+		Completion: 5,
+	}, nil
+}
+
+// Calls returns deep copies of all CompleteCall records received, in order.
+func (a *Adapter) Calls() []CompleteCall {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	result := make([]CompleteCall, len(a.calls))
+	for i, call := range a.calls {
+		msgCopy := make([]transport.Message, len(call.Request.Messages))
+		copy(msgCopy, call.Request.Messages)
+		requestCopy := call.Request
+		requestCopy.Messages = msgCopy
+		result[i] = CompleteCall{
+			Request: requestCopy,
+		}
+	}
+	return result
+}
