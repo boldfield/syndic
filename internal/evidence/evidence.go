@@ -131,15 +131,15 @@ func writeExclusive(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	if _, err := file.Write(data); err != nil {
-		os.Remove(path)
+		_ = file.Close()
+		_ = os.Remove(path)
 		return err
 	}
 
 	if err := file.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return err
 	}
 
