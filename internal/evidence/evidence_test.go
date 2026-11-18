@@ -142,7 +142,7 @@ func TestLocalHostIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal failed: %v", err)
 	}
-	for _, part := range []string{"8000/", "://"} {
+	for _, part := range []string{"8000/", "://", "8000/v1", "localhost:8000/"} {
 		if contains(string(data), part) {
 			t.Errorf("Serialized export contains %q, which follows the host", part)
 		}
@@ -569,4 +569,39 @@ func getCallerInfo() (string, string, int, bool) {
 // Helper: contains checks if a string contains a substring.
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+// TestFileNameSanitized verifies that disallowed characters in the endpoint and
+// model never reach the file name.
+func TestFileNameSanitized(t *testing.T) {
+	freezeClock(t)
+	tempDir := t.TempDir()
+
+	record := transport.CapabilityRecord{
+		Endpoint:       "my endpoint",
+		Model:          "org/llama3:8b-q4",
+		AdapterVersion: "1.0.0",
+	}
+	rawPath, err := WriteRaw(record, tempDir)
+	if err != nil {
+		t.Fatalf("WriteRaw failed: %v", err)
+	}
+	if got, want := filepath.Base(rawPath), "my-endpoint-org-llama3-8b-q4-20260102T030405Z.raw.json"; got != want {
+		t.Errorf("raw file name = %q, want %q", got, want)
+	}
+	if filepath.Dir(rawPath) != tempDir {
+		t.Errorf("raw file written outside dir: %s", rawPath)
+	}
+
+	export := Export{Redacted: true, RedactionRule: "evidence/v1", EndpointName: record.Endpoint, Model: record.Model}
+	exportPath, err := WriteExport(export, tempDir)
+	if err != nil {
+		t.Fatalf("WriteExport failed: %v", err)
+	}
+	if got, want := filepath.Base(exportPath), "my-endpoint-org-llama3-8b-q4-20260102T030405Z.json"; got != want {
+		t.Errorf("export file name = %q, want %q", got, want)
+	}
+	if filepath.Dir(exportPath) != tempDir {
+		t.Errorf("export file written outside dir: %s", exportPath)
+	}
 }
