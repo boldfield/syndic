@@ -64,7 +64,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			quarantined = true
 			return nil
 		}
-		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate); err != nil {
+		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, e.lastInflight(t.author)); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -97,7 +97,9 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		// The turn already ended; release reports the author idle.
 		return false
 	}
-	delete(e.running, t.author)
+	if e.lastInflight(t.author) {
+		delete(e.running, t.author)
+	}
 	if ended {
 		if e.open == t {
 			e.open = nil
@@ -430,7 +432,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			// The slot's release reports the participant idle.
 			return emitCompleted(emit, t.id, d.attemptID, res, nil)
 		}
-		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate); err != nil {
+		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate, e.lastInflight(d.participant)); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -509,7 +511,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if quarantined {
 		return nil
 	}
-	delete(e.running, d.participant)
+	if e.lastInflight(d.participant) {
+		delete(e.running, d.participant)
+	}
 	if repair {
 		return &res.Text
 	}
@@ -547,7 +551,7 @@ func outputOf(res transport.CompleteResult) journal.AttemptOutput {
 
 // recordCompletion stores usage and the gate error of an accepted result and
 // emits attempt_completed and the participant going idle.
-func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error) error {
+func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error, idle bool) error {
 	var usage *wire.ReportedUsage
 	if res.Usage != nil {
 		if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
@@ -563,6 +567,9 @@ func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemp
 	}
 	if err := emitCompleted(emit, turnID, attemptID, res, usage); err != nil {
 		return err
+	}
+	if !idle {
+		return nil
 	}
 	return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
 }

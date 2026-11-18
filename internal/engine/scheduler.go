@@ -65,6 +65,13 @@ func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
 	return nil
 }
 
+// lastInflight reports whether the dispatch completing now is the participant's
+// only one holding a slot, so its completion takes the participant to idle.
+// Dispatches abandoned at a deadline hold their slot until Complete returns.
+func (e *Engine) lastInflight(participant string) bool {
+	return e.inflight[participant] <= 1
+}
+
 // release gives back the pool slot of an attempt whose Complete call has
 // returned.
 func (e *Engine) release(participant string) {

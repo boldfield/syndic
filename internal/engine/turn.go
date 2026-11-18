@@ -218,11 +218,13 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		}); err != nil {
 			return err
 		}
-		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-			Participant: t.author,
-			State:       ParticipantIdle,
-		}); err != nil {
-			return err
+		if e.lastInflight(t.author) {
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+				Participant: t.author,
+				State:       ParticipantIdle,
+			}); err != nil {
+				return err
+			}
 		}
 		if gate == nil {
 			return endTurnIn(tx, emit, t.id, StateSoloComplete, reasonSoloOK)
@@ -240,7 +242,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return
 	}
-	delete(e.running, t.author)
+	if e.lastInflight(t.author) {
+		delete(e.running, t.author)
+	}
 	e.open = nil
 	e.turnEnded(t)
 }

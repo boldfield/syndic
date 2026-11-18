@@ -488,3 +488,37 @@ func waitQuarantined(t *testing.T, h *enginetest.Harness, attemptID string) {
 	}
 	t.Fatalf("attempt %s was not quarantined", attemptID)
 }
+
+// The newer attempt's accepted result must not report idle while an older,
+// abandoned request of the same participant is still in flight.
+func TestOverlappingAttemptsNewerFinishesFirst(t *testing.T) {
+	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	scripts := map[string][]fake.Step{"author": {
+		{Kind: fake.StepKindHang},
+		enginetest.ReplyFunc(func(transport.CompleteRequest) string { return authorText }),
+	}}
+	roster := schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, "\n[pools.default]\nconcurrency = 2\n")
+	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(start))
+	reply, err := h.Engine.Submit(soloReq("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCount(t, h, wire.EventKindAttemptBegun, 1)
+	first := attemptsOf(h, reply.TurnID, "author")[0]
+	h.Clock.Advance(61 * time.Second)
+	wantEnd(t, h, reply.TurnID, engine.StateIncomplete, "deadline:attempt:"+first)
+
+	reply2, err := h.Engine.Submit(soloReq("s2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
+	time.Sleep(50 * time.Millisecond)
+	if s := participantState(t, h, "author"); s != engine.ParticipantRunning {
+		t.Fatalf("author is %s while the timed-out Complete is still in flight", s)
+	}
+	if _, err := h.Adapters["author"].Cancel(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	waitParticipantState(t, h, "author", engine.ParticipantIdle)
+}
