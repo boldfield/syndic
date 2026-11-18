@@ -156,14 +156,6 @@ func TestEndTurnSecondEndTurnErrors(t *testing.T) {
 			secondState:  "approved",
 			secondReason: "override",
 		},
-		{
-			name:          "overridden to approved",
-			firstState:    "incomplete",
-			firstReason:   "needs review",
-			secondState:   "overridden",
-			secondReason:  "override",
-			needCandidate: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -183,56 +175,72 @@ func TestEndTurnSecondEndTurnErrors(t *testing.T) {
 				t.Fatalf("first EndTurn failed: %v", err)
 			}
 
-			// For incomplete→overridden with candidate, freeze the candidate and do second EndTurn
-			if tt.firstState == "incomplete" && tt.needCandidate {
-				err = store.Tx(func(tx *journal.Tx) error {
-					_, err := tx.FreezeCandidate(turnID, "content", "hash123")
-					return err
-				})
-				if err != nil {
-					t.Fatalf("FreezeCandidate failed: %v", err)
-				}
+			// For all cases, second EndTurn should error
+			err = store.Tx(func(tx *journal.Tx) error {
+				return tx.EndTurn(turnID, tt.secondState, tt.secondReason)
+			})
+			if err == nil {
+				t.Error("second EndTurn should have errored")
+			}
 
-				// Second EndTurn should succeed
-				err = store.Tx(func(tx *journal.Tx) error {
-					return tx.EndTurn(turnID, tt.secondState, tt.secondReason)
-				})
-				if err != nil {
-					t.Fatalf("second EndTurn should have succeeded: %v", err)
-				}
-
-				// Verify state is set correctly
-				var state sql.NullString
-				err = conn.QueryRow(`SELECT terminal_state FROM turns WHERE id = ?`, turnID).Scan(&state)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !state.Valid || state.String != "overridden" {
-					t.Errorf("terminal_state = %v, want 'overridden'", state)
-				}
-			} else {
-				// For all other cases, second EndTurn should error
-				err = store.Tx(func(tx *journal.Tx) error {
-					return tx.EndTurn(turnID, tt.secondState, tt.secondReason)
-				})
-				if err == nil {
-					t.Error("second EndTurn should have errored")
-				}
-
-				// Verify that terminal_state and terminal_reason remain from first call
-				var state, reason sql.NullString
-				err = conn.QueryRow(`SELECT terminal_state, terminal_reason FROM turns WHERE id = ?`, turnID).Scan(&state, &reason)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !state.Valid || state.String != tt.firstState {
-					t.Errorf("after failed EndTurn, terminal_state = %v, want %v", state, tt.firstState)
-				}
-				if !reason.Valid || reason.String != tt.firstReason {
-					t.Errorf("after failed EndTurn, terminal_reason = %v, want %v", reason, tt.firstReason)
-				}
+			// Verify that terminal_state and terminal_reason remain from first call
+			var state, reason sql.NullString
+			err = conn.QueryRow(`SELECT terminal_state, terminal_reason FROM turns WHERE id = ?`, turnID).Scan(&state, &reason)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.Valid || state.String != tt.firstState {
+				t.Errorf("after failed EndTurn, terminal_state = %v, want %v", state, tt.firstState)
+			}
+			if !reason.Valid || reason.String != tt.firstReason {
+				t.Errorf("after failed EndTurn, terminal_reason = %v, want %v", reason, tt.firstReason)
 			}
 		})
+	}
+}
+
+func TestEndTurnOnAlreadyOverriddenErrors(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+	_, turnID, _ := setupTurnstateTestData(t, conn)
+
+	store := journal.NewStore(db)
+
+	// Reach overridden state via incomplete -> FreezeCandidate -> EndTurn(overridden)
+	err := store.Tx(func(tx *journal.Tx) error {
+		if err := tx.EndTurn(turnID, "incomplete", "needs review"); err != nil {
+			return err
+		}
+		_, err := tx.FreezeCandidate(turnID, "content", "hash123")
+		if err != nil {
+			return err
+		}
+		return tx.EndTurn(turnID, "overridden", "override")
+	})
+	if err != nil {
+		t.Fatalf("reaching overridden state failed: %v", err)
+	}
+
+	// Now call EndTurn again on the already-overridden turn
+	err = store.Tx(func(tx *journal.Tx) error {
+		return tx.EndTurn(turnID, "approved", "try again")
+	})
+	if err == nil {
+		t.Error("EndTurn on already-overridden turn should have errored")
+	}
+
+	// Verify that terminal_state and terminal_reason remain unchanged
+	var state, reason sql.NullString
+	err = conn.QueryRow(`SELECT terminal_state, terminal_reason FROM turns WHERE id = ?`, turnID).Scan(&state, &reason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Valid || state.String != "overridden" {
+		t.Errorf("after failed EndTurn on overridden, terminal_state = %v, want 'overridden'", state)
+	}
+	if !reason.Valid || reason.String != "override" {
+		t.Errorf("after failed EndTurn on overridden, terminal_reason = %v, want 'override'", reason)
 	}
 }
 
@@ -725,6 +733,16 @@ func TestAcceptResultIncompleteTerminalState(t *testing.T) {
 		t.Error("AcceptResult with empty expectedTerminalState on incomplete turn returned true, want false")
 	}
 
+	// Verify attemptID1 is quarantined
+	var attemptID1Quarantined int
+	err = conn.QueryRow(`SELECT quarantined FROM attempts WHERE id = ?`, attemptID1).Scan(&attemptID1Quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attemptID1Quarantined != 1 {
+		t.Errorf("attemptID1 should be quarantined, got quarantined = %v", attemptID1Quarantined)
+	}
+
 	// Test 2: with matching terminal state
 	err = store.Tx(func(tx *journal.Tx) error {
 		epoch, err := tx.BumpEpoch(turnID)
@@ -741,6 +759,20 @@ func TestAcceptResultIncompleteTerminalState(t *testing.T) {
 
 	if !accepted {
 		t.Error("AcceptResult with matching terminal state returned false, want true")
+	}
+
+	// Verify attemptID2 is completed and not quarantined
+	var attemptID2Status string
+	var attemptID2Quarantined int
+	err = conn.QueryRow(`SELECT status, quarantined FROM attempts WHERE id = ?`, attemptID2).Scan(&attemptID2Status, &attemptID2Quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attemptID2Status != "complete" {
+		t.Errorf("attemptID2 status = %v, want 'complete'", attemptID2Status)
+	}
+	if attemptID2Quarantined != 0 {
+		t.Errorf("attemptID2 should not be quarantined, got quarantined = %v", attemptID2Quarantined)
 	}
 }
 
