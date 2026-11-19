@@ -568,11 +568,15 @@ func TestRestartResubscribeReceivesEventsSince(t *testing.T) {
 // sends deliveries.
 func incompleteWithBlock(t *testing.T, acks map[string][]fake.Step) (*enginetest.Harness, *second, string) {
 	t.Helper()
-	scripts := map[string][]fake.Step{
+	return incompleteWithScripts(t, map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText)},
 		"r1":     {blockStep("b1")},
 		"r2":     {approveStep()},
-	}
+	}, acks)
+}
+
+func incompleteWithScripts(t *testing.T, scripts, acks map[string][]fake.Step) (*enginetest.Harness, *second, string) {
+	t.Helper()
 	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), scripts, enginetest.ClockStart(farFuture))
 	release := h.Hold("r1")
 	turnID := submitReview(t, h, "s1")
@@ -666,7 +670,7 @@ func TestOverrideIncompleteTurnDeliversOverridden(t *testing.T) {
 		}
 	}
 	// Not repeatable: the turn is no longer incomplete.
-	wantRefusal(t, s.Override(turnID, "again"), wire.ErrorCodeNotIncomplete)
+	_ = wantRefusal(t, s.Override(turnID, "again"), wire.ErrorCodeNotIncomplete)
 }
 
 func TestOverrideDoesNotTouchTheOpenTurn(t *testing.T) {
@@ -699,7 +703,7 @@ func TestOverrideDoesNotTouchTheOpenTurn(t *testing.T) {
 func TestOverrideErrors(t *testing.T) {
 	t.Run("reason required", func(t *testing.T) {
 		h := enginetest.New(t, enginetest.RosterTOML, nil)
-		wantRefusal(t, h.Engine.Override("t", ""), wire.ErrorCodeReasonRequired)
+		_ = wantRefusal(t, h.Engine.Override("t", ""), wire.ErrorCodeReasonRequired)
 	})
 	t.Run("not found", func(t *testing.T) {
 		h := enginetest.New(t, enginetest.RosterTOML, nil)
@@ -712,7 +716,7 @@ func TestOverrideErrors(t *testing.T) {
 		h := enginetest.New(t, reviewRoster("author", "r1"), approvers("r1"))
 		turnID := submitReview(t, h, "s1")
 		wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
-		wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
+		_ = wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
 	})
 	t.Run("cancelled", func(t *testing.T) {
 		h := enginetest.New(t, reviewRoster("author", "r1"), approvers("r1"))
@@ -724,7 +728,7 @@ func TestOverrideErrors(t *testing.T) {
 		}
 		release()
 		wantEnd(t, h, turnID, engine.StateCancelled, "cancelled")
-		wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
+		_ = wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
 	})
 	t.Run("no candidate", func(t *testing.T) {
 		scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindError, Err: errors.New("boom")}}}
@@ -733,13 +737,13 @@ func TestOverrideErrors(t *testing.T) {
 		if row := waitEnded(t, h, turnID); row.TerminalState != engine.StateIncomplete {
 			t.Fatalf("turn ended %q", row.TerminalState)
 		}
-		wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
+		_ = wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
 	})
 	t.Run("not yet terminal", func(t *testing.T) {
 		h := enginetest.New(t, reviewRoster("author", "r1"), approvers("r1"))
 		release := h.Hold("author")
 		turnID := submitReview(t, h, "s1")
-		wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
+		_ = wantRefusal(t, h.Engine.Override(turnID, "r"), wire.ErrorCodeNotIncomplete)
 		release()
 	})
 }
@@ -771,5 +775,33 @@ func TestOverrideTxIsAtomic(t *testing.T) {
 	s.SetPayloadHook(nil)
 	if err := s.Override(turnID, "false alarm"); err != nil {
 		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestOverrideDeliversReviewerTextNotRawBody(t *testing.T) {
+	// r1's transport body differs from its reply text, as with a real adapter.
+	blocker := blockStep("b1")
+	blocker.RawOutput = "RAW-TRANSPORT-BODY"
+	_, s, turnID := incompleteWithScripts(t, map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"r1":     {blocker},
+		"r2":     {approveStep()},
+	}, map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), ack()},
+		"r1":     {ack()},
+		"r2":     {ack()},
+	})
+	if err := s.Override(turnID, "false alarm"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "deliveries", func() bool { return len(s.Adapters["r2"].Calls()) == 1 })
+	var content string
+	for _, c := range s.Adapters["r2"].Calls() {
+		if c.Request.Envelope.Phase == phaseDelivery {
+			content = userContent(c.Request)
+		}
+	}
+	if content == "" || strings.Contains(content, "RAW-TRANSPORT-BODY") || !strings.Contains(content, "b1") {
+		t.Fatalf("delivery content = %q", content)
 	}
 }

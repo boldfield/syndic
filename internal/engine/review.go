@@ -490,6 +490,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 
+		if err := tx.SetAttemptText(d.attemptID, res.Text); err != nil {
+			return err
+		}
 		parsed := verdict.Parse(res.Text, t.candidateHash, d.attemptID)
 		if err := tx.SetAttemptCommentary(d.attemptID, parsed.Commentary); err != nil {
 			return err

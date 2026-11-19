@@ -564,9 +564,15 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		stopAttempt:   make(map[string]func() bool),
 		pending:       make(map[string]time.Time),
 	}
+	texts, err := e.store.AttemptTexts(row.ID)
+	if err != nil {
+		log.Printf("engine: turn %s: no delivery, reviewer texts unreadable: %v", row.ID, err)
+		return nil
+	}
+	// Only the accepted, gate-passed replies carry text, as in the live path.
 	for _, a := range attempts {
-		if a.Phase == phaseReview && a.State != attemptPending && !a.Quarantined && a.RawOutput != nil {
-			t.outputs[a.ID] = *a.RawOutput
+		if text, ok := texts[a.ID]; ok && a.Phase == phaseReview && !a.Quarantined {
+			t.outputs[a.ID] = text
 		}
 	}
 	return t
