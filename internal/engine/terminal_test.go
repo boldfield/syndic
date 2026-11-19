@@ -240,6 +240,27 @@ func TestConfirmedCancelReleasesAndNextTurnDispatches(t *testing.T) {
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 }
 
+func TestEngineCancelledAttemptKeepsAdapterTransportStatus(t *testing.T) {
+	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
+	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(farFuture))
+	reply, err := h.Engine.Submit(soloReq("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCount(t, h, wire.EventKindAttemptBegun, 1)
+	attemptID := attemptsOf(h, reply.TurnID, "author")[0]
+	if err := h.Engine.Cancel(reply.TurnID); err != nil {
+		t.Fatal(err)
+	}
+	wantReleased(t, h, attemptID, "server_confirmed")
+	waitFor(t, "late result journaled", func() bool {
+		return getAttempt(t, h, attemptID).TransportStatus != nil
+	})
+	if got := *getAttempt(t, h, attemptID).TransportStatus; got != "cancelled" {
+		t.Fatalf("transport status = %q, want cancelled", got)
+	}
+}
+
 func TestUnconfirmedCancelKeepsPoolHeldUntilOperatorRelease(t *testing.T) {
 	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}, enginetest.Reply(authorText)}}
 	// Deadlines far beyond the clock advance below, so the queued turn lives.

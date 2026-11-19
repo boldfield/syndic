@@ -45,7 +45,7 @@ func (e *Engine) participantConfig(id string) config.Participant {
 // review-mode turn and, when it passes, freezes the candidate. It reports
 // whether reviewers should be dispatched. A turn it does not carry on is
 // either ended here or already terminal.
-func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult) bool {
+func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -55,8 +55,9 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	var hash string
 	var quarantined, ended, exceeded bool
 	var term *terminal
+	var held *hold
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, quarantined, ended, exceeded, term = "", false, false, false, nil
+		hash, quarantined, ended, exceeded, term, held = "", false, false, false, nil, nil
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -69,7 +70,10 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		if exceeded, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
 			return err
 		}
-		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, e.lastInflight(t.author)); err != nil {
+		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, fail, e.lastInflight(t.author)); err != nil {
+			return err
+		}
+		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -107,6 +111,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		e.lateCommitted(attemptID, res)
 		return false
 	}
+	e.failedCommitted(t.author, fail, held)
 	if e.lastInflight(t.author) {
 		delete(e.running, t.author)
 	}
@@ -158,8 +163,8 @@ func (e *Engine) startReviewer(t *openTurn, id string) {
 // back when Complete has returned and its result handled. A repair goes back
 // through the scheduler, so it queues behind work already waiting in its pool.
 func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
-	res := e.complete(d.participant, d.req)
-	repair := e.completeReviewer(t, d, res)
+	res, fail := e.complete(t, d.participant, d.req)
+	repair := e.completeReviewer(t, d, res, fail)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -192,7 +197,7 @@ func (e *Engine) startRepair(t *openTurn, orig reviewerDispatch, original string
 		e.releaseLocked(orig.participant)
 		return
 	}
-	e.running[orig.participant] = true
+	e.markRunning(orig.participant)
 	e.armAttempt(t, rd.attemptID, rd.req.Deadline)
 	go e.runReviewer(t, *rd)
 }
@@ -305,7 +310,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 	if err != nil {
 		return reviewerDispatch{}, err
 	}
-	e.running[id] = true
+	e.markRunning(id)
 	e.armAttempt(t, d.attemptID, d.req.Deadline)
 	return d, nil
 }
@@ -443,7 +448,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 
 // completeReviewer runs accept, gate, parse and the decision for one
 // reviewer's result in one transaction.
-func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult) *string {
+func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult, fail *failure) *string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -454,9 +459,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	var endState, endReason string
 	var repair bool
 	var term *terminal
+	var held *hold
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, endState, endReason = false, false, "", ""
-		repair, exceeded, term = false, false, nil
+		repair, exceeded, term, held = false, false, nil, nil
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -472,7 +478,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if exceeded, err = e.settle(tx, emit, t.id, d.attemptID, res.Usage, true); err != nil {
 			return err
 		}
-		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate, e.lastInflight(d.participant)); err != nil {
+		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate, fail, e.lastInflight(d.participant)); err != nil {
+			return err
+		}
+		if held, err = e.failedIn(tx, emit, d.participant, d.attemptID, fail); err != nil {
 			return err
 		}
 		if gate != nil {
@@ -557,6 +566,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		e.lateCommitted(d.attemptID, res)
 		return nil
 	}
+	e.failedCommitted(d.participant, fail, held)
 	if e.lastInflight(d.participant) {
 		delete(e.running, d.participant)
 	}
@@ -596,8 +606,9 @@ func outputOf(res transport.CompleteResult) journal.AttemptOutput {
 }
 
 // recordCompletion stores usage and the gate error of an accepted result and
-// emits attempt_completed and the participant going idle.
-func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error, idle bool) error {
+// emits attempt_completed and the participant going idle, or into the state a
+// failed dispatch sets.
+func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemptID string, res transport.CompleteResult, gate error, fail *failure, idle bool) error {
 	var usage *wire.ReportedUsage
 	if res.Usage != nil {
 		if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
@@ -617,7 +628,7 @@ func recordCompletion(tx *journal.Tx, emit hub.Emit, turnID, participant, attemp
 	if !idle {
 		return nil
 	}
-	return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
+	return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: fail.participantState()})
 }
 
 func emitCompleted(emit hub.Emit, turnID, attemptID string, res transport.CompleteResult, usage *wire.ReportedUsage) error {

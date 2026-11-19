@@ -86,6 +86,37 @@ func (e *Engine) poolGroup(pool string) []wire.GroupMember {
 	return group
 }
 
+// holdIn opens the capacity hold of an attempt whose server-side outcome is
+// unknown and announces it, inside the caller's Tx. The caller installs the
+// returned hold once the Tx has committed. e.mu is held.
+func (e *Engine) holdIn(tx *journal.Tx, emit hub.Emit, attemptID, participant string, now time.Time) (*hold, error) {
+	p := e.participantConfig(participant)
+	pool := poolName(p)
+	group := e.poolGroup(pool)
+	members := make([]journal.GroupMember, len(group))
+	for i, m := range group {
+		members[i] = journal.GroupMember{EndpointName: m.EndpointName, Model: m.Model}
+	}
+	if err := tx.OpenHold(journal.Hold{
+		AttemptID:    attemptID,
+		Pool:         pool,
+		EndpointName: p.Endpoint,
+		Model:        p.Model,
+		Group:        members,
+		HeldSince:    now,
+	}); err != nil {
+		return nil, err
+	}
+	if err := emit("", wire.EventKindCapacity, wire.EvCapacity{
+		Pool:          pool,
+		HeldByAttempt: attemptID,
+		State:         capacityUncertain,
+	}); err != nil {
+		return nil, err
+	}
+	return &hold{attemptID: attemptID, pool: pool, participant: participant, since: now, group: group}, nil
+}
+
 // endIn is the one terminal path, run inside the Tx that ends the turn:
 // bump the epoch, drop the turn's queued dispatches, request cancellation of
 // and hold capacity for every in-flight attempt, record the phase for a
@@ -126,31 +157,11 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 		if a.State != "pending" {
 			continue
 		}
-		p := e.participantConfig(a.Participant)
-		pool := poolName(p)
 		if err := tx.SetCancellation(a.ID, cancellationRequested); err != nil {
 			return nil, err
 		}
-		group := e.poolGroup(pool)
-		members := make([]journal.GroupMember, len(group))
-		for i, m := range group {
-			members[i] = journal.GroupMember{EndpointName: m.EndpointName, Model: m.Model}
-		}
-		if err := tx.OpenHold(journal.Hold{
-			AttemptID:    a.ID,
-			Pool:         pool,
-			EndpointName: p.Endpoint,
-			Model:        p.Model,
-			Group:        members,
-			HeldSince:    now,
-		}); err != nil {
-			return nil, err
-		}
-		if err := emit("", wire.EventKindCapacity, wire.EvCapacity{
-			Pool:          pool,
-			HeldByAttempt: a.ID,
-			State:         capacityUncertain,
-		}); err != nil {
+		h, err := e.holdIn(tx, emit, a.ID, a.Participant, now)
+		if err != nil {
 			return nil, err
 		}
 		if !cancelling[a.Participant] {
@@ -162,13 +173,7 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 				return nil, err
 			}
 		}
-		term.holds = append(term.holds, &hold{
-			attemptID:   a.ID,
-			pool:        pool,
-			participant: a.Participant,
-			since:       now,
-			group:       group,
-		})
+		term.holds = append(term.holds, h)
 	}
 
 	if state == StateCancelled {
@@ -201,6 +206,9 @@ func (e *Engine) commitTerminal(t *openTurn, term *terminal) {
 	if term != nil {
 		for _, h := range term.holds {
 			h.calling = e.calling[h.attemptID]
+			if h.calling {
+				e.cancelled[h.attemptID] = true
+			}
 			e.holds[h.attemptID] = h
 			e.cancelling[h.participant]++
 			e.pstate[h.participant] = ParticipantCancelling
