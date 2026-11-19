@@ -292,19 +292,22 @@ func lastTurnState(t *testing.T, h *enginetest.Harness, turnID string) wire.EvTu
 func TestSoloFailures(t *testing.T) {
 	cases := []struct {
 		name   string
-		step   fake.Step
+		steps  []fake.Step
 		reason string
 		gate   bool
 	}{
-		{"refused", fake.Step{Kind: fake.StepKindReply, Text: "no", Status: transport.StatusRefused, TransportStatus: transport.TransportStatusOK}, "author_failed:refused", true},
-		{"truncated", fake.Step{Kind: fake.StepKindReply, Text: "cut", Status: transport.StatusTruncated, TransportStatus: transport.TransportStatusOK}, "author_failed:truncated", true},
-		{"identity mismatch", fake.Step{Kind: fake.StepKindReply, Text: "x", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK, ReportedModel: "other-model"}, "author_failed:gate:identity mismatch", true},
-		{"transport status", fake.Step{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnreachable}, "author_failed:unreachable", true},
-		{"go error", fake.Step{Kind: fake.StepKindError, Err: errors.New("boom")}, "author_failed:adapter_error:boom", true},
+		{"refused", []fake.Step{{Kind: fake.StepKindReply, Text: "no", Status: transport.StatusRefused, TransportStatus: transport.TransportStatusOK}}, "author_failed:refused", true},
+		{"truncated", []fake.Step{{Kind: fake.StepKindReply, Text: "cut", Status: transport.StatusTruncated, TransportStatus: transport.TransportStatusOK}}, "author_failed:truncated", true},
+		{"identity mismatch", []fake.Step{{Kind: fake.StepKindReply, Text: "x", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK, ReportedModel: "other-model"}}, "author_failed:gate:identity mismatch", true},
+		{"transport status", []fake.Step{{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnreachable}, {Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnreachable}}, "author_failed:unreachable", true},
+		{"go error", []fake.Step{{Kind: fake.StepKindError, Err: errors.New("boom")}}, "author_failed:adapter_error:boom", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": {tc.step}})
+			oldDelay := engine.DispatchRetryDelay
+			t.Cleanup(func() { engine.DispatchRetryDelay = oldDelay })
+			engine.DispatchRetryDelay = 0
+			h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": tc.steps})
 			reply, err := h.Engine.Submit(soloReq("s1"))
 			if err != nil {
 				t.Fatal(err)

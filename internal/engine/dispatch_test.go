@@ -44,7 +44,7 @@ func TestDecideDispatchFailure(t *testing.T) {
 			goErr:            nil,
 			wantShouldRetry:  false,
 			wantOpenHold:     false,
-			wantNewStatus:    "",
+			wantNewStatus:    string(transport.StatusError),
 			wantReasonPrefix: "test_participant:unreachable",
 		},
 		// Reset: should end turn with hold

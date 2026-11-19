@@ -8,8 +8,9 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
-// dispatchRetryDelay is the fixed delay for retrying an unreachable attempt.
-var dispatchRetryDelay = 100 * time.Millisecond
+// DispatchRetryDelay is the fixed delay for retrying an unreachable attempt.
+// Tests can shorten this to speed up retries in test scenarios.
+var DispatchRetryDelay = 100 * time.Millisecond
 
 // dispatchFailureOutcome describes how a transport failure should be handled.
 type dispatchFailureOutcome struct {
@@ -111,7 +112,7 @@ func decideDispatchFailure(role string, participant string, retryCount int, stat
 		} else {
 			terminalReason = fmt.Sprintf("%s:unreachable", participant)
 		}
-		return false, false, "", terminalReason
+		return false, false, string(transport.StatusError), terminalReason
 	}
 
 	// For other failures, construct terminal reason

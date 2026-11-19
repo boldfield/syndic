@@ -380,10 +380,10 @@ func (e *Engine) completeWithRetry(participant string, req transport.CompleteReq
 				return nil
 			}
 			now := e.clock.Now()
-			if attempt.Deadline != nil && now.Add(dispatchRetryDelay).After(*attempt.Deadline) {
+			if attempt.Deadline != nil && now.Add(DispatchRetryDelay).After(*attempt.Deadline) {
 				return nil
 			}
-			if turn.TurnDeadline != nil && now.Add(dispatchRetryDelay).After(*turn.TurnDeadline) {
+			if turn.TurnDeadline != nil && now.Add(DispatchRetryDelay).After(*turn.TurnDeadline) {
 				return nil
 			}
 			retryable = true
@@ -391,8 +391,12 @@ func (e *Engine) completeWithRetry(participant string, req transport.CompleteReq
 			return err
 		})
 		if err == nil && retryable {
-			// Wait for the retry delay
-			time.Sleep(dispatchRetryDelay)
+			// Wait for the retry delay using the clock
+			if DispatchRetryDelay > 0 {
+				done := make(chan struct{})
+				e.clock.AfterFunc(DispatchRetryDelay, func() { close(done) })
+				<-done
+			}
 			// Retry the dispatch
 			return e.completeWithRetry(participant, req, attemptID, turnID, retryCount+1, role)
 		}
