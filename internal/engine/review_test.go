@@ -427,7 +427,8 @@ func TestReviewLateResultIsQuarantined(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		for _, p := range status.Participants {
-			if p.ID == "r1" && p.State != engine.ParticipantRunning {
+			// The block cancelled r1's request; it is in flight, not idle.
+			if p.ID == "r1" && p.State == engine.ParticipantIdle {
 				t.Fatalf("r1 state = %s while in flight", p.State)
 			}
 		}

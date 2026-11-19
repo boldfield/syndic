@@ -409,19 +409,9 @@ func asRefusal(err error) (*budgetRefusal, bool) {
 // finishBudget ends the turn for a refused dispatch: the budget event and the
 // terminal path in one Tx. e.mu is held.
 func (e *Engine) finishBudget(t *openTurn, r *budgetRefusal) {
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		if err := emit(t.id, wire.EventKindBudget, r.event(t.id)); err != nil {
-			return err
-		}
-		return endTurnIn(tx, emit, t.id, StateIncomplete, r.reason())
-	})
-	if err != nil {
-		return
-	}
-	if e.open == t {
-		e.open = nil
-		e.turnEnded(t)
-	}
+	e.launchCancels(e.endLocked(t, StateIncomplete, r.reason(), func(tx *journal.Tx, emit hub.Emit) error {
+		return emit(t.id, wire.EventKindBudget, r.event(t.id))
+	}))
 }
 
 // settleQuarantined stores the usage of a quarantined result and charges it.
@@ -431,5 +421,9 @@ func (e *Engine) settleQuarantined(tx *journal.Tx, emit hub.Emit, turnID, attemp
 			return false, err
 		}
 	}
-	return e.settle(tx, emit, turnID, attemptID, res.Usage, false)
+	exceeded, err := e.settle(tx, emit, turnID, attemptID, res.Usage, false)
+	if err != nil {
+		return false, err
+	}
+	return exceeded, e.releaseLateIn(tx, emit, attemptID, res)
 }

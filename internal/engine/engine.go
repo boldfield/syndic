@@ -34,6 +34,7 @@ const (
 	StateApproved            = "approved"
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
+	StateCancelled           = "cancelled"
 )
 
 // Participant states.
@@ -42,6 +43,10 @@ const (
 	ParticipantQueued   = "queued"
 	ParticipantRunning  = "running"
 	ParticipantUnprobed = "unprobed"
+	// ParticipantCancelling lasts from the terminal Tx until Adapter.Cancel
+	// returns; ParticipantUnknown while an attempt of the participant is held.
+	ParticipantCancelling = "cancelling"
+	ParticipantUnknown    = "unknown"
 )
 
 // Attempt phases and message senders.
@@ -57,6 +62,7 @@ const (
 	reasonSoloOK       = "solo_ok"
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
+	reasonCancelled    = "cancelled"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
@@ -114,6 +120,14 @@ type Engine struct {
 	// writes. It is set before any request and never changed afterwards.
 	payloadHook func(kind string, payload any) any
 
+	// crashHook lets tests stop the engine between the terminal Tx and the
+	// Adapter.Cancel calls: when it returns true no call is made and nothing
+	// further is written. It is set before any request.
+	crashHook func() bool
+
+	// wg counts the goroutines that call Adapter.Cancel.
+	wg sync.WaitGroup
+
 	// mu owns everything below.
 	mu           sync.Mutex
 	started      bool
@@ -130,7 +144,11 @@ type Engine struct {
 	inflight     map[string]int // dispatches holding a pool slot, per participant
 	queued       map[string]bool
 	pools        map[string]*pool
-	exceeded     map[string]bool // participants whose estimate was exceeded this run
+	exceeded     map[string]bool   // participants whose estimate was exceeded this run
+	holds        map[string]*hold  // unreleased capacity holds, by attempt id
+	calling      map[string]bool   // attempts whose Complete call has not returned
+	cancelling   map[string]int    // Adapter.Cancel calls pending, per participant
+	pstate       map[string]string // cancelling or unknown last reported, per participant
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -158,6 +176,10 @@ func New(o Options) (*Engine, error) {
 		inflight:   make(map[string]int),
 		queued:     make(map[string]bool),
 		pools:      make(map[string]*pool),
+		holds:      make(map[string]*hold),
+		calling:    make(map[string]bool),
+		cancelling: make(map[string]int),
+		pstate:     make(map[string]string),
 	}
 	if e.clock == nil {
 		e.clock = realClock{}
@@ -326,13 +348,5 @@ func (e *Engine) Hello() wire.HelloReply {
 	}
 }
 
-// Cancel is implemented by a later task.
-func (e *Engine) Cancel(turnID string) error { return ErrNotImplemented }
-
 // Override is implemented by a later task.
 func (e *Engine) Override(turnID, reason string) error { return ErrNotImplemented }
-
-// Release is implemented by a later task.
-func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
-	return wire.ReleaseReply{}, ErrNotImplemented
-}

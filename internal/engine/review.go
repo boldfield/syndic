@@ -54,8 +54,9 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 
 	var hash string
 	var quarantined, ended, exceeded bool
+	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, quarantined, ended, exceeded = "", false, false, false
+		hash, quarantined, ended, exceeded, term = "", false, false, false, nil
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -73,7 +74,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if gate != nil {
 			ended = true
-			return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			return err
 		}
 		hash, err = candidate.Hash(candidate.Identity{
 			ManifestHash:    e.manifestHash,
@@ -102,16 +104,15 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	}
 	if quarantined {
 		// The turn already ended; release reports the author idle.
+		e.lateCommitted(attemptID, res)
 		return false
 	}
 	if e.lastInflight(t.author) {
 		delete(e.running, t.author)
 	}
 	if ended {
-		if e.open == t {
-			e.open = nil
-			e.turnEnded(t)
-		}
+		e.commitTerminal(t, term)
+		e.launchCancels(term)
 		return false
 	}
 	t.candidate = res.Text
@@ -452,9 +453,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	var quarantined, approvedNow, exceeded bool
 	var endState, endReason string
 	var repair bool
+	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, endState, endReason = false, false, "", ""
-		repair, exceeded = false, false
+		repair, exceeded, term = false, false, nil
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -475,7 +477,8 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)
-			return endTurnIn(tx, emit, t.id, endState, endReason)
+			term, err = e.endIn(tx, emit, t, endState, endReason)
+			return err
 		}
 
 		parsed := verdict.Parse(res.Text, t.candidateHash, d.attemptID)
@@ -539,7 +542,8 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if endState == "" {
 			return nil
 		}
-		return endTurnIn(tx, emit, t.id, endState, endReason)
+		term, err = e.endIn(tx, emit, t, endState, endReason)
+		return err
 	})
 	e.attemptDone(t, d.attemptID)
 	if err == nil && exceeded {
@@ -550,6 +554,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		return nil
 	}
 	if quarantined {
+		e.lateCommitted(d.attemptID, res)
 		return nil
 	}
 	if e.lastInflight(d.participant) {
@@ -561,9 +566,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if approvedNow {
 		t.approved[d.participant] = true
 	}
-	if endState != "" && e.open == t {
-		e.open = nil
-		e.turnEnded(t)
+	if endState != "" {
+		e.commitTerminal(t, term)
+		e.launchCancels(term)
 	}
 	return nil
 }

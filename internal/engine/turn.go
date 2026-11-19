@@ -66,6 +66,7 @@ func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID
 // error result.
 func (e *Engine) complete(participant string, req transport.CompleteRequest) transport.CompleteResult {
 	res, err := e.adapterFor(participant).Complete(context.Background(), req)
+	e.returned(req.Envelope.AttemptID)
 	if err != nil {
 		res = transport.CompleteResult{
 			Envelope:        req.Envelope,
@@ -74,6 +75,17 @@ func (e *Engine) complete(participant string, req transport.CompleteRequest) tra
 		}
 	}
 	return res
+}
+
+// returned records that the attempt's Complete call has returned. A hold on
+// the attempt then occupies a slot of its own.
+func (e *Engine) returned(attemptID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.calling, attemptID)
+	if h := e.holds[attemptID]; h != nil {
+		h.calling = false
+	}
 }
 
 func (e *Engine) adapterFor(id string) transport.Adapter {
@@ -187,8 +199,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	gate := transport.CheckResult(req, res, expected)
 
 	quarantined, exceeded := false, false
+	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		quarantined, exceeded = false, false
+		quarantined, exceeded, term = false, false, nil
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
@@ -242,15 +255,20 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			}
 		}
 		if gate == nil {
-			return endTurnIn(tx, emit, t.id, StateSoloComplete, reasonSoloOK)
+			term, err = e.endIn(tx, emit, t, StateSoloComplete, reasonSoloOK)
+		} else {
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
 		}
-		return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+		return err
 	})
 	e.attemptDone(t, attemptID)
 	if err == nil && exceeded {
 		e.markExceeded(t.author)
 	}
 	if quarantined {
+		if err == nil {
+			e.lateCommitted(attemptID, res)
+		}
 		return
 	}
 	if err != nil {
@@ -263,34 +281,8 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	if e.lastInflight(t.author) {
 		delete(e.running, t.author)
 	}
-	e.open = nil
-	e.turnEnded(t)
-}
-
-// finishLocked is finishTurn with e.mu held.
-func (e *Engine) finishLocked(t *openTurn, state, reason string) {
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return endTurnIn(tx, emit, t.id, state, reason)
-	})
-	if err != nil {
-		return
-	}
-	if e.open == t {
-		e.open = nil
-		e.turnEnded(t)
-	}
-}
-
-// endTurnIn is the terminal path: record the state and reason, bump the
-// epoch so no later result is accepted, and emit turn_state.
-func endTurnIn(tx *journal.Tx, emit hub.Emit, turnID, state, reason string) error {
-	if err := tx.EndTurn(turnID, state, reason); err != nil {
-		return err
-	}
-	if _, err := tx.BumpEpoch(turnID); err != nil {
-		return err
-	}
-	return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{TurnID: turnID, State: state, Reason: &reason})
+	e.commitTerminal(t, term)
+	e.launchCancels(term)
 }
 
 // authorFailedStatus follows the design's "Terminal reasons" rule: the

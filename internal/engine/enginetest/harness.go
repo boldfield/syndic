@@ -107,6 +107,7 @@ type options struct {
 	contextBound map[string]int
 	calibration  map[string]float64
 	noStart      bool
+	unconfirmed  bool
 	clockStart   time.Time
 }
 
@@ -145,6 +146,12 @@ func WithEligibleRequiredReviewer(id string, v transport.Tri) Option {
 // scripted Hang to outlast the real wall clock starts it in the far future.
 func ClockStart(t time.Time) Option {
 	return func(o *options) { o.clockStart = t }
+}
+
+// CancelUnconfirmed makes every fake adapter answer Cancel with a server
+// confirmation of unknown.
+func CancelUnconfirmed() Option {
+	return func(o *options) { o.unconfirmed = true }
 }
 
 // NoStart builds the engine without starting it.
@@ -246,7 +253,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		done:       make(chan struct{}),
 	}
 	for _, p := range roster.Participants {
-		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel})
+		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed})
 		hn.Adapters[p.ID] = fa
 		hn.gated[p.ID] = &gatedAdapter{inner: fa}
 	}

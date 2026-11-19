@@ -58,6 +58,7 @@ type Adapter struct {
 	mu             sync.Mutex
 	calls          []CompleteCall
 	current        int
+	cancels        []string
 	hangingAttempt map[string]context.CancelFunc
 }
 
@@ -267,6 +268,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.cancels = append(a.cancels, attemptID)
 
 	confirmed := transport.TriYes
 	if a.cancelUnconfirmed {
@@ -310,4 +312,11 @@ func (a *Adapter) Calls() []CompleteCall {
 		}
 	}
 	return result
+}
+
+// CancelCalls returns the attempt id of every Cancel call received, in order.
+func (a *Adapter) CancelCalls() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.cancels...)
 }

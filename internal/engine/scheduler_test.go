@@ -242,9 +242,9 @@ func TestTurnDeadlineCountsQueueTime(t *testing.T) {
 }
 
 func TestAttemptDeadlineOnHang(t *testing.T) {
-	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
-	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
-	h := enginetest.New(t, schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
+	scripts := map[string][]fake.Step{"author": {enginetest.Reply(authorText)}}
+	h := enginetest.New(t, schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts)
+	release := h.Hold("author")
 	reply, err := h.Engine.Submit(soloReq("s1"))
 	if err != nil {
 		t.Fatal(err)
@@ -259,14 +259,13 @@ func TestAttemptDeadlineOnHang(t *testing.T) {
 	h.Clock.Advance(2 * time.Second)
 	wantEnd(t, h, reply.TurnID, engine.StateIncomplete, "deadline:attempt:"+attemptID)
 
-	// The engine gave up, but the author's slot is held until Complete
-	// returns.
-	if s := participantState(t, h, "author"); s != engine.ParticipantRunning {
+	// The engine gave up and cancelled, but the author's slot is held until
+	// Complete returns. The terminal path now calls Adapter.Cancel, so the
+	// request is kept in flight by the harness gate rather than by the Hang.
+	if s := participantState(t, h, "author"); s == engine.ParticipantIdle {
 		t.Fatalf("author is %s while its request is in flight", s)
 	}
-	if _, err := h.Adapters["author"].Cancel(context.Background(), attemptID); err != nil {
-		t.Fatal(err)
-	}
+	release()
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 	row := getAttempt(t, h, attemptID)
 	if !row.Quarantined {
@@ -496,10 +495,12 @@ func TestAttemptDeadlineOnHangReviewAuthorIdle(t *testing.T) {
 	}
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 
+	// The terminal path reports the author cancelling; a confirmed cancel
+	// may also show it running until Complete returns.
 	states := stateEvents(h, "author")
-	want := []string{engine.ParticipantRunning, engine.ParticipantIdle}
-	if joinStates(states) != joinStates(want) {
-		t.Fatalf("author participant_state events = %v, want %v", states, want)
+	if len(states) < 3 || states[0] != engine.ParticipantRunning ||
+		states[1] != engine.ParticipantCancelling || states[len(states)-1] != engine.ParticipantIdle {
+		t.Fatalf("author participant_state events = %v, want running, cancelling, ..., idle", states)
 	}
 }
 
@@ -571,13 +572,15 @@ func waitQuarantined(t *testing.T, h *enginetest.Harness, attemptID string) {
 // The newer attempt's accepted result must not report idle while an older,
 // abandoned request of the same participant is still in flight.
 func TestOverlappingAttemptsNewerFinishesFirst(t *testing.T) {
-	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	scripts := map[string][]fake.Step{"author": {
-		{Kind: fake.StepKindHang},
+		enginetest.Reply(authorText),
 		enginetest.ReplyFunc(func(transport.CompleteRequest) string { return authorText }),
 	}}
 	roster := schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, "\n[pools.default]\nconcurrency = 2\n")
-	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(start))
+	h := enginetest.New(t, roster, scripts)
+	// The first request is kept in flight by the harness gate: the terminal
+	// path cancels it at its deadline, and the fake's Hang would return then.
+	release := h.Hold("author")
 	reply, err := h.Engine.Submit(soloReq("s1"))
 	if err != nil {
 		t.Fatal(err)
@@ -593,11 +596,9 @@ func TestOverlappingAttemptsNewerFinishesFirst(t *testing.T) {
 	}
 	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
 	time.Sleep(50 * time.Millisecond)
-	if s := participantState(t, h, "author"); s != engine.ParticipantRunning {
+	if s := participantState(t, h, "author"); s == engine.ParticipantIdle {
 		t.Fatalf("author is %s while the timed-out Complete is still in flight", s)
 	}
-	if _, err := h.Adapters["author"].Cancel(context.Background(), first); err != nil {
-		t.Fatal(err)
-	}
+	release()
 	waitParticipantState(t, h, "author", engine.ParticipantIdle)
 }
