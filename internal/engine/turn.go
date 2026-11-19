@@ -242,9 +242,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			}
 		}
 		if gate == nil {
-			return e.endTurnTerminalPath(tx, emit, t, StateSoloComplete, reasonSoloOK, false, nil)
+			return e.endTurnTerminalPath(tx, emit, t, StateSoloComplete, reasonSoloOK, false, []string{})
 		}
-		return e.endTurnTerminalPath(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate), false, nil)
+		return e.endTurnTerminalPath(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate), false, []string{})
 	})
 	e.attemptDone(t, attemptID)
 	if err == nil && exceeded {
@@ -334,14 +334,7 @@ func (e *Engine) endpointFor(participantID string) config.EndpointProfile {
 }
 
 // endTurnTerminalPath runs the terminal path for ending a turn with holds and cancellations.
-// If inflightIDs is nil or empty, it will be derived from the turn's pending attempts.
 func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason string, isCancellation bool, inflightIDs []string) error {
-	// If inflight not provided, derive from pending attempts
-	if len(inflightIDs) == 0 {
-		for id := range t.pending {
-			inflightIDs = append(inflightIDs, id)
-		}
-	}
 
 	// 1. Bump epoch so no later result is accepted
 	_, err := tx.BumpEpoch(t.id)
