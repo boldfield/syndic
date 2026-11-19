@@ -451,3 +451,15 @@ func (h *Harness) Hold(participantID string) (release func()) {
 	h.T.Cleanup(release)
 	return release
 }
+
+// HoldCancel makes the participant's next Adapter.Cancel call block until the
+// returned function is called. entered is closed once that call has begun.
+func (h *Harness) HoldCancel(participantID string) (entered <-chan struct{}, release func()) {
+	g, ok := h.gated[participantID]
+	if !ok {
+		h.T.Fatalf("no adapter for participant %q", participantID)
+	}
+	entered, release = g.holdCancel()
+	h.T.Cleanup(release)
+	return entered, release
+}

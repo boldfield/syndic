@@ -15,6 +15,19 @@ type gatedAdapter struct {
 
 	mu   sync.Mutex
 	gate chan struct{}
+
+	cancelGate    chan struct{}
+	cancelEntered chan struct{}
+}
+
+func (a *gatedAdapter) holdCancel() (entered <-chan struct{}, release func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	gate := make(chan struct{})
+	en := make(chan struct{})
+	a.cancelGate, a.cancelEntered = gate, en
+	var once sync.Once
+	return en, func() { once.Do(func() { close(gate) }) }
 }
 
 func (a *gatedAdapter) hold() (release func()) {
@@ -42,6 +55,14 @@ func (a *gatedAdapter) Complete(ctx context.Context, req transport.CompleteReque
 }
 
 func (a *gatedAdapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
+	a.mu.Lock()
+	gate, entered := a.cancelGate, a.cancelEntered
+	a.cancelGate, a.cancelEntered = nil, nil
+	a.mu.Unlock()
+	if gate != nil {
+		close(entered)
+		<-gate
+	}
 	return a.inner.Cancel(ctx, attemptID)
 }
 

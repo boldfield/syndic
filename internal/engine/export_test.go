@@ -54,3 +54,28 @@ func EnableDelivery() (restore func()) {
 	deliveryOff = false
 	return func() { deliveryOff = old }
 }
+
+// Inflight is the number of dispatches of the participant holding a pool
+// slot; it is zero once the last of them has handled its result.
+func (e *Engine) Inflight(id string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.inflight[id]
+}
+
+// Cancelers is the number of adapter cancellation goroutines still running.
+func (e *Engine) Cancelers() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cancelers
+}
+
+// StopWaiters is the number of Stop calls waiting for the first one.
+func (e *Engine) StopWaiters() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stop == nil {
+		return 0
+	}
+	return e.stop.waiters
+}

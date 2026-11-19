@@ -123,16 +123,10 @@ func (e *Engine) holdIn(tx *journal.Tx, emit hub.Emit, attemptID, participant st
 	return &hold{attemptID: attemptID, pool: pool, appliedPools: []string{pool}, participant: participant, since: now, group: group}, nil
 }
 
-// endIn is the one terminal path, run inside the Tx that ends the turn:
-// bump the epoch, drop the turn's queued dispatches, request cancellation of
-// and hold capacity for every in-flight attempt, record the phase for a
-// cancel, end the turn and emit turn_state. e.mu is held.
-func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason string) (*terminal, error) {
-	if _, err := tx.BumpEpoch(t.id); err != nil {
-		return nil, err
-	}
-
-	// Queued dispatches have no rows, so only their participants change.
+// reportDroppedIn reports, inside the caller's Tx, the participants of the
+// turn's queued dispatches as no longer queued. Queued dispatches have no
+// rows, so only their participants change. e.mu is held.
+func (e *Engine) reportDroppedIn(emit hub.Emit, t *openTurn) error {
 	var queued []string
 	for _, p := range e.pools {
 		for _, q := range p.queue {
@@ -148,27 +142,28 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 			next = ParticipantIdle
 		}
 		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: id, State: next}); err != nil {
-			return nil, err
+			return err
 		}
 	}
+	return nil
+}
 
-	attempts, err := tx.ListAttempts(t.id)
-	if err != nil {
-		return nil, err
-	}
-	term := &terminal{}
+// holdPendingIn requests cancellation of and holds capacity for each pending
+// attempt of the list, inside the caller's Tx, and adds the holds to term. A
+// non-empty phase restricts it to that phase. e.mu is held.
+func (e *Engine) holdPendingIn(tx *journal.Tx, emit hub.Emit, term *terminal, attempts []journal.AttemptRow, phase string) error {
 	now := e.clock.Now().UTC()
 	cancelling := map[string]bool{}
 	for _, a := range attempts {
-		if a.State != "pending" {
+		if a.State != attemptPending || (phase != "" && a.Phase != phase) {
 			continue
 		}
 		if err := tx.SetCancellation(a.ID, cancellationRequested); err != nil {
-			return nil, err
+			return err
 		}
 		h, err := e.holdIn(tx, emit, a.ID, a.Participant, now)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if !cancelling[a.Participant] {
 			cancelling[a.Participant] = true
@@ -176,10 +171,34 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 				Participant: a.Participant,
 				State:       ParticipantCancelling,
 			}); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		term.holds = append(term.holds, h)
+	}
+	return nil
+}
+
+// endIn is the one terminal path, run inside the Tx that ends the turn:
+// bump the epoch, drop the turn's queued dispatches, request cancellation of
+// and hold capacity for every in-flight attempt, record the phase for a
+// cancel, end the turn and emit turn_state. e.mu is held.
+func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason string) (*terminal, error) {
+	if _, err := tx.BumpEpoch(t.id); err != nil {
+		return nil, err
+	}
+
+	if err := e.reportDroppedIn(emit, t); err != nil {
+		return nil, err
+	}
+
+	attempts, err := tx.ListAttempts(t.id)
+	if err != nil {
+		return nil, err
+	}
+	term := &terminal{}
+	if err := e.holdPendingIn(tx, emit, term, attempts, ""); err != nil {
+		return nil, err
 	}
 
 	if state == StateCancelled {
@@ -209,21 +228,27 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 // against their pools, the turn is no longer open, and nothing it queued
 // starts. e.mu is held.
 func (e *Engine) commitTerminal(t *openTurn, term *terminal) {
-	if term != nil {
-		for _, h := range term.holds {
-			h.calling = e.calling[h.attemptID]
-			if h.calling {
-				e.cancelled[h.attemptID] = true
-			}
-			e.holds[h.attemptID] = h
-			e.cancelling[h.participant]++
-			e.pstate[h.participant] = ParticipantCancelling
-			e.armHold(h)
-		}
-	}
+	e.applyHolds(term)
 	if e.open == t {
 		e.open = nil
 		e.turnEnded(t)
+	}
+}
+
+// applyHolds installs the holds a committed Tx opened. e.mu is held.
+func (e *Engine) applyHolds(term *terminal) {
+	if term == nil {
+		return
+	}
+	for _, h := range term.holds {
+		h.calling = e.calling[h.attemptID]
+		if h.calling {
+			e.cancelled[h.attemptID] = true
+		}
+		e.holds[h.attemptID] = h
+		e.cancelling[h.participant]++
+		e.pstate[h.participant] = ParticipantCancelling
+		e.armHold(h)
 	}
 }
 
@@ -233,15 +258,28 @@ func (e *Engine) launchCancels(term *terminal) {
 	if term == nil || len(term.holds) == 0 {
 		return
 	}
-	e.cancelers++
+	e.beginCancel()
 	go func() {
+		defer e.endCancel()
 		_ = e.cancelAttempts(term.holds)
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		if e.cancelers--; e.cancelers == 0 {
-			e.cancelersOut.Broadcast()
-		}
 	}()
+}
+
+// beginCancel counts a goroutine calling Adapter.Cancel. e.mu is held.
+func (e *Engine) beginCancel() {
+	if e.cancelers == 0 {
+		e.cancelersIdle = make(chan struct{})
+	}
+	e.cancelers++
+}
+
+// endCancel is the end of what beginCancel counted.
+func (e *Engine) endCancel() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cancelers--; e.cancelers == 0 {
+		close(e.cancelersIdle)
+	}
 }
 
 // endLocked runs the terminal path in a Tx of its own, after pre if given,
@@ -298,10 +336,6 @@ func (e *Engine) afterCancel(h *hold, confirmed bool) error {
 	defer e.mu.Unlock()
 	if e.cancelling[h.participant] > 0 {
 		e.cancelling[h.participant]--
-	}
-	if e.stopping && e.stoppingResult != nil {
-		e.syncParticipant(h.participant)
-		return nil
 	}
 	released := false
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -510,10 +544,14 @@ func (e *Engine) Cancel(turnID string) error {
 	if term == nil {
 		failure = errors.New("engine: cancel: terminal transaction failed")
 	}
+	if failure == nil {
+		e.beginCancel()
+	}
 	e.mu.Unlock()
 	if failure != nil {
 		return failure
 	}
+	defer e.endCancel()
 	return e.cancelAttempts(term.holds)
 }
 

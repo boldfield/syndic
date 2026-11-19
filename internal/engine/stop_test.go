@@ -2,7 +2,9 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,418 +14,486 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
+// reviewRosterWithStopGrace is reviewRoster with the engine's stop_grace set.
 func reviewRosterWithStopGrace(authorID string, stopGrace string, reviewers ...string) string {
-	toml := enginetest.RosterTOML
-	toml = strings.ReplaceAll(toml, `id = "author"`, `id = "`+authorID+`"`)
-	toml = strings.ReplaceAll(toml, `author = "author"`, `author = "`+authorID+`"`)
-	start := strings.Index(toml, "[[participants]]\nid = \"reviewer\"")
-	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
-	var extra, quoted []string
-	for _, id := range reviewers {
-		extra = append(extra, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"\n")
-		quoted = append(quoted, `"`+id+`"`)
-	}
-	toml = strings.Replace(toml, "[[endpoints]]", strings.Join(extra, "\n")+"\n[[endpoints]]", 1)
-	toml += "\n[pools.reviewers]\nconcurrency = 10\n"
-	toml = strings.Replace(toml, `required_reviewers = ["reviewer"]`, "required_reviewers = ["+strings.Join(quoted, ", ")+"]", 1)
+	toml := reviewRoster(authorID, reviewers...)
 	if stopGrace != "" {
 		toml += "\n[engine]\nstop_grace = \"" + stopGrace + "\"\n"
 	}
 	return toml
 }
 
-func hasEvent(h *enginetest.Harness, kind string) bool {
-	for _, ev := range h.Events() {
-		if ev.Kind == kind {
-			return true
-		}
-	}
-	return false
-}
+const stopGrace = 5 * time.Second
 
-// TestStopDuringReviewWithConfirmingFake tests that Stop ends an open turn
-// with engine_stop reason, calls Cancel, releases the hold with server_confirmed,
-// and emits engine_stopping last.
-func TestStopDuringReviewWithConfirmingFake(t *testing.T) {
-	scripts := map[string][]fake.Step{
+// stopScripts has the author answer and the reviewer never reach an answer
+// before the test lets it.
+func stopScripts() map[string][]fake.Step {
+	return map[string][]fake.Step{
 		"author":   {enginetest.Reply(authorText)},
 		"reviewer": {enginetest.Reply("approved")},
 	}
-	h := enginetest.New(t, reviewRosterWithStopGrace("author", "5s", "reviewer"), scripts)
+}
+
+// inReview starts a review turn and returns once the reviewer's attempt is in
+// flight, held.
+func inReview(t *testing.T, opts ...enginetest.Option) (*enginetest.Harness, string, string) {
+	t.Helper()
+	h := enginetest.New(t, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts(), opts...)
 	h.Hold("reviewer")
 	turnID := submitReview(t, h, "s1")
 	waitCount(t, h, wire.EventKindAttemptBegun, 2)
+	return h, turnID, attemptsOf(h, turnID, "reviewer")[0]
+}
 
-	// Stop the engine while reviewer attempt is in flight
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+func stopAsync(h *enginetest.Harness, ctx context.Context) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- h.Engine.Stop(ctx) }()
+	return done
+}
 
-	// Turn should be incomplete with engine_stop reason
-	row, err := h.Store.GetTurn(turnID)
-	if err != nil {
-		t.Fatal(err)
+func wantStopReturns(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not return")
+		return nil
 	}
-	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "engine_stop" {
-		t.Fatalf("turn ended %q %q, want incomplete engine_stop", row.TerminalState, row.TerminalReason)
-	}
+}
 
-	// Cancel should have been called on the reviewer attempt
-	reviewerAttempts := attemptsOf(h, turnID, "reviewer")
-	if len(reviewerAttempts) != 1 {
-		t.Fatalf("reviewer attempts = %v", reviewerAttempts)
+func wantRefusedStopping(t *testing.T, what string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s was not refused after Stop", what)
 	}
-	if calls := h.Adapters["reviewer"].CancelCalls(); len(calls) != 1 {
-		t.Fatalf("reviewer Cancel calls = %v", calls)
-	}
+	wantRefusal(t, err, wire.ErrorCodeStopping)
+}
 
-	// No terminal delivery should be attempted
-	if hasEvent(h, wire.EventKindVerdictsDelivered) {
-		t.Fatal("terminal delivery attempted for engine_stop turn")
-	}
-
-	// engine_stopping should be in the events
-	if !hasEvent(h, wire.EventKindEngineStopping) {
-		t.Fatal("engine_stopping event not found")
-	}
-
-	// Last meaningful event should be engine_stopping (not delivery-related)
+func lastEventKind(h *enginetest.Harness) string {
 	events := h.Events()
-	var lastMeaningful string
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Kind != wire.EventKindCapacity && events[i].Kind != wire.EventKindParticipantState {
-			lastMeaningful = events[i].Kind
-			break
-		}
-	}
-	if lastMeaningful != wire.EventKindEngineStopping {
-		t.Fatalf("last meaningful event = %q, want engine_stopping", lastMeaningful)
-	}
-
-	// Hold should be released with server_confirmed
-	hold, found, err := h.Store.GetHold(reviewerAttempts[0])
-	if err != nil || !found {
-		t.Fatalf("hold not found for reviewer attempt: %v", err)
-	}
-	if hold.ReleasedHow != "server_confirmed" {
-		t.Fatalf("hold released how %q, want server_confirmed", hold.ReleasedHow)
-	}
+	return events[len(events)-1].Kind
 }
 
-// TestStopWithCancelUnconfirmed tests that with CancelUnconfirmed, after Stop
-// the hold is unreleased.
-func TestStopWithCancelUnconfirmed(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author":   {enginetest.Reply(authorText)},
-		"reviewer": {enginetest.Reply("approved")},
-	}
-	h := enginetest.New(t, reviewRosterWithStopGrace("author", "100ms", "reviewer"), scripts, enginetest.CancelUnconfirmed())
-	h.Hold("reviewer")
-	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 2)
-
-	reviewerAttempts := attemptsOf(h, turnID, "reviewer")
-
-	// Stop the engine
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	if err := h.Engine.Stop(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	// Hold should NOT be released
-	hold, found, err := h.Store.GetHold(reviewerAttempts[0])
-	if err != nil || !found {
-		t.Fatalf("hold not found: %v", err)
-	}
-	if hold.ReleasedAt != nil {
-		t.Fatal("hold was released but should be unreleased with CancelUnconfirmed")
-	}
-}
-
-// TestSubmitRefusedAfterStop tests that Submit returns stopping error after Stop.
-func TestSubmitRefusedAfterStop(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Submit should be refused with stopping
-	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
-	if err == nil {
-		t.Fatal("Submit should be refused after Stop")
-	}
-	if !strings.Contains(err.Error(), "stopping") {
-		t.Fatalf("Submit error = %q, want stopping", err)
-	}
-}
-
-// TestSubmitRetryWithKnownIDReturnsStoredReply tests that a Submit retry with
-// known submission_id and matching content returns the stored reply during stop.
-func TestSubmitRetryWithKnownIDReturnsStoredReply(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-
-	// First submit
-	reply1, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstTurnID := reply1.TurnID
-
-	// Stop the engine
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Retry with same submission_id and matching content should return stored reply
-	reply2, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
-	if err != nil {
-		t.Fatalf("Submit retry failed: %v", err)
-	}
-	if reply2.TurnID != firstTurnID {
-		t.Fatalf("retry returned different turn %q vs %q", reply2.TurnID, firstTurnID)
-	}
-}
-
-// TestStopWithCancelledContext tests that Stop returns early if context is
-// cancelled during grace, and recovery handles the pending attempt correctly.
-// TestStopWithNoOpenTurn tests that Stop with no open turn emits engine_stopping
-// and returns.
-func TestStopWithNoOpenTurn(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-
-	// No turn is open yet
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	if !hasEvent(h, wire.EventKindEngineStopping) {
-		t.Fatal("engine_stopping event not emitted")
-	}
-}
-
-// TestStoppingChannelClosed tests that Stopping() channel is closed after
-// engine_stopping is emitted.
-func TestStoppingChannelClosed(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-
-	stopping := h.Engine.Stopping()
-
-	// Stop the engine
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Stopping channel should be closed
-	select {
-	case _, ok := <-stopping:
-		if ok {
-			t.Fatal("Stopping channel is not closed")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stopping channel never closed")
-	}
-}
-
-// TestTurnEndedByStopHasEngineStopReason tests that a turn ended by stop has
-// engine_stop reason.
-func TestTurnEndedByStopHasEngineStopReason(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-	h.Hold("author")
-
-	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 1)
-
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
+func wantStopEnd(t *testing.T, h *enginetest.Harness, turnID, reason string) {
+	t.Helper()
 	row, err := h.Store.GetTurn(turnID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.TerminalReason != "engine_stop" {
-		t.Fatalf("terminal reason = %q, want engine_stop", row.TerminalReason)
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != reason {
+		t.Fatalf("turn ended %q %q, want incomplete %s", row.TerminalState, row.TerminalReason, reason)
 	}
 }
 
-// TestLateAdapterResultNotRecorded tests that an adapter result that arrives
-// after Stop returned adds no row and no event.
-func TestLateAdapterResultNotRecorded(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-	h.Hold("author")
-
-	_ = submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 1)
-
-	countBefore := len(h.Events())
-
-	// Stop the engine
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Now release the held result
-	release := h.Hold("author")
-	release()
-
-	// Wait a bit for any late processing
-	time.Sleep(100 * time.Millisecond)
-
-	// Count should not have increased significantly
-	countAfter := len(h.Events())
-	if countAfter > countBefore+10 { // Allow margin for internal events
-		t.Fatalf("late result was recorded: %d events added", countAfter-countBefore)
-	}
-}
-
-// TestMultipleStopCalls tests that a second call to Stop while the first is
-// running waits for the first and returns its result.
-func TestMultipleStopCalls(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-
-	// Make concurrent Stop calls
-	var err1, err2 error
-	done := make(chan struct{})
-	go func() {
-		err1 = h.Engine.Stop(context.Background())
-		done <- struct{}{}
-	}()
-	time.Sleep(10 * time.Millisecond)
-	go func() {
-		err2 = h.Engine.Stop(context.Background())
-		done <- struct{}{}
-	}()
-
-	<-done
-	<-done
-
-	if err1 != nil || err2 != nil {
-		t.Fatalf("Stop errors: %v, %v", err1, err2)
-	}
-}
-
-// TestStopBeforeStart tests that Stop before Start works correctly.
-func TestStopBeforeStart(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts, enginetest.NoStart())
+func TestStopDuringReviewWithConfirmingFake(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	h, turnID, attemptID := inReview(t)
 
 	if err := h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	// Now trying to Start should fail (engine stopped)
-	if err := h.Engine.Start(); err == nil {
-		t.Fatal("Start should fail after Stop was called")
+	wantStopEnd(t, h, turnID, "engine_stop")
+	if calls := h.Adapters["reviewer"].CancelCalls(); len(calls) != 1 || calls[0] != attemptID {
+		t.Fatalf("reviewer Cancel calls = %v, want [%s]", calls, attemptID)
 	}
-
-	stopping := h.Engine.Stopping()
-	select {
-	case _, ok := <-stopping:
-		if ok {
-			t.Fatal("Stopping channel should be closed")
+	if n := len(deliveryAttempts(t, h, turnID)); n != 0 {
+		t.Fatalf("%d terminal_delivery attempts for an engine_stop turn", n)
+	}
+	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
+		t.Fatalf("last event = %q, want engine_stopping", got)
+	}
+	hold, found := getHold(t, h, attemptID)
+	if !found || hold.ReleasedAt == nil || hold.ReleasedHow != "server_confirmed" {
+		t.Fatalf("hold = %+v, found %v", hold, found)
+	}
+	released := false
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvCapacity); ok && p.HeldByAttempt == attemptID && p.State == "released" {
+			released = p.How != nil && *p.How == "server_confirmed"
 		}
-	case <-time.After(1 * time.Second):
-		t.Logf("Note: Stopping channel not closed when Stop before Start - acceptable")
+	}
+	if !released {
+		t.Fatal("no capacity released event with how server_confirmed")
 	}
 }
 
-// TestCancelRefusedAfterStop tests that Cancel returns stopping after Stop.
-func TestCancelRefusedAfterStop(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-	h.Hold("author")
+func TestStopWithCancelUnconfirmed(t *testing.T) {
+	h, turnID, attemptID := inReview(t, enginetest.CancelUnconfirmed())
 
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if hold, found := getHold(t, h, attemptID); !found || hold.ReleasedAt != nil {
+		t.Fatalf("hold = %+v, found %v; want unreleased", hold, found)
+	}
+	wantStopEnd(t, h, turnID, "engine_stop")
+
+	restart(t, h, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
+	started := lastStarted(t, h)
+	if len(started.UncertainCapacity) != 1 || started.UncertainCapacity[0] != "reviewers" {
+		t.Fatalf("engine_started = %+v, want uncertain_capacity [reviewers]", started)
+	}
+	if hold, _ := getHold(t, h, attemptID); hold.ReleasedAt != nil {
+		t.Fatalf("hold released by the restart: %+v", hold)
+	}
+}
+
+func TestStopRefusesSubmitCancelOverrideRelease(t *testing.T) {
+	h, turnID, _ := inReview(t)
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: "again"})
+	wantRefusedStopping(t, "Submit", err)
+	wantRefusedStopping(t, "Cancel", h.Engine.Cancel(turnID))
+	wantRefusedStopping(t, "Override", h.Engine.Override(turnID, "because"))
+	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "reviewers", Reason: "because"})
+	wantRefusedStopping(t, "Release", err)
+}
+
+func TestSubmitRetryWithKnownIDDuringStop(t *testing.T) {
+	h, turnID, _ := inReview(t)
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
+	if err != nil {
+		t.Fatalf("retry during stop: %v", err)
+	}
+	if reply.TurnID != turnID {
+		t.Fatalf("retry returned turn %q, want %q", reply.TurnID, turnID)
+	}
+	_, err = h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "something else"})
+	wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+}
+
+func TestStopWithBlockedCancelReturnsAtGraceAndHoldStays(t *testing.T) {
+	h, turnID, attemptID := inReview(t)
+	entered, release := h.HoldCancel("reviewer")
+
+	done := stopAsync(h, context.Background())
+	<-entered
+	select {
+	case err := <-done:
+		t.Fatalf("Stop returned before the grace period: %v", err)
+	default:
+	}
+
+	h.Clock.Advance(stopGrace)
+	if err := wantStopReturns(t, done); err != nil {
+		t.Fatal(err)
+	}
+	wantStopEnd(t, h, turnID, "engine_stop")
+	if hold, found := getHold(t, h, attemptID); !found || hold.ReleasedAt != nil {
+		t.Fatalf("hold = %+v, found %v; want unreleased", hold, found)
+	}
+	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
+		t.Fatalf("last event = %q, want engine_stopping", got)
+	}
+
+	// The cancellation returns after Stop did: nothing is written.
+	before, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	waitFor(t, "cancellation to return", func() bool { return h.Engine.Cancelers() == 0 })
+	if after, _ := h.Store.MaxSeq(); after != before {
+		t.Fatalf("journal grew from seq %d to %d after Stop returned", before, after)
+	}
+	if hold, _ := getHold(t, h, attemptID); hold.ReleasedAt != nil {
+		t.Fatalf("hold released after Stop returned: %+v", hold)
+	}
+}
+
+func TestStopWithContextCancelledDuringGrace(t *testing.T) {
+	h, turnID, attemptID := inReview(t)
+	entered, _ := h.HoldCancel("reviewer")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := stopAsync(h, ctx)
+	<-entered
+	cancel()
+	if err := wantStopReturns(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop = %v, want context.Canceled", err)
+	}
+	wantStopEnd(t, h, turnID, "engine_stop")
+
+	restart(t, h, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
+	if got := getAttempt(t, h, attemptID).State; got != "unknown" {
+		t.Fatalf("attempt state after restart = %q, want unknown", got)
+	}
+	if hold, found := getHold(t, h, attemptID); !found || hold.ReleasedAt != nil {
+		t.Fatalf("hold = %+v, found %v; want unreleased", hold, found)
+	}
+	wantStopEnd(t, h, turnID, "engine_stop")
+}
+
+func TestStopWithNoOpenTurn(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil)
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
+		t.Fatalf("last event = %q, want engine_stopping", got)
+	}
+	if n := countEvents(h, wire.EventKindEngineStopping); n != 1 {
+		t.Fatalf("%d engine_stopping events", n)
+	}
+	select {
+	case <-h.Engine.Stopping():
+	default:
+		t.Fatal("Stopping() is not closed")
+	}
+}
+
+func TestStoppingClosedAfterEngineStoppingIsJournaled(t *testing.T) {
+	h, _, _ := inReview(t)
+	entered, _ := h.HoldCancel("reviewer")
+	done := stopAsync(h, context.Background())
+	<-entered
+	select {
+	case <-h.Engine.Stopping():
+		t.Fatal("Stopping() closed while a cancellation is outstanding")
+	default:
+	}
+	h.Clock.Advance(stopGrace)
+	<-h.Engine.Stopping()
+	events, err := h.Store.EventsSince(0, 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := events[len(events)-1].Kind; got != wire.EventKindEngineStopping {
+		t.Fatalf("last journaled event when Stopping() closed = %q", got)
+	}
+	if err := wantStopReturns(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStopBeforeStart(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil, enginetest.NoStart())
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-h.Engine.Stopping():
+	default:
+		t.Fatal("Stopping() is not closed")
+	}
+	if err := h.Engine.Start(); err == nil {
+		t.Fatal("Start succeeded after Stop")
+	}
+}
+
+// Stop while the previous turn's terminal delivery is in flight: the delivery
+// is asked to cancel and held, and its turn is untouched.
+func TestStopCancelsEarlierTurnDelivery(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), ack()},
+		"r1":     {approveStep(), {Kind: fake.StepKindHang}},
+	}
+	h := enginetest.New(t, oneReviewer(""), scripts, enginetest.ClockStart(farFuture))
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	var hung string
+	waitFor(t, "r1 delivery pending and author's done", func() bool {
+		var authorDone bool
+		hung = ""
+		for _, a := range deliveryAttempts(t, h, turnID) {
+			switch {
+			case a.Participant == "author" && a.State == "completed":
+				authorDone = true
+			case a.Participant == "r1" && a.State == "pending":
+				hung = a.ID
+			}
+		}
+		return authorDone && hung != ""
+	})
+	before, err := h.Store.GetTurn(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if calls := h.Adapters["r1"].CancelCalls(); len(calls) != 1 || calls[0] != hung {
+		t.Fatalf("r1 Cancel calls = %v, want [%s]", calls, hung)
+	}
+	hold, found := getHold(t, h, hung)
+	if !found || hold.ReleasedHow != "server_confirmed" {
+		t.Fatalf("hold = %+v, found %v", hold, found)
+	}
+	after, err := h.Store.GetTurn(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.TerminalState != before.TerminalState || after.TerminalReason != before.TerminalReason || after.Epoch != before.Epoch {
+		t.Fatalf("turn changed by Stop: %+v -> %+v", before, after)
+	}
+	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
+		t.Fatalf("last event = %q, want engine_stopping", got)
+	}
+}
+
+// A delivery still queued for a slot when Stop runs never starts.
+func TestStopDropsQueuedDelivery(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), {Kind: fake.StepKindHang}},
+		"r1":     {approveStep(), ack()},
+	}
+	roster := restartRoster([]rpart{{id: "author", endpoint: "local", model: "llama2", pool: "p"}, {id: "r1", endpoint: "local", model: "llama3", pool: "p"}},
+		map[string]string{"p": "concurrency = 1\n"})
+	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(farFuture))
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	// The author and r1 share a pool of width 1: the author's delivery hangs
+	// in the slot and r1's waits behind it.
+	waitFor(t, "author delivery pending", func() bool {
+		for _, a := range deliveryAttempts(t, h, turnID) {
+			if a.Participant == "author" && a.State == "pending" {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "r1 queued", func() bool { return participantState(t, h, "r1") == engine.ParticipantQueued })
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range deliveryAttempts(t, h, turnID) {
+		if a.Participant == "r1" {
+			t.Fatalf("queued delivery to r1 was started: %+v", a)
+		}
+	}
+	if n := len(h.Adapters["r1"].CancelCalls()); n != 0 {
+		t.Fatalf("r1 Cancel calls = %d, want 0", n)
+	}
+	if got := participantState(t, h, "r1"); got != engine.ParticipantIdle {
+		t.Fatalf("r1 state = %q, want idle", got)
+	}
+}
+
+// An adapter result that arrives after Stop returned adds no row and no event.
+func TestLateAdapterResultAddsNothing(t *testing.T) {
+	for _, phase := range []string{"author", "reviewer"} {
+		t.Run(phase, func(t *testing.T) {
+			h := enginetest.New(t, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
+			release := h.Hold(phase)
+			turnID := submitReview(t, h, "s1")
+			want := 1
+			if phase == "reviewer" {
+				want = 2
+			}
+			waitCount(t, h, wire.EventKindAttemptBegun, want)
+			attemptID := attemptsOf(h, turnID, phase)[0]
+
+			if err := h.Engine.Stop(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			before, err := h.Store.MaxSeq()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := getAttempt(t, h, attemptID).State
+
+			release()
+			waitFor(t, "late result handled", func() bool { return h.Engine.Inflight(phase) == 0 })
+			waitFor(t, "cancellations returned", func() bool { return h.Engine.Cancelers() == 0 })
+
+			if after, _ := h.Store.MaxSeq(); after != before {
+				t.Fatalf("journal grew from seq %d to %d after Stop returned", before, after)
+			}
+			if got := getAttempt(t, h, attemptID).State; got != state {
+				t.Fatalf("attempt state %q -> %q after Stop returned", state, got)
+			}
+		})
+	}
+}
+
+func TestStopCalls(t *testing.T) {
+	h, _, _ := inReview(t)
+	entered, _ := h.HoldCancel("reviewer")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	first := stopAsync(h, ctx)
+	<-entered
+	second := stopAsync(h, context.Background())
+	waitFor(t, "second Stop to wait", func() bool { return h.Engine.StopWaiters() == 1 })
+
+	cancel()
+	if err := wantStopReturns(t, first); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Stop = %v, want context.Canceled", err)
+	}
+	if err := wantStopReturns(t, second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Stop = %v, want the first call's result", err)
+	}
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop after it finished = %v, want nil", err)
+	}
+}
+
+func TestStopRetriedAfterTerminalTransactionFails(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": {enginetest.Reply(authorText)}}, enginetest.NoStart())
+	var failing atomic.Bool
+	h.Engine.SetPayloadHook(func(kind string, payload any) any {
+		if failing.Load() && kind == wire.EventKindTurnState {
+			return make(chan int) // cannot be marshalled
+		}
+		return payload
+	})
+	if err := h.Engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	h.Hold("author")
 	turnID := submitReview(t, h, "s1")
 	waitCount(t, h, wire.EventKindAttemptBegun, 1)
 
+	failing.Store(true)
+	if err := h.Engine.Stop(context.Background()); err == nil {
+		t.Fatal("Stop succeeded though the turn could not be ended")
+	}
+	row, err := h.Store.GetTurn(turnID)
+	if err != nil || row.TerminalState != "" {
+		t.Fatalf("turn = %+v, err %v; want still open", row, err)
+	}
+	select {
+	case <-h.Engine.Stopping():
+		t.Fatal("Stopping() closed though engine_stopping was not emitted")
+	default:
+	}
+	_, err = h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: "x"})
+	wantRefusedStopping(t, "Submit", err)
+
+	failing.Store(false)
 	if err := h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-
-	// Cancel should be refused with stopping
-	err := h.Engine.Cancel(turnID)
-	if err == nil {
-		t.Fatal("Cancel should be refused after Stop")
-	}
-	if !strings.Contains(err.Error(), "stopping") {
-		t.Fatalf("Cancel error = %q, want stopping", err)
-	}
+	wantStopEnd(t, h, turnID, "engine_stop")
 }
 
-// TestReleaseRefusedAfterStop tests that Release returns stopping after Stop.
-func TestReleaseRefusedAfterStop(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author":   {enginetest.Reply(authorText)},
-		"reviewer": {enginetest.Reply("approved")},
-	}
-	h := enginetest.New(t, reviewRosterWithStopGrace("author", "5s", "reviewer"), scripts)
-	h.Hold("reviewer")
-
-	_ = submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 2)
-
+// A turn ended by a stop says engine_stop; the same turn found open after a
+// kill says engine_restart.
+func TestStopAndKillReasonsDiffer(t *testing.T) {
+	h, stoppedTurn, _ := inReview(t)
 	if err := h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	wantStopEnd(t, h, stoppedTurn, "engine_stop")
 
-	// Release should be refused with stopping
-	_, err := h.Engine.Release(wire.ReleaseRequest{Pool: "reviewers", Reason: "test reason"})
-	if err == nil {
-		t.Fatal("Release should be refused after Stop")
-	}
-	if !strings.Contains(err.Error(), "stopping") {
-		t.Fatalf("Release error = %q, want stopping", err)
-	}
-}
-
-// TestOverrideRefusedAfterStop tests that Override returns stopping after Stop.
-func TestOverrideRefusedAfterStop(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author": {enginetest.Reply(authorText)},
-	}
-	h := enginetest.New(t, enginetest.RosterTOML, scripts)
-	h.Hold("author")
-
-	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 1)
-
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Override should be refused with stopping
-	err := h.Engine.Override(turnID, "test reason")
-	if err == nil {
-		t.Fatal("Override should be refused after Stop")
-	}
-	if !strings.Contains(err.Error(), "stopping") {
-		t.Fatalf("Override error = %q, want stopping", err)
+	killed, killedTurn, _ := inReview(t)
+	restart(t, killed, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
+	wantStopEnd(t, killed, killedTurn, "engine_restart")
+	if strings.Contains(stoppedTurn, killedTurn) {
+		t.Fatal("turns are not distinct")
 	}
 }

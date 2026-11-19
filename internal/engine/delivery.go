@@ -61,6 +61,7 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 	msgs := prompt.Delivery(in)
 	t.delivering = true
 	t.deliveryState = state
+	e.deliveries = append(e.deliveries, t)
 	for _, id := range recipients {
 		// A scheduling failure drops that one delivery and no other.
 		if err := e.schedule(t, id, func() { e.startDelivery(t, id, msgs) }); err != nil {
@@ -260,12 +261,6 @@ func (e *Engine) runDelivery(t *openTurn, d reviewerDispatch) {
 func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport.CompleteResult, fail *failure) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	// After Stop returns, drop late results (spec step 6).
-	if e.stopping && e.stoppingResult != nil {
-		e.attemptDone(t, d.attemptID)
-		return
-	}
 
 	var late, quarantined, exceeded bool
 	var held *hold

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -78,16 +77,6 @@ const defaultPool = "default"
 // ErrNotImplemented is returned by requests a later task implements.
 var ErrNotImplemented = errors.New("not implemented")
 
-// isChanClosed checks if a chan struct{} has been closed by trying to receive in a non-blocking way.
-func isChanClosed(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
-}
-
 // RosterError is returned by Start when the roster fails to load or validate.
 type RosterError struct{ Err error }
 
@@ -108,6 +97,9 @@ func (realClock) Now() time.Time { return time.Now() }
 func (realClock) AfterFunc(d time.Duration, f func()) func() bool {
 	return time.AfterFunc(d, f).Stop
 }
+
+// errJournalClosed is what a transaction attempted after Stop returned gets.
+var errJournalClosed = errors.New("engine: stopped, journal closed")
 
 // Options configure an Engine.
 type Options struct {
@@ -142,36 +134,42 @@ type Engine struct {
 	// further is written. It is set before any request.
 	crashHook func() bool
 
+	// gate guards closed: once Stop has returned the engine writes nothing
+	// more to the journal. Every transaction holds it shared; closing takes it
+	// exclusively, so it waits for transactions in flight.
+	gate   sync.RWMutex
+	closed bool
+
 	// mu owns everything below.
-	mu             sync.Mutex
-	started        bool
-	stopping       bool          // Stop has been called
-	stoppingResult *error        // the result of the first Stop call
-	stopped        *sync.Cond    // signalled on e.mu when Stop completes
-	stoppingCh     chan struct{} // closed when engine_stopping is emitted
-	cancelers      int           // goroutines calling Adapter.Cancel; Stop waits for none
-	cancelersOut   *sync.Cond    // signalled on e.mu when cancelers drops to zero
-	rosterAbs      string
-	roster         *config.Roster
-	adapters       map[string]transport.Adapter
-	built          manifest.Built
-	runID          string
-	manifestHash   string
-	runFirstSeq    int64
-	startedAt      time.Time
-	open           *openTurn
-	running        map[string]bool
-	inflight       map[string]int // dispatches holding a pool slot, per participant
-	queued         map[string]bool
-	pools          map[string]*pool
-	exceeded       map[string]bool   // participants whose estimate was exceeded this run
-	holds          map[string]*hold  // unreleased capacity holds, by attempt id
-	orphanedHolds  map[string]*hold  // holds whose group has no members in new roster
-	calling        map[string]bool   // attempts whose Complete call has not returned
-	cancelled      map[string]bool   // calling attempts the engine itself cancelled
-	cancelling     map[string]int    // Adapter.Cancel calls pending, per participant
-	pstate         map[string]string // cancelling or unknown last reported, per participant
-	failed         map[string]string // failure state of the last dispatch, per participant
+	mu            sync.Mutex
+	started       bool
+	stopping      bool          // Stop has been called
+	stop          *stopRun      // the first Stop call, running or finished
+	stoppingCh    chan struct{} // closed when engine_stopping is emitted
+	cancelers     int           // goroutines calling Adapter.Cancel; Stop waits for none
+	cancelersIdle chan struct{} // closed when cancelers drops to zero
+	deliveries    []*openTurn   // turns that sent terminal deliveries, for Stop
+	rosterAbs     string
+	roster        *config.Roster
+	adapters      map[string]transport.Adapter
+	built         manifest.Built
+	runID         string
+	manifestHash  string
+	runFirstSeq   int64
+	startedAt     time.Time
+	open          *openTurn
+	running       map[string]bool
+	inflight      map[string]int // dispatches holding a pool slot, per participant
+	queued        map[string]bool
+	pools         map[string]*pool
+	exceeded      map[string]bool   // participants whose estimate was exceeded this run
+	holds         map[string]*hold  // unreleased capacity holds, by attempt id
+	orphanedHolds map[string]*hold  // holds whose group has no members in new roster
+	calling       map[string]bool   // attempts whose Complete call has not returned
+	cancelled     map[string]bool   // calling attempts the engine itself cancelled
+	cancelling    map[string]int    // Adapter.Cancel calls pending, per participant
+	pstate        map[string]string // cancelling or unknown last reported, per participant
+	failed        map[string]string // failure state of the last dispatch, per participant
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -210,8 +208,6 @@ func New(o Options) (*Engine, error) {
 		pstate:        make(map[string]string),
 		failed:        make(map[string]string),
 	}
-	e.cancelersOut = sync.NewCond(&e.mu)
-	e.stopped = sync.NewCond(&e.mu)
 	if e.clock == nil {
 		e.clock = realClock{}
 	}
@@ -224,6 +220,11 @@ func New(o Options) (*Engine, error) {
 // tx runs fn in one hub transaction. Events emitted through emit commit with
 // the row writes or not at all.
 func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
+	e.gate.RLock()
+	defer e.gate.RUnlock()
+	if e.closed {
+		return errJournalClosed
+	}
 	return e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return fn(tx, func(turnID, kind string, payload any) error {
 			if e.payloadHook != nil {
@@ -864,123 +865,4 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 		return group[i].Model < group[j].Model
 	})
 	return group, poolID, endpoint, model, nil
-}
-
-// Stop gracefully stops the engine: refuses new submissions, ends any open
-// turn with engine_stop reason, and waits for in-flight cancellations with a
-// bounded grace period. It may be called multiple times; concurrent calls wait
-// for the first to complete and return its result; calls after it finishes return nil.
-func (e *Engine) Stop(ctx context.Context) error {
-	e.mu.Lock()
-
-	wasConcurrent := false
-	// If a previous Stop call is running, wait for it
-	if e.stopping && e.stoppingResult == nil {
-		wasConcurrent = true
-		for e.stopping && e.stoppingResult == nil {
-			e.stopped.Wait()
-		}
-	}
-
-	// If Stop has already completed
-	if e.stoppingResult != nil {
-		result := *e.stoppingResult
-		e.mu.Unlock()
-		// Concurrent calls return the first's result; sequential calls return nil
-		if wasConcurrent {
-			return result
-		}
-		return nil
-	}
-
-	// First call to Stop - mark as stopping
-	e.stopping = true
-	e.mu.Unlock()
-
-	result := e.doStop(ctx)
-
-	e.mu.Lock()
-	e.stoppingResult = &result
-	e.stopped.Broadcast()
-	e.mu.Unlock()
-
-	return result
-}
-
-// doStop implements the stop logic. e.mu is NOT held.
-func (e *Engine) doStop(ctx context.Context) error {
-	var term *terminal
-
-	e.mu.Lock()
-	if !e.started {
-		close(e.stoppingCh)
-		e.mu.Unlock()
-		return nil
-	}
-
-	if e.open != nil {
-		t := e.open
-		term = e.endLocked(t, StateIncomplete, "engine_stop", nil)
-	}
-	e.mu.Unlock()
-
-	if term != nil {
-		e.mu.Lock()
-		e.launchCancels(term)
-		e.mu.Unlock()
-	}
-
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
-	})
-	if err != nil {
-		return err
-	}
-
-	e.mu.Lock()
-	close(e.stoppingCh)
-	e.mu.Unlock()
-
-	// Wait for cancellations to complete or grace period to expire, whichever comes first.
-	graceDone := make(chan struct{})
-	graceStop := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() {
-		close(graceDone)
-	})
-	defer graceStop()
-
-	// Track if ctx or grace has ended to avoid infinite wait.
-	ended := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-graceDone:
-		}
-		close(ended)
-		e.mu.Lock()
-		e.cancelersOut.Broadcast()
-		e.mu.Unlock()
-	}()
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	for e.cancelers > 0 {
-		// Wait for a cancellation to complete or grace/ctx to end.
-		e.cancelersOut.Wait()
-		// After waiting, check if grace or context has ended while we were locked.
-		if isChanClosed(ended) {
-			// Return early if context was cancelled; otherwise return nil.
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			return nil
-		}
-	}
-	return nil
-}
-
-// Stopping returns a channel that is closed when engine_stopping has been
-// emitted to the journal.
-func (e *Engine) Stopping() <-chan struct{} {
-	return e.stoppingCh
 }
