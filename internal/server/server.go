@@ -135,7 +135,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		c := &connection{server: s, conn: conn}
+		c := s.newConnection(conn)
 		s.mu.Lock()
 		s.conns[c] = true
 		s.mu.Unlock()
@@ -206,6 +206,21 @@ type connection struct {
 	sub     *hub.Subscription
 }
 
+// newConnection builds a connection with its reader and writer in place, so
+// it is safe to publish to other goroutines (the stop notice) at once.
+func (s *Server) newConnection(conn net.Conn) *connection {
+	c := &connection{
+		server: s,
+		conn:   conn,
+		reader: wire.NewReader(conn),
+		writer: wire.NewWriter(conn),
+	}
+	if s.frameObserver != nil {
+		c.writer.SetObserver(s.frameObserver)
+	}
+	return c
+}
+
 func (c *connection) handle() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var requests sync.WaitGroup
@@ -216,12 +231,6 @@ func (c *connection) handle() {
 		requests.Wait()
 		c.server.removeConnection(c)
 	}()
-
-	c.reader = wire.NewReader(c.conn)
-	c.writer = wire.NewWriter(c.conn)
-	if c.server.frameObserver != nil {
-		c.writer.SetObserver(c.server.frameObserver)
-	}
 
 	if !c.handshake() {
 		return
@@ -298,6 +307,9 @@ func (c *connection) rejectOversized() {
 func (c *connection) handleRequest(frame wire.Frame) {
 	switch frame.Type {
 	case wire.RequestStatus:
+		if !c.decode(frame, &struct{}{}) {
+			return
+		}
 		status, err := c.server.engine.Status()
 		c.respond(frame.ID, "status", status, err)
 	case wire.RequestSubmit:
@@ -438,7 +450,7 @@ func (c *connection) handleSubscribe(ctx context.Context, requests *sync.WaitGro
 	requests.Add(1)
 	go func() {
 		defer requests.Done()
-		c.forwardSubscription(ctx, sub)
+		c.forwardSubscription(ctx, sub, req.SinceSeq)
 	}()
 }
 
@@ -459,28 +471,151 @@ func (c *connection) closeSubscription(sub *hub.Subscription) {
 	}
 }
 
-func (c *connection) forwardSubscription(ctx context.Context, sub *hub.Subscription) {
-	defer c.closeSubscription(sub)
+// maxOutbound bounds the events queued for a subscriber that is not keeping
+// up with the socket; past it the subscriber is lagging.
+const maxOutbound = 256
+
+// laggingGrace is how long a lagging subscriber has to take its backlog and
+// the lagging notice before the connection is dropped.
+const laggingGrace = 2 * time.Second
+
+// outbound holds the events pulled from the hub that are waiting for the
+// socket.
+type outbound struct {
+	mu     sync.Mutex
+	events []journal.Event
+	done   bool
+	lagSeq *int64 // set when the subscriber lagged: the last seq it was queued
+	wake   chan struct{}
+}
+
+func (o *outbound) signal() {
+	select {
+	case o.wake <- struct{}{}:
+	default:
+	}
+}
+
+// finish records that nothing more will be queued.
+func (o *outbound) finish(lagSeq *int64) {
+	o.mu.Lock()
+	o.done = true
+	o.lagSeq = lagSeq
+	o.mu.Unlock()
+	o.signal()
+}
+
+// forwardSubscription streams sub to the client. The hub is drained by a
+// separate goroutine so that a client that stops reading, which blocks the
+// socket write, is still noticed: its queue overflows and it is given a
+// bounded time to take what is owed before the connection is dropped.
+func (c *connection) forwardSubscription(ctx context.Context, sub *hub.Subscription, sinceSeq int64) {
+	out := &outbound{wake: make(chan struct{}, 1)}
+	var pull sync.WaitGroup
+	pull.Add(1)
+	go func() {
+		defer pull.Done()
+		c.pullSubscription(ctx, sub, sinceSeq, out)
+	}()
+	defer func() {
+		c.closeSubscription(sub)
+		pull.Wait()
+	}()
+
+	for {
+		out.mu.Lock()
+		var event journal.Event
+		have := len(out.events) > 0
+		if have {
+			event = out.events[0]
+			out.events = out.events[1:]
+		}
+		done, lagSeq := out.done, out.lagSeq
+		out.mu.Unlock()
+
+		switch {
+		case have:
+			if !c.sendCurrent(sub, wire.NewEvent(event.Seq, event.Kind, event.At, event.Data)) {
+				return
+			}
+		case done:
+			if lagSeq != nil {
+				frame, err := wire.NewError("", &wire.Error{Code: wire.ErrorCodeLagging, LastSeq: lagSeq})
+				if err == nil {
+					c.sendCurrent(sub, frame)
+				}
+				_ = c.conn.Close()
+			}
+			return
+		default:
+			select {
+			case <-out.wake:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (c *connection) pullSubscription(ctx context.Context, sub *hub.Subscription, sinceSeq int64, out *outbound) {
+	lastQueued := sinceSeq
 	for {
 		event, err := sub.Next(ctx)
 		if err != nil {
 			var lagging *hub.LaggingError
 			if errors.As(err, &lagging) {
-				c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeLagging, LastSeq: &lagging.LastSeq}))
-				_ = c.conn.Close()
-			} else if !errors.Is(err, hub.ErrClosed) && ctx.Err() == nil {
+				seq := lastQueued
+				out.finish(&seq)
+				return
+			}
+			if !errors.Is(err, hub.ErrClosed) && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "subscription: %v\n", err)
 			}
+			out.finish(nil)
 			return
 		}
-		if err := c.sendFrame(wire.NewEvent(event.Seq, event.Kind, event.At, event.Data)); err != nil {
-			c.logSend(err)
+		out.mu.Lock()
+		if len(out.events) >= maxOutbound {
+			out.mu.Unlock()
+			seq := lastQueued
+			// The socket is not draining: stop waiting on it after a grace.
+			_ = c.conn.SetWriteDeadline(time.Now().Add(laggingGrace))
+			out.finish(&seq)
 			return
 		}
+		out.events = append(out.events, event)
+		out.mu.Unlock()
+		lastQueued = event.Seq
+		out.signal()
 	}
 }
 
+// sendCurrent writes frame only while sub is still the connection's
+// subscription. The check and the write happen under the write lock, and
+// replacing or ending a subscription clears it before its reply is written,
+// so no event of a closed subscription follows that reply.
+func (c *connection) sendCurrent(sub *hub.Subscription, frame wire.Frame) bool {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.subMu.Lock()
+	current := c.sub == sub
+	c.subMu.Unlock()
+	if !current {
+		return false
+	}
+	if err := c.writer.Write(frame); err != nil {
+		c.logSend(err)
+		// A failed write may have left half a frame on the wire.
+		_ = c.conn.Close()
+		return false
+	}
+	return true
+}
+
 func (c *connection) handleUnsubscribe(frame wire.Frame) {
+	if !c.decode(frame, &struct{}{}) {
+		return
+	}
 	c.closeSubscription(nil)
 	c.logSend(c.sendReply(frame.ID, wire.UnsubscribeReply{OK: true}))
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -321,6 +322,8 @@ func TestBadRequests(t *testing.T) {
 		{"transcript empty body", wire.RequestTranscript, `{}`},
 		{"content missing limit", wire.RequestContent, `{"ref":"msg:1","offset":0}`},
 		{"subscribe missing since_seq", wire.RequestSubscribe, `{}`},
+		{"status not an object", wire.RequestStatus, `[1]`},
+		{"unsubscribe not an object", wire.RequestUnsubscribe, `"x"`},
 	}
 	for i, tc := range cases {
 		id := fmt.Sprintf("b%d", i)
@@ -812,7 +815,7 @@ func TestLaggingSubscriberIsDisconnected(t *testing.T) {
 
 	// slow reads nothing, so its socket fills, the server blocks writing to
 	// it and the hub's queue for it overflows.
-	const flood = 1500
+	const flood = 400
 	emitFlood(t, h.Hub, flood, 24<<10)
 	release()
 	waitTerminal(t, h, turn.TurnID)
@@ -1014,4 +1017,213 @@ func TestServeReturnsOnContextCancel(t *testing.T) {
 		t.Fatal("Serve did not return after cancel")
 	}
 	r.wantClosed()
+}
+
+// blockedHarness is a harness whose reviewer blocks.
+func blockedHarness(t *testing.T) *enginetest.Harness {
+	t.Helper()
+	block := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "evidence", "remedy", "reason")
+	})
+	return enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText)},
+		"reviewer": {block},
+	})
+}
+
+func TestBlockedReviewTurnRecord(t *testing.T) {
+	h := blockedHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	reply, err := c.Submit(ctx, reviewReq("blocked-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, h, reply.TurnID)
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.State != engine.StateIncomplete {
+		t.Fatalf("state = %q, want %q", turn.State, engine.StateIncomplete)
+	}
+	if len(turn.Verdicts) != 1 || turn.Verdicts[0].Parsed != true {
+		t.Fatalf("verdicts = %+v", turn.Verdicts)
+	}
+	wantID := turn.Verdicts[0].ID + ":b1"
+	if turn.TerminalReason == nil || *turn.TerminalReason != "block:"+wantID {
+		t.Fatalf("terminal reason = %v, want block:%s", turn.TerminalReason, wantID)
+	}
+	if len(turn.OpenBlocks) != 1 {
+		t.Fatalf("open blocks = %+v", turn.OpenBlocks)
+	}
+	if b := turn.OpenBlocks[0]; b.ID != wantID || b.Severity != "high" || b.State != "open" {
+		t.Fatalf("block = %+v, want %s high open", b, wantID)
+	}
+	rows, err := h.Store.OpenBlocks(reply.TurnID)
+	if err != nil || len(rows) != 1 || rows[0].ID != wantID {
+		t.Fatalf("journal blocks = %+v, %v", rows, err)
+	}
+}
+
+// TestNoEventAfterUnsubscribeReply floods events while the subscription is
+// ended and replaced, and requires that nothing of the old subscription
+// follows the reply that ended it.
+func TestNoEventAfterUnsubscribeReply(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	r := s.raw()
+	r.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.send("s1", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := r.read(); f.Type != "reply" || f.ID != "s1" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+
+	stop := make(chan struct{})
+	flooded := make(chan struct{})
+	go func() {
+		defer close(flooded)
+		payload := json.RawMessage(`{"pad":"p"}`)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			err := h.Hub.Tx(func(tx *journal.Tx, emit hub.Emit) error { return emit("", "flood", payload) })
+			if err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { close(stop); <-flooded }()
+
+	// Take some of the flood, then replace the subscription mid-stream.
+	var seen int64 = start
+	for seen < start+20 {
+		f := r.read()
+		if f.Type != "event" {
+			t.Fatalf("frame = %+v", f)
+		}
+		seen = f.Seq
+	}
+	r.send("s2", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: seen})
+	for {
+		f := r.read()
+		if f.Type == "reply" && f.ID == "s2" {
+			break
+		}
+		if f.Type != "event" {
+			t.Fatalf("frame = %+v", f)
+		}
+	}
+	// After the replace reply only the replacement delivers: seq follows on
+	// from since_seq with no repeat and no gap.
+	next := seen + 1
+	for i := 0; i < 30; i++ {
+		f := r.read()
+		if f.Type != "event" || f.Seq != next {
+			t.Fatalf("after replace got %s seq %d, want event %d", f.Type, f.Seq, next)
+		}
+		next++
+	}
+
+	r.send("u", wire.RequestUnsubscribe, struct{}{})
+	for {
+		f := r.read()
+		if f.Type == "reply" && f.ID == "u" {
+			break
+		}
+		if f.Type != "event" {
+			t.Fatalf("frame = %+v", f)
+		}
+	}
+	// Nothing but the status reply may follow, however much is emitted.
+	time.Sleep(50 * time.Millisecond)
+	r.send("st", wire.RequestStatus, struct{}{})
+	if f := r.read(); f.Type != "reply" || f.ID != "st" {
+		t.Fatalf("after unsubscribe reply got %+v, want only the status reply", f)
+	}
+}
+
+// TestStopDuringAccept stops the engine while connections are being made, to
+// catch a connection published before it can be written to.
+func TestStopDuringAccept(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		h := newHarness(t)
+		s := serve(t, h.Engine, h.Store, h.Hub)
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				conn, err := net.Dial("unix", s.paths.Socket)
+				if err != nil {
+					return
+				}
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				_, _ = io.Copy(io.Discard, conn)
+				_ = conn.Close()
+			}()
+		}
+		if err := h.Engine.Stop(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		wg.Wait()
+		select {
+		case <-s.done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Serve did not return")
+		}
+	}
+}
+
+// TestNonReadingSubscriberIsDropped checks that a subscriber that never reads
+// is disconnected by the server without its help: the connection is closed
+// and its backlog cut off while it is still not reading.
+func TestNonReadingSubscriberIsDropped(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	slow := s.raw()
+	slow.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := slow.read(); f.Type != "reply" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+
+	const flood = 400
+	emitFlood(t, h.Hub, flood, 24<<10)
+	// Longer than the server's grace, with the peer still not reading.
+	time.Sleep(3 * time.Second)
+
+	// Whatever fitted in the socket arrives, then the stream just ends: the
+	// server dropped the connection rather than waiting for us.
+	var n int
+	for {
+		_ = slow.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		f, err := slow.r.Read()
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatal("connection still open and stalled after the grace period")
+			}
+			break
+		}
+		if f.Type == "event" {
+			n++
+		}
+	}
+	if n >= flood {
+		t.Fatalf("got all %d events, backlog was not cut off", n)
+	}
 }
