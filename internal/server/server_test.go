@@ -813,8 +813,8 @@ func TestLaggingSubscriberIsDisconnected(t *testing.T) {
 	}
 	h.WaitTurnState(turn.TurnID, engine.StateAuthorDispatched)
 
-	// slow reads nothing, so its socket fills, the server blocks writing to
-	// it and the hub's queue for it overflows.
+	// slow reads nothing, so its socket fills and the server's queue for it
+	// overflows.
 	const flood = 400
 	emitFlood(t, h.Hub, flood, 24<<10)
 	release()
@@ -1186,8 +1186,9 @@ func TestStopDuringAccept(t *testing.T) {
 }
 
 // TestNonReadingSubscriberIsDropped checks that a subscriber that never reads
-// is disconnected by the server without its help: the connection is closed
-// and its backlog cut off while it is still not reading.
+// is disconnected by the server without its help, and that what it finds when
+// it does read is its backlog, then lagging naming the last event it was
+// written, then the end.
 func TestNonReadingSubscriberIsDropped(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
@@ -1204,70 +1205,168 @@ func TestNonReadingSubscriberIsDropped(t *testing.T) {
 
 	const flood = 400
 	emitFlood(t, h.Hub, flood, 24<<10)
-	// Longer than the server's grace, with the peer still not reading.
-	time.Sleep(3 * time.Second)
 
-	// Whatever fitted in the socket arrives, then the stream just ends: the
-	// server dropped the connection rather than waiting for us.
-	var n int
+	// Still without reading: the server has closed its end, so a write fails.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		_ = slow.c.SetReadDeadline(time.Now().Add(5 * time.Second))
-		f, err := slow.r.Read()
+		f, err := wire.NewRequest("st", wire.RequestStatus, struct{}{})
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				t.Fatal("connection still open and stalled after the grace period")
-			}
+			t.Fatal(err)
+		}
+		if err := slow.w.Write(f); err != nil {
 			break
 		}
-		if f.Type == "event" {
-			n++
+		if time.Now().After(deadline) {
+			t.Fatal("server never closed the connection of a subscriber that does not read")
 		}
-	}
-	if n >= flood {
-		t.Fatalf("got all %d events, backlog was not cut off", n)
-	}
-}
-
-// TestLaggingNoticeFollowsCutShortFrame checks that a subscriber that
-// stopped reading, and that starts again within the grace, gets whole event
-// frames and then lagging whose last_seq is the last event it received.
-func TestLaggingNoticeFollowsCutShortFrame(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	slow := s.raw()
-	slow.hello()
-	start, err := h.Store.MaxSeq()
-	if err != nil {
-		t.Fatal(err)
-	}
-	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
-	if f := slow.read(); f.Type != "reply" {
-		t.Fatalf("subscribe reply = %+v", f)
+		time.Sleep(20 * time.Millisecond)
 	}
 
-	emitFlood(t, h.Hub, 400, 24<<10)
-	// Late enough that the server has found the subscriber lagging, early
-	// enough that it still waits for a reader.
-	time.Sleep(time.Second)
-
+	var n int
 	var lastEvent int64
 	for {
-		_ = slow.c.SetReadDeadline(time.Now().Add(5 * time.Second))
-		f, err := slow.r.Read()
-		if err != nil {
-			t.Fatalf("stream ended without a lagging notice: %v", err)
-		}
+		f := slow.read()
 		if f.Type == "event" {
+			n++
 			lastEvent = f.Seq
 			continue
 		}
 		var e wire.Error
 		if f.Type != "error" || f.ID != "" || json.Unmarshal(f.Body, &e) != nil || e.Code != "lagging" {
-			t.Fatalf("frame = %+v, want lagging", f)
+			t.Fatalf("frame = %s %q %s, want lagging with an empty id", f.Type, f.ID, f.Body)
 		}
 		if e.LastSeq == nil || *e.LastSeq != lastEvent {
 			t.Fatalf("last_seq = %v, want %d", e.LastSeq, lastEvent)
 		}
-		return
+		break
 	}
+	slow.wantClosed()
+	if n >= flood {
+		t.Fatalf("got all %d events, backlog was not cut off", n)
+	}
+}
+
+// stalledSubscriber subscribes a raw client that then reads nothing while n
+// large events are emitted, too few for it to lag.
+func stalledSubscriber(t *testing.T, s *serving, h *enginetest.Harness, n int) *rawConn {
+	t.Helper()
+	r := s.raw()
+	r.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := r.read(); f.Type != "reply" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+	emitFlood(t, h.Hub, n, 24<<10)
+	return r
+}
+
+// waitServe requires Serve to return within limit.
+func waitServe(t *testing.T, s *serving, limit time.Duration) {
+	t.Helper()
+	select {
+	case <-s.done:
+		if s.serveErr != nil {
+			t.Fatalf("Serve returned %v", s.serveErr)
+		}
+	case <-time.After(limit):
+		t.Fatalf("Serve did not return within %v of the engine stopping", limit)
+	}
+}
+
+// TestStopWithStalledSubscriber stops the engine while a subscriber that is
+// not reading has a backlog: Serve returns promptly, and the client finds
+// whole events and then the stopping notice as the last frame.
+func TestStopWithStalledSubscriber(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	r := stalledSubscriber(t, s, h, 60)
+	time.Sleep(200 * time.Millisecond)
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitServe(t, s, 5*time.Second)
+
+	for {
+		f := r.read()
+		if f.Type == "event" {
+			continue
+		}
+		var e wire.Error
+		if f.Type != "error" || f.ID != "" || json.Unmarshal(f.Body, &e) != nil || e.Code != "stopping" {
+			t.Fatalf("frame = %s %q %s, want stopping", f.Type, f.ID, f.Body)
+		}
+		break
+	}
+	r.wantClosed()
+}
+
+// TestStopWithUnreadReplies stops the engine while a client has asked for
+// large content pages and is not reading them, so a reply write is stuck.
+func TestStopWithUnreadReplies(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+
+	body := bytes.Repeat([]byte(`"`), 4<<20)
+	turnID, err := h.Store.CreateTurn(h.Engine.Hello().RunID, "solo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := h.Store.BeginAttempt(turnID, "author", "author", 0, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.DB.Conn().Exec(`UPDATE attempts SET raw_output = ? WHERE id = ?`, string(body), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	r := s.raw()
+	r.hello()
+	for i := 0; i < 8; i++ {
+		r.send(fmt.Sprintf("c%d", i), wire.RequestContent, wire.ContentRequest{Ref: "attempt:" + attemptID, Offset: int64(i) * wire.MaxContentPageBytes, Limit: wire.MaxContentPageBytes})
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitServe(t, s, 5*time.Second)
+}
+
+// stallStatus is an engine whose Status waits to be released.
+type stallStatus struct {
+	server.Engine
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (e *stallStatus) Status() (wire.StatusReply, error) {
+	close(e.entered)
+	<-e.release
+	return e.Engine.Status()
+}
+
+// TestNothingFollowsStopping holds a request in the engine across the stop:
+// its reply, finished after the notice, is never written.
+func TestNothingFollowsStopping(t *testing.T) {
+	h := newHarness(t)
+	eng := &stallStatus{Engine: h.Engine, entered: make(chan struct{}), release: make(chan struct{})}
+	s := serve(t, eng, h.Store, h.Hub)
+	r := s.raw()
+	r.hello()
+	r.send("st", wire.RequestStatus, struct{}{})
+	<-eng.entered
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e := r.wantError("stopping"); e.Code != "stopping" {
+		t.Fatal("no stopping notice")
+	}
+	close(eng.release)
+	r.wantClosed()
+	waitServe(t, s, 5*time.Second)
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,16 +20,13 @@ func getTurnStateForOpen(store *journal.Store, turnID string) (string, error) {
 		return "", nil
 	}
 
-	var data map[string]interface{}
+	var data struct {
+		State string `json:"state"`
+	}
 	if err := json.Unmarshal(event.Data, &data); err != nil {
-		return "", nil
+		return "", fmt.Errorf("turn_state event %d: %w", event.Seq, err)
 	}
-	if state, ok := data["state"]; ok {
-		if stateStr, ok := state.(string); ok {
-			return stateStr, nil
-		}
-	}
-	return "", nil
+	return data.State, nil
 }
 
 // buildTurnRecord builds a full turn record from the journal.
@@ -56,9 +54,9 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 	// Get state: terminal state if available, otherwise most recent turn_state event
 	state := turn.TerminalState
 	if state == "" {
-		openState, err := getTurnStateForOpen(store, turnID)
-		if err == nil && openState != "" {
-			state = openState
+		state, err = getTurnStateForOpen(store, turnID)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -77,9 +75,10 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 
 	if turn.CandidateID != "" {
 		candidate, err := store.GetCandidate(turn.CandidateID)
-		if err == nil && candidate != nil {
-			reply.CandidateHash = &candidate.ContentHash
+		if err != nil {
+			return nil, fmt.Errorf("candidate %s: %w", turn.CandidateID, err)
 		}
+		reply.CandidateHash = &candidate.ContentHash
 	}
 
 	if turn.TerminalReason != "" {
@@ -198,9 +197,8 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 
 	// Parse budget JSON
 	if turn.BudgetJSON != nil {
-		var budget wire.BudgetRecord
-		if err := json.Unmarshal(turn.BudgetJSON, &budget); err == nil {
-			reply.Budget = budget
+		if err := json.Unmarshal(turn.BudgetJSON, &reply.Budget); err != nil {
+			return nil, fmt.Errorf("turn %s budget_json: %w", turnID, err)
 		}
 	}
 
