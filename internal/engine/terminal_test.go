@@ -204,7 +204,7 @@ func TestCancelIsIdempotentAndRefusesOthers(t *testing.T) {
 		t.Fatalf("adapter Cancel called %d times", n)
 	}
 
-	wantRefusal(t, h.Engine.Cancel("no-such-turn"), wire.ErrorCodeNotFound)
+	_ = wantRefusal(t, h.Engine.Cancel("no-such-turn"), wire.ErrorCodeNotFound)
 
 	solo := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": {enginetest.Reply(authorText)}})
 	reply, err := solo.Engine.Submit(soloReq("s1"))
@@ -212,7 +212,7 @@ func TestCancelIsIdempotentAndRefusesOthers(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantEnd(t, solo, reply.TurnID, engine.StateSoloComplete, "solo_ok")
-	wantRefusal(t, solo.Engine.Cancel(reply.TurnID), wire.ErrorCodeNotOpen)
+	_ = wantRefusal(t, solo.Engine.Cancel(reply.TurnID), wire.ErrorCodeNotOpen)
 }
 
 func TestConfirmedCancelReleasesAndNextTurnDispatches(t *testing.T) {
@@ -462,15 +462,15 @@ func TestReleaseErrorsAndHoldGroup(t *testing.T) {
 	}
 
 	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "default", Reason: "x"})
-	wantRefusal(t, err, wire.ErrorCodeNoHold)
+	_ = wantRefusal(t, err, wire.ErrorCodeNoHold)
 	wrong := "no-such-attempt"
 	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "reviewers", AttemptID: &wrong, Reason: "x"})
-	wantRefusal(t, err, wire.ErrorCodeNoSuchHold)
+	_ = wantRefusal(t, err, wire.ErrorCodeNoSuchHold)
 	// An attempt held in another pool is not that pool's hold.
 	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "default", AttemptID: &r1, Reason: "x"})
-	wantRefusal(t, err, wire.ErrorCodeNoSuchHold)
+	_ = wantRefusal(t, err, wire.ErrorCodeNoSuchHold)
 	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "reviewers", AttemptID: &r1, Reason: ""})
-	wantRefusal(t, err, wire.ErrorCodeReasonRequired)
+	_ = wantRefusal(t, err, wire.ErrorCodeReasonRequired)
 	if _, found := getHold(t, h, r1); !found {
 		t.Fatal("hold vanished")
 	}
@@ -488,7 +488,7 @@ func TestReleaseErrorsAndHoldGroup(t *testing.T) {
 		t.Fatalf("Release = %+v, %v", rel, err)
 	}
 	_, err = h.Engine.Release(wire.ReleaseRequest{Pool: "reviewers", Reason: "y"})
-	wantRefusal(t, err, wire.ErrorCodeNoHold)
+	_ = wantRefusal(t, err, wire.ErrorCodeNoHold)
 }
 
 func TestCrashAfterTerminalTxLeavesHold(t *testing.T) {
