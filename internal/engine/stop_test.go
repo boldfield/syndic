@@ -222,6 +222,14 @@ func TestStopWithContextCancelledDuringGrace(t *testing.T) {
 		t.Fatalf("Stop = %v, want context.Canceled", err)
 	}
 	wantStopEnd(t, h, turnID, "engine_stop")
+	select {
+	case <-h.Engine.Stopping():
+	default:
+		t.Fatal("Stopping() is not closed after the context ended")
+	}
+	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
+		t.Fatalf("last event = %q, want engine_stopping", got)
+	}
 
 	restart(t, h, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
 	if got := getAttempt(t, h, attemptID).State; got != "unknown" {

@@ -114,21 +114,17 @@ func (e *Engine) doStop(ctx context.Context) error {
 
 	// Past this point no cancellation outcome is written: engine_stopping is
 	// the last event, and the journal closes with it. A context that ended
-	// leaves what was committed, as a crash would.
-	if ctxErr != nil {
-		e.closeJournal()
-		return ctxErr
-	}
+	// leaves what was committed, as a crash would, plus the notice that the
+	// engine was stopping.
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
 	})
+	e.closeJournal()
 	if err != nil {
-		e.closeJournal()
 		return err
 	}
-	e.closeJournal()
 	close(e.stoppingCh)
-	return nil
+	return ctxErr
 }
 
 // closeJournal stops the engine writing to the journal. e.mu is held.
