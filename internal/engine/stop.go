@@ -106,22 +106,30 @@ func (e *Engine) doStop(ctx context.Context) error {
 	// Wait for the cancellations, for at most the grace period. What they
 	// confirm meanwhile is recorded as usual.
 	var ctxErr error
-	for {
-		e.mu.Lock()
-		if e.cancelers == 0 {
-			break
-		}
-		idle := e.cancelersIdle
-		e.mu.Unlock()
+	graceExpired := false
+	select {
+	case <-graceDone:
+		graceExpired = true
+	case <-ctx.Done():
+		ctxErr = ctx.Err()
+	default:
+	}
+
+	e.mu.Lock()
+	for e.cancelers > 0 && !graceExpired && ctxErr == nil {
+		// Check timeout again (it may have fired while we weren't holding mu).
 		select {
-		case <-idle:
-			continue
 		case <-graceDone:
+			graceExpired = true
 		case <-ctx.Done():
 			ctxErr = ctx.Err()
+		default:
 		}
-		e.mu.Lock()
-		break
+		if graceExpired || ctxErr != nil {
+			break
+		}
+		// Wait for a canceller to complete (broadcasts on cancelersOut).
+		e.cancelersOut.Wait()
 	}
 	// The journal closes under the same lock as the decision to return:
 	// nothing is written after Stop returns. A context that ended leaves

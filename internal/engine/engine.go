@@ -77,6 +77,9 @@ const defaultPool = "default"
 // ErrNotImplemented is returned by requests a later task implements.
 var ErrNotImplemented = errors.New("not implemented")
 
+// errClosed is returned by tx when the engine journal has been closed.
+var errClosed = errors.New("engine: journal closed")
+
 // RosterError is returned by Start when the roster fails to load or validate.
 type RosterError struct{ Err error }
 
@@ -215,12 +218,13 @@ func New(o Options) (*Engine, error) {
 }
 
 // tx runs fn in one hub transaction. Events emitted through emit commit with
-// the row writes or not at all. If the engine is closed no transaction runs.
+// the row writes or not at all. If the engine is closed no transaction runs
+// and errClosed is returned.
 func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
 	e.gate.Lock()
 	if e.closed {
 		e.gate.Unlock()
-		return nil
+		return errClosed
 	}
 	e.gate.Unlock()
 	return e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {

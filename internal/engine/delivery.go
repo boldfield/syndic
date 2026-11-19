@@ -119,6 +119,9 @@ func (e *Engine) startDelivery(t *openTurn, id string, msgs []transport.Message)
 	d, sent, err := e.beginDelivery(t, id, msgs)
 	if err != nil || !sent {
 		e.releaseLocked(id)
+		if len(t.pending) == 0 && t.delivering {
+			delete(e.deliveries, t.id)
+		}
 		return
 	}
 	e.markRunning(id)
