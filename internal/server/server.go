@@ -407,13 +407,6 @@ func (c *connection) handleOverride(frame wire.Frame) {
 		return
 	}
 
-	if req.Reason == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "reason_required"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
 	err := c.server.engine.Override(req.TurnID, req.Reason)
 	if err != nil {
 		if wireErr, ok := err.(*wire.Error); ok {
@@ -438,13 +431,6 @@ func (c *connection) handleRelease(frame wire.Frame) {
 	var req wire.ReleaseRequest
 	if err := json.Unmarshal(frame.Body, &req); err != nil {
 		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.Reason == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "reason_required"}); err != nil {
 			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 		}
 		return
@@ -627,23 +613,30 @@ func (c *connection) forwardSubscription(ctx context.Context) {
 			if laggingErr, ok := err.(*hub.LaggingError); ok {
 				_ = c.sendError("", &wire.Error{Code: "lagging", LastSeq: &laggingErr.LastSeq})
 				c.subMu.Lock()
-				if c.sub != nil {
-					c.sub.Close()
+				if c.sub == sub {
 					c.sub = nil
 				}
 				c.subMu.Unlock()
+				sub.Close()
+				_ = c.conn.Close()
 				return
 			}
 			if err == hub.ErrClosed || err == context.Canceled || err == ctx.Err() {
 				c.subMu.Lock()
-				if c.sub != nil {
-					c.sub.Close()
+				if c.sub == sub {
 					c.sub = nil
 				}
 				c.subMu.Unlock()
+				sub.Close()
 				return
 			}
 			fmt.Fprintf(os.Stderr, "get event: %v\n", err)
+			c.subMu.Lock()
+			if c.sub == sub {
+				c.sub = nil
+			}
+			c.subMu.Unlock()
+			sub.Close()
 			return
 		}
 
@@ -651,11 +644,11 @@ func (c *connection) forwardSubscription(ctx context.Context) {
 		if err := c.sendFrame(eventFrame); err != nil {
 			fmt.Fprintf(os.Stderr, "send event: %v\n", err)
 			c.subMu.Lock()
-			if c.sub != nil {
-				c.sub.Close()
+			if c.sub == sub {
 				c.sub = nil
 			}
 			c.subMu.Unlock()
+			sub.Close()
 			return
 		}
 	}

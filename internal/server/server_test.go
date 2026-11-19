@@ -227,7 +227,9 @@ func TestServerHandshakeBadProtocol(t *testing.T) {
 		Protocol:      2, // wrong protocol
 	}
 	frame, _ := wire.NewRequest("test-1", "hello", helloReq)
-	w.Write(frame)
+	if err := w.Write(frame); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
 
 	// Read error
 	reply, err := r.Read()
@@ -349,13 +351,19 @@ func TestServerCancel(t *testing.T) {
 		Protocol:      wire.ProtocolVersion,
 	}
 	frame, _ := wire.NewRequest("hello", "hello", helloReq)
-	w.Write(frame)
-	r.Read()
+	if err := w.Write(frame); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, err := r.Read(); err != nil {
+		t.Fatalf("read hello reply: %v", err)
+	}
 
 	// Send cancel request
 	cancelReq := wire.CancelRequest{TurnID: "turn-123"}
 	frame, _ = wire.NewRequest("cancel-1", "cancel", cancelReq)
-	w.Write(frame)
+	if err := w.Write(frame); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
 
 	// Read cancel reply
 	reply, err := r.Read()
@@ -406,8 +414,12 @@ func TestServerFrameSizeLimit(t *testing.T) {
 		Protocol:      wire.ProtocolVersion,
 	}
 	frame, _ := wire.NewRequest("hello", "hello", helloReq)
-	w.Write(frame)
-	r.Read()
+	if err := w.Write(frame); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, err := r.Read(); err != nil {
+		t.Fatalf("read hello reply: %v", err)
+	}
 
 	// Send a huge submit request (should fail)
 	hugeInput := make([]byte, 2*1024*1024) // 2 MiB

@@ -9,6 +9,30 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
+// getTurnStateForOpen gets the most recent turn_state from the events table for an open turn
+func getTurnStateForOpen(store *journal.Store, turnID string) (string, error) {
+	events, err := store.EventsSince(0, 1000000)
+	if err != nil {
+		return "", err
+	}
+
+	// Find the latest turn_state event for this turn, working backwards
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].TurnID == turnID && events[i].Kind == "turn_state" {
+			var data map[string]interface{}
+			if err := json.Unmarshal(events[i].Data, &data); err != nil {
+				continue
+			}
+			if state, ok := data["state"]; ok {
+				if stateStr, ok := state.(string); ok {
+					return stateStr, nil
+				}
+			}
+		}
+	}
+	return "", nil
+}
+
 // buildTurnRecord builds a full turn record from the journal.
 func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, error) {
 	turn, err := store.GetTurn(turnID)
@@ -31,8 +55,17 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 		return nil, err
 	}
 
+	// Get state: terminal state if available, otherwise most recent turn_state event
+	state := turn.TerminalState
+	if state == "" {
+		openState, err := getTurnStateForOpen(store, turnID)
+		if err == nil && openState != "" {
+			state = openState
+		}
+	}
+
 	reply := &wire.TurnReply{
-		State:      turn.TerminalState,
+		State:      state,
 		Mode:       turn.Mode,
 		Preset:     turn.Preset,
 		Attempts:   []wire.AttemptRecord{},
@@ -45,14 +78,23 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 	}
 
 	if turn.CandidateID != "" {
-		reply.CandidateHash = &turn.CandidateID
+		candidate, err := store.GetCandidate(turn.CandidateID)
+		if err == nil && candidate != nil {
+			reply.CandidateHash = &candidate.ContentHash
+		}
 	}
 
 	if turn.TerminalReason != "" {
 		reply.TerminalReason = &turn.TerminalReason
 	}
 
-	// Build attempt records
+	// Build attempt records and collect aggregates
+	var totalScrubCount int
+	var totalEstimatedPrompt int64
+	var totalPromptUsage int64
+	var totalCompletionUsage int64
+	hasUsage := false
+
 	for _, a := range attempts {
 		attemptRecord := wire.AttemptRecord{
 			ID:          a.ID,
@@ -67,6 +109,7 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 
 		if a.EstimatedPromptTokens != nil {
 			attemptRecord.EstimatedPromptTokens = int64(*a.EstimatedPromptTokens)
+			totalEstimatedPrompt += int64(*a.EstimatedPromptTokens)
 		}
 
 		if a.Status != nil {
@@ -75,6 +118,7 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 
 		if a.ScrubCount != nil {
 			attemptRecord.ScrubCount = *a.ScrubCount
+			totalScrubCount += *a.ScrubCount
 		}
 
 		if a.TransportStatus != nil {
@@ -94,10 +138,14 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 			if a.UsagePrompt != nil {
 				v := int64(*a.UsagePrompt)
 				uPrompt = &v
+				totalPromptUsage += int64(*a.UsagePrompt)
+				hasUsage = true
 			}
 			if a.UsageCompletion != nil {
 				v := int64(*a.UsageCompletion)
 				uCompletion = &v
+				totalCompletionUsage += int64(*a.UsageCompletion)
+				hasUsage = true
 			}
 			attemptRecord.Usage = &wire.ReportedUsage{
 				PromptTokens:     uPrompt,
@@ -106,6 +154,16 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 		}
 
 		reply.Attempts = append(reply.Attempts, attemptRecord)
+	}
+
+	// Set aggregate values
+	reply.ScrubCount = totalScrubCount
+	reply.EstimatedPromptTokens = totalEstimatedPrompt
+	if hasUsage {
+		reply.ReportedUsage = &wire.ReportedUsage{
+			PromptTokens:     &totalPromptUsage,
+			CompletionTokens: &totalCompletionUsage,
+		}
 	}
 
 	// Build verdict records
