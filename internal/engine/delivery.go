@@ -61,6 +61,7 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 	msgs := prompt.Delivery(in)
 	t.delivering = true
 	t.deliveryState = state
+	e.deliveries[t.id] = t
 	for _, id := range recipients {
 		// A scheduling failure drops that one delivery and no other.
 		if err := e.schedule(t, id, func() { e.startDelivery(t, id, msgs) }); err != nil {

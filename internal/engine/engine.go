@@ -136,6 +136,7 @@ type Engine struct {
 	started       bool
 	cancelers     int        // goroutines calling Adapter.Cancel; Stop waits for none
 	cancelersOut  *sync.Cond // signalled on e.mu when cancelers drops to zero
+	cancelersIdle chan struct{}
 	rosterAbs     string
 	roster        *config.Roster
 	adapters      map[string]transport.Adapter
@@ -157,6 +158,12 @@ type Engine struct {
 	cancelling    map[string]int    // Adapter.Cancel calls pending, per participant
 	pstate        map[string]string // cancelling or unknown last reported, per participant
 	failed        map[string]string // failure state of the last dispatch, per participant
+	deliveries    map[string]*openTurn
+	stop          *stopRun
+	stopping      bool
+	stoppingCh    chan struct{}
+	gate          sync.Mutex
+	closed        bool
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -193,6 +200,9 @@ func New(o Options) (*Engine, error) {
 		cancelling:    make(map[string]int),
 		pstate:        make(map[string]string),
 		failed:        make(map[string]string),
+		deliveries:    make(map[string]*openTurn),
+		stoppingCh:    make(chan struct{}),
+		cancelersIdle: make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
@@ -491,6 +501,9 @@ func (e *Engine) Override(turnID, reason string) error {
 	defer e.mu.Unlock()
 	if !e.started {
 		return errors.New("engine: not started")
+	}
+	if e.stopping {
+		return refusal(wire.ErrorCodeStopping)
 	}
 
 	row, err := e.store.GetTurn(turnID)

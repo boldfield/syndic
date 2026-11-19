@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"sort"
 	"time"
@@ -12,25 +11,6 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// Stop shuts the engine down. It waits for the adapter cancellations a
-// terminal path started, until ctx ends.
-func (e *Engine) Stop(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		e.mu.Lock()
-		for e.cancelers > 0 {
-			e.cancelersOut.Wait()
-		}
-		e.mu.Unlock()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
 
 // Status reports the run, the participants, pools and quick profiles.
 func (e *Engine) Status() (wire.StatusReply, error) {
