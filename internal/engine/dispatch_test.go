@@ -133,6 +133,7 @@ var failRoles = []failRole{
 }
 
 func TestDispatchFailures(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	for _, role := range failRoles {
 		for _, tc := range failCases {
 			t.Run(role.name+"/"+tc.name, func(t *testing.T) {
@@ -262,6 +263,7 @@ func TestDispatchHeldSlotBlocksNextDispatch(t *testing.T) {
 }
 
 func TestUnreachableRetriedOnce(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	for _, role := range failRoles {
 		t.Run(role.name, func(t *testing.T) {
 			shortRetry(t)
@@ -296,6 +298,7 @@ func TestUnreachableRetriedOnce(t *testing.T) {
 }
 
 func TestUnreachableTwice(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	for _, role := range failRoles {
 		t.Run(role.name, func(t *testing.T) {
 			shortRetry(t)

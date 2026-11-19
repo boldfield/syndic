@@ -570,6 +570,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if e.lastInflight(d.participant) {
 		delete(e.running, d.participant)
 	}
+	if t.outputs == nil {
+		t.outputs = map[string]string{}
+	}
+	t.outputs[d.attemptID] = res.Text
 	if repair {
 		return &res.Text
 	}
@@ -579,6 +583,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if endState != "" {
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
+		e.deliverTerminal(t, endState, endReason)
 	}
 	return nil
 }

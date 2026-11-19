@@ -35,6 +35,7 @@ const (
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
 	StateCancelled           = "cancelled"
+	StateOverridden          = "overridden"
 )
 
 // Participant states.
@@ -51,10 +52,11 @@ const (
 
 // Attempt phases and message senders.
 const (
-	phaseAuthor  = "author"
-	phaseReview  = "review"
-	senderUser   = "user"
-	senderEngine = "engine"
+	phaseAuthor   = "author"
+	phaseReview   = "review"
+	phaseDelivery = "terminal_delivery"
+	senderUser    = "user"
+	senderEngine  = "engine"
 )
 
 // Terminal reasons.
@@ -114,6 +116,7 @@ type Engine struct {
 	clock      Clock
 	rand       io.Reader
 	retryDelay time.Duration // the package-level retryDelay when the engine was built
+	noDelivery bool          // the package-level deliveryOff when the engine was built
 	newAdapter func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 
 	// payloadHook lets tests replace an event payload (for example with one
@@ -126,12 +129,11 @@ type Engine struct {
 	// further is written. It is set before any request.
 	crashHook func() bool
 
-	// wg counts the goroutines that call Adapter.Cancel.
-	wg sync.WaitGroup
-
 	// mu owns everything below.
 	mu           sync.Mutex
 	started      bool
+	cancelers    int        // goroutines calling Adapter.Cancel; Stop waits for none
+	cancelersOut *sync.Cond // signalled on e.mu when cancelers drops to zero
 	rosterAbs    string
 	roster       *config.Roster
 	adapters     map[string]transport.Adapter
@@ -175,6 +177,7 @@ func New(o Options) (*Engine, error) {
 		clock:      o.Clock,
 		rand:       o.Rand,
 		retryDelay: retryDelay,
+		noDelivery: deliveryOff,
 		newAdapter: o.NewAdapter,
 		running:    make(map[string]bool),
 		inflight:   make(map[string]int),
@@ -187,6 +190,7 @@ func New(o Options) (*Engine, error) {
 		pstate:     make(map[string]string),
 		failed:     make(map[string]string),
 	}
+	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
 		e.clock = realClock{}
 	}

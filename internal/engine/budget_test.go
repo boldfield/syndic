@@ -456,6 +456,7 @@ func TestBudgetExhaustionRefusesLaterReservation(t *testing.T) {
 }
 
 func TestBudgetQuarantinedUsageIsChargedNeverRefunded(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	run := func(t *testing.T, usage transport.Usage) (before, after recordView, reservation int) {
 		t.Helper()
 		late := approveStep()
@@ -498,6 +499,7 @@ func TestBudgetQuarantinedUsageIsChargedNeverRefunded(t *testing.T) {
 }
 
 func TestBudgetRacingDispatchesExactlyOne(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	big := strings.Repeat("a", 60000)
 	toml := reviewRoster("author", "r1", "r2")
 	// Different pools, so both dispatches are ready at the same moment.

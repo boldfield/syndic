@@ -45,7 +45,9 @@ func (e *Engine) poolState(name string) *pool {
 // of it, start runs at once; otherwise the dispatch queues, first in first
 // out, and the participant is queued. e.mu is held.
 func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
-	if e.open != t || e.turnExpired(t) {
+	// A delivering turn has ended and its deadline with it; only its
+	// deliveries run.
+	if !t.delivering && (e.open != t || e.turnExpired(t)) {
 		return nil
 	}
 	name := e.poolOf(participant)
@@ -122,7 +124,7 @@ func (e *Engine) kick(name string) {
 		}
 		p.queue = p.queue[1:]
 		delete(e.queued, head.participant)
-		if e.open != head.t {
+		if e.open != head.t && !head.t.delivering {
 			continue
 		}
 		p.running++
@@ -181,10 +183,16 @@ func (e *Engine) armTurn(t *openTurn) {
 
 // armAttempt starts the timer for a begun attempt. e.mu is held.
 func (e *Engine) armAttempt(t *openTurn, attemptID string, deadline time.Time) {
+	e.armAttemptWith(t, attemptID, deadline, func() { e.onAttemptDeadline(t, attemptID) })
+}
+
+// armAttemptWith starts the timer for a begun attempt with the handler its
+// deadline runs. e.mu is held.
+func (e *Engine) armAttemptWith(t *openTurn, attemptID string, deadline time.Time, onDeadline func()) {
 	t.pending[attemptID] = deadline
 	e.calling[attemptID] = true
 	d := deadline.Sub(e.clock.Now())
-	t.stopAttempt[attemptID] = e.clock.AfterFunc(d, func() { e.onAttemptDeadline(t, attemptID) })
+	t.stopAttempt[attemptID] = e.clock.AfterFunc(d, onDeadline)
 }
 
 // attemptDone stops the attempt's timer once its result has been handled.

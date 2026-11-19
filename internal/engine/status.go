@@ -17,7 +17,11 @@ import (
 func (e *Engine) Stop(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
-		e.wg.Wait()
+		e.mu.Lock()
+		for e.cancelers > 0 {
+			e.cancelersOut.Wait()
+		}
+		e.mu.Unlock()
 		close(done)
 	}()
 	select {
