@@ -158,7 +158,7 @@ func (e *Engine) startReviewer(t *openTurn, id string) {
 // back when Complete has returned and its result handled. A repair goes back
 // through the scheduler, so it queues behind work already waiting in its pool.
 func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
-	res := e.complete(d.participant, d.req)
+	res := e.completeWithRetry(d.participant, d.req, d.attemptID, t.id, 0, "reviewer")
 	repair := e.completeReviewer(t, d, res)
 
 	e.mu.Lock()
@@ -450,6 +450,18 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
 
+	// Check for transport failures that might need a hold
+	var openHold bool
+	var newStatus, terminalReason string
+	var retryCount int
+	if res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK {
+		// Get the retry count to determine if this is a retry
+		if attempt, err := e.store.GetAttempt(d.attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
+			retryCount = *attempt.RetryCount
+		}
+		_, openHold, newStatus, terminalReason = decideDispatchFailure("reviewer", d.participant, retryCount, res.TransportStatus, nil)
+	}
+
 	var quarantined, approvedNow, exceeded bool
 	var endState, endReason string
 	var repair bool
@@ -457,7 +469,14 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, endState, endReason = false, false, "", ""
 		repair, exceeded, term = false, false, nil
-		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
+
+		// Create output with potentially updated status
+		output := outputOf(res)
+		if newStatus != "" {
+			output.Status = newStatus
+		}
+
+		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", output)
 		if err != nil {
 			return err
 		}
@@ -475,8 +494,38 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if err := recordCompletion(tx, emit, t.id, d.participant, d.attemptID, res, gate, e.lastInflight(d.participant)); err != nil {
 			return err
 		}
+
+		// Open hold if needed
+		if openHold {
+			p := e.participantConfig(d.participant)
+			pool := poolName(p)
+			group := e.poolGroup(pool)
+			members := make([]journal.GroupMember, len(group))
+			for i, m := range group {
+				members[i] = journal.GroupMember{EndpointName: m.EndpointName, Model: m.Model}
+			}
+			now := e.clock.Now().UTC()
+			if err := tx.OpenHold(journal.Hold{
+				AttemptID:    d.attemptID,
+				Pool:         pool,
+				EndpointName: p.Endpoint,
+				Model:        p.Model,
+				Group:        members,
+				HeldSince:    now,
+			}); err != nil {
+				return err
+			}
+		}
+
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)
+			term, err = e.endIn(tx, emit, t, endState, endReason)
+			return err
+		}
+
+		// If there's a transport failure terminal reason, use it
+		if terminalReason != "" {
+			endState, endReason = StateIncomplete, reasonReviewerFailed+terminalReason
 			term, err = e.endIn(tx, emit, t, endState, endReason)
 			return err
 		}

@@ -49,7 +49,7 @@ func (e *Engine) startAuthor(t *openTurn) {
 // runAuthor calls the author, handles its result and gives back the pool slot
 // before anything else is dispatched.
 func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
-	res := e.complete(t.author, req)
+	res := e.completeWithRetry(t.author, req, attemptID, t.id, 0, "author")
 	if t.mode != modeSolo {
 		proceed := e.completeAuthorReview(t, attemptID, req, res)
 		e.release(t.author)
@@ -198,6 +198,24 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 
+	// Check for transport failures that might need a hold
+	var openHold bool
+	var newStatus, terminalReason string
+	var retryCount int
+	if res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK {
+		// Get the retry count to determine if this is a retry
+		if attempt, err := e.getAttempt(attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
+			retryCount = *attempt.RetryCount
+		}
+		_, openHold, newStatus, terminalReason = decideDispatchFailure("author", t.author, retryCount, res.TransportStatus, nil)
+	}
+
+	// Use newStatus if set, otherwise use the result's status
+	finalStatus := string(res.Status)
+	if newStatus != "" {
+		finalStatus = newStatus
+	}
+
 	quarantined, exceeded := false, false
 	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -206,7 +224,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
 			Identity:        identityString(res.Identity),
-			Status:          string(res.Status),
+			Status:          finalStatus,
 			NativeFinish:    res.NativeFinish,
 			TransportStatus: res.TransportStatus,
 		})
@@ -232,6 +250,29 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		if exceeded, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
 			return err
 		}
+
+		// Open hold if needed
+		if openHold {
+			p := e.participantConfig(t.author)
+			pool := poolName(p)
+			group := e.poolGroup(pool)
+			members := make([]journal.GroupMember, len(group))
+			for i, m := range group {
+				members[i] = journal.GroupMember{EndpointName: m.EndpointName, Model: m.Model}
+			}
+			now := e.clock.Now().UTC()
+			if err := tx.OpenHold(journal.Hold{
+				AttemptID:    attemptID,
+				Pool:         pool,
+				EndpointName: p.Endpoint,
+				Model:        p.Model,
+				Group:        members,
+				HeldSince:    now,
+			}); err != nil {
+				return err
+			}
+		}
+
 		if gate != nil {
 			if err := tx.SetAttemptGate(attemptID, gate.Error()); err != nil {
 				return err
@@ -239,7 +280,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		}
 		if err := emit(t.id, wire.EventKindAttemptCompleted, wire.EvAttemptCompleted{
 			AttemptID:       attemptID,
-			Status:          string(res.Status),
+			Status:          finalStatus,
 			ScrubCount:      res.ScrubCount,
 			TransportStatus: res.TransportStatus,
 			Usage:           usage,
@@ -254,7 +295,11 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 				return err
 			}
 		}
-		if gate == nil {
+
+		// Determine final turn state
+		if terminalReason != "" {
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+terminalReason)
+		} else if gate == nil {
 			term, err = e.endIn(tx, emit, t, StateSoloComplete, reasonSoloOK)
 		} else {
 			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
@@ -303,4 +348,55 @@ func identityString(id transport.ModelIdentity) string {
 		return id.Kind
 	}
 	return id.Kind + ":" + id.Value
+}
+
+// getAttempt retrieves an attempt from the store.
+func (e *Engine) getAttempt(attemptID string) (*journal.AttemptRow, error) {
+	return e.store.GetAttempt(attemptID)
+}
+
+// completeWithRetry handles a Complete call with retry logic for unreachable failures.
+// It returns the final result after any retries.
+func (e *Engine) completeWithRetry(participant string, req transport.CompleteRequest, attemptID, turnID string, retryCount int, role string) transport.CompleteResult {
+	res := e.complete(participant, req)
+
+	shouldRetry, _, _, _ := decideDispatchFailure(role, participant, retryCount, res.TransportStatus, nil)
+
+	// Handle retry for unreachable
+	if shouldRetry && res.TransportStatus == transport.TransportStatusUnreachable {
+		// Record the retry and check deadlines
+		retryable := false
+		err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+			attempt, err := tx.GetAttempt(attemptID)
+			if err != nil {
+				return err
+			}
+			turn, err := tx.GetTurn(turnID)
+			if err != nil {
+				return err
+			}
+			// Check if turn is still open and both deadlines allow retry
+			if turn.TerminalState != "" {
+				return nil
+			}
+			now := e.clock.Now()
+			if attempt.Deadline != nil && now.Add(dispatchRetryDelay).After(*attempt.Deadline) {
+				return nil
+			}
+			if turn.TurnDeadline != nil && now.Add(dispatchRetryDelay).After(*turn.TurnDeadline) {
+				return nil
+			}
+			retryable = true
+			_, err = tx.RecordRetryDispatch(attemptID)
+			return err
+		})
+		if err == nil && retryable {
+			// Wait for the retry delay
+			time.Sleep(dispatchRetryDelay)
+			// Retry the dispatch
+			return e.completeWithRetry(participant, req, attemptID, turnID, retryCount+1, role)
+		}
+	}
+
+	return res
 }
