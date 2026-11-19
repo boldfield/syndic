@@ -846,3 +846,36 @@ func TestOverrideDeliversGateFailedReviewerText(t *testing.T) {
 		t.Fatalf("delivery content = %q", content)
 	}
 }
+
+func TestOverrideAfterPresetRenameDeliversFromRunManifest(t *testing.T) {
+	// The turn ran under preset "review"; the roster after the restart names
+	// that preset "renamed". The turn's own run manifest still resolves it.
+	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"r1":     {blockStep("b1")},
+		"r2":     {approveStep()},
+	}, enginetest.ClockStart(farFuture))
+	release := h.Hold("r1")
+	turnID := submitReview(t, h, "s1")
+	waitCount(t, h, wire.EventKindAttemptBegun, 3)
+	release()
+	if row := waitEnded(t, h, turnID); row.TerminalState != engine.StateIncomplete || row.Preset != "review" {
+		t.Fatalf("turn ended %q under preset %q", row.TerminalState, row.Preset)
+	}
+	t.Cleanup(engine.EnableDelivery())
+	renamed := strings.ReplaceAll(reviewRoster("author", "r1", "r2"), `default_preset = "review"`, `default_preset = "renamed"`)
+	renamed = strings.Replace(renamed, "[presets.review]", "[presets.renamed]", 1)
+	s := restart(t, h, renamed, ackAll())
+	if err := s.Override(turnID, "false alarm"); err != nil {
+		t.Fatal(err)
+	}
+	got := waitDeliveries(t, h, turnID, 3)
+	var recipients []string
+	for _, a := range got {
+		recipients = append(recipients, a.Participant)
+	}
+	sort.Strings(recipients)
+	if strings.Join(recipients, ",") != "author,r1,r2" {
+		t.Fatalf("delivery recipients = %v", recipients)
+	}
+}

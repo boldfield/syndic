@@ -539,7 +539,9 @@ func (e *Engine) Override(turnID, reason string) error {
 // reads for a turn that already left e.open. It returns nil when the turn
 // cannot be rebuilt, in which case nothing is sent. e.mu is held.
 func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
-	eff, err := e.roster.Resolve(row.Preset, row.QuickProfile)
+	// The turn's preset is resolved against its own run's manifest, which is
+	// immutable, not against the roster this engine started with.
+	eff, err := e.manifestEffective(row)
 	if err != nil {
 		log.Printf("engine: turn %s: no delivery, preset unresolved: %v", row.ID, err)
 		return nil
@@ -706,7 +708,7 @@ func appliedPools(index map[string]map[string]bool, group []journal.GroupMember)
 	return pools
 }
 
-// manifestRoster is the part of a run manifest recovery reads.
+// manifestRoster is the part of a run manifest recovery and override read.
 type manifestRoster struct {
 	Roster struct {
 		Participants []struct {
@@ -715,7 +717,86 @@ type manifestRoster struct {
 			Model    string `json:"model"`
 			Pool     string `json:"pool"`
 		} `json:"participants"`
+		DefaultPreset string                          `json:"default_preset"`
+		Presets       map[string]manifestPreset       `json:"presets"`
+		Quick         map[string]manifestQuickProfile `json:"quick"`
+		Deadlines     manifestDeadlines               `json:"deadlines"`
+		Budgets       manifestBudgets                 `json:"budgets"`
 	} `json:"roster"`
+}
+
+// manifestDeadlines and manifestBudgets have the fields of config.Deadlines
+// and config.Budgets, with the manifest's JSON names.
+type manifestDeadlines struct {
+	Attempt     *config.Duration `json:"attempt"`
+	Turn        *config.Duration `json:"turn"`
+	Delivery    *config.Duration `json:"delivery"`
+	Provisional *bool            `json:"provisional"`
+}
+
+type manifestBudgets struct {
+	CalibrationSafety       *float64 `json:"calibration_safety"`
+	MessageOverheadTokens   *int     `json:"message_overhead_tokens"`
+	RequestOverheadTokens   *int     `json:"request_overhead_tokens"`
+	ContextMargin           *float64 `json:"context_margin"`
+	AuthorMaxOutputTokens   *int     `json:"author_max_output_tokens"`
+	ReviewerMaxOutputTokens *int     `json:"reviewer_max_output_tokens"`
+	DeliveryMaxTokens       *int     `json:"delivery_max_tokens"`
+	TurnMaxEstimatedTokens  *int     `json:"turn_max_estimated_tokens"`
+}
+
+type manifestPreset struct {
+	Mode              string             `json:"mode"`
+	Author            string             `json:"author"`
+	RequiredReviewers []string           `json:"required_reviewers"`
+	Deadlines         *manifestDeadlines `json:"deadlines"`
+	Budgets           *manifestBudgets   `json:"budgets"`
+}
+
+type manifestQuickProfile struct {
+	Preset  string           `json:"preset"`
+	Drafts  bool             `json:"drafts"`
+	Budgets *manifestBudgets `json:"budgets"`
+}
+
+// manifestEffective resolves a turn's preset and quick profile as the run
+// the turn belongs to resolved them, from that run's manifest. e.mu is held.
+func (e *Engine) manifestEffective(row *journal.TurnRow) (config.Effective, error) {
+	run, err := e.store.GetRun(row.RunID)
+	if err != nil {
+		return config.Effective{}, fmt.Errorf("get run %s: %w", row.RunID, err)
+	}
+	var m manifestRoster
+	if err := json.Unmarshal(run.Manifest, &m); err != nil {
+		return config.Effective{}, fmt.Errorf("unmarshal manifest: %w", err)
+	}
+	budgets := func(b *manifestBudgets) *config.Budgets {
+		if b == nil {
+			return nil
+		}
+		c := config.Budgets(*b)
+		return &c
+	}
+	r := &config.Roster{
+		DefaultPreset: m.Roster.DefaultPreset,
+		Presets:       make(map[string]config.Preset, len(m.Roster.Presets)),
+		Quick:         make(map[string]config.QuickProfile, len(m.Roster.Quick)),
+		Deadlines:     config.Deadlines(m.Roster.Deadlines),
+		Budgets:       config.Budgets(m.Roster.Budgets),
+	}
+	for name, p := range m.Roster.Presets {
+		cp := config.Preset{Mode: p.Mode, Author: p.Author, RequiredReviewers: p.RequiredReviewers, Budgets: budgets(p.Budgets)}
+		if p.Deadlines != nil {
+			d := config.Deadlines(*p.Deadlines)
+			cp.Deadlines = &d
+		}
+		r.Presets[name] = cp
+	}
+	for name, q := range m.Roster.Quick {
+		r.Quick[name] = config.QuickProfile{Preset: q.Preset, Drafts: q.Drafts, Budgets: budgets(q.Budgets)}
+	}
+	r.ApplyDefaults()
+	return r.Resolve(row.Preset, row.QuickProfile)
 }
 
 // extractParticipantInfoFromManifest reads a participant's pool, endpoint and
