@@ -272,24 +272,3 @@ func (s *Store) OpenBlocks(turnID string) ([]Block, error) {
 	})
 	return blocks, err
 }
-
-// PendingTurnsWithoutTerminal returns all turn IDs that have no terminal state.
-func (s *Store) PendingTurnsWithoutTerminal() ([]string, error) {
-	var turnIDs []string
-	err := s.Tx(func(tx *Tx) error {
-		var txErr error
-		turnIDs, txErr = tx.PendingTurnsWithoutTerminal()
-		return txErr
-	})
-	return turnIDs, err
-}
-
-// GetAttemptTurnAndRun returns the turn_id and run_id for an attempt.
-func (s *Store) GetAttemptTurnAndRun(attemptID string) (turnID, runID string, err error) {
-	err = s.Tx(func(tx *Tx) error {
-		var txErr error
-		turnID, runID, txErr = tx.GetAttemptTurnAndRun(attemptID)
-		return txErr
-	})
-	return turnID, runID, err
-}

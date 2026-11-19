@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -234,34 +235,26 @@ func (e *Engine) Start() error {
 			return fmt.Errorf("recover pending attempts: %w", err)
 		}
 
+		existingHolds, err := tx.UnreleasedHolds()
+		if err != nil {
+			return fmt.Errorf("get existing holds: %w", err)
+		}
+		held := make(map[string]bool, len(existingHolds))
+		for _, h := range existingHolds {
+			held[h.AttemptID] = true
+		}
+
 		for _, attemptID := range pendingAttempts {
-			// Get the turn and run for this attempt
 			turnID, runID, err := tx.GetAttemptTurnAndRun(attemptID)
 			if err != nil {
 				return fmt.Errorf("get turn for attempt %s: %w", attemptID, err)
 			}
-
-			// Get the run manifest to extract participant info
 			run, err := tx.GetRun(runID)
 			if err != nil {
 				return fmt.Errorf("get run %s: %w", runID, err)
 			}
 
-			// Check if attempt already has a hold
-			existingHolds, err := tx.UnreleasedHolds()
-			if err != nil {
-				return fmt.Errorf("get existing holds: %w", err)
-			}
-
-			hasHold := false
-			for _, h := range existingHolds {
-				if h.AttemptID == attemptID {
-					hasHold = true
-					break
-				}
-			}
-
-			if !hasHold {
+			if !held[attemptID] {
 				// Get the attempt to extract participant ID
 				attempt, err := tx.GetAttempt(attemptID)
 				if err != nil {
@@ -487,144 +480,96 @@ func (e *Engine) Hello() wire.HelloReply {
 	}
 }
 
-// Override marks a turn as overridden with the given reason.
+// Override marks an incomplete turn that has a candidate as overridden and
+// sends its terminal deliveries. Deliveries still running from the incomplete
+// outcome finish on their own; their results no longer pass acceptance.
 func (e *Engine) Override(turnID, reason string) error {
 	if reason == "" {
 		return refusal(wire.ErrorCodeReasonRequired)
 	}
-
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.started {
-		e.mu.Unlock()
 		return errors.New("engine: not started")
 	}
 
-	t := e.open
-	if t == nil || t.id != turnID {
-		e.mu.Unlock()
-		turnRow, err := e.store.GetTurn(turnID)
-		switch {
-		case errors.Is(err, journal.ErrTurnNotFound):
-			notFound := refusal(wire.ErrorCodeNotFound)
-			notFound.TurnID = strPtr(turnID)
-			return notFound
-		case err != nil:
-			return err
-		case turnRow.TerminalState != StateIncomplete:
-			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
-			notIncomplete.TurnID = strPtr(turnID)
-			return notIncomplete
-		case turnRow.CandidateID == "":
-			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
-			notIncomplete.TurnID = strPtr(turnID)
-			return notIncomplete
-		}
-		// At this point, turnRow is incomplete with a candidate,
-		// but it's not the currently open turn. We can still override it.
-		// Lock back and proceed.
-		e.mu.Lock()
-	} else {
-		// t matches e.open and e.mu is held
-		// For the open turn, verify it's actually in incomplete state
-		turnRow, err := e.store.GetTurn(turnID)
-		if err != nil {
-			e.mu.Unlock()
-			return err
-		}
-		if turnRow.TerminalState != StateIncomplete {
-			e.mu.Unlock()
-			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
-			notIncomplete.TurnID = strPtr(turnID)
-			return notIncomplete
-		}
-		if t.candidateHash == "" {
-			e.mu.Unlock()
-			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
-			notIncomplete.TurnID = strPtr(turnID)
-			return notIncomplete
-		}
+	row, err := e.store.GetTurn(turnID)
+	switch {
+	case errors.Is(err, journal.ErrTurnNotFound):
+		r := refusal(wire.ErrorCodeNotFound)
+		r.TurnID = strPtr(turnID)
+		return r
+	case err != nil:
+		return fmt.Errorf("engine: override: %w", err)
+	case row.TerminalState != StateIncomplete || row.CandidateID == "":
+		r := refusal(wire.ErrorCodeNotIncomplete)
+		r.TurnID = strPtr(turnID)
+		return r
 	}
 
-	// Get candidateHash for delivery. If this is e.open, use the in-memory hash.
-	// Otherwise, retrieve it from the database.
-	var candidateHash string
-	if t != nil {
-		candidateHash = t.candidateHash
-	} else {
-		// Retrieve candidate hash from the database for a recovered incomplete turn
-		turn, err := e.store.GetTurn(turnID)
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		blocks, err := tx.OpenBlocks(turnID)
 		if err != nil {
-			e.mu.Unlock()
-			return fmt.Errorf("override: get turn for delivery: %w", err)
+			return err
 		}
-		if turn.CandidateID != "" {
-			cand, err := e.store.GetCandidate(turn.CandidateID)
-			if err != nil {
-				e.mu.Unlock()
-				return fmt.Errorf("override: get candidate: %w", err)
-			}
-			candidateHash = cand.ContentHash
-		}
-	}
-
-	// Perform the override in a transaction
-	var blocks []journal.Block
-
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		// Read open blocks BEFORE OverrideTurn
-		var err error
-		blocks, err = tx.OpenBlocks(turnID)
-		if err != nil {
-			return fmt.Errorf("get open blocks: %w", err)
-		}
-
-		// Bump epoch
 		if _, err := tx.BumpEpoch(turnID); err != nil {
-			return fmt.Errorf("bump epoch: %w", err)
+			return err
 		}
-
-		// Now override the turn (which will also override blocks and emit override event)
 		if err := tx.OverrideTurn(turnID, reason); err != nil {
-			return fmt.Errorf("override turn: %w", err)
+			return err
 		}
-
-		// Emit block_state events for each block that was overridden
-		for _, block := range blocks {
-			if err := emit(turnID, wire.EventKindBlockState, wire.EvBlockState{
-				BlockID: block.ID,
-				State:   StateOverridden,
-			}); err != nil {
-				return fmt.Errorf("emit block_state: %w", err)
+		for _, b := range blocks {
+			if err := emit(turnID, wire.EventKindBlockState, wire.EvBlockState{BlockID: b.ID, State: StateOverridden}); err != nil {
+				return err
 			}
 		}
-
-		// Emit turn_state event
-		if err := emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
-			TurnID: turnID,
-			State:  StateOverridden,
-			Reason: &reason,
-		}); err != nil {
-			return fmt.Errorf("emit turn_state: %w", err)
-		}
-
-		return nil
+		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{TurnID: turnID, State: StateOverridden, Reason: &reason})
 	})
-
 	if err != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("override: %w", err)
+		return fmt.Errorf("engine: override: %w", err)
 	}
 
-	// If this is e.open, prepare for delivery
-	if t != nil && e.open == t {
-		e.commitTerminal(t, &terminal{holds: []*hold{}})
-		// Set candidateHash for delivery
-		t.candidateHash = candidateHash
+	if t := e.deliveryTurn(row); t != nil {
 		e.deliverTerminal(t, StateOverridden, reason)
 	}
-
-	e.mu.Unlock()
 	return nil
+}
+
+// deliveryTurn rebuilds, from the journal, the turn state terminal delivery
+// reads for a turn that already left e.open. It returns nil when the turn
+// cannot be rebuilt, in which case nothing is sent. e.mu is held.
+func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
+	eff, err := e.roster.Resolve(row.Preset, row.QuickProfile)
+	if err != nil {
+		log.Printf("engine: turn %s: no delivery, preset unresolved: %v", row.ID, err)
+		return nil
+	}
+	cand, err := e.store.GetCandidate(row.CandidateID)
+	if err != nil {
+		log.Printf("engine: turn %s: no delivery, candidate unreadable: %v", row.ID, err)
+		return nil
+	}
+	attempts, err := e.store.ListAttempts(row.ID)
+	if err != nil {
+		log.Printf("engine: turn %s: no delivery, attempts unreadable: %v", row.ID, err)
+		return nil
+	}
+	t := &openTurn{
+		id:            row.ID,
+		mode:          row.Mode,
+		author:        eff.Preset.Author,
+		eff:           eff,
+		candidateHash: cand.ContentHash,
+		outputs:       make(map[string]string),
+		stopAttempt:   make(map[string]func() bool),
+		pending:       make(map[string]time.Time),
+	}
+	for _, a := range attempts {
+		if a.Phase == phaseReview && a.State != attemptPending && !a.Quarantined && a.RawOutput != nil {
+			t.outputs[a.ID] = *a.RawOutput
+		}
+	}
+	return t
 }
 
 // mapHoldsToNewRoster maps unreleased holds from previous runs to the new roster.
@@ -714,6 +659,10 @@ func (e *Engine) loadHoldsIntoMemory() error {
 	}
 
 	for _, journalHold := range holds {
+		participant := ""
+		if a, err := e.store.GetAttempt(journalHold.AttemptID); err == nil {
+			participant = a.Participant
+		}
 		// Convert journal hold to wire hold with group members
 		var group []wire.GroupMember
 		for _, m := range journalHold.Group {
@@ -743,7 +692,7 @@ func (e *Engine) loadHoldsIntoMemory() error {
 				attemptID:    journalHold.AttemptID,
 				pool:         journalHold.Pool, // original pool for display
 				appliedPools: appliedPools,
-				participant:  journalHold.EndpointName + ":" + journalHold.Model,
+				participant:  participant,
 				since:        journalHold.HeldSince,
 				group:        group,
 			}
@@ -755,7 +704,7 @@ func (e *Engine) loadHoldsIntoMemory() error {
 				attemptID:    journalHold.AttemptID,
 				pool:         journalHold.Pool,
 				appliedPools: []string{},
-				participant:  journalHold.EndpointName + ":" + journalHold.Model,
+				participant:  participant,
 				since:        journalHold.HeldSince,
 				group:        group,
 			}
@@ -766,100 +715,57 @@ func (e *Engine) loadHoldsIntoMemory() error {
 	return nil
 }
 
-// extractParticipantInfoFromManifest extracts participant info from the manifest JSON.
-// Returns group, pool, endpoint_name, model, error.
-// Pool names are normalized: empty pool becomes defaultPool.
-func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, participantID string) ([]journal.GroupMember, string, string, string, error) {
-	var manifestData map[string]interface{}
-	if err := json.Unmarshal(manifest, &manifestData); err != nil {
+// manifestRoster is the part of a run manifest recovery reads.
+type manifestRoster struct {
+	Roster struct {
+		Participants []struct {
+			ID       string `json:"id"`
+			Endpoint string `json:"endpoint"`
+			Model    string `json:"model"`
+			Pool     string `json:"pool"`
+		} `json:"participants"`
+	} `json:"roster"`
+}
+
+// extractParticipantInfoFromManifest reads a participant's pool, endpoint and
+// model from a run manifest, and the group of its pool: every {endpoint,
+// model} in that pool, sorted. An empty pool is the default pool.
+func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, participantID string) ([]journal.GroupMember, string, string, string, error) {
+	var m manifestRoster
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, "", "", "", fmt.Errorf("unmarshal manifest: %w", err)
 	}
-
-	roster, ok := manifestData["roster"].(map[string]interface{})
-	if !ok {
-		return nil, "", "", "", fmt.Errorf("roster not found in manifest")
-	}
-
-	participants, ok := roster["participants"].([]interface{})
-	if !ok {
-		return nil, "", "", "", fmt.Errorf("participants not found in roster")
-	}
-
-	// Find the participant by ID and extract endpoint_name and model
-	var targetParticipant map[string]interface{}
-	var poolName, endpointName, model string
-
-	for _, p := range participants {
-		pMap, ok := p.(map[string]interface{})
-		if !ok {
-			continue
+	pool := func(p string) string {
+		if p == "" {
+			return defaultPool
 		}
-		if pMap["id"] == participantID {
-			targetParticipant = pMap
-			if ep, ok := pMap["endpoint"].(string); ok {
-				endpointName = ep
-			}
-			if m, ok := pMap["model"].(string); ok {
-				model = m
-			}
-			if pool, ok := pMap["pool"].(string); ok {
-				poolName = pool
-			} else {
-				poolName = ""
-			}
+		return p
+	}
+	found := false
+	var poolID, endpoint, model string
+	for _, p := range m.Roster.Participants {
+		if p.ID == participantID {
+			found, poolID, endpoint, model = true, pool(p.Pool), p.Endpoint, p.Model
 			break
 		}
 	}
-
-	if targetParticipant == nil {
+	if !found {
 		return nil, "", "", "", fmt.Errorf("participant %s not found in manifest", participantID)
 	}
-
-	// Normalize pool name: empty becomes default
-	if poolName == "" {
-		poolName = defaultPool
-	}
-
-	// Now build the group by finding all participants in the same pool
+	seen := make(map[journal.GroupMember]bool)
 	var group []journal.GroupMember
-	groupSet := make(map[string]bool) // For deduplication
-
-	for _, p := range participants {
-		pMap, ok := p.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		currentPool := ""
-		if pool, ok := pMap["pool"].(string); ok {
-			currentPool = pool
-		}
-		// Normalize pool name for comparison
-		if currentPool == "" {
-			currentPool = defaultPool
-		}
-		if currentPool == poolName {
-			if ep, ok := pMap["endpoint"].(string); ok {
-				if m, ok := pMap["model"].(string); ok {
-					key := ep + ":" + m
-					if !groupSet[key] {
-						group = append(group, journal.GroupMember{
-							EndpointName: ep,
-							Model:        m,
-						})
-						groupSet[key] = true
-					}
-				}
-			}
+	for _, p := range m.Roster.Participants {
+		gm := journal.GroupMember{EndpointName: p.Endpoint, Model: p.Model}
+		if pool(p.Pool) == poolID && !seen[gm] {
+			seen[gm] = true
+			group = append(group, gm)
 		}
 	}
-
-	// Sort the group by endpoint name then model (as required by OpenHold)
 	sort.Slice(group, func(i, j int) bool {
 		if group[i].EndpointName != group[j].EndpointName {
 			return group[i].EndpointName < group[j].EndpointName
 		}
 		return group[i].Model < group[j].Model
 	})
-
-	return group, poolName, endpointName, model, nil
+	return group, poolID, endpoint, model, nil
 }
