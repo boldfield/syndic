@@ -159,6 +159,8 @@ func (e *Engine) recordRetry(t *openTurn, req transport.CompleteRequest) bool {
 		_, err := tx.RecordRetryDispatch(req.Envelope.AttemptID)
 		return err
 	})
+	// A failed journal write skips the retry on purpose: a retry that is not
+	// journaled must not be dispatched, so the turn ends with the first result.
 	return err == nil
 }
 
