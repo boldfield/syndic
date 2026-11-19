@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -429,4 +430,370 @@ func TestServerFrameSizeLimit(t *testing.T) {
 
 func connectSocket(path string) (net.Conn, error) {
 	return net.Dial("unix", path)
+}
+
+func TestSocketMode(t *testing.T) {
+	server, sockPath, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	fi, err := os.Stat(sockPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+
+	mode := fi.Mode()
+	perms := mode & os.ModePerm
+	expected := os.FileMode(0600)
+
+	if perms != expected {
+		t.Errorf("socket mode is %o, expected %o", perms, expected)
+	}
+}
+
+func TestOversizedClientFrame(t *testing.T) {
+	server, sockPath, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := connectSocket(sockPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	r := wire.NewReader(conn)
+	w := wire.NewWriter(conn)
+
+	// Handshake
+	helloReq := wire.HelloRequest{
+		Client:        "test",
+		ClientVersion: "1.0",
+		Protocol:      wire.ProtocolVersion,
+	}
+	helloFrame, _ := wire.NewRequest("hello", "hello", helloReq)
+	if err := w.Write(helloFrame); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	helloReply, err := r.Read()
+	if err != nil {
+		t.Fatalf("read hello reply: %v", err)
+	}
+
+	if helloReply.Type != "reply" {
+		t.Errorf("expected reply to hello, got %s", helloReply.Type)
+	}
+
+	// Try to send a frame that's too large locally (wire.Writer will reject it)
+	largeData := make([]byte, wire.MaxFrameBytes+100)
+	for i := range largeData {
+		largeData[i] = 'x'
+	}
+
+	submitReq := wire.SubmitRequest{
+		SubmissionID: "sub-1",
+		Input:        string(largeData),
+	}
+	frameToSend, _ := wire.NewRequest("submit-1", "submit", submitReq)
+
+	err = w.Write(frameToSend)
+	if err != wire.ErrFrameTooLarge {
+		t.Fatalf("expected ErrFrameTooLarge from client writer, got %v", err)
+	}
+}
+
+func TestStoppingDeliveredToConnections(t *testing.T) {
+	server, sockPath, engine, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := connectSocket(sockPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	r := wire.NewReader(conn)
+	w := wire.NewWriter(conn)
+
+	// Handshake
+	helloReq := wire.HelloRequest{
+		Client:        "test",
+		ClientVersion: "1.0",
+		Protocol:      wire.ProtocolVersion,
+	}
+	helloFrame, _ := wire.NewRequest("hello", "hello", helloReq)
+	if err := w.Write(helloFrame); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	helloReply, err := r.Read()
+	if err != nil {
+		t.Fatalf("read hello reply: %v", err)
+	}
+
+	if helloReply.Type != "reply" {
+		t.Errorf("expected reply to hello, got %s", helloReply.Type)
+	}
+
+	// Stop the engine
+	engine.stop()
+
+	// Should receive stopping error or connection close
+	frame, err := r.Read()
+	if err != nil {
+		if err != io.EOF {
+			t.Logf("read error after stopping: %v", err)
+		}
+	} else {
+		if frame.Type == "error" {
+			var errReply wire.Error
+			if err := json.Unmarshal(frame.Body, &errReply); err != nil {
+				t.Fatalf("unmarshal error: %v", err)
+			}
+			if errReply.Code != "stopping" {
+				t.Errorf("expected stopping error, got %s", errReply.Code)
+			}
+		}
+	}
+
+	// Serve should return
+	select {
+	case err := <-serveDone:
+		if err != nil && err != context.Canceled {
+			t.Logf("Serve returned: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("Serve did not return after engine stopped")
+	}
+}
+
+func TestFrameObserverLimitGuard(t *testing.T) {
+	tmpdir := t.TempDir()
+	socketDir := filepath.Join(tmpdir, "syndic")
+	if err := os.MkdirAll(socketDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	paths := lockfile.Paths{
+		Dir:    socketDir,
+		Socket: filepath.Join(socketDir, "engine.sock"),
+		Lock:   filepath.Join(socketDir, "engine.lock"),
+	}
+
+	db, err := journal.Open(filepath.Join(tmpdir, "journal.db"))
+	if err != nil {
+		t.Fatalf("open journal: %v", err)
+	}
+	defer db.Close()
+
+	store := journal.NewStore(db)
+	h := hub.New(store, 1024)
+
+	var maxFrameMu sync.Mutex
+	maxFrameObserved := int64(0)
+	frameObserver := func(len int) {
+		maxFrameMu.Lock()
+		if int64(len) > maxFrameObserved {
+			maxFrameObserved = int64(len)
+		}
+		maxFrameMu.Unlock()
+	}
+
+	engine := &stubEngine{
+		helloReply: wire.HelloReply{
+			EngineVersion: "test",
+			Protocol:      wire.ProtocolVersion,
+			RunID:         "run-123",
+		},
+		statusReply: wire.StatusReply{
+			RunID: "run-123",
+		},
+		stopping: make(chan struct{}),
+	}
+
+	server := New(Options{
+		Paths:         paths,
+		Engine:        engine,
+		Store:         store,
+		Hub:           h,
+		FrameObserver: frameObserver,
+	})
+
+	if err := server.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := connectSocket(paths.Socket)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	r := wire.NewReader(conn)
+	w := wire.NewWriter(conn)
+
+	helloReq := wire.HelloRequest{
+		Client:        "test",
+		ClientVersion: "1.0",
+		Protocol:      wire.ProtocolVersion,
+	}
+	helloFrame, _ := wire.NewRequest("hello", "hello", helloReq)
+	if err := w.Write(helloFrame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err = r.Read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Check that no frame exceeded 1 MiB
+	maxFrameMu.Lock()
+	observed := maxFrameObserved
+	maxFrameMu.Unlock()
+
+	if observed > wire.MaxFrameBytes {
+		t.Errorf("frame size %d exceeded limit %d", observed, wire.MaxFrameBytes)
+	}
+}
+
+func TestBadProtocolVersion(t *testing.T) {
+	server, sockPath, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := connectSocket(sockPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	r := wire.NewReader(conn)
+	w := wire.NewWriter(conn)
+
+	helloReq := wire.HelloRequest{
+		Client:        "test",
+		ClientVersion: "1.0",
+		Protocol:      2, // wrong protocol
+	}
+	helloFrame, _ := wire.NewRequest("hello", "hello", helloReq)
+	if err := w.Write(helloFrame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	frame, err := r.Read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if frame.Type != "error" {
+		t.Errorf("expected error, got %s", frame.Type)
+	}
+
+	var errReply wire.Error
+	if err := json.Unmarshal(frame.Body, &errReply); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if errReply.Code != "protocol" {
+		t.Errorf("expected protocol error, got %s", errReply.Code)
+	}
+
+	// Connection should close after error
+	_, err = r.Read()
+	if err != io.EOF {
+		t.Errorf("expected EOF after protocol error, got %v", err)
+	}
+}
+
+func TestNonHelloFirstFrame(t *testing.T) {
+	server, sockPath, _, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() {
+		_ = server.Serve(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := connectSocket(sockPath)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Close()
+
+	r := wire.NewReader(conn)
+	w := wire.NewWriter(conn)
+
+	// Send status request instead of hello
+	statusReq := wire.StatusRequest{}
+	statusFrame, _ := wire.NewRequest("status-1", "status", statusReq)
+	if err := w.Write(statusFrame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	frame, err := r.Read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if frame.Type != "error" {
+		t.Errorf("expected error, got %s", frame.Type)
+	}
+
+	var errReply wire.Error
+	if err := json.Unmarshal(frame.Body, &errReply); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if errReply.Code != "protocol" {
+		t.Errorf("expected protocol error, got %s", errReply.Code)
+	}
 }

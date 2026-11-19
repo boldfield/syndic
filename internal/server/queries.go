@@ -55,15 +55,30 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 	// Build attempt records
 	for _, a := range attempts {
 		attemptRecord := wire.AttemptRecord{
-			ID:                    a.ID,
-			Participant:           a.Participant,
-			Phase:                 a.Phase,
-			Epoch:                 int64(a.Epoch),
-			MaxOutputTokens:       int64(*a.MaxOutputTokens),
-			EstimatedPromptTokens: int64(*a.EstimatedPromptTokens),
-			Status:                *a.Status,
-			ScrubCount:            *a.ScrubCount,
-			TransportStatus:       *a.TransportStatus,
+			ID:          a.ID,
+			Participant: a.Participant,
+			Phase:       a.Phase,
+			Epoch:       int64(a.Epoch),
+		}
+
+		if a.MaxOutputTokens != nil {
+			attemptRecord.MaxOutputTokens = int64(*a.MaxOutputTokens)
+		}
+
+		if a.EstimatedPromptTokens != nil {
+			attemptRecord.EstimatedPromptTokens = int64(*a.EstimatedPromptTokens)
+		}
+
+		if a.Status != nil {
+			attemptRecord.Status = *a.Status
+		}
+
+		if a.ScrubCount != nil {
+			attemptRecord.ScrubCount = *a.ScrubCount
+		}
+
+		if a.TransportStatus != nil {
+			attemptRecord.TransportStatus = *a.TransportStatus
 		}
 
 		if a.Deadline != nil {
