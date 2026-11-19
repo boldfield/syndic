@@ -118,6 +118,18 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.EligibleRoles = append(ws.EligibleRoles, string(role))
 	}
 
+	// Check if participant has any unreleased holds
+	hasUnreleasedHold := false
+	if holds, err := e.store.UnreleasedHolds(); err == nil {
+		for _, h := range holds {
+			attempt, _ := e.store.GetAttempt(h.AttemptID)
+			if attempt != nil && attempt.Participant == p.ID {
+				hasUnreleasedHold = true
+				break
+			}
+		}
+	}
+
 	switch {
 	case !mp.Usable:
 		ws.State = ParticipantUnprobed
@@ -131,6 +143,9 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.State = ParticipantUnknown
 	case e.inflight[p.ID] > 0:
 		// Participant has in-flight attempts, keep them as running
+		ws.State = ParticipantRunning
+	case hasUnreleasedHold:
+		// Participant has unreleased holds, so it's running (slot is held)
 		ws.State = ParticipantRunning
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning

@@ -378,16 +378,6 @@ func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn,
 		}); err != nil {
 			return err
 		}
-
-		// Only set participant state to cancelling for actual user cancellations
-		if isCancellation {
-			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-				Participant: attempt.Participant,
-				State:       ParticipantCancelling,
-			}); err != nil {
-				return err
-			}
-		}
 	}
 
 	// 3. If this is a cancellation, set phase_at_cancel to the turn's current phase.
@@ -503,8 +493,7 @@ func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 				}
 				return nil
 			})
-			// Don't update participant state here - let it stay running
-			// until the original Complete() call returns and calls release()
+			// Server confirmed: release and go back to running (or idle if Complete returned)
 			delete(e.cancelling, info.participant)
 			delete(e.unknown, info.participant)
 		} else {
