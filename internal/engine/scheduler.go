@@ -51,7 +51,7 @@ func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
 	name := e.poolOf(participant)
 	p := e.poolState(name)
 	concurrency, _ := e.roster.PoolFor(name)
-	if p.running < concurrency && len(p.queue) == 0 {
+	if e.occupied(name) < concurrency && len(p.queue) == 0 {
 		p.running++
 		e.inflight[participant]++
 		start()
@@ -98,12 +98,22 @@ func (e *Engine) releaseLocked(participant string) {
 	// A newer dispatch of the same participant may still be running.
 	if e.inflight[participant] == 0 && e.running[participant] {
 		delete(e.running, participant)
-		_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-			return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
-		})
+		// A cancelling or unknown participant is reported by syncParticipant.
+		if e.specialState(participant) == "" {
+			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
+			})
+		}
 	}
+	e.kick(name)
+	e.syncParticipant(participant)
+}
+
+// kick starts the head of the pool's queue while slots remain. e.mu is held.
+func (e *Engine) kick(name string) {
+	p := e.poolState(name)
 	concurrency, _ := e.roster.PoolFor(name)
-	for p.running < concurrency && len(p.queue) > 0 {
+	for e.occupied(name) < concurrency && len(p.queue) > 0 {
 		head := p.queue[0]
 		// A turn whose deadline has passed ends here; dropping its queue
 		// takes head out and reports it idle.
@@ -121,15 +131,13 @@ func (e *Engine) releaseLocked(participant string) {
 	}
 }
 
-// dropQueued removes the turn's queued dispatches. They never start; their
-// participants go back to idle.
+// dropQueued removes the turn's queued dispatches. They never start; the
+// terminal Tx already reported their participants. e.mu is held.
 func (e *Engine) dropQueued(t *openTurn) {
-	var dropped []string
 	for _, p := range e.pools {
 		kept := p.queue[:0]
 		for _, q := range p.queue {
 			if q.t == t {
-				dropped = append(dropped, q.participant)
 				delete(e.queued, q.participant)
 				continue
 			}
@@ -137,18 +145,6 @@ func (e *Engine) dropQueued(t *openTurn) {
 		}
 		p.queue = kept
 	}
-	if len(dropped) == 0 {
-		return
-	}
-	sort.Strings(dropped)
-	_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		for _, id := range dropped {
-			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: id, State: ParticipantIdle}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 // attemptDeadline is the deadline of an attempt dispatched now: the attempt
@@ -186,6 +182,7 @@ func (e *Engine) armTurn(t *openTurn) {
 // armAttempt starts the timer for a begun attempt. e.mu is held.
 func (e *Engine) armAttempt(t *openTurn, attemptID string, deadline time.Time) {
 	t.pending[attemptID] = deadline
+	e.calling[attemptID] = true
 	d := deadline.Sub(e.clock.Now())
 	t.stopAttempt[attemptID] = e.clock.AfterFunc(d, func() { e.onAttemptDeadline(t, attemptID) })
 }

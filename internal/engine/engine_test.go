@@ -675,14 +675,8 @@ func TestDispatchTxIsAtomic(t *testing.T) {
 
 func TestNotImplemented(t *testing.T) {
 	h := enginetest.New(t, enginetest.RosterTOML, nil)
-	if err := h.Engine.Cancel("t"); !errors.Is(err, engine.ErrNotImplemented) {
-		t.Fatalf("Cancel = %v", err)
-	}
 	if err := h.Engine.Override("t", "r"); !errors.Is(err, engine.ErrNotImplemented) {
 		t.Fatalf("Override = %v", err)
-	}
-	if _, err := h.Engine.Release(wire.ReleaseRequest{}); !errors.Is(err, engine.ErrNotImplemented) {
-		t.Fatalf("Release = %v", err)
 	}
 }
 

@@ -12,8 +12,21 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// Stop shuts the engine down. In this task it waits for nothing.
-func (e *Engine) Stop(ctx context.Context) error { return nil }
+// Stop shuts the engine down. It waits for the adapter cancellations a
+// terminal path started, until ctx ends.
+func (e *Engine) Stop(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // Status reports the run, the participants, pools and quick profiles.
 func (e *Engine) Status() (wire.StatusReply, error) {
@@ -62,7 +75,15 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		concurrency, _ := r.PoolFor(name)
-		reply.Pools = append(reply.Pools, wire.Pool{Name: name, Concurrency: concurrency, Holds: []wire.PoolHold{}})
+		holds := []wire.PoolHold{}
+		for _, h := range e.sortedHolds(name) {
+			holds = append(holds, wire.PoolHold{
+				AttemptID: h.attemptID,
+				HeldSince: h.since.Format(time.RFC3339Nano),
+				Group:     h.group,
+			})
+		}
+		reply.Pools = append(reply.Pools, wire.Pool{Name: name, Concurrency: concurrency, Holds: holds})
 	}
 
 	quick := make([]string, 0, len(r.Quick))
@@ -124,10 +145,15 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 			detail := mp.Detail
 			ws.Detail = &detail
 		}
+	case e.cancelling[p.ID] > 0:
+		ws.State = ParticipantCancelling
+	case e.queued[p.ID]:
+		// Waiting for a slot is more current than an earlier hold.
+		ws.State = ParticipantQueued
+	case e.specialState(p.ID) != "":
+		ws.State = ParticipantUnknown
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning
-	case e.queued[p.ID]:
-		ws.State = ParticipantQueued
 	default:
 		ws.State = ParticipantIdle
 	}

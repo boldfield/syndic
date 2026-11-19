@@ -206,6 +206,9 @@ type TurnRow struct {
 	BudgetJSON                          json.RawMessage
 }
 
+// ErrTurnNotFound is returned by GetTurn for an unknown turn id.
+var ErrTurnNotFound = errors.New("turn not found")
+
 // GetTurn retrieves a turn by ID.
 func (s *Store) GetTurn(turnID string) (*TurnRow, error) {
 	var row *TurnRow
@@ -222,7 +225,7 @@ func (tx *Tx) GetTurn(turnID string) (*TurnRow, error) {
 	row, err := tx.getTurnByID(turnID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("turn not found")
+			return nil, ErrTurnNotFound
 		}
 		return nil, err
 	}

@@ -401,3 +401,41 @@ func (tx *Tx) SetAttemptEstimate(attemptID string, estimatedPromptTokens int) er
 	}
 	return nil
 }
+
+// GetHold returns the hold of an attempt, released or not. The bool is false
+// when the attempt has none.
+func (s *Store) GetHold(attemptID string) (Hold, bool, error) {
+	var h Hold
+	var found bool
+	err := s.Tx(func(tx *Tx) error {
+		var heldSince, groupJSON string
+		var releasedAt, how, reason sql.NullString
+		err := tx.tx.QueryRow(`
+			SELECT attempt_id, pool, endpoint_name, model, group_json, held_since, released_at, released_how, released_reason
+			FROM capacity_holds WHERE attempt_id = ?
+		`, attemptID).Scan(&h.AttemptID, &h.Pool, &h.EndpointName, &h.Model, &groupJSON, &heldSince, &releasedAt, &how, &reason)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("query hold: %w", err)
+		}
+		found = true
+		if h.HeldSince, err = parseTime(heldSince); err != nil {
+			return fmt.Errorf("parse held_since: %w", err)
+		}
+		if err := json.Unmarshal([]byte(groupJSON), &h.Group); err != nil {
+			return fmt.Errorf("unmarshal group: %w", err)
+		}
+		if releasedAt.Valid {
+			at, err := parseTime(releasedAt.String)
+			if err != nil {
+				return fmt.Errorf("parse released_at: %w", err)
+			}
+			h.ReleasedAt = &at
+		}
+		h.ReleasedHow, h.ReleasedReason = how.String, reason.String
+		return nil
+	})
+	return h, found, err
+}
