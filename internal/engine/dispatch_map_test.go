@@ -6,7 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,15 +19,20 @@ import (
 func transportStatusConstants(t *testing.T) map[string]string {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, "../transport", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	paths, err := filepath.Glob("../transport/*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := map[string]string{}
-	for _, pkg := range pkgs {
-		for _, f := range pkg.Files {
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		{
 			for _, decl := range f.Decls {
 				gd, ok := decl.(*ast.GenDecl)
 				if !ok || gd.Tok != token.CONST {

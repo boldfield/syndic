@@ -77,8 +77,8 @@ func classifyDispatch(res transport.CompleteResult, goErr error) *failure {
 	if ts == "" || ts == transport.TransportStatusOK {
 		return nil
 	}
-	// A cancel the engine did not make is as uncertain as a reset. The
-	// engine's own cancels end the turn first, so their results never get here.
+	// A cancel the engine did not make is as uncertain as a reset. callOnce
+	// keeps the engine's own cancels away from here.
 	if ts == transport.TransportStatusCancelled {
 		ts = statusReset
 	}
@@ -103,10 +103,15 @@ func (f *failure) applyTo(req transport.CompleteRequest, res transport.CompleteR
 }
 
 // callOnce calls the adapter once and classifies what came back.
-func callOnce(a transport.Adapter, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
+// A result the adapter reported as cancelled while the engine itself had
+// cancelled the attempt (live reports false) keeps the adapter's own status.
+func callOnce(a transport.Adapter, req transport.CompleteRequest, live func() bool) (transport.CompleteResult, *failure) {
 	res, err := a.Complete(context.Background(), req)
 	if err != nil {
 		res = transport.CompleteResult{}
+	}
+	if err == nil && res.TransportStatus == transport.TransportStatusCancelled && !live() {
+		return res, nil
 	}
 	f := classifyDispatch(res, err)
 	if f != nil {
@@ -162,9 +167,14 @@ func (e *Engine) recordRetry(t *openTurn, req transport.CompleteRequest) bool {
 // transport-ok result.
 func (e *Engine) complete(t *openTurn, participant string, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
 	a := e.adapterFor(participant)
-	res, f := callOnce(a, req)
+	live := func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.retryRoom(t, req, 0)
+	}
+	res, f := callOnce(a, req, live)
 	if f != nil && f.retry && e.waitToRetry(t, req) && e.recordRetry(t, req) {
-		res, f = callOnce(a, req)
+		res, f = callOnce(a, req, live)
 	}
 	e.returned(req.Envelope.AttemptID)
 	return res, f
