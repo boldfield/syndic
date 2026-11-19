@@ -1,5 +1,7 @@
 package engine
 
+import "time"
+
 // SetPayloadHook installs a hook that may replace any event payload, so a
 // test can make a transaction fail after its row writes. Call it before the
 // first request.
@@ -13,4 +15,15 @@ func (e *Engine) SetPayloadHook(f func(kind string, payload any) any) {
 // before the first request.
 func (e *Engine) SetCrashHook(f func() bool) {
 	e.crashHook = f
+}
+
+// GetDispatchRetryDelay returns the current retry delay for unreachable failures.
+func GetDispatchRetryDelay() time.Duration {
+	return dispatchRetryDelay
+}
+
+// SetDispatchRetryDelay sets the retry delay for unreachable failures.
+// Tests use this to accelerate retries.
+func SetDispatchRetryDelay(d time.Duration) {
+	dispatchRetryDelay = d
 }

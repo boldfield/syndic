@@ -45,19 +45,34 @@ func (e *Engine) participantConfig(id string) config.Participant {
 // review-mode turn and, when it passes, freezes the candidate. It reports
 // whether reviewers should be dispatched. A turn it does not carry on is
 // either ended here or already terminal.
-func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult) bool {
+func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, goErr error) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 
+	// Check for transport failures or Go errors
+	var openHold bool
+	var newStatus, terminalReason string
+	var retryCount int
+	if goErr != nil || (res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK) {
+		if attempt, err := e.getAttempt(attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
+			retryCount = *attempt.RetryCount
+		}
+		_, openHold, newStatus, terminalReason = decideDispatchFailure("author", t.author, retryCount, res.TransportStatus, goErr)
+	}
+
 	var hash string
 	var quarantined, ended, exceeded bool
 	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		hash, quarantined, ended, exceeded, term = "", false, false, false, nil
-		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
+		output := outputOf(res)
+		if newStatus != "" {
+			output.Status = newStatus
+		}
+		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", output)
 		if err != nil {
 			return err
 		}
@@ -72,9 +87,37 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, e.lastInflight(t.author)); err != nil {
 			return err
 		}
+
+		// Open hold if needed
+		if openHold {
+			p := e.participantConfig(t.author)
+			pool := poolName(p)
+			group := e.poolGroup(pool)
+			members := make([]journal.GroupMember, len(group))
+			for i, m := range group {
+				members[i] = journal.GroupMember{EndpointName: m.EndpointName, Model: m.Model}
+			}
+			now := e.clock.Now().UTC()
+			if err := tx.OpenHold(journal.Hold{
+				AttemptID:    attemptID,
+				Pool:         pool,
+				EndpointName: p.Endpoint,
+				Model:        p.Model,
+				Group:        members,
+				HeldSince:    now,
+			}); err != nil {
+				return err
+			}
+		}
+
 		if gate != nil {
 			ended = true
 			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			return err
+		}
+		if terminalReason != "" {
+			ended = true
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+terminalReason)
 			return err
 		}
 		hash, err = candidate.Hash(candidate.Identity{
@@ -158,8 +201,8 @@ func (e *Engine) startReviewer(t *openTurn, id string) {
 // back when Complete has returned and its result handled. A repair goes back
 // through the scheduler, so it queues behind work already waiting in its pool.
 func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
-	res := e.completeWithRetry(d.participant, d.req, d.attemptID, t.id, 0, "reviewer")
-	repair := e.completeReviewer(t, d, res)
+	res, goErr := e.completeWithRetry(d.participant, d.req, d.attemptID, t.id, 0, "reviewer")
+	repair := e.completeReviewer(t, d, res, goErr)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -443,23 +486,23 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 
 // completeReviewer runs accept, gate, parse and the decision for one
 // reviewer's result in one transaction.
-func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult) *string {
+func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult, goErr error) *string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
 
-	// Check for transport failures that might need a hold
+	// Check for transport failures or Go errors that might need a hold
 	var openHold bool
 	var newStatus, terminalReason string
 	var retryCount int
-	if res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK {
+	if goErr != nil || (res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK) {
 		// Get the retry count to determine if this is a retry
 		if attempt, err := e.store.GetAttempt(d.attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
 			retryCount = *attempt.RetryCount
 		}
-		_, openHold, newStatus, terminalReason = decideDispatchFailure("reviewer", d.participant, retryCount, res.TransportStatus, nil)
+		_, openHold, newStatus, terminalReason = decideDispatchFailure("reviewer", d.participant, retryCount, res.TransportStatus, goErr)
 	}
 
 	var quarantined, approvedNow, exceeded bool

@@ -8,9 +8,9 @@ import (
 	"github.com/boldfield/syndic/internal/transport"
 )
 
-// DispatchRetryDelay is the fixed delay for retrying an unreachable attempt.
-// Tests can shorten this to speed up retries in test scenarios.
-var DispatchRetryDelay = 100 * time.Millisecond
+// dispatchRetryDelay is the fixed delay for retrying an unreachable attempt.
+// Tests can shorten this via export_test.go.
+var dispatchRetryDelay = 100 * time.Millisecond
 
 // dispatchFailureOutcome describes how a transport failure should be handled.
 type dispatchFailureOutcome struct {

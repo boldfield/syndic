@@ -49,32 +49,25 @@ func (e *Engine) startAuthor(t *openTurn) {
 // runAuthor calls the author, handles its result and gives back the pool slot
 // before anything else is dispatched.
 func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
-	res := e.completeWithRetry(t.author, req, attemptID, t.id, 0, "author")
+	res, goErr := e.completeWithRetry(t.author, req, attemptID, t.id, 0, "author")
 	if t.mode != modeSolo {
-		proceed := e.completeAuthorReview(t, attemptID, req, res)
+		proceed := e.completeAuthorReview(t, attemptID, req, res, goErr)
 		e.release(t.author)
 		if proceed {
 			e.runReviewers(t)
 		}
 		return
 	}
-	e.completeAuthor(t, attemptID, req, res)
+	e.completeAuthor(t, attemptID, req, res, goErr)
 	e.release(t.author)
 }
 
-// complete calls the participant's adapter and turns a Go error into an
-// error result.
-func (e *Engine) complete(participant string, req transport.CompleteRequest) transport.CompleteResult {
+// complete calls the participant's adapter and returns both result and error.
+// The original error is preserved for dispatch failure mapping.
+func (e *Engine) complete(participant string, req transport.CompleteRequest) (transport.CompleteResult, error) {
 	res, err := e.adapterFor(participant).Complete(context.Background(), req)
 	e.returned(req.Envelope.AttemptID)
-	if err != nil {
-		res = transport.CompleteResult{
-			Envelope:        req.Envelope,
-			Status:          transport.StatusError,
-			TransportStatus: "adapter_error:" + err.Error(),
-		}
-	}
-	return res
+	return res, err
 }
 
 // returned records that the attempt's Complete call has returned. A hold on
@@ -191,23 +184,23 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 
 // completeAuthor runs accept, gate and the terminal path for the author's
 // result in one transaction.
-func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult) {
+func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, goErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 
-	// Check for transport failures that might need a hold
+	// Check for transport failures or Go errors that might need a hold
 	var openHold bool
 	var newStatus, terminalReason string
 	var retryCount int
-	if res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK {
+	if goErr != nil || (res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK) {
 		// Get the retry count to determine if this is a retry
 		if attempt, err := e.getAttempt(attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
 			retryCount = *attempt.RetryCount
 		}
-		_, openHold, newStatus, terminalReason = decideDispatchFailure("author", t.author, retryCount, res.TransportStatus, nil)
+		_, openHold, newStatus, terminalReason = decideDispatchFailure("author", t.author, retryCount, res.TransportStatus, goErr)
 	}
 
 	// Use newStatus if set, otherwise use the result's status
@@ -356,16 +349,17 @@ func (e *Engine) getAttempt(attemptID string) (*journal.AttemptRow, error) {
 }
 
 // completeWithRetry handles a Complete call with retry logic for unreachable failures.
-// It returns the final result after any retries.
-func (e *Engine) completeWithRetry(participant string, req transport.CompleteRequest, attemptID, turnID string, retryCount int, role string) transport.CompleteResult {
-	res := e.complete(participant, req)
+// It returns the final result and any Go error after retries.
+func (e *Engine) completeWithRetry(participant string, req transport.CompleteRequest, attemptID, turnID string, retryCount int, role string) (transport.CompleteResult, error) {
+	res, goErr := e.complete(participant, req)
 
-	shouldRetry, _, _, _ := decideDispatchFailure(role, participant, retryCount, res.TransportStatus, nil)
+	shouldRetry, _, _, _ := decideDispatchFailure(role, participant, retryCount, res.TransportStatus, goErr)
 
 	// Handle retry for unreachable
 	if shouldRetry && res.TransportStatus == transport.TransportStatusUnreachable {
 		// Record the retry and check deadlines
 		retryable := false
+		now := e.clock.Now()
 		err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 			attempt, err := tx.GetAttempt(attemptID)
 			if err != nil {
@@ -379,11 +373,10 @@ func (e *Engine) completeWithRetry(participant string, req transport.CompleteReq
 			if turn.TerminalState != "" {
 				return nil
 			}
-			now := e.clock.Now()
-			if attempt.Deadline != nil && now.Add(DispatchRetryDelay).After(*attempt.Deadline) {
+			if attempt.Deadline != nil && now.Add(dispatchRetryDelay).After(*attempt.Deadline) {
 				return nil
 			}
-			if turn.TurnDeadline != nil && now.Add(DispatchRetryDelay).After(*turn.TurnDeadline) {
+			if turn.TurnDeadline != nil && now.Add(dispatchRetryDelay).After(*turn.TurnDeadline) {
 				return nil
 			}
 			retryable = true
@@ -392,15 +385,42 @@ func (e *Engine) completeWithRetry(participant string, req transport.CompleteReq
 		})
 		if err == nil && retryable {
 			// Wait for the retry delay using the clock
-			if DispatchRetryDelay > 0 {
+			if dispatchRetryDelay > 0 {
 				done := make(chan struct{})
-				e.clock.AfterFunc(DispatchRetryDelay, func() { close(done) })
+				e.clock.AfterFunc(dispatchRetryDelay, func() { close(done) })
 				<-done
 			}
-			// Retry the dispatch
-			return e.completeWithRetry(participant, req, attemptID, turnID, retryCount+1, role)
+			// Re-gate the retry: check again that turn and deadlines still allow it
+			regatePassed := false
+			err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				attempt, err := tx.GetAttempt(attemptID)
+				if err != nil {
+					return err
+				}
+				turn, err := tx.GetTurn(turnID)
+				if err != nil {
+					return err
+				}
+				// Check again if turn is still open and both deadlines still allow retry
+				if turn.TerminalState != "" {
+					return nil
+				}
+				now := e.clock.Now()
+				if attempt.Deadline != nil && now.After(*attempt.Deadline) {
+					return nil
+				}
+				if turn.TurnDeadline != nil && now.After(*turn.TurnDeadline) {
+					return nil
+				}
+				regatePassed = true
+				return nil
+			})
+			if err == nil && regatePassed {
+				// Retry the dispatch
+				return e.completeWithRetry(participant, req, attemptID, turnID, retryCount+1, role)
+			}
 		}
 	}
 
-	return res
+	return res, goErr
 }

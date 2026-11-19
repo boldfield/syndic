@@ -304,9 +304,9 @@ func TestSoloFailures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			oldDelay := engine.DispatchRetryDelay
-			t.Cleanup(func() { engine.DispatchRetryDelay = oldDelay })
-			engine.DispatchRetryDelay = 0
+			oldDelay := engine.GetDispatchRetryDelay()
+			t.Cleanup(func() { engine.SetDispatchRetryDelay(oldDelay) })
+			engine.SetDispatchRetryDelay(0)
 			h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": tc.steps})
 			reply, err := h.Engine.Submit(soloReq("s1"))
 			if err != nil {
