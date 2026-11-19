@@ -260,7 +260,15 @@ func (e *Engine) endLocked(t *openTurn, state, reason string, pre func(tx *journ
 // finishLocked ends the turn through the terminal path and starts the
 // adapter cancellations without waiting for them. e.mu is held.
 func (e *Engine) finishLocked(t *openTurn, state, reason string) {
-	e.launchCancels(e.endLocked(t, state, reason, nil))
+	term := e.endLocked(t, state, reason, nil)
+	e.launchCancels(term)
+	if state == StateApproved || (state == StateIncomplete && t.candidateHash != "") {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			_ = e.dispatchDeliveries(t)
+		}()
+	}
 }
 
 // cancelAttempts calls Adapter.Cancel for each held attempt, after the

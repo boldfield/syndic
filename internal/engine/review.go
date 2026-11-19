@@ -579,6 +579,13 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if endState != "" {
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
+		if endState == StateApproved || (endState == StateIncomplete && t.candidateHash != "") {
+			e.wg.Add(1)
+			go func() {
+				defer e.wg.Done()
+				_ = e.dispatchDeliveries(t)
+			}()
+		}
 	}
 	return nil
 }
