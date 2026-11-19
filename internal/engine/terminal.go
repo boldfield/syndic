@@ -299,6 +299,10 @@ func (e *Engine) afterCancel(h *hold, confirmed bool) error {
 	if e.cancelling[h.participant] > 0 {
 		e.cancelling[h.participant]--
 	}
+	if e.stopping && e.stoppingResult != nil {
+		e.syncParticipant(h.participant)
+		return nil
+	}
 	released := false
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		released = false

@@ -859,7 +859,7 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 // Stop gracefully stops the engine: refuses new submissions, ends any open
 // turn with engine_stop reason, and waits for in-flight cancellations with a
 // bounded grace period. It may be called multiple times; subsequent calls wait
-// for the first to complete.
+// for the first to complete and return nil.
 func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 
@@ -868,11 +868,10 @@ func (e *Engine) Stop(ctx context.Context) error {
 		e.stopped.Wait()
 	}
 
-	// If Stop has already completed, return the stored result
+	// If Stop has already completed, return nil per spec
 	if e.stoppingResult != nil {
-		result := *e.stoppingResult
 		e.mu.Unlock()
-		return result
+		return nil
 	}
 
 	// First call to Stop - mark as stopping
@@ -895,6 +894,7 @@ func (e *Engine) doStop(ctx context.Context) error {
 
 	e.mu.Lock()
 	if !e.started {
+		close(e.stoppingCh)
 		e.mu.Unlock()
 		return nil
 	}
@@ -906,12 +906,9 @@ func (e *Engine) doStop(ctx context.Context) error {
 	e.mu.Unlock()
 
 	if term != nil {
+		e.mu.Lock()
 		e.launchCancels(term)
-	}
-
-	graceDeadline := e.clock.Now().UTC().Add(e.roster.Engine.StopGrace.Duration)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(graceDeadline) {
-		graceDeadline = dl
+		e.mu.Unlock()
 	}
 
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -926,29 +923,25 @@ func (e *Engine) doStop(ctx context.Context) error {
 	e.mu.Unlock()
 
 	graceDone := make(chan struct{})
-	graceStop := e.clock.AfterFunc(graceDeadline.Sub(e.clock.Now()), func() {
+	graceStop := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() {
 		close(graceDone)
 	})
 	defer graceStop()
 
-	// Monitor cancelers and signal when they reach 0
-	cancelersDone := make(chan struct{})
-	go func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		for e.cancelers > 0 {
-			e.cancelersOut.Wait()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-graceDone:
+			return nil
+		case <-time.After(10 * time.Millisecond):
+			e.mu.Lock()
+			if e.cancelers == 0 {
+				e.mu.Unlock()
+				return nil
+			}
+			e.mu.Unlock()
 		}
-		close(cancelersDone)
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-graceDone:
-		return nil
-	case <-cancelersDone:
-		return nil
 	}
 }
 
