@@ -373,6 +373,12 @@ func (e *Engine) Cancel(turnID string) error {
 
 	e.open = nil
 	e.turnEnded(t)
+
+	// Release lock before calling cancelInflightAttempts to avoid deadlock.
+	// The defer at the top of the function will re-lock and then unlock.
+	e.mu.Unlock()
+	defer e.mu.Lock()
+
 	e.cancelInflightAttempts(inflight)
 	return nil
 }

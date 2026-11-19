@@ -242,9 +242,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			}
 		}
 		if gate == nil {
-			return endTurnIn(tx, emit, t.id, StateSoloComplete, reasonSoloOK)
+			return e.endTurnTerminalPath(tx, emit, t, StateSoloComplete, reasonSoloOK, false, nil)
 		}
-		return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+		return e.endTurnTerminalPath(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate), false, nil)
 	})
 	e.attemptDone(t, attemptID)
 	if err == nil && exceeded {
@@ -267,7 +267,8 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	e.turnEnded(t)
 }
 
-// finishLocked is finishTurn with e.mu held.
+// finishLocked is finishTurn with e.mu held. It must release e.mu before
+// calling cancelInflightAttempts to avoid deadlock.
 func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 	inflight := e.getInflightAttempts(t)
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -280,7 +281,13 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 		e.open = nil
 		e.turnEnded(t)
 	}
+
+	// cancelInflightAttempts must be called without holding e.mu.
+	// Temporarily release, call it, then re-acquire. The caller's defer
+	// unlock will happen after we return, so we need to restore the lock state.
+	e.mu.Unlock()
 	e.cancelInflightAttempts(inflight)
+	e.mu.Lock()
 }
 
 // getInflightAttempts returns all in-flight attempts for a turn.
@@ -327,7 +334,15 @@ func (e *Engine) endpointFor(participantID string) config.EndpointProfile {
 }
 
 // endTurnTerminalPath runs the terminal path for ending a turn with holds and cancellations.
+// If inflightIDs is nil or empty, it will be derived from the turn's pending attempts.
 func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason string, isCancellation bool, inflightIDs []string) error {
+	// If inflight not provided, derive from pending attempts
+	if len(inflightIDs) == 0 {
+		for id := range t.pending {
+			inflightIDs = append(inflightIDs, id)
+		}
+	}
+
 	// 1. Bump epoch so no later result is accepted
 	_, err := tx.BumpEpoch(t.id)
 	if err != nil {
@@ -357,7 +372,7 @@ func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn,
 			EndpointName: e.endpointFor(attempt.Participant).Name,
 			Model:        participantConfig.Model,
 			Group:        members,
-			HeldSince:    time.Now(),
+			HeldSince:    e.clock.Now(),
 		}
 		if err := tx.OpenHold(hold); err != nil {
 			return err
@@ -372,26 +387,54 @@ func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn,
 			return err
 		}
 
-		// Set participant state to cancelling (temporary during terminal path)
-		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
-			Participant: attempt.Participant,
-			State:       ParticipantCancelling,
-		}); err != nil {
-			return err
+		// Only set participant state to cancelling for actual user cancellations
+		if isCancellation {
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+				Participant: attempt.Participant,
+				State:       ParticipantCancelling,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 
-	// 3. If this is a cancellation, set phase_at_cancel
+	// 3. If this is a cancellation, set phase_at_cancel to the turn's current phase.
+	// Infer phase from inflight attempts or turn state.
 	if isCancellation {
-		// Get the current phase from an in-flight attempt, or default to empty
 		var phase string
-		for _, attemptID := range inflightIDs {
-			attempt, err := tx.GetAttempt(attemptID)
+
+		// Try to get phase from inflight attempts
+		if len(inflightIDs) > 0 {
+			attempt, err := tx.GetAttempt(inflightIDs[0])
 			if err == nil {
 				phase = attempt.Phase
-				break
 			}
 		}
+
+		// If no inflight or couldn't determine from attempts, infer from turn state
+		if phase == "" {
+			turn, err := tx.GetTurn(t.id)
+			if err == nil {
+				switch turn.TerminalState {
+				case StateAuthorDispatched:
+					phase = phaseAuthor
+				case StateReviewersDispatched, StateApproved:
+					phase = phaseReview
+				}
+			}
+		}
+
+		// If still no phase, derive from turn structure (what's been dispatched)
+		if phase == "" {
+			// If author has been dispatched/completed, we're at least in author phase
+			// If reviewers have been started, we're in review phase
+			if len(t.required) > 0 && t.reviewersBegun > 0 {
+				phase = phaseReview
+			} else {
+				phase = phaseAuthor
+			}
+		}
+
 		if phase != "" {
 			if err := tx.SetPhaseAtCancel(t.id, phase); err != nil {
 				return err
@@ -407,27 +450,40 @@ func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn,
 	return emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: state, Reason: &reason})
 }
 
-// cancelInflightAttempts calls Adapter.Cancel for each in-flight attempt after the terminal transaction commits.
+// cancelInflightAttempts calls Adapter.Cancel for each in-flight attempt. It must
+// be called WITHOUT holding e.mu. The function acquires the lock only when needed
+// for transactions, not for the adapter.Cancel calls.
 func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
+	// First pass: collect adapters without holding lock for long
+	type adapterInfo struct {
+		attemptID string
+		adapter   transport.Adapter
+		participant string
+	}
+	var infos []adapterInfo
+
+	e.mu.Lock()
 	for _, attemptID := range inflightIDs {
-		e.mu.Lock()
 		attempt, err := e.store.GetAttempt(attemptID)
 		if err != nil {
-			e.mu.Unlock()
 			continue
 		}
 		adapter := e.adapters[attempt.Participant]
-		e.mu.Unlock()
+		infos = append(infos, adapterInfo{attemptID, adapter, attempt.Participant})
+	}
+	e.mu.Unlock()
 
+	// Second pass: call adapters without lock
+	for _, info := range infos {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		result, _ := adapter.Cancel(ctx, attemptID)
+		result, _ := info.adapter.Cancel(ctx, info.attemptID)
 		cancel()
 
 		// If server confirmed, release the hold
 		if result.ServerConfirmed == transport.TriYes {
 			e.mu.Lock()
-			err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-				if err := tx.SetCancellation(attemptID, "confirmed"); err != nil {
+			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				if err := tx.SetCancellation(info.attemptID, "confirmed"); err != nil {
 					return err
 				}
 				// Query the hold to get the pool name
@@ -437,18 +493,18 @@ func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 				}
 				var poolName string
 				for _, h := range holds {
-					if h.AttemptID == attemptID {
+					if h.AttemptID == info.attemptID {
 						poolName = h.Pool
 						break
 					}
 				}
-				if err := tx.ReleaseHold(attemptID, "server_confirmed", ""); err != nil {
+				if err := tx.ReleaseHold(info.attemptID, "server_confirmed", ""); err != nil {
 					return err
 				}
 				if poolName != "" {
 					return emit("", wire.EventKindCapacity, wire.EvCapacity{
 						Pool:          poolName,
-						HeldByAttempt: attemptID,
+						HeldByAttempt: info.attemptID,
 						State:         "released",
 						How:           strPtr("server_confirmed"),
 					})
@@ -456,14 +512,11 @@ func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 				return nil
 			})
 			e.mu.Unlock()
-			if err != nil {
-				continue
-			}
 		} else {
 			// Mark as unknown, hold stays
 			e.mu.Lock()
 			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-				return tx.SetCancellation(attemptID, "unknown")
+				return tx.SetCancellation(info.attemptID, "unknown")
 			})
 			e.mu.Unlock()
 		}

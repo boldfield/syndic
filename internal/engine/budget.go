@@ -407,13 +407,15 @@ func asRefusal(err error) (*budgetRefusal, bool) {
 }
 
 // finishBudget ends the turn for a refused dispatch: the budget event and the
-// terminal path in one Tx. e.mu is held.
+// terminal path in one Tx. e.mu is held. Must release e.mu before calling
+// cancelInflightAttempts to avoid deadlock.
 func (e *Engine) finishBudget(t *openTurn, r *budgetRefusal) {
+	inflight := e.getInflightAttempts(t)
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		if err := emit(t.id, wire.EventKindBudget, r.event(t.id)); err != nil {
 			return err
 		}
-		return endTurnIn(tx, emit, t.id, StateIncomplete, r.reason())
+		return e.endTurnTerminalPath(tx, emit, t, StateIncomplete, r.reason(), false, inflight)
 	})
 	if err != nil {
 		return
@@ -422,6 +424,13 @@ func (e *Engine) finishBudget(t *openTurn, r *budgetRefusal) {
 		e.open = nil
 		e.turnEnded(t)
 	}
+
+	// cancelInflightAttempts must be called without holding e.mu.
+	// Temporarily release, call it, then re-acquire. The caller's defer
+	// unlock will happen after we return, so we need to restore the lock state.
+	e.mu.Unlock()
+	e.cancelInflightAttempts(inflight)
+	e.mu.Lock()
 }
 
 // settleQuarantined stores the usage of a quarantined result and charges it.

@@ -73,7 +73,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if gate != nil {
 			ended = true
-			return endTurnIn(tx, emit, t.id, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			return e.endTurnTerminalPath(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate), false, nil)
 		}
 		hash, err = candidate.Hash(candidate.Identity{
 			ManifestHash:    e.manifestHash,
@@ -475,7 +475,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)
-			return endTurnIn(tx, emit, t.id, endState, endReason)
+			return e.endTurnTerminalPath(tx, emit, t, endState, endReason, false, nil)
 		}
 
 		parsed := verdict.Parse(res.Text, t.candidateHash, d.attemptID)
@@ -539,7 +539,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if endState == "" {
 			return nil
 		}
-		return endTurnIn(tx, emit, t.id, endState, endReason)
+		return e.endTurnTerminalPath(tx, emit, t, endState, endReason, false, nil)
 	})
 	e.attemptDone(t, d.attemptID)
 	if err == nil && exceeded {
