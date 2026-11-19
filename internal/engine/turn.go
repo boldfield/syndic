@@ -456,8 +456,8 @@ func (e *Engine) endTurnTerminalPath(tx *journal.Tx, emit hub.Emit, t *openTurn,
 func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 	// First pass: collect adapters without holding lock for long
 	type adapterInfo struct {
-		attemptID string
-		adapter   transport.Adapter
+		attemptID   string
+		adapter     transport.Adapter
 		participant string
 	}
 	var infos []adapterInfo
