@@ -222,6 +222,13 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		hangCtxCancel, cancelFunc := context.WithCancel(hangCtx)
 		a.mu.Lock()
 		a.hangingAttempt[attemptID] = cancelFunc
+		// A Cancel that arrived before the hang registered still ends it.
+		for _, id := range a.cancels {
+			if id == attemptID {
+				cancelFunc()
+				break
+			}
+		}
 		a.mu.Unlock()
 
 		<-hangCtxCancel.Done()

@@ -932,6 +932,28 @@ func TestHangWithCancelDriven(t *testing.T) {
 	<-done
 }
 
+// TestCancelBeforeHangEndsIt verifies a Cancel that arrives before the hang
+// starts still ends it.
+func TestCancelBeforeHangEndsIt(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindHang}}, Options{})
+	if _, err := adapter.Cancel(context.Background(), "a1"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := adapter.Complete(ctx, transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{AttemptID: "a1"},
+		Deadline: time.Now().Add(10 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if result.TransportStatus != transport.TransportStatusCancelled {
+		t.Errorf("transport status: %q, want cancelled", result.TransportStatus)
+	}
+}
+
 // TestCancelDefault verifies Cancel default is ServerConfirmed = yes.
 func TestCancelDefault(t *testing.T) {
 	script := []Step{}

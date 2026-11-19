@@ -227,10 +227,14 @@ func (e *Engine) launchCancels(term *terminal) {
 	if term == nil || len(term.holds) == 0 {
 		return
 	}
-	e.wg.Add(1)
+	e.cancelers++
 	go func() {
-		defer e.wg.Done()
 		_ = e.cancelAttempts(term.holds)
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.cancelers--; e.cancelers == 0 {
+			e.cancelersOut.Broadcast()
+		}
 	}()
 }
 
@@ -254,6 +258,7 @@ func (e *Engine) endLocked(t *openTurn, state, reason string, pre func(tx *journ
 		return nil
 	}
 	e.commitTerminal(t, term)
+	e.deliverTerminal(t, state, reason)
 	return term
 }
 
