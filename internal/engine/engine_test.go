@@ -673,9 +673,16 @@ func TestDispatchTxIsAtomic(t *testing.T) {
 	}
 }
 
-func TestNotImplemented(t *testing.T) {
+func TestOverrideNotFound(t *testing.T) {
 	h := enginetest.New(t, enginetest.RosterTOML, nil)
-	if err := h.Engine.Override("t", "r"); !errors.Is(err, engine.ErrNotImplemented) {
+	if err := h.Engine.Override("t", "r"); err == nil || !strings.Contains(err.Error(), "not_found") {
+		t.Fatalf("Override = %v", err)
+	}
+}
+
+func TestOverrideReasonRequired(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil)
+	if err := h.Engine.Override("t", ""); err == nil || !strings.Contains(err.Error(), "reason_required") {
 		t.Fatalf("Override = %v", err)
 	}
 }

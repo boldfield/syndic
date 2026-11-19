@@ -625,3 +625,44 @@ func (tx *Tx) nextJournalSeq() (int64, error) {
 	}
 	return seq, nil
 }
+
+// PendingTurnsWithoutTerminal returns all turn IDs that have no terminal state.
+func (tx *Tx) PendingTurnsWithoutTerminal() ([]string, error) {
+	rows, err := tx.tx.Query(`
+		SELECT id FROM turns WHERE terminal_state IS NULL ORDER BY rowid ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query turns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var turnIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan turn id: %w", err)
+		}
+		turnIDs = append(turnIDs, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	return turnIDs, nil
+}
+
+// GetAttemptTurnAndRun returns the turn_id and run_id for an attempt.
+func (tx *Tx) GetAttemptTurnAndRun(attemptID string) (turnID, runID string, err error) {
+	if err := tx.tx.QueryRow(`
+		SELECT a.turn_id, t.run_id FROM attempts a
+		JOIN turns t ON a.turn_id = t.id
+		WHERE a.id = ?
+	`, attemptID).Scan(&turnID, &runID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", fmt.Errorf("attempt not found")
+		}
+		return "", "", fmt.Errorf("query attempt: %w", err)
+	}
+	return turnID, runID, nil
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -65,6 +66,7 @@ const (
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
 	reasonCancelled    = "cancelled"
+	reasonOverride     = "override"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
@@ -222,6 +224,116 @@ func (e *Engine) Start() error {
 		return errors.New("engine: already started")
 	}
 
+	// Recovery: mark pending attempts as unknown and end non-terminal turns
+	recoveredAttempts := 0
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Get all pending attempts
+		pendingAttempts, err := tx.RecoverPending()
+		if err != nil {
+			return fmt.Errorf("recover pending attempts: %w", err)
+		}
+
+		for _, attemptID := range pendingAttempts {
+			// Get the turn and run for this attempt
+			turnID, runID, err := tx.GetAttemptTurnAndRun(attemptID)
+			if err != nil {
+				return fmt.Errorf("get turn for attempt %s: %w", attemptID, err)
+			}
+
+			// Get the run manifest to extract participant info
+			run, err := tx.GetRun(runID)
+			if err != nil {
+				return fmt.Errorf("get run %s: %w", runID, err)
+			}
+
+			// Check if attempt already has a hold
+			existingHolds, err := tx.UnreleasedHolds()
+			if err != nil {
+				return fmt.Errorf("get existing holds: %w", err)
+			}
+
+			hasHold := false
+			for _, h := range existingHolds {
+				if h.AttemptID == attemptID {
+					hasHold = true
+					break
+				}
+			}
+
+			if !hasHold {
+				// Get the attempt to extract participant ID
+				attempt, err := tx.GetAttempt(attemptID)
+				if err != nil {
+					return fmt.Errorf("get attempt: %w", err)
+				}
+
+				// Extract participant info from manifest
+				group, poolName, endpointName, model, err := e.extractParticipantInfoFromManifest(run.Manifest, attempt.Participant)
+				if err != nil {
+					return fmt.Errorf("extract participant info from manifest: %w", err)
+				}
+
+				// Open hold
+				hold := journal.Hold{
+					AttemptID:    attemptID,
+					Pool:         poolName,
+					EndpointName: endpointName,
+					Model:        model,
+					Group:        group,
+					HeldSince:    e.clock.Now().UTC(),
+				}
+				if err := tx.OpenHold(hold); err != nil {
+					return fmt.Errorf("open hold for attempt %s: %w", attemptID, err)
+				}
+			}
+
+			// Mark attempt as unknown
+			if err := tx.MarkUnknown(attemptID); err != nil {
+				return fmt.Errorf("mark attempt unknown: %w", err)
+			}
+
+			// Emit attempt_unknown event
+			if err := emit(turnID, wire.EventKindAttemptUnknown, wire.EvAttemptUnknown{
+				AttemptID: attemptID,
+			}); err != nil {
+				return fmt.Errorf("emit attempt_unknown: %w", err)
+			}
+
+			recoveredAttempts++
+		}
+
+		// End non-terminal turns with engine_restart reason
+		pendingTurns, err := tx.PendingTurnsWithoutTerminal()
+		if err != nil {
+			return fmt.Errorf("get pending turns: %w", err)
+		}
+
+		for _, turnID := range pendingTurns {
+			if _, err := tx.BumpEpoch(turnID); err != nil {
+				return fmt.Errorf("bump epoch for turn %s: %w", turnID, err)
+			}
+
+			if err := tx.EndTurn(turnID, StateIncomplete, "engine_restart"); err != nil {
+				return fmt.Errorf("end turn %s: %w", turnID, err)
+			}
+
+			reason := "engine_restart"
+			if err := emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+				TurnID: turnID,
+				State:  StateIncomplete,
+				Reason: &reason,
+			}); err != nil {
+				return fmt.Errorf("emit turn_state: %w", err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("engine: recovery: %w", err)
+	}
+
+	// Now read and validate the new roster
 	path, err := filepath.Abs(e.rosterPath)
 	if err != nil {
 		return &RosterError{Err: err}
@@ -289,12 +401,20 @@ func (e *Engine) Start() error {
 		if err != nil {
 			return err
 		}
+
+		// Map holds across roster changes
+		uncertainCapacity, orphanedHolds, err := e.mapHoldsToNewRoster(tx, roster)
+		if err != nil {
+			return fmt.Errorf("map holds: %w", err)
+		}
+
 		return emit("", wire.EventKindEngineStarted, wire.EvEngineStarted{
 			RunID:             runID,
 			ManifestHash:      manifestHash,
 			RosterHash:        built.RosterHash,
-			UncertainCapacity: []string{},
-			OrphanedHolds:     []wire.Hold{},
+			RecoveredAttempts: recoveredAttempts,
+			UncertainCapacity: uncertainCapacity,
+			OrphanedHolds:     orphanedHolds,
 			Unprobed:          unprobed,
 		})
 	})
@@ -358,5 +478,217 @@ func (e *Engine) Hello() wire.HelloReply {
 	}
 }
 
-// Override is implemented by a later task.
-func (e *Engine) Override(turnID, reason string) error { return ErrNotImplemented }
+// Override marks a turn as overridden with the given reason.
+func (e *Engine) Override(turnID, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("engine: reason_required")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.started {
+		return errors.New("engine: not started")
+	}
+
+	// Perform the override in a transaction
+	return e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Check that turn exists and is incomplete with a candidate
+		turnRow, err := tx.GetTurn(turnID)
+		if err != nil {
+			return fmt.Errorf("not_found")
+		}
+
+		if turnRow.TerminalState != StateIncomplete {
+			return fmt.Errorf("not_incomplete")
+		}
+
+		if turnRow.CandidateID == "" {
+			return fmt.Errorf("not_incomplete")
+		}
+
+		// Bump epoch
+		if _, err := tx.BumpEpoch(turnID); err != nil {
+			return fmt.Errorf("bump epoch: %w", err)
+		}
+
+		// Override the turn and emit the override event
+		if err := tx.OverrideTurn(turnID, reason); err != nil {
+			return fmt.Errorf("override turn: %w", err)
+		}
+
+		// Get the open blocks and emit block_state events for each
+		blocks, err := tx.OpenBlocks(turnID)
+		if err != nil {
+			return fmt.Errorf("get open blocks: %w", err)
+		}
+
+		for _, block := range blocks {
+			if err := emit(turnID, wire.EventKindBlockState, wire.EvBlockState{
+				BlockID: block.ID,
+				State:   "overridden",
+			}); err != nil {
+				return fmt.Errorf("emit block_state: %w", err)
+			}
+		}
+
+		// Emit turn_state event
+		if err := emit(turnID, wire.EventKindTurnState, wire.EvTurnState{
+			TurnID: turnID,
+			State:  StateOverridden,
+			Reason: &reason,
+		}); err != nil {
+			return fmt.Errorf("emit turn_state: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// mapHoldsToNewRoster maps unreleased holds from previous runs to the new roster.
+// Returns uncertain capacity pool names and orphaned holds.
+func (e *Engine) mapHoldsToNewRoster(tx *journal.Tx, newRoster *config.Roster) ([]string, []wire.Hold, error) {
+	// Get all unreleased holds
+	holds, err := tx.UnreleasedHolds()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get unreleased holds: %w", err)
+	}
+
+	// Build a map of pools to participants for quick lookup
+	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
+	for _, p := range newRoster.Participants {
+		key := p.Endpoint + ":" + p.Model
+		if poolParticipants[p.Pool] == nil {
+			poolParticipants[p.Pool] = make(map[string]bool)
+		}
+		poolParticipants[p.Pool][key] = true
+	}
+
+	uncertainCapacitySet := make(map[string]bool)
+	var orphanedHolds []wire.Hold
+
+	for _, h := range holds {
+		// Check if this hold applies to any pool in the new roster
+		appliesToAnyPool := false
+
+		for pool := range poolParticipants {
+			// Check if any participant in this pool is in the hold's group
+			for _, member := range h.Group {
+				key := member.EndpointName + ":" + member.Model
+				if poolParticipants[pool][key] {
+					uncertainCapacitySet[pool] = true
+					appliesToAnyPool = true
+					break
+				}
+			}
+		}
+
+		if !appliesToAnyPool {
+			// This hold is orphaned
+			orphanedHolds = append(orphanedHolds, wire.Hold{
+				Pool:      h.Pool,
+				AttemptID: h.AttemptID,
+				Group: func() []wire.GroupMember {
+					var g []wire.GroupMember
+					for _, m := range h.Group {
+						g = append(g, wire.GroupMember{
+							EndpointName: m.EndpointName,
+							Model:        m.Model,
+						})
+					}
+					return g
+				}(),
+			})
+		}
+	}
+
+	var uncertainCapacity []string
+	for pool := range uncertainCapacitySet {
+		uncertainCapacity = append(uncertainCapacity, pool)
+	}
+	sort.Strings(uncertainCapacity)
+
+	return uncertainCapacity, orphanedHolds, nil
+}
+
+// extractParticipantInfoFromManifest extracts participant info from the manifest JSON.
+// Returns group, pool, endpoint_name, model, error.
+func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, participantID string) ([]journal.GroupMember, string, string, string, error) {
+	var manifestData map[string]interface{}
+	if err := json.Unmarshal(manifest, &manifestData); err != nil {
+		return nil, "", "", "", fmt.Errorf("unmarshal manifest: %w", err)
+	}
+
+	roster, ok := manifestData["roster"].(map[string]interface{})
+	if !ok {
+		return nil, "", "", "", fmt.Errorf("roster not found in manifest")
+	}
+
+	participants, ok := roster["participants"].([]interface{})
+	if !ok {
+		return nil, "", "", "", fmt.Errorf("participants not found in roster")
+	}
+
+	// Find the participant by ID and extract endpoint_name and model
+	var targetParticipant map[string]interface{}
+	var poolName, endpointName, model string
+
+	for _, p := range participants {
+		pMap, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if pMap["id"] == participantID {
+			targetParticipant = pMap
+			if ep, ok := pMap["endpoint"].(string); ok {
+				endpointName = ep
+			}
+			if m, ok := pMap["model"].(string); ok {
+				model = m
+			}
+			if pool, ok := pMap["pool"].(string); ok {
+				poolName = pool
+			}
+			break
+		}
+	}
+
+	if targetParticipant == nil {
+		return nil, "", "", "", fmt.Errorf("participant %s not found in manifest", participantID)
+	}
+
+	// Now build the group by finding all participants in the same pool
+	var group []journal.GroupMember
+	groupSet := make(map[string]bool) // For deduplication
+
+	for _, p := range participants {
+		pMap, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if pool, ok := pMap["pool"].(string); ok && pool == poolName {
+			if ep, ok := pMap["endpoint"].(string); ok {
+				if m, ok := pMap["model"].(string); ok {
+					key := ep + ":" + m
+					if !groupSet[key] {
+						group = append(group, journal.GroupMember{
+							EndpointName: ep,
+							Model:        m,
+						})
+						groupSet[key] = true
+					}
+				}
+			}
+		}
+	}
+
+	// Sort the group by endpoint name then model (as required by OpenHold)
+	sort.Slice(group, func(i, j int) bool {
+		if group[i].EndpointName != group[j].EndpointName {
+			return group[i].EndpointName < group[j].EndpointName
+		}
+		return group[i].Model < group[j].Model
+	})
+
+	return group, poolName, endpointName, model, nil
+}
