@@ -67,6 +67,7 @@ func (e *Engine) returned(attemptID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.calling, attemptID)
+	delete(e.cancelled, attemptID)
 	if h := e.holds[attemptID]; h != nil {
 		h.calling = false
 	}

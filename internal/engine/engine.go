@@ -148,6 +148,7 @@ type Engine struct {
 	exceeded     map[string]bool   // participants whose estimate was exceeded this run
 	holds        map[string]*hold  // unreleased capacity holds, by attempt id
 	calling      map[string]bool   // attempts whose Complete call has not returned
+	cancelled    map[string]bool   // calling attempts the engine itself cancelled
 	cancelling   map[string]int    // Adapter.Cancel calls pending, per participant
 	pstate       map[string]string // cancelling or unknown last reported, per participant
 	failed       map[string]string // failure state of the last dispatch, per participant
@@ -181,6 +182,7 @@ func New(o Options) (*Engine, error) {
 		pools:      make(map[string]*pool),
 		holds:      make(map[string]*hold),
 		calling:    make(map[string]bool),
+		cancelled:  make(map[string]bool),
 		cancelling: make(map[string]int),
 		pstate:     make(map[string]string),
 		failed:     make(map[string]string),

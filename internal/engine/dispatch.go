@@ -46,7 +46,13 @@ type failure struct {
 // participantState is the state the participant reports once the attempt
 // completes.
 func (f *failure) participantState() string {
-	if f == nil || f.state == "" {
+	switch {
+	case f == nil:
+		return ParticipantIdle
+	case f.hold:
+		// The held slot makes the participant unknown; skip the idle between.
+		return ParticipantUnknown
+	case f.state == "":
 		return ParticipantIdle
 	}
 	return f.state
@@ -103,14 +109,14 @@ func (f *failure) applyTo(req transport.CompleteRequest, res transport.CompleteR
 }
 
 // callOnce calls the adapter once and classifies what came back.
-// A result the adapter reported as cancelled while the engine itself had
-// cancelled the attempt (live reports false) keeps the adapter's own status.
-func callOnce(a transport.Adapter, req transport.CompleteRequest, live func() bool) (transport.CompleteResult, *failure) {
+// A result the adapter reported as cancelled after the engine itself cancelled
+// the attempt (ours reports true) keeps the adapter's own status.
+func callOnce(a transport.Adapter, req transport.CompleteRequest, ours func() bool) (transport.CompleteResult, *failure) {
 	res, err := a.Complete(context.Background(), req)
 	if err != nil {
 		res = transport.CompleteResult{}
 	}
-	if err == nil && res.TransportStatus == transport.TransportStatusCancelled && !live() {
+	if err == nil && res.TransportStatus == transport.TransportStatusCancelled && ours() {
 		return res, nil
 	}
 	f := classifyDispatch(res, err)
@@ -169,14 +175,14 @@ func (e *Engine) recordRetry(t *openTurn, req transport.CompleteRequest) bool {
 // transport-ok result.
 func (e *Engine) complete(t *openTurn, participant string, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
 	a := e.adapterFor(participant)
-	live := func() bool {
+	ours := func() bool {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		return e.retryRoom(t, req, 0)
+		return e.cancelled[req.Envelope.AttemptID]
 	}
-	res, f := callOnce(a, req, live)
+	res, f := callOnce(a, req, ours)
 	if f != nil && f.retry && e.waitToRetry(t, req) && e.recordRetry(t, req) {
-		res, f = callOnce(a, req, live)
+		res, f = callOnce(a, req, ours)
 	}
 	e.returned(req.Envelope.AttemptID)
 	return res, f
@@ -199,6 +205,10 @@ func (e *Engine) failedCommitted(participant string, f *failure, h *hold) {
 		h.calling = e.calling[h.attemptID]
 		e.holds[h.attemptID] = h
 		e.armHold(h)
+		if e.lastInflight(participant) {
+			// Already announced by the completion Tx; syncParticipant must not repeat it.
+			e.pstate[participant] = ParticipantUnknown
+		}
 	}
 	if f != nil && f.state != "" && e.lastInflight(participant) {
 		e.failed[participant] = f.state

@@ -180,6 +180,19 @@ func TestDispatchFailures(t *testing.T) {
 					t.Fatalf("participant state = %q, want %q", got, tc.state)
 				}
 
+				if tc.hold {
+					// running goes straight to unknown, with no idle between.
+					var tail []string
+					for _, st := range announcedStates(h, role.participant) {
+						if st != "queued" {
+							tail = append(tail, st)
+						}
+					}
+					if n := len(tail); n < 2 || tail[n-1] != "unknown" || tail[n-2] != "running" {
+						t.Fatalf("announced states = %v, want running then unknown", tail)
+					}
+				}
+
 				// A held slot is the operator's to give back; after that the
 				// next submit dispatches to the same participant and succeeds.
 				if tc.hold {

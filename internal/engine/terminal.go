@@ -206,6 +206,9 @@ func (e *Engine) commitTerminal(t *openTurn, term *terminal) {
 	if term != nil {
 		for _, h := range term.holds {
 			h.calling = e.calling[h.attemptID]
+			if h.calling {
+				e.cancelled[h.attemptID] = true
+			}
 			e.holds[h.attemptID] = h
 			e.cancelling[h.participant]++
 			e.pstate[h.participant] = ParticipantCancelling
