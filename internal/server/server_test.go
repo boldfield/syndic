@@ -597,6 +597,31 @@ func emitFlood(t *testing.T, h *hub.Hub, n, size int) {
 	}
 }
 
+// emitBatches commits n events of the given payload size, batch to a
+// transaction.
+func emitBatches(t *testing.T, h *hub.Hub, n, size, batch int) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"pad": strings.Repeat("p", size)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n > 0 {
+		k := min(batch, n)
+		err := h.Tx(func(tx *journal.Tx, emit hub.Emit) error {
+			for i := 0; i < k; i++ {
+				if err := emit("", "flood", json.RawMessage(payload)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n -= k
+	}
+}
+
 func TestReplayThenLive(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
@@ -813,10 +838,10 @@ func TestLaggingSubscriberIsDisconnected(t *testing.T) {
 	}
 	h.WaitTurnState(turn.TurnID, engine.StateAuthorDispatched)
 
-	// slow reads nothing, so its socket fills and the server's queue for it
-	// overflows.
-	const flood = 400
-	emitFlood(t, h.Hub, flood, 24<<10)
+	// slow reads nothing, so its socket and the server's queue for it fill,
+	// and the flood is more than the hub queues for it besides.
+	const flood = 2000
+	emitBatches(t, h.Hub, flood, 1<<10, 100)
 	release()
 	waitTerminal(t, h, turn.TurnID)
 	last, err := h.Store.MaxSeq()
@@ -1369,4 +1394,168 @@ func TestNothingFollowsStopping(t *testing.T) {
 	close(eng.release)
 	r.wantClosed()
 	waitServe(t, s, 5*time.Second)
+}
+
+// TestLongReplayIsPacedByTheReader replays thousands of events from the start
+// of the journal, to a client reading at full speed and to one reading with a
+// small delay. Replay waits for the reader: both get every seq once, in
+// order, and neither is lagging.
+func TestLongReplayIsPacedByTheReader(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	const flood = 5000
+	emitBatches(t, h.Hub, flood, 1<<10, 500)
+	ctx := ctxT(t)
+	last, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fast := s.dial()
+	if _, err := fast.Subscribe(ctx, 0); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	for next := int64(1); next <= last; next++ {
+		ev, err := fast.NextEvent(ctx)
+		if err != nil {
+			t.Fatalf("after %d of %d events: %v", next-1, last, err)
+		}
+		if ev.Seq != next {
+			t.Fatalf("got seq %d, want %d", ev.Seq, next)
+		}
+	}
+
+	slow := s.raw()
+	slow.hello()
+	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: 0})
+	if f := slow.read(); f.Type != "reply" || f.ID != "s" {
+		t.Fatalf("subscribe reply = %s %q %s", f.Type, f.ID, f.Body)
+	}
+	for next := int64(1); next <= last; next++ {
+		if next%10 == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		f := slow.read()
+		if f.Type != "event" || f.Seq != next {
+			t.Fatalf("got %s seq %d %s, want event %d", f.Type, f.Seq, f.Body, next)
+		}
+	}
+}
+
+// TestLaggingKeepsQueuedReplies has a subscriber that stops reading send a
+// request: its reply was queued before the subscriber lagged, so it still
+// goes out ahead of the lagging notice.
+func TestLaggingKeepsQueuedReplies(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	slow := s.raw()
+	slow.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := slow.read(); f.Type != "reply" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+	// Enough to fill the socket, so the reply queues behind events.
+	emitBatches(t, h.Hub, 40, 24<<10, 40)
+	slow.send("st", wire.RequestStatus, struct{}{})
+
+	waitPeerClosed(t, slow)
+	var lastEvent int64
+	var replied bool
+	for {
+		f := slow.read()
+		if f.Type == "event" {
+			lastEvent = f.Seq
+			continue
+		}
+		if f.Type == "reply" {
+			replied = replied || f.ID == "st"
+			continue
+		}
+		var e wire.Error
+		if f.Type != "error" || f.ID != "" || json.Unmarshal(f.Body, &e) != nil || e.Code != "lagging" {
+			t.Fatalf("frame = %s %q %s, want lagging with an empty id", f.Type, f.ID, f.Body)
+		}
+		if e.LastSeq == nil || *e.LastSeq != lastEvent {
+			t.Fatalf("last_seq = %v, want %d", e.LastSeq, lastEvent)
+		}
+		break
+	}
+	if !replied {
+		t.Fatal("the status reply queued before lagging was dropped")
+	}
+	slow.wantClosed()
+}
+
+// waitPeerClosed waits, without reading, for the server to close r: a write
+// then fails. It writes single spaces, which never end a frame, so the server
+// has nothing to answer.
+func waitPeerClosed(t *testing.T, r *rawConn) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := r.c.Write([]byte(" ")); err != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server never closed the connection of a subscriber that does not read")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestNonReadingSubscriberLargeEvents has a subscriber stop reading while
+// events larger than the socket buffer arrive, so one is only partly written
+// when the subscriber lags. The partial event is finished before the notice:
+// reading again yields whole events, then lagging with last_seq, then the
+// end. Another client is unaffected meanwhile.
+func TestNonReadingSubscriberLargeEvents(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	ctx := ctxT(t)
+	slow := s.raw()
+	slow.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := slow.read(); f.Type != "reply" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+	const flood = 40
+	emitBatches(t, h.Hub, flood, 400<<10, 10)
+
+	// Long enough for the stalled event to make the subscriber lag.
+	time.Sleep(3 * time.Second)
+	other := s.dial()
+	if _, err := other.Status(ctx); err != nil {
+		t.Fatalf("another client's status: %v", err)
+	}
+
+	var n int
+	var lastEvent int64
+	for {
+		f := slow.read()
+		if f.Type == "event" {
+			n++
+			lastEvent = f.Seq
+			continue
+		}
+		var e wire.Error
+		if f.Type != "error" || f.ID != "" || json.Unmarshal(f.Body, &e) != nil || e.Code != "lagging" {
+			t.Fatalf("frame = %s %q, want lagging with an empty id", f.Type, f.ID)
+		}
+		if e.LastSeq == nil || *e.LastSeq != lastEvent {
+			t.Fatalf("last_seq = %v, want %d", e.LastSeq, lastEvent)
+		}
+		break
+	}
+	slow.wantClosed()
+	if n >= flood {
+		t.Fatalf("got all %d events, the subscriber never lagged", n)
+	}
 }

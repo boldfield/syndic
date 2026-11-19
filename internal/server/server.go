@@ -1,3 +1,12 @@
+// Package server serves the control socket protocol.
+//
+// A subscriber whose socket stops taking frames for stallGrace, or that the
+// hub finds lagging, is sent error{code: "lagging", last_seq} and closed. A
+// frame already partly written is finished before the notice, so a client
+// that reads again always finds whole frames ending in the notice. On Linux
+// the server keeps room in the socket for the notice, so a client that stops
+// reading is closed promptly; elsewhere it cannot tell how full the socket
+// is, and the notice, with the close, waits for the client to read.
 package server
 
 import (
@@ -213,19 +222,30 @@ func (s *Server) removeConnection(c *connection) {
 	s.mu.Unlock()
 }
 
-// maxOutbound bounds the events queued for a subscriber; past it the
-// subscriber is lagging.
+// maxOutbound bounds the events queued for a subscriber. Past it the
+// subscription waits for the sender, so a reader that keeps up paces its own
+// replay; the hub's live queue decides when it has fallen behind.
 const maxOutbound = 256
 
-// laggingGrace bounds the write of the lagging notice.
-const laggingGrace = 2 * time.Second
+// stallGrace is how long one frame may wait for a subscriber's socket to take
+// it before the subscriber is lagging.
+const stallGrace = 2 * time.Second
 
-// roomPoll is how often an event waiting for socket room looks again.
+// roomPoll is how often a frame waiting for socket room looks again.
 const roomPoll = 5 * time.Millisecond
 
-// errDropped reports an event that was given up on before any of it was
+// errDropped reports a frame that was given up on before any of it was
 // written.
-var errDropped = errors.New("event dropped")
+var errDropped = errors.New("frame dropped")
+
+// gate says how a frame being written waits for socket room.
+type gate int
+
+const (
+	gateNone  gate = iota // the final frame: written at once, into the room kept for it
+	gateReply             // waits for room
+	gateEvent             // waits for room, or is dropped
+)
 
 // connection handles one client connection. Every frame goes through one
 // queue, written in order by the sender goroutine alone, which is the only
@@ -239,17 +259,21 @@ type connection struct {
 	// room for a final notice; nil when the platform cannot tell.
 	room func(n int) bool
 
-	// gateSub is the subscription of the event being written, nil for any
-	// other frame. Only the sender touches it.
+	// gate and gateSub describe the frame being written; gateSub is the
+	// subscription of an event. Only the sender touches them.
+	gate    gate
 	gateSub *hub.Subscription
 
-	mu     sync.Mutex
-	queue  []outFrame
-	events int // events in queue
+	mu sync.Mutex
+	// changed is broadcast whenever a subscription waiting for queue space
+	// should look again.
+	changed *sync.Cond
+	queue   []outFrame
+	events  int // events in queue
 	// final is the last frame before the connection closes: stopping,
 	// lagging, or a handshake or frame error. Nothing is queued once it is
 	// set. Queued frames still go first, until dropAt; a zero dropAt drops
-	// them at once.
+	// them at once. A lagging final drops only events.
 	final  *finalFrame
 	dropAt time.Time
 	shut   bool // the connection is going away; the sender quits
@@ -284,6 +308,7 @@ func (s *Server) newConnection(conn net.Conn) *connection {
 		wake:       make(chan struct{}, 1),
 		senderDone: make(chan struct{}),
 	}
+	c.changed = sync.NewCond(&c.mu)
 	c.writer = wire.NewWriter(gateWriter{c})
 	if s.frameObserver != nil {
 		c.writer.SetObserver(s.frameObserver)
@@ -310,17 +335,16 @@ func (c *connection) enqueue(f wire.Frame) {
 	c.signal()
 }
 
-// enqueueEvent queues an event of sub. It reports false when sub should stop
-// forwarding: it is no longer current, the connection is closing, or the
-// subscriber has fallen too far behind and is now lagging.
+// enqueueEvent queues an event of sub, waiting while the queue holds
+// maxOutbound events. It reports false when sub should stop forwarding: it is
+// no longer current, or the connection is closing.
 func (c *connection) enqueueEvent(sub *hub.Subscription, ev journal.Event) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.sub != sub || c.final != nil || c.shut {
-		return false
+	for c.sub == sub && c.final == nil && !c.shut && c.events >= maxOutbound {
+		c.changed.Wait()
 	}
-	if c.events >= maxOutbound {
-		c.lagLocked()
+	if c.sub != sub || c.final != nil || c.shut {
 		return false
 	}
 	c.queue = append(c.queue, outFrame{frame: wire.NewEvent(ev.Seq, ev.Kind, ev.At, ev.Data), sub: sub})
@@ -339,15 +363,26 @@ func (c *connection) lagging(sub *hub.Subscription) {
 	}
 }
 
-// lagLocked drops the backlog and makes lagging, with the last event the
-// client was written, the next and last frame.
+// stalled is called when a frame has waited stallGrace for the socket. A
+// subscriber that is not reading is lagging.
+func (c *connection) stalled() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sub != nil {
+		c.lagLocked()
+	}
+}
+
+// lagLocked drops the queued events and makes lagging, with the last event
+// the client was written, the last frame. Queued replies still go first. No
+// write deadline is set: a frame already partly written is finished first, so
+// whatever the client reads ends with the notice.
 func (c *connection) lagLocked() {
-	if c.final != nil {
+	if c.final != nil || c.shut {
 		return
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(laggingGrace))
 	c.final = &finalFrame{err: wire.Error{Code: wire.ErrorCodeLagging}, lagging: true}
-	c.dropQueueLocked()
+	c.dropLocked()
 	c.signal()
 }
 
@@ -364,18 +399,38 @@ func (c *connection) finish(id string, e wire.Error, drain, deadline time.Durati
 	if drain > 0 {
 		c.dropAt = time.Now().Add(drain)
 	} else {
-		c.dropQueueLocked()
+		c.dropLocked()
 	}
+	c.changed.Broadcast()
 	c.signal()
 }
 
-func (c *connection) dropQueueLocked() {
-	c.queue = nil
+// dropLocked gives up queued frames for the final frame: only events for
+// lagging, everything otherwise, or everything once the connection is shut.
+func (c *connection) dropLocked() {
+	if c.shut || c.final == nil || !c.final.lagging {
+		c.queue = nil
+	} else if c.events > 0 {
+		c.queue = repliesOnly(c.queue)
+	}
 	c.events = 0
+	c.changed.Broadcast()
 }
 
-// dropping reports whether queued frames are being given up for the final
-// frame.
+// repliesOnly returns queue without its events, reusing its storage.
+func repliesOnly(queue []outFrame) []outFrame {
+	kept := queue[:0]
+	for _, item := range queue {
+		if item.sub == nil {
+			kept = append(kept, item)
+		}
+	}
+	clear(queue[len(kept):])
+	return kept
+}
+
+// droppingLocked reports whether queued frames are being given up for the
+// final frame.
 func (c *connection) droppingLocked() bool {
 	return c.final != nil && (c.dropAt.IsZero() || !time.Now().Before(c.dropAt))
 }
@@ -403,7 +458,7 @@ func (c *connection) stop(maxSeq int64) {
 func (c *connection) shutdown() {
 	c.mu.Lock()
 	c.shut = true
-	c.dropQueueLocked()
+	c.dropLocked()
 	c.signal()
 	c.mu.Unlock()
 	_ = c.conn.Close()
@@ -419,7 +474,7 @@ func (c *connection) next() (outFrame, *wire.Frame, bool) {
 			return outFrame{}, nil, false
 		}
 		if c.droppingLocked() {
-			c.dropQueueLocked()
+			c.dropLocked()
 		}
 		if len(c.queue) > 0 {
 			item := c.queue[0]
@@ -427,6 +482,7 @@ func (c *connection) next() (outFrame, *wire.Frame, bool) {
 			c.queue = c.queue[1:]
 			if item.sub != nil {
 				c.events--
+				c.changed.Broadcast()
 			}
 			c.mu.Unlock()
 			return item, nil, true
@@ -458,7 +514,7 @@ func (c *connection) send() {
 	defer func() {
 		c.mu.Lock()
 		c.shut = true
-		c.dropQueueLocked()
+		c.dropLocked()
 		c.mu.Unlock()
 		_ = c.conn.Close()
 	}()
@@ -468,12 +524,11 @@ func (c *connection) send() {
 			return
 		}
 		if final != nil {
+			c.gate, c.gateSub = gateNone, nil
 			c.logSend(c.writer.Write(*final))
 			return
 		}
-		c.gateSub = item.sub
-		err := c.writer.Write(item.frame)
-		c.gateSub = nil
+		err := c.write(item)
 		switch {
 		case err == nil:
 			if item.sub != nil {
@@ -492,9 +547,9 @@ func (c *connection) send() {
 			}
 			frame, ferr := wire.NewError(item.frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
 			if ferr == nil {
-				ferr = c.writer.Write(frame)
+				ferr = c.write(outFrame{frame: frame})
 			}
-			if ferr != nil {
+			if ferr != nil && !errors.Is(ferr, errDropped) {
 				c.logSend(ferr)
 				return
 			}
@@ -505,21 +560,46 @@ func (c *connection) send() {
 	}
 }
 
-// gateWriter writes encoded frames to the socket. An event is held until the
+// write writes one queued frame. If the socket has not taken it within
+// stallGrace, a subscriber is lagging.
+func (c *connection) write(item outFrame) error {
+	c.gate, c.gateSub = gateReply, item.sub
+	if item.sub != nil {
+		c.gate = gateEvent
+	}
+	watchdog := time.AfterFunc(stallGrace, c.stalled)
+	err := c.writer.Write(item.frame)
+	watchdog.Stop()
+	c.gate, c.gateSub = gateNone, nil
+	return err
+}
+
+// gateWriter writes encoded frames to the socket. A frame is held until the
 // socket has room for it and a final notice besides, so a subscriber that
-// stops reading can still be told it is lagging; it is dropped instead if the
-// connection gives up on its queue meanwhile.
+// stops reading can still be told it is lagging. A held event is dropped if
+// the connection gives up on its queue meanwhile; a held reply is dropped
+// only when everything queued is, and once lagging it goes at once, as it
+// comes before the notice either way.
 type gateWriter struct{ c *connection }
 
 func (g gateWriter) Write(p []byte) (int, error) {
 	c := g.c
-	if c.gateSub != nil && c.room != nil {
+	if c.gate != gateNone && c.room != nil {
 		for !c.room(len(p)) {
 			c.mu.Lock()
-			drop := c.shut || c.sub != c.gateSub || c.droppingLocked()
+			drop := c.shut
+			lagging := c.final != nil && c.final.lagging
+			if c.gate == gateEvent {
+				drop = drop || c.sub != c.gateSub || c.droppingLocked()
+			} else if !lagging {
+				drop = drop || c.droppingLocked()
+			}
 			c.mu.Unlock()
 			if drop {
 				return 0, errDropped
+			}
+			if lagging && c.gate == gateReply {
+				break
 			}
 			select {
 			case <-c.wake:
@@ -802,15 +882,10 @@ func (c *connection) closeSubscription() {
 	sub := c.sub
 	c.sub = nil
 	if c.events > 0 {
-		kept := c.queue[:0]
-		for _, item := range c.queue {
-			if item.sub == nil {
-				kept = append(kept, item)
-			}
-		}
-		c.queue = kept
+		c.queue = repliesOnly(c.queue)
 		c.events = 0
 	}
+	c.changed.Broadcast()
 	c.mu.Unlock()
 	if sub != nil {
 		sub.Close()
