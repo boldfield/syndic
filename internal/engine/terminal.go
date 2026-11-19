@@ -475,6 +475,10 @@ func (e *Engine) Cancel(turnID string) error {
 		e.mu.Unlock()
 		return errors.New("engine: not started")
 	}
+	if e.stopping {
+		e.mu.Unlock()
+		return refusal(wire.ErrorCodeStopping)
+	}
 	turn, err := e.store.GetTurn(turnID)
 	switch {
 	case errors.Is(err, journal.ErrTurnNotFound):
@@ -515,6 +519,9 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 	defer e.mu.Unlock()
 	if !e.started {
 		return wire.ReleaseReply{}, errors.New("engine: not started")
+	}
+	if e.stopping {
+		return wire.ReleaseReply{}, refusal(wire.ErrorCodeStopping)
 	}
 	if req.Reason == "" {
 		return wire.ReleaseReply{}, refusal(wire.ErrorCodeReasonRequired)

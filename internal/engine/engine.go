@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -134,8 +135,12 @@ type Engine struct {
 	// mu owns everything below.
 	mu            sync.Mutex
 	started       bool
-	cancelers     int        // goroutines calling Adapter.Cancel; Stop waits for none
-	cancelersOut  *sync.Cond // signalled on e.mu when cancelers drops to zero
+	stopping      bool          // Stop has been called
+	stopped       *sync.Cond    // signalled on e.mu when Stop completes
+	stoppingOnce  sync.Once     // ensures Stop runs only once
+	stoppingCh    chan struct{} // closed when engine_stopping is emitted
+	cancelers     int           // goroutines calling Adapter.Cancel; Stop waits for none
+	cancelersOut  *sync.Cond    // signalled on e.mu when cancelers drops to zero
 	rosterAbs     string
 	roster        *config.Roster
 	adapters      map[string]transport.Adapter
@@ -182,6 +187,7 @@ func New(o Options) (*Engine, error) {
 		retryDelay:    retryDelay,
 		noDelivery:    deliveryOff,
 		newAdapter:    o.NewAdapter,
+		stoppingCh:    make(chan struct{}),
 		running:       make(map[string]bool),
 		inflight:      make(map[string]int),
 		queued:        make(map[string]bool),
@@ -195,6 +201,7 @@ func New(o Options) (*Engine, error) {
 		failed:        make(map[string]string),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
+	e.stopped = sync.NewCond(&e.mu)
 	if e.clock == nil {
 		e.clock = realClock{}
 	}
@@ -491,6 +498,10 @@ func (e *Engine) Override(turnID, reason string) error {
 	defer e.mu.Unlock()
 	if !e.started {
 		return errors.New("engine: not started")
+	}
+
+	if e.stopping {
+		return refusal(wire.ErrorCodeStopping)
 	}
 
 	row, err := e.store.GetTurn(turnID)
@@ -840,4 +851,94 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 		return group[i].Model < group[j].Model
 	})
 	return group, poolID, endpoint, model, nil
+}
+
+// Stop gracefully stops the engine: refuses new submissions, ends any open
+// turn with engine_stop reason, and waits for in-flight cancellations with a
+// bounded grace period. It may be called multiple times; subsequent calls wait
+// for the first to complete.
+func (e *Engine) Stop(ctx context.Context) error {
+	var result error
+	e.stoppingOnce.Do(func() {
+		result = e.stopOnce(ctx)
+	})
+	if result != nil {
+		return result
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for e.cancelers > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		e.stopped.Wait()
+	}
+	return ctx.Err()
+}
+
+// stopOnce implements the actual stop logic, called once by Stop via sync.Once.
+func (e *Engine) stopOnce(ctx context.Context) error {
+	e.mu.Lock()
+
+	if !e.started {
+		e.stopping = true
+		e.mu.Unlock()
+		return nil
+	}
+
+	e.stopping = true
+
+	var term *terminal
+	if e.open != nil {
+		t := e.open
+		term = e.endLocked(t, StateIncomplete, "engine_stop", nil)
+	}
+
+	e.mu.Unlock()
+
+	if term != nil {
+		e.launchCancels(term)
+	}
+
+	graceDeadline := e.clock.Now().UTC().Add(e.roster.Engine.StopGrace.Duration)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(graceDeadline) {
+		graceDeadline = dl
+	}
+
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
+	})
+	if err != nil {
+		return err
+	}
+
+	close(e.stoppingCh)
+
+	graceTicker := time.NewTicker(10 * time.Millisecond)
+	defer graceTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-graceTicker.C:
+			e.mu.Lock()
+			if e.cancelers == 0 {
+				e.mu.Unlock()
+				return nil
+			}
+			e.mu.Unlock()
+
+			if e.clock.Now().UTC().After(graceDeadline) {
+				return nil
+			}
+		}
+	}
+}
+
+// Stopping returns a channel that is closed when engine_stopping has been
+// emitted to the journal.
+func (e *Engine) Stopping() <-chan struct{} {
+	return e.stoppingCh
 }

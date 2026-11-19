@@ -78,6 +78,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, errors.New("engine: not started")
 	}
 
+	if e.stopping {
+		return wire.SubmitReply{}, refusal(wire.ErrorCodeStopping)
+	}
+
 	if req.SubmissionID == "" {
 		bad := refusal(wire.ErrorCodeBadRequest)
 		bad.Detail = strPtr("submission_id_required")
