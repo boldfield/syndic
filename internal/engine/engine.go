@@ -569,7 +569,7 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		log.Printf("engine: turn %s: no delivery, reviewer texts unreadable: %v", row.ID, err)
 		return nil
 	}
-	// Only the accepted, gate-passed replies carry text, as in the live path.
+	// Every accepted reply carries text, gate-failed ones included, as in the live path.
 	for _, a := range attempts {
 		if text, ok := texts[a.ID]; ok && a.Phase == phaseReview && !a.Quarantined {
 			t.outputs[a.ID] = text
@@ -587,37 +587,16 @@ func (e *Engine) mapHoldsToNewRoster(tx *journal.Tx, newRoster *config.Roster) (
 		return nil, nil, fmt.Errorf("get unreleased holds: %w", err)
 	}
 
-	// Build a map of pools to participants for quick lookup
-	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
-	for _, p := range newRoster.Participants {
-		pool := poolName(p)
-		key := p.Endpoint + ":" + p.Model
-		if poolParticipants[pool] == nil {
-			poolParticipants[pool] = make(map[string]bool)
-		}
-		poolParticipants[pool][key] = true
-	}
-
+	index := poolMembers(newRoster)
 	uncertainCapacitySet := make(map[string]bool)
 	var orphanedHolds []wire.Hold
 
 	for _, h := range holds {
-		// Check if this hold applies to any pool in the new roster
-		appliesToAnyPool := false
-
-		for pool := range poolParticipants {
-			// Check if any participant in this pool is in the hold's group
-			for _, member := range h.Group {
-				key := member.EndpointName + ":" + member.Model
-				if poolParticipants[pool][key] {
-					uncertainCapacitySet[pool] = true
-					appliesToAnyPool = true
-					break
-				}
-			}
+		pools := appliedPools(index, h.Group)
+		for _, pool := range pools {
+			uncertainCapacitySet[pool] = true
 		}
-
-		if !appliesToAnyPool {
+		if len(pools) == 0 {
 			// This hold is orphaned
 			orphanedHolds = append(orphanedHolds, wire.Hold{
 				Pool:      h.Pool,
@@ -653,17 +632,7 @@ func (e *Engine) loadHoldsIntoMemory() error {
 		return fmt.Errorf("get unreleased holds: %w", err)
 	}
 
-	// Build a map of pools to participants for quick lookup
-	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
-	for _, p := range e.roster.Participants {
-		pool := poolName(p)
-		key := p.Endpoint + ":" + p.Model
-		if poolParticipants[pool] == nil {
-			poolParticipants[pool] = make(map[string]bool)
-		}
-		poolParticipants[pool][key] = true
-	}
-
+	index := poolMembers(e.roster)
 	for _, journalHold := range holds {
 		participant := ""
 		if a, err := e.store.GetAttempt(journalHold.AttemptID); err == nil {
@@ -678,26 +647,12 @@ func (e *Engine) loadHoldsIntoMemory() error {
 			})
 		}
 
-		// Find all pools this hold applies to in the new roster
-		var appliedPools []string
-		for pool := range poolParticipants {
-			// Check if any participant in this pool is in the hold's group
-			for _, member := range journalHold.Group {
-				key := member.EndpointName + ":" + member.Model
-				if poolParticipants[pool][key] {
-					appliedPools = append(appliedPools, pool)
-					break
-				}
-			}
-		}
-
-		if len(appliedPools) > 0 {
-			// Sort for deterministic order
-			sort.Strings(appliedPools)
+		pools := appliedPools(index, journalHold.Group)
+		if len(pools) > 0 {
 			h := &hold{
 				attemptID:    journalHold.AttemptID,
 				pool:         journalHold.Pool, // original pool for display
-				appliedPools: appliedPools,
+				appliedPools: pools,
 				participant:  participant,
 				since:        journalHold.HeldSince,
 				group:        group,
@@ -719,6 +674,36 @@ func (e *Engine) loadHoldsIntoMemory() error {
 	}
 
 	return nil
+}
+
+// poolMembers indexes the roster's pools by the {endpoint, model} pairs of
+// their participants.
+func poolMembers(roster *config.Roster) map[string]map[string]bool {
+	index := make(map[string]map[string]bool)
+	for _, p := range roster.Participants {
+		pool := poolName(p)
+		if index[pool] == nil {
+			index[pool] = make(map[string]bool)
+		}
+		index[pool][p.Endpoint+":"+p.Model] = true
+	}
+	return index
+}
+
+// appliedPools returns, sorted, every pool with at least one participant in
+// the hold's group. None means the hold is orphaned.
+func appliedPools(index map[string]map[string]bool, group []journal.GroupMember) []string {
+	var pools []string
+	for pool, members := range index {
+		for _, m := range group {
+			if members[m.EndpointName+":"+m.Model] {
+				pools = append(pools, pool)
+				break
+			}
+		}
+	}
+	sort.Strings(pools)
+	return pools
 }
 
 // manifestRoster is the part of a run manifest recovery reads.

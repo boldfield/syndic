@@ -279,6 +279,11 @@ func TestRestartKeepsCancelUnconfirmedHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitHold(t, h, attemptID, false)
+	// The hung call returns after the cancel; restart only once the attempt
+	// has left pending, so recovery has nothing to mark unknown.
+	waitFor(t, "cancelled attempt settled", func() bool {
+		return getAttempt(t, h, attemptID).State != "pending"
+	})
 
 	s := restart(t, h, enginetest.RosterTOML, map[string][]fake.Step{"author": {enginetest.Reply(authorText)}})
 	if hold, _ := getHold(t, h, attemptID); hold.ReleasedAt != nil {
