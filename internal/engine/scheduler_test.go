@@ -144,6 +144,7 @@ func begunDeadline(t *testing.T, h *enginetest.Harness, attemptID string) time.T
 func joinStates(s []string) string { return strings.Join(s, ",") }
 
 func TestPoolSerializesSecondReviewer(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}, {"r2", "p"}}, nil, ""), approvers("r1", "r2"))
 	release := h.Hold("r1")
 	turnID := submitReview(t, h, "s1")
@@ -170,6 +171,7 @@ func TestPoolSerializesSecondReviewer(t *testing.T) {
 }
 
 func TestPoolsRunReviewersInParallel(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "a"}, {"r2", "b"}}, nil, ""), approvers("r1", "r2"))
 	release1, release2 := h.Hold("r1"), h.Hold("r2")
 	turnID := submitReview(t, h, "s1")
@@ -183,6 +185,7 @@ func TestPoolsRunReviewersInParallel(t *testing.T) {
 }
 
 func TestPoolConcurrencyTwoQueuesThird(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	roster := schedRoster("300s", "900s", []reviewer{{"r1", "p"}, {"r2", "p"}, {"r3", "p"}}, map[string]int{"p": 2}, "")
 	h := enginetest.New(t, roster, approvers("r1", "r2", "r3"))
 	release1, release2 := h.Hold("r1"), h.Hold("r2")
@@ -215,6 +218,7 @@ func TestPoolConcurrencyTwoQueuesThird(t *testing.T) {
 }
 
 func TestTurnDeadlineCountsQueueTime(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("100s", "100s", []reviewer{{"r1", "p"}, {"r2", "p"}}, nil, ""), approvers("r1", "r2"))
 	release := h.Hold("r1")
 	turnID := submitReview(t, h, "s1")
@@ -242,6 +246,7 @@ func TestTurnDeadlineCountsQueueTime(t *testing.T) {
 }
 
 func TestAttemptDeadlineOnHang(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply(authorText)}}
 	h := enginetest.New(t, schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts)
 	release := h.Hold("author")
@@ -276,6 +281,7 @@ func TestAttemptDeadlineOnHang(t *testing.T) {
 // The turn timer fires at the deadline recorded at submit, even when time
 // passes between computing that deadline and arming the timer.
 func TestTurnTimerFiresAtRecordedDeadline(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
 	h := enginetest.New(t, schedRoster("100s", "100s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
@@ -314,6 +320,7 @@ func TestTurnTimerFiresAtRecordedDeadline(t *testing.T) {
 }
 
 func TestTurnDeadlinePassedDuringSubmit(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
 	h := enginetest.New(t, schedRoster("100s", "100s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
@@ -353,6 +360,7 @@ func TestTurnDeadlinePassedDuringSubmit(t *testing.T) {
 }
 
 func TestAttemptDeadlineClampedToTurn(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("80s", "100s", []reviewer{{"r1", "p"}}, nil, ""), approvers("r1"))
 	start := h.Clock.Now()
 	release := h.Hold("author")
@@ -383,6 +391,7 @@ func TestAttemptDeadlineClampedToTurn(t *testing.T) {
 }
 
 func TestPresetAttemptDeadlineOverride(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	extra := "\n[presets.solo.deadlines]\nattempt = \"45s\"\n"
 	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}}, nil, extra), map[string][]fake.Step{"author": {enginetest.Reply("ok")}})
 	start := h.Clock.Now()
@@ -398,6 +407,7 @@ func TestPresetAttemptDeadlineOverride(t *testing.T) {
 }
 
 func TestRepairDeadlineIsFreshButCappedByTurn(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText)},
 		"r1":     {enginetest.Reply(fake.VerdictProseApprove()), approveStep()},
@@ -425,6 +435,7 @@ func TestRepairDeadlineIsFreshButCappedByTurn(t *testing.T) {
 }
 
 func TestDeadlineEventsOncePerSecond(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}}, nil, ""), approvers("r1"))
 	release := h.Hold("r1")
 	turnID := submitReview(t, h, "s1")
@@ -462,6 +473,7 @@ func TestDeadlineEventsOncePerSecond(t *testing.T) {
 }
 
 func TestNoTimerFiresAfterTurnEnds(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, schedRoster("60s", "100s", []reviewer{{"r1", "p"}}, nil, ""), approvers("r1"))
 	turnID := submitReview(t, h, "s1")
 	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
@@ -481,6 +493,7 @@ func TestNoTimerFiresAfterTurnEnds(t *testing.T) {
 }
 
 func TestAttemptDeadlineOnHangReviewAuthorIdle(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	scripts := map[string][]fake.Step{"author": {{Kind: fake.StepKindHang}}}
 	h := enginetest.New(t, schedRoster("60s", "900s", []reviewer{{"r1", "p"}}, nil, ""), scripts, enginetest.ClockStart(start))
@@ -505,6 +518,7 @@ func TestAttemptDeadlineOnHangReviewAuthorIdle(t *testing.T) {
 }
 
 func TestRepairQueuesBehindWaitingReviewer(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	scripts := approvers("r2")
 	scripts["r1"] = []fake.Step{enginetest.Reply(fake.VerdictProseApprove()), approveStep()}
 	h := enginetest.New(t, schedRoster("300s", "900s", []reviewer{{"r1", "p"}, {"r2", "p"}}, nil, ""), scripts)
@@ -523,6 +537,7 @@ func TestRepairQueuesBehindWaitingReviewer(t *testing.T) {
 }
 
 func TestOverlappingAttemptsKeepParticipantRunning(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	start := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	gate := make(chan struct{})
 	scripts := map[string][]fake.Step{"author": {
@@ -572,6 +587,7 @@ func waitQuarantined(t *testing.T, h *enginetest.Harness, attemptID string) {
 // The newer attempt's accepted result must not report idle while an older,
 // abandoned request of the same participant is still in flight.
 func TestOverlappingAttemptsNewerFinishesFirst(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	scripts := map[string][]fake.Step{"author": {
 		enginetest.Reply(authorText),
 		enginetest.ReplyFunc(func(transport.CompleteRequest) string { return authorText }),

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"log"
 	"time"
 
 	"github.com/boldfield/syndic/internal/budget"
@@ -62,11 +63,16 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 	t.deliveryState = state
 	for _, id := range recipients {
 		// A scheduling failure drops that one delivery and no other.
-		_ = e.schedule(t, id, func() { e.startDelivery(t, id, msgs) })
+		if err := e.schedule(t, id, func() { e.startDelivery(t, id, msgs) }); err != nil {
+			log.Printf("engine: turn %s: delivery to %s not scheduled: %v", t.id, id, err)
+		}
 	}
-	_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return emit(t.id, wire.EventKindVerdictsDelivered, wire.EvVerdictsDelivered{TurnID: t.id, Recipients: recipients})
 	})
+	if err != nil {
+		log.Printf("engine: turn %s: verdicts_delivered not recorded: %v", t.id, err)
+	}
 }
 
 // deliveryInput returns the recipients in dispatch order, the author first,
@@ -75,10 +81,12 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 func (e *Engine) deliveryInput(t *openTurn, state, reason string) ([]string, prompt.DeliveryInput, bool) {
 	attempts, err := e.store.ListAttempts(t.id)
 	if err != nil {
+		log.Printf("engine: turn %s: no delivery, attempts unreadable: %v", t.id, err)
 		return nil, prompt.DeliveryInput{}, false
 	}
 	blocks, err := e.store.OpenBlocks(t.id)
 	if err != nil {
+		log.Printf("engine: turn %s: no delivery, open blocks unreadable: %v", t.id, err)
 		return nil, prompt.DeliveryInput{}, false
 	}
 	in := prompt.DeliveryInput{TerminalState: state, TerminalReason: reason, CandidateHash: t.candidateHash}
@@ -305,7 +313,8 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 
 // onDeliveryDeadline ends a delivery that is still pending at its deadline:
 // the attempt is recorded interrupted with a capacity hold, and the adapter is
-// asked to cancel it. The turn is already terminal and is not touched.
+// asked to cancel it. The turn is already terminal and is not touched: only
+// the attempt, its budget settlement and the hold are committed.
 func (e *Engine) onDeliveryDeadline(t *openTurn, d reviewerDispatch) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
