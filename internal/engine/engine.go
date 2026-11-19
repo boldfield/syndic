@@ -215,8 +215,14 @@ func New(o Options) (*Engine, error) {
 }
 
 // tx runs fn in one hub transaction. Events emitted through emit commit with
-// the row writes or not at all.
+// the row writes or not at all. If the engine is closed no transaction runs.
 func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
+	e.gate.Lock()
+	if e.closed {
+		e.gate.Unlock()
+		return nil
+	}
+	e.gate.Unlock()
 	return e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return fn(tx, func(turnID, kind string, payload any) error {
 			if e.payloadHook != nil {

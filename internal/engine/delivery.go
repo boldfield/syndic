@@ -299,6 +299,9 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 		// Nothing durable changed; the attempt stays pending in the journal.
 		return
 	}
+	if len(t.pending) == 0 && t.delivering {
+		delete(e.deliveries, t.id)
+	}
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
@@ -359,6 +362,9 @@ func (e *Engine) onDeliveryDeadline(t *openTurn, d reviewerDispatch) {
 		return
 	}
 	e.attemptDone(t, d.attemptID)
+	if len(t.pending) == 0 && t.delivering {
+		delete(e.deliveries, t.id)
+	}
 	if exceeded {
 		e.markExceeded(d.participant)
 	}

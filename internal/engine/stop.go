@@ -14,7 +14,6 @@ type stopRun struct {
 	done     chan struct{}
 	err      error
 	finished bool // guarded by Engine.mu
-	waiters  int  // calls waiting on done, guarded by Engine.mu
 }
 
 // errStopTerminal is returned by Stop when the transaction that ends the open
@@ -37,9 +36,6 @@ func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	if r := e.stop; r != nil {
 		finished := r.finished
-		if !finished {
-			r.waiters++
-		}
 		e.mu.Unlock()
 		if finished {
 			return nil

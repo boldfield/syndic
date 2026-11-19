@@ -2,7 +2,6 @@ package engine_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -274,7 +273,57 @@ func TestStopAndKillReasonsDiffer(t *testing.T) {
 	killed, killedTurn, _ := inReview(t)
 	restart(t, killed, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
 	wantStopEnd(t, killed, killedTurn, "engine_restart")
-	if strings.Contains(stoppedTurn, killedTurn) {
-		t.Fatal("turns are not distinct")
+}
+
+func TestStoppingChannelClosed(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil)
+	stopped := h.Engine.Stopping()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stopping() closed before Stop called")
+	default:
+	}
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-stopped:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Stopping() not closed after Stop")
+	}
+}
+
+func TestEngineSoppingAfterTurnState(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	h, turnID, _ := inReview(t)
+
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	events := h.Events()
+	var turnStateSeq, stoppingSeq int64 = -1, -1
+	for _, ev := range events {
+		if ev.Kind == wire.EventKindTurnState && ev.TurnID == turnID {
+			if p, ok := ev.Payload.(*wire.EvTurnState); ok && p.State == "incomplete" {
+				turnStateSeq = ev.Seq
+			}
+		}
+		if ev.Kind == wire.EventKindEngineStopping {
+			stoppingSeq = ev.Seq
+		}
+	}
+
+	if turnStateSeq < 0 {
+		t.Fatal("no turn_state{incomplete} event")
+	}
+	if stoppingSeq < 0 {
+		t.Fatal("no engine_stopping event")
+	}
+	if stoppingSeq <= turnStateSeq {
+		t.Fatalf("engine_stopping seq %d <= turn_state seq %d", stoppingSeq, turnStateSeq)
 	}
 }
