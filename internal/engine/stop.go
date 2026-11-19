@@ -121,25 +121,19 @@ func (e *Engine) doStop(ctx context.Context) error {
 
 	var ctxErr error
 	e.mu.Lock()
-	for e.cancelers > 0 && ctxErr == nil {
-		// Check if grace or ctx has ended without blocking.
+wait:
+	for e.cancelers > 0 {
+		// grace and ctx both broadcast on cancelersOut when they fire, so
+		// the Wait below always wakes for them.
 		select {
 		case <-graceDone:
-			// Grace period has expired; break without an error.
-			break
+			break wait
 		case <-ctx.Done():
-			// Context was cancelled.
 			ctxErr = ctx.Err()
-			break
+			break wait
 		default:
-			// Neither has fired yet; wait for a canceller to complete or for
-			// grace/ctx to fire (which will broadcast and wake this Wait).
-			e.cancelersOut.Wait()
-			// After Wait returns, loop back to check the conditions again.
-			continue
 		}
-		// Grace or ctx fired, so break.
-		break
+		e.cancelersOut.Wait()
 	}
 
 	// The journal closes under the same lock as the decision to return:

@@ -3,14 +3,19 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 )
+
+// stopGrace is the stop_grace every stop test's roster sets.
+const stopGrace = 5 * time.Second
 
 // reviewRosterWithStopGrace is reviewRoster with the engine's stop_grace set.
 func reviewRosterWithStopGrace(authorID string, stopGrace string, reviewers ...string) string {
@@ -295,130 +300,192 @@ func TestStoppingChannelClosed(t *testing.T) {
 	}
 }
 
+// blockedStop starts a Stop over a reviewer whose Cancel blocks, and returns
+// once Stop is in its grace wait: engine_stopping is out and the adapter's
+// Cancel has been called.
+func blockedStop(t *testing.T, ctx context.Context, opts ...enginetest.Option) (h *enginetest.Harness, turnID, attemptID string, done <-chan error) {
+	t.Helper()
+	h, turnID, attemptID = inReview(t, append(opts, enginetest.BlockingCancel())...)
+	t.Cleanup(h.ReleaseBlockingCancel)
+	done = stopAsync(h, ctx)
+	select {
+	case <-h.Engine.Stopping():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stopping() never closed")
+	}
+	waitFor(t, "adapter Cancel", func() bool { return len(h.Adapters["reviewer"].CancelCalls()) == 1 })
+	return h, turnID, attemptID, done
+}
+
+func wantStopStillRunning(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("Stop returned %v while Cancel was blocked", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func journalState(t *testing.T, h *enginetest.Harness, attemptID string) (int, *journal.AttemptRow, journal.Hold) {
+	t.Helper()
+	hold, found := getHold(t, h, attemptID)
+	if !found {
+		t.Fatalf("no hold for %s", attemptID)
+	}
+	return len(h.Events()), getAttempt(t, h, attemptID), hold
+}
+
 func TestStopWithBlockingCancelAndGrace(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
-	h, turnID, attemptID := inReview(t, enginetest.BlockingCancel())
+	h, turnID, attemptID, done := blockedStop(t, context.Background())
 
-	done := stopAsync(h, context.Background())
-
-	// Give Stop time to reach the grace period waiting loop
-	time.Sleep(100 * time.Millisecond)
-
-	// Advance clock by grace period to allow grace to expire
-	h.Clock.Advance(5 * time.Second)
-
+	wantStopStillRunning(t, done)
+	h.Clock.Advance(stopGrace)
 	if err := wantStopReturns(t, done); err != nil {
 		t.Fatal(err)
 	}
-
-	// The hold should be unreleased because Cancel was blocking and grace expired
+	wantStopEnd(t, h, turnID, "engine_stop")
 	if hold, found := getHold(t, h, attemptID); !found || hold.ReleasedAt != nil {
 		t.Fatalf("hold = %+v, found %v; want unreleased after grace", hold, found)
 	}
+}
 
-	wantStopEnd(t, h, turnID, "engine_stop")
+// A Cancel that returns after Stop did writes nothing.
+func TestStopLateCancelResultWritesNothing(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	h, _, attemptID, done := blockedStop(t, context.Background())
+	h.Clock.Advance(stopGrace)
+	if err := wantStopReturns(t, done); err != nil {
+		t.Fatal(err)
+	}
+	events, attempt, hold := journalState(t, h, attemptID)
+
+	h.ReleaseBlockingCancel()
+	time.Sleep(100 * time.Millisecond)
+
+	events2, attempt2, hold2 := journalState(t, h, attemptID)
+	if events2 != events {
+		t.Fatalf("%d events after Stop returned, want %d", events2, events)
+	}
+	if !reflect.DeepEqual(attempt, attempt2) || !reflect.DeepEqual(hold, hold2) {
+		t.Fatalf("rows changed after Stop: attempt %+v -> %+v, hold %+v -> %+v", attempt, attempt2, hold, hold2)
+	}
+}
+
+// A reviewer's result that arrives after Stop returned writes nothing.
+func TestStopLateCompleteResultWritesNothing(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	h := enginetest.New(t, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts(), enginetest.CancelUnconfirmed())
+	release := h.Hold("reviewer")
+	turnID := submitReview(t, h, "s1")
+	waitCount(t, h, wire.EventKindAttemptBegun, 2)
+	attemptID := attemptsOf(h, turnID, "reviewer")[0]
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events, attempt, hold := journalState(t, h, attemptID)
+
+	release()
+	time.Sleep(100 * time.Millisecond)
+
+	events2, attempt2, hold2 := journalState(t, h, attemptID)
+	if events2 != events {
+		t.Fatalf("%d events after Stop returned, want %d", events2, events)
+	}
+	if !reflect.DeepEqual(attempt, attempt2) || !reflect.DeepEqual(hold, hold2) {
+		t.Fatalf("rows changed after Stop: attempt %+v -> %+v, hold %+v -> %+v", attempt, attempt2, hold, hold2)
+	}
 }
 
 func TestStopWithContextCancelledDuringGrace(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
-	h, turnID, attemptID := inReview(t, enginetest.BlockingCancel())
-
 	ctx, cancel := context.WithCancel(context.Background())
-	done := stopAsync(h, ctx)
+	defer cancel()
+	h, turnID, attemptID, done := blockedStop(t, ctx)
 
-	// Let Stop start the grace period
-	time.Sleep(10 * time.Millisecond)
+	wantStopStillRunning(t, done)
 	cancel()
-
-	err := wantStopReturns(t, done)
-	if !errors.Is(err, context.Canceled) {
+	if err := wantStopReturns(t, done); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stop returned %v, want context.Canceled", err)
 	}
-
-	// The turn should be ended as incomplete with engine_stop
 	wantStopEnd(t, h, turnID, "engine_stop")
 
-	// Start a new engine on the same journal
 	restart(t, h, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
+	a := getAttempt(t, h, attemptID)
+	if a.State != "unknown" {
+		t.Fatalf("recovered attempt state = %q, want unknown", a.State)
+	}
+}
 
-	// The pending attempt should be recovered as unknown
-	attempts, err := h.Store.ListAttempts(turnID)
+// A stop with a previous turn's delivery in flight cancels the delivery and
+// leaves that turn's state alone.
+func TestStopWithDeliveryInFlight(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), {Kind: fake.StepKindHang}, {Kind: fake.StepKindHang}},
+		"r1":     {approveStep(), ack()},
+	}
+	h := enginetest.New(t, reviewRoster("author", "r1"), scripts, enginetest.ClockStart(farFuture))
+	turn1 := submitReview(t, h, "s1")
+	wantEnd(t, h, turn1, engine.StateApproved, "all_approved")
+	before := waitEnded(t, h, turn1)
+	waitFor(t, "author delivery in flight", func() bool { return len(deliveryCalls(h, "author")) == 1 })
+	deliveryID := deliveryCalls(h, "author")[0].Envelope.AttemptID
+
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: "next question"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range attempts {
-		if a.ID == attemptID && a.State != "unknown" {
-			t.Fatalf("recovered attempt state = %q, want unknown", a.State)
-		}
+	if row, err := h.Store.GetTurn(reply.TurnID); err != nil || row.TerminalState != "" {
+		t.Fatalf("second turn: %+v, %v; want it open", row, err)
 	}
-}
 
-func TestStopWithDeliveriesInProgress(t *testing.T) {
-	t.Cleanup(engine.EnableDelivery())
-	h, turnID, _ := inReview(t)
-
-	// Stop should complete successfully even with deliveries in progress
 	if err := h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-
-	wantStopEnd(t, h, turnID, "engine_stop")
-}
-
-func TestStopWithContextCancellationRecovery(t *testing.T) {
-	t.Cleanup(engine.EnableDelivery())
-	h, turnID, attemptID := inReview(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := stopAsync(h, ctx)
-
-	// Cancel the context immediately
-	cancel()
-
-	err := wantStopReturns(t, done)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Stop returned %v, want context.Canceled", err)
+	wantStopEnd(t, h, reply.TurnID, "engine_stop")
+	cancelled := false
+	for _, id := range h.Adapters["author"].CancelCalls() {
+		cancelled = cancelled || id == deliveryID
 	}
-
-	// Restart and verify the attempt is marked unknown
-	restart(t, h, reviewRosterWithStopGrace("author", "5s", "reviewer"), stopScripts())
-	attempts, _ := h.Store.ListAttempts(turnID)
-	for _, a := range attempts {
-		if a.ID == attemptID && a.State != "unknown" {
-			t.Fatalf("recovered attempt state = %q, want unknown", a.State)
-		}
+	if !cancelled {
+		t.Fatalf("delivery %s got no Cancel: %v", deliveryID, h.Adapters["author"].CancelCalls())
+	}
+	if _, found := getHold(t, h, deliveryID); !found {
+		t.Fatal("no hold for the cancelled delivery")
+	}
+	after := waitEnded(t, h, turn1)
+	if after.TerminalState != before.TerminalState || after.TerminalReason != before.TerminalReason {
+		t.Fatalf("previous turn changed to %q %q", after.TerminalState, after.TerminalReason)
 	}
 }
 
+// Stopping() closes only once engine_stopping is in the journal, and a stop
+// that is waiting for a Cancel has already closed it.
 func TestStoppingChannelClosedAfterEngineStopping(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
-	h, _, _ := inReview(t)
+	h, turnID, _, done := blockedStop(t, context.Background())
 
-	stopped := h.Engine.Stopping()
-
-	// Stop the engine
-	if err := h.Engine.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// The channel must be closed now
-	select {
-	case <-stopped:
-	default:
-		t.Fatal("Stopping() not closed after Stop")
-	}
-
-	// Verify that engine_stopping was already emitted and in the journal
-	events := h.Events()
-	var engineStoppingSeq int64 = -1
-	for _, ev := range events {
+	// blockedStop returned on <-Stopping() with Stop still in its grace wait.
+	wantStopStillRunning(t, done)
+	var stopping, turnState int64 = -1, -1
+	for _, ev := range h.Events() {
 		if ev.Kind == wire.EventKindEngineStopping {
-			engineStoppingSeq = ev.Seq
-			break
+			stopping = ev.Seq
+		}
+		if p, ok := ev.Payload.(*wire.EvTurnState); ok && ev.TurnID == turnID && p.State == "incomplete" {
+			turnState = ev.Seq
 		}
 	}
-	if engineStoppingSeq < 0 {
-		t.Fatal("no engine_stopping event in journal")
+	if stopping < 0 {
+		t.Fatal("Stopping() closed but engine_stopping is not in the journal")
+	}
+	if turnState < 0 || stopping <= turnState {
+		t.Fatalf("engine_stopping seq %d not after turn_state{incomplete} seq %d", stopping, turnState)
+	}
+	h.Clock.Advance(stopGrace)
+	if err := wantStopReturns(t, done); err != nil {
+		t.Fatal(err)
 	}
 }
 

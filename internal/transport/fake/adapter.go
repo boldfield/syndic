@@ -61,7 +61,8 @@ type Adapter struct {
 	current        int
 	cancels        []string
 	hangingAttempt map[string]context.CancelFunc
-	cancelBlocked  chan struct{} // signals when blocking cancels should proceed
+	cancelBlocked  chan struct{} // closed to let blocking cancels proceed
+	releaseOnce    sync.Once
 }
 
 // New creates a new fake adapter with the given script and options.
@@ -316,10 +317,7 @@ func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
 // ReleaseBlockingCancel releases blocking Cancel calls. Only call this if
 // BlockingCancel was enabled in Options.
 func (a *Adapter) ReleaseBlockingCancel() {
-	select {
-	case a.cancelBlocked <- struct{}{}:
-	default:
-	}
+	a.releaseOnce.Do(func() { close(a.cancelBlocked) })
 }
 
 // Calls returns deep copies of all CompleteCall records received, in order.
