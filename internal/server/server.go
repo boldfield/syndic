@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -157,13 +158,40 @@ func (s *Server) snapshotConnections() []*connection {
 	return conns
 }
 
-// notifyStopping tells every connection the engine is stopping.
+// stoppingGrace bounds how long shutdown waits for a client: to be sent the
+// events already in the journal, and to take the stopping notice.
+const stoppingGrace = time.Second
+
+// notifyStopping tells every connection the engine is stopping. The notice is
+// the last frame a connection gets: subscribers are first given the events
+// the journal holds (engine_stopping among them), then the connection stops
+// accepting event writes and the notice goes out. Connections are handled
+// together so clients that are not reading cost one grace in all.
 func (s *Server) notifyStopping() {
-	for _, c := range s.snapshotConnections() {
-		// A client that is not reading must not hold up shutdown.
-		_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
-		c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeStopping}))
+	maxSeq, err := s.store.MaxSeq()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "server: stopping: %v\n", err)
+		maxSeq = 0
 	}
+	var wg sync.WaitGroup
+	for _, c := range s.snapshotConnections() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.flushEvents(maxSeq, time.Now().Add(stoppingGrace))
+			c.writeMu.Lock()
+			defer c.writeMu.Unlock()
+			c.closing = true
+			// A client that is not reading must not hold up shutdown.
+			_ = c.conn.SetWriteDeadline(time.Now().Add(stoppingGrace))
+			frame, err := wire.NewError("", &wire.Error{Code: wire.ErrorCodeStopping})
+			if err == nil {
+				err = c.writer.Write(frame)
+			}
+			c.logSend(err)
+		}()
+	}
+	wg.Wait()
 }
 
 func (s *Server) closeConnections() {
@@ -201,19 +229,50 @@ type connection struct {
 	conn    net.Conn
 	reader  *wire.Reader
 	writer  *wire.Writer
+	pending *pendingWriter
 	writeMu sync.Mutex
+	closing bool // set under writeMu once the stop notice is going out
 	subMu   sync.Mutex
 	sub     *hub.Subscription
+	// delivered is the last event seq written to the current subscriber.
+	delivered atomic.Int64
+}
+
+// pendingWriter remembers the unwritten tail of a write that failed part-way,
+// so a frame cut short by a deadline can be completed before another follows.
+type pendingWriter struct {
+	w    io.Writer
+	rest []byte
+}
+
+func (p *pendingWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if err != nil && n < len(b) {
+		p.rest = append(p.rest[:0], b[n:]...)
+	}
+	return n, err
+}
+
+// flush writes what a failed write left behind.
+func (p *pendingWriter) flush() error {
+	if len(p.rest) == 0 {
+		return nil
+	}
+	n, err := p.w.Write(p.rest)
+	p.rest = p.rest[n:]
+	return err
 }
 
 // newConnection builds a connection with its reader and writer in place, so
 // it is safe to publish to other goroutines (the stop notice) at once.
 func (s *Server) newConnection(conn net.Conn) *connection {
+	pending := &pendingWriter{w: conn}
 	c := &connection{
-		server: s,
-		conn:   conn,
-		reader: wire.NewReader(conn),
-		writer: wire.NewWriter(conn),
+		server:  s,
+		conn:    conn,
+		reader:  wire.NewReader(conn),
+		writer:  wire.NewWriter(pending),
+		pending: pending,
 	}
 	if s.frameObserver != nil {
 		c.writer.SetObserver(s.frameObserver)
@@ -437,6 +496,7 @@ func (c *connection) handleSubscribe(ctx context.Context, requests *sync.WaitGro
 		return
 	}
 
+	c.delivered.Store(req.SinceSeq)
 	c.subMu.Lock()
 	c.sub = sub
 	c.subMu.Unlock()
@@ -535,16 +595,23 @@ func (c *connection) forwardSubscription(ctx context.Context, sub *hub.Subscript
 
 		switch {
 		case have:
-			if !c.sendCurrent(sub, wire.NewEvent(event.Seq, event.Kind, event.At, event.Data)) {
-				return
+			ok, werr := c.sendCurrent(sub, event.Seq, wire.NewEvent(event.Seq, event.Kind, event.At, event.Data))
+			if ok {
+				break
 			}
+			var ne net.Error
+			if errors.As(werr, &ne) && ne.Timeout() && out.lagged() {
+				// The subscriber did not take its backlog in time. Finish
+				// the frame it was sent part of, then tell it where it
+				// stopped, if it will still listen.
+				c.noticeLagging(sub, event.Seq, true)
+			} else if werr != nil {
+				_ = c.conn.Close()
+			}
+			return
 		case done:
 			if lagSeq != nil {
-				frame, err := wire.NewError("", &wire.Error{Code: wire.ErrorCodeLagging, LastSeq: lagSeq})
-				if err == nil {
-					c.sendCurrent(sub, frame)
-				}
-				_ = c.conn.Close()
+				c.noticeLagging(sub, *lagSeq, false)
 			}
 			return
 		default:
@@ -554,6 +621,55 @@ func (c *connection) forwardSubscription(ctx context.Context, sub *hub.Subscript
 				return
 			}
 		}
+	}
+}
+
+// lagged reports whether the subscriber was found to be lagging.
+func (o *outbound) lagged() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.done && o.lagSeq != nil
+}
+
+// noticeLagging sends the lagging notice for a subscriber whose last event
+// was lastSeq and closes the connection. When the last write was cut short,
+// the rest of that frame goes first. The wait is bounded: a client that is
+// still not reading is dropped without the notice.
+func (c *connection) noticeLagging(sub *hub.Subscription, lastSeq int64, finishFrame bool) {
+	defer func() { _ = c.conn.Close() }()
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.subMu.Lock()
+	current := c.sub == sub
+	c.subMu.Unlock()
+	if !current || c.closing {
+		return
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(laggingGrace))
+	if finishFrame {
+		if err := c.pending.flush(); err != nil {
+			return
+		}
+	}
+	frame, err := wire.NewError("", &wire.Error{Code: wire.ErrorCodeLagging, LastSeq: &lastSeq})
+	if err == nil {
+		err = c.writer.Write(frame)
+	}
+	c.logSend(err)
+}
+
+// flushEvents waits, until the deadline, for the current subscriber to have
+// been sent every event up to seq. Connections with no subscription return
+// at once.
+func (c *connection) flushEvents(seq int64, deadline time.Time) {
+	for time.Now().Before(deadline) {
+		c.subMu.Lock()
+		subscribed := c.sub != nil
+		c.subMu.Unlock()
+		if !subscribed || c.delivered.Load() >= seq {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -593,23 +709,24 @@ func (c *connection) pullSubscription(ctx context.Context, sub *hub.Subscription
 // sendCurrent writes frame only while sub is still the connection's
 // subscription. The check and the write happen under the write lock, and
 // replacing or ending a subscription clears it before its reply is written,
-// so no event of a closed subscription follows that reply.
-func (c *connection) sendCurrent(sub *hub.Subscription, frame wire.Frame) bool {
+// so no event of a closed subscription follows that reply. Nothing is written
+// once the stop notice has gone out. A failed write is returned to the caller,
+// which decides what the connection is owed.
+func (c *connection) sendCurrent(sub *hub.Subscription, seq int64, frame wire.Frame) (bool, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	c.subMu.Lock()
 	current := c.sub == sub
 	c.subMu.Unlock()
-	if !current {
-		return false
+	if !current || c.closing {
+		return false, nil
 	}
 	if err := c.writer.Write(frame); err != nil {
 		c.logSend(err)
-		// A failed write may have left half a frame on the wire.
-		_ = c.conn.Close()
-		return false
+		return false, err
 	}
-	return true
+	c.delivered.Store(seq)
+	return true, nil
 }
 
 func (c *connection) handleUnsubscribe(frame wire.Frame) {

@@ -1106,7 +1106,7 @@ func TestNoEventAfterUnsubscribeReply(t *testing.T) {
 	defer func() { close(stop); <-flooded }()
 
 	// Take some of the flood, then replace the subscription mid-stream.
-	var seen int64 = start
+	seen := start
 	for seen < start+20 {
 		f := r.read()
 		if f.Type != "event" {
@@ -1225,5 +1225,49 @@ func TestNonReadingSubscriberIsDropped(t *testing.T) {
 	}
 	if n >= flood {
 		t.Fatalf("got all %d events, backlog was not cut off", n)
+	}
+}
+
+// TestLaggingNoticeFollowsCutShortFrame checks that a subscriber that
+// stopped reading, and that starts again within the grace, gets whole event
+// frames and then lagging whose last_seq is the last event it received.
+func TestLaggingNoticeFollowsCutShortFrame(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	slow := s.raw()
+	slow.hello()
+	start, err := h.Store.MaxSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+	if f := slow.read(); f.Type != "reply" {
+		t.Fatalf("subscribe reply = %+v", f)
+	}
+
+	emitFlood(t, h.Hub, 400, 24<<10)
+	// Late enough that the server has found the subscriber lagging, early
+	// enough that it still waits for a reader.
+	time.Sleep(time.Second)
+
+	var lastEvent int64
+	for {
+		_ = slow.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		f, err := slow.r.Read()
+		if err != nil {
+			t.Fatalf("stream ended without a lagging notice: %v", err)
+		}
+		if f.Type == "event" {
+			lastEvent = f.Seq
+			continue
+		}
+		var e wire.Error
+		if f.Type != "error" || f.ID != "" || json.Unmarshal(f.Body, &e) != nil || e.Code != "lagging" {
+			t.Fatalf("frame = %+v, want lagging", f)
+		}
+		if e.LastSeq == nil || *e.LastSeq != lastEvent {
+			t.Fatalf("last_seq = %v, want %d", e.LastSeq, lastEvent)
+		}
+		return
 	}
 }
