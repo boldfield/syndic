@@ -20,8 +20,6 @@ func reviewRosterWithStopGrace(authorID string, stopGrace string, reviewers ...s
 	return toml
 }
 
-const stopGrace = 5 * time.Second
-
 // stopScripts has the author answer and the reviewer never reach an answer
 // before the test lets it.
 func stopScripts() map[string][]fake.Step {
