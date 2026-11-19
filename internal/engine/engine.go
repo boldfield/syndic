@@ -133,35 +133,35 @@ type Engine struct {
 	crashHook func() bool
 
 	// mu owns everything below.
-	mu            sync.Mutex
-	started       bool
-	stopping      bool          // Stop has been called
-	stopped       *sync.Cond    // signalled on e.mu when Stop completes
-	stoppingOnce  sync.Once     // ensures Stop runs only once
-	stoppingCh    chan struct{} // closed when engine_stopping is emitted
-	cancelers     int           // goroutines calling Adapter.Cancel; Stop waits for none
-	cancelersOut  *sync.Cond    // signalled on e.mu when cancelers drops to zero
-	rosterAbs     string
-	roster        *config.Roster
-	adapters      map[string]transport.Adapter
-	built         manifest.Built
-	runID         string
-	manifestHash  string
-	runFirstSeq   int64
-	startedAt     time.Time
-	open          *openTurn
-	running       map[string]bool
-	inflight      map[string]int // dispatches holding a pool slot, per participant
-	queued        map[string]bool
-	pools         map[string]*pool
-	exceeded      map[string]bool   // participants whose estimate was exceeded this run
-	holds         map[string]*hold  // unreleased capacity holds, by attempt id
-	orphanedHolds map[string]*hold  // holds whose group has no members in new roster
-	calling       map[string]bool   // attempts whose Complete call has not returned
-	cancelled     map[string]bool   // calling attempts the engine itself cancelled
-	cancelling    map[string]int    // Adapter.Cancel calls pending, per participant
-	pstate        map[string]string // cancelling or unknown last reported, per participant
-	failed        map[string]string // failure state of the last dispatch, per participant
+	mu             sync.Mutex
+	started        bool
+	stopping       bool          // Stop has been called
+	stoppingResult *error        // the result of the first Stop call
+	stopped        *sync.Cond    // signalled on e.mu when Stop completes
+	stoppingCh     chan struct{} // closed when engine_stopping is emitted
+	cancelers      int           // goroutines calling Adapter.Cancel; Stop waits for none
+	cancelersOut   *sync.Cond    // signalled on e.mu when cancelers drops to zero
+	rosterAbs      string
+	roster         *config.Roster
+	adapters       map[string]transport.Adapter
+	built          manifest.Built
+	runID          string
+	manifestHash   string
+	runFirstSeq    int64
+	startedAt      time.Time
+	open           *openTurn
+	running        map[string]bool
+	inflight       map[string]int // dispatches holding a pool slot, per participant
+	queued         map[string]bool
+	pools          map[string]*pool
+	exceeded       map[string]bool   // participants whose estimate was exceeded this run
+	holds          map[string]*hold  // unreleased capacity holds, by attempt id
+	orphanedHolds  map[string]*hold  // holds whose group has no members in new roster
+	calling        map[string]bool   // attempts whose Complete call has not returned
+	cancelled      map[string]bool   // calling attempts the engine itself cancelled
+	cancelling     map[string]int    // Adapter.Cancel calls pending, per participant
+	pstate         map[string]string // cancelling or unknown last reported, per participant
+	failed         map[string]string // failure state of the last dispatch, per participant
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -231,6 +231,9 @@ func (e *Engine) Start() error {
 	defer e.mu.Unlock()
 	if e.started {
 		return errors.New("engine: already started")
+	}
+	if e.stopping {
+		return errors.New("engine: cannot start after Stop")
 	}
 
 	// Recovery: mark pending attempts as unknown and end non-terminal turns
@@ -858,43 +861,48 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 // bounded grace period. It may be called multiple times; subsequent calls wait
 // for the first to complete.
 func (e *Engine) Stop(ctx context.Context) error {
-	var result error
-	e.stoppingOnce.Do(func() {
-		result = e.stopOnce(ctx)
-	})
-	if result != nil {
+	e.mu.Lock()
+
+	// Wait for a previous Stop call if one is in progress
+	for e.stopping && e.stoppingResult == nil {
+		e.stopped.Wait()
+	}
+
+	// If Stop has already completed, return the stored result
+	if e.stoppingResult != nil {
+		result := *e.stoppingResult
+		e.mu.Unlock()
 		return result
 	}
 
+	// First call to Stop - mark as stopping
+	e.stopping = true
+	e.mu.Unlock()
+
+	result := e.doStop(ctx)
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	for e.cancelers > 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		e.stopped.Wait()
-	}
-	return ctx.Err()
+	e.stoppingResult = &result
+	e.stopped.Broadcast()
+	e.mu.Unlock()
+
+	return result
 }
 
-// stopOnce implements the actual stop logic, called once by Stop via sync.Once.
-func (e *Engine) stopOnce(ctx context.Context) error {
-	e.mu.Lock()
+// doStop implements the stop logic. e.mu is NOT held.
+func (e *Engine) doStop(ctx context.Context) error {
+	var term *terminal
 
+	e.mu.Lock()
 	if !e.started {
-		e.stopping = true
 		e.mu.Unlock()
 		return nil
 	}
 
-	e.stopping = true
-
-	var term *terminal
 	if e.open != nil {
 		t := e.open
 		term = e.endLocked(t, StateIncomplete, "engine_stop", nil)
 	}
-
 	e.mu.Unlock()
 
 	if term != nil {
@@ -913,27 +921,34 @@ func (e *Engine) stopOnce(ctx context.Context) error {
 		return err
 	}
 
+	e.mu.Lock()
 	close(e.stoppingCh)
+	e.mu.Unlock()
 
-	graceTicker := time.NewTicker(10 * time.Millisecond)
-	defer graceTicker.Stop()
+	graceDone := make(chan struct{})
+	graceStop := e.clock.AfterFunc(graceDeadline.Sub(e.clock.Now()), func() {
+		close(graceDone)
+	})
+	defer graceStop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-graceTicker.C:
-			e.mu.Lock()
-			if e.cancelers == 0 {
-				e.mu.Unlock()
-				return nil
-			}
-			e.mu.Unlock()
-
-			if e.clock.Now().UTC().After(graceDeadline) {
-				return nil
-			}
+	// Monitor cancelers and signal when they reach 0
+	cancelersDone := make(chan struct{})
+	go func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		for e.cancelers > 0 {
+			e.cancelersOut.Wait()
 		}
+		close(cancelersDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-graceDone:
+		return nil
+	case <-cancelersDone:
+		return nil
 	}
 }
 

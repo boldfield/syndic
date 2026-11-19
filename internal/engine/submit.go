@@ -78,10 +78,6 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, errors.New("engine: not started")
 	}
 
-	if e.stopping {
-		return wire.SubmitReply{}, refusal(wire.ErrorCodeStopping)
-	}
-
 	if req.SubmissionID == "" {
 		bad := refusal(wire.ErrorCodeBadRequest)
 		bad.Detail = strPtr("submission_id_required")
@@ -113,6 +109,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
 		}
 		return reply, nil
+	}
+
+	if e.stopping {
+		return wire.SubmitReply{}, refusal(wire.ErrorCodeStopping)
 	}
 
 	if e.open != nil {
