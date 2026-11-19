@@ -805,3 +805,39 @@ func TestOverrideDeliversReviewerTextNotRawBody(t *testing.T) {
 		t.Fatalf("delivery content = %q", content)
 	}
 }
+
+func TestOverrideDeliversGateFailedReviewerText(t *testing.T) {
+	trunc := fake.Step{Kind: fake.StepKindReply, Text: "GATE-FAILED-REVIEW-TEXT", Status: transport.StatusTruncated, TransportStatus: transport.TransportStatusOK}
+	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText)},
+		"r1":     {trunc},
+		"r2":     {approveStep()},
+	}, enginetest.ClockStart(farFuture))
+	release := h.Hold("r1")
+	turnID := submitReview(t, h, "s1")
+	waitCount(t, h, wire.EventKindAttemptBegun, 3)
+	release()
+	row := waitEnded(t, h, turnID)
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "reviewer_failed:r1:truncated" {
+		t.Fatalf("turn ended %q %q", row.TerminalState, row.TerminalReason)
+	}
+	t.Cleanup(engine.EnableDelivery())
+	s := restart(t, h, reviewRoster("author", "r1", "r2"), map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), ack()},
+		"r1":     {ack()},
+		"r2":     {ack()},
+	})
+	if err := s.Override(turnID, "false alarm"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "deliveries", func() bool { return len(s.Adapters["r2"].Calls()) == 1 })
+	var content string
+	for _, c := range s.Adapters["r2"].Calls() {
+		if c.Request.Envelope.Phase == phaseDelivery {
+			content = userContent(c.Request)
+		}
+	}
+	if !strings.Contains(content, "GATE-FAILED-REVIEW-TEXT") {
+		t.Fatalf("delivery content = %q", content)
+	}
+}
