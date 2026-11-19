@@ -261,6 +261,12 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// After Stop returns, drop late results (spec step 6).
+	if e.stopping && e.stoppingResult != nil {
+		e.attemptDone(t, d.attemptID)
+		return
+	}
+
 	var late, quarantined, exceeded bool
 	var held *hold
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {

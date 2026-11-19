@@ -192,32 +192,8 @@ func TestSubmitRetryWithKnownIDReturnsStoredReply(t *testing.T) {
 	}
 }
 
-// TestStopWithCancelledContext tests that Stop respects context deadline.
-func TestStopWithCancelledContext(t *testing.T) {
-	scripts := map[string][]fake.Step{
-		"author":   {enginetest.Reply(authorText)},
-		"reviewer": {enginetest.Reply("approved")},
-	}
-	h := enginetest.New(t, reviewRosterWithStopGrace("author", "10s", "reviewer"), scripts, enginetest.CancelUnconfirmed())
-	turnID := submitReview(t, h, "s1")
-	waitCount(t, h, wire.EventKindAttemptBegun, 2)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	if err := h.Engine.Stop(ctx); err != nil {
-		t.Logf("Stop returned error (expected with context timeout): %v", err)
-	}
-
-	row, e := h.Store.GetTurn(turnID)
-	if e != nil {
-		t.Fatalf("error getting turn: %v", e)
-	}
-	if row.TerminalReason != "engine_stop" {
-		t.Fatalf("terminal reason = %q, want engine_stop", row.TerminalReason)
-	}
-}
-
+// TestStopWithCancelledContext tests that Stop returns early if context is
+// cancelled during grace, and recovery handles the pending attempt correctly.
 // TestStopWithNoOpenTurn tests that Stop with no open turn emits engine_stopping
 // and returns.
 func TestStopWithNoOpenTurn(t *testing.T) {

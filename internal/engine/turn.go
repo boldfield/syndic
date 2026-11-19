@@ -180,6 +180,12 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// After Stop returns, drop late results (spec step 6).
+	if e.stopping && e.stoppingResult != nil {
+		e.attemptDone(t, attemptID)
+		return
+	}
+
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 

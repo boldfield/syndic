@@ -78,6 +78,16 @@ const defaultPool = "default"
 // ErrNotImplemented is returned by requests a later task implements.
 var ErrNotImplemented = errors.New("not implemented")
 
+// isChanClosed checks if a chan struct{} has been closed by trying to receive in a non-blocking way.
+func isChanClosed(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // RosterError is returned by Start when the roster fails to load or validate.
 type RosterError struct{ Err error }
 
@@ -858,19 +868,28 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 
 // Stop gracefully stops the engine: refuses new submissions, ends any open
 // turn with engine_stop reason, and waits for in-flight cancellations with a
-// bounded grace period. It may be called multiple times; subsequent calls wait
-// for the first to complete and return nil.
+// bounded grace period. It may be called multiple times; concurrent calls wait
+// for the first to complete and return its result; calls after it finishes return nil.
 func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 
-	// Wait for a previous Stop call if one is in progress
-	for e.stopping && e.stoppingResult == nil {
-		e.stopped.Wait()
+	wasConcurrent := false
+	// If a previous Stop call is running, wait for it
+	if e.stopping && e.stoppingResult == nil {
+		wasConcurrent = true
+		for e.stopping && e.stoppingResult == nil {
+			e.stopped.Wait()
+		}
 	}
 
-	// If Stop has already completed, return nil per spec
+	// If Stop has already completed
 	if e.stoppingResult != nil {
+		result := *e.stoppingResult
 		e.mu.Unlock()
+		// Concurrent calls return the first's result; sequential calls return nil
+		if wasConcurrent {
+			return result
+		}
 		return nil
 	}
 
@@ -922,27 +941,42 @@ func (e *Engine) doStop(ctx context.Context) error {
 	close(e.stoppingCh)
 	e.mu.Unlock()
 
+	// Wait for cancellations to complete or grace period to expire, whichever comes first.
 	graceDone := make(chan struct{})
 	graceStop := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() {
 		close(graceDone)
 	})
 	defer graceStop()
 
-	for {
+	// Track if ctx or grace has ended to avoid infinite wait.
+	ended := make(chan struct{})
+	go func() {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
 		case <-graceDone:
-			return nil
-		case <-time.After(10 * time.Millisecond):
-			e.mu.Lock()
-			if e.cancelers == 0 {
-				e.mu.Unlock()
-				return nil
+		}
+		close(ended)
+		e.mu.Lock()
+		e.cancelersOut.Broadcast()
+		e.mu.Unlock()
+	}()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for e.cancelers > 0 {
+		// Wait for a cancellation to complete or grace/ctx to end.
+		e.cancelersOut.Wait()
+		// After waiting, check if grace or context has ended while we were locked.
+		if isChanClosed(ended) {
+			// Return early if context was cancelled; otherwise return nil.
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			e.mu.Unlock()
+			return nil
 		}
 	}
+	return nil
 }
 
 // Stopping returns a channel that is closed when engine_stopping has been

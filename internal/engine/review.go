@@ -452,6 +452,12 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// After Stop returns, drop late results (spec step 6).
+	if e.stopping && e.stoppingResult != nil {
+		e.attemptDone(t, d.attemptID)
+		return nil
+	}
+
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
 
