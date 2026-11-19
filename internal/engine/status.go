@@ -47,6 +47,20 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 
 	r := e.roster
 	started := e.startedAt.Format(time.RFC3339Nano)
+
+	// Build orphaned holds list
+	orphanedHolds := make([]wire.Hold, 0, len(e.orphanedHolds))
+	for _, h := range e.orphanedHolds {
+		orphanedHolds = append(orphanedHolds, wire.Hold{
+			Pool:      h.pool,
+			AttemptID: h.attemptID,
+			Group:     h.group,
+		})
+	}
+	sort.Slice(orphanedHolds, func(i, j int) bool {
+		return orphanedHolds[i].AttemptID < orphanedHolds[j].AttemptID
+	})
+
 	reply := wire.StatusReply{
 		RunID:                e.runID,
 		RunStartedAt:         started,
@@ -57,7 +71,7 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 		DeadlinesProvisional: r.Deadlines.Provisional != nil && *r.Deadlines.Provisional,
 		Participants:         make([]wire.Participant, 0, len(r.Participants)),
 		Pools:                []wire.Pool{},
-		OrphanedHolds:        []wire.Hold{},
+		OrphanedHolds:        orphanedHolds,
 		QuickProfiles:        []wire.QuickProfile{},
 		TurnsOpen:            []string{},
 		EngineStartedAt:      started,

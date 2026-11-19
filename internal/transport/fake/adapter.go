@@ -145,7 +145,6 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	case StepKindReply:
 		if step.Build != nil {
 			step.Text = step.Build(req)
-			step.RawOutput = ""
 		}
 		// Apply delay for reply steps.
 		if step.Delay > 0 {

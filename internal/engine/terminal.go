@@ -33,11 +33,12 @@ const (
 
 // hold is the in-memory mirror of an unreleased capacity_holds row.
 type hold struct {
-	attemptID   string
-	pool        string
-	participant string
-	since       time.Time
-	group       []wire.GroupMember
+	attemptID    string
+	pool         string   // original pool name from the hold record (for orphaned holds)
+	appliedPools []string // all pools this hold applies to in the new roster
+	participant  string
+	since        time.Time
+	group        []wire.GroupMember
 	// calling is true while the attempt's Complete call has not returned, in
 	// which case its pool slot is already counted as running.
 	calling bool
@@ -55,8 +56,13 @@ type terminal struct {
 func (e *Engine) occupied(name string) int {
 	n := e.poolState(name).running
 	for _, h := range e.holds {
-		if h.pool == name && !h.calling {
-			n++
+		if !h.calling {
+			for _, pool := range h.appliedPools {
+				if pool == name {
+					n++
+					break
+				}
+			}
 		}
 	}
 	return n
@@ -114,7 +120,7 @@ func (e *Engine) holdIn(tx *journal.Tx, emit hub.Emit, attemptID, participant st
 	}); err != nil {
 		return nil, err
 	}
-	return &hold{attemptID: attemptID, pool: pool, participant: participant, since: now, group: group}, nil
+	return &hold{attemptID: attemptID, pool: pool, appliedPools: []string{pool}, participant: participant, since: now, group: group}, nil
 }
 
 // endIn is the one terminal path, run inside the Tx that ends the turn:
@@ -329,7 +335,7 @@ func releaseHoldIn(tx *journal.Tx, emit hub.Emit, h *hold, how, reason string) e
 	return emit("", wire.EventKindCapacity, ev)
 }
 
-// dropHold forgets a hold whose row was released and lets its pool's queue
+// dropHold forgets a hold whose row was released and lets its pools' queues
 // move. e.mu is held.
 func (e *Engine) dropHold(h *hold) {
 	if e.holds[h.attemptID] != h {
@@ -339,13 +345,18 @@ func (e *Engine) dropHold(h *hold) {
 	if h.stop != nil {
 		h.stop()
 	}
-	e.kick(h.pool)
+	for _, pool := range h.appliedPools {
+		e.kick(pool)
+	}
 }
 
-// armHold starts the operator-configured release timer of the hold's pool.
+// armHold starts the operator-configured release timer of the hold's first applied pool.
 // Zero means the hold is never released on its own. e.mu is held.
 func (e *Engine) armHold(h *hold) {
-	_, after := e.roster.PoolFor(h.pool)
+	var after time.Duration
+	if len(h.appliedPools) > 0 {
+		_, after = e.roster.PoolFor(h.appliedPools[0])
+	}
 	if after <= 0 {
 		return
 	}
@@ -440,8 +451,11 @@ func (e *Engine) syncParticipant(id string) {
 func (e *Engine) sortedHolds(pool string) []*hold {
 	var out []*hold
 	for _, h := range e.holds {
-		if h.pool == pool {
-			out = append(out, h)
+		for _, p := range h.appliedPools {
+			if p == pool {
+				out = append(out, h)
+				break
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -506,12 +520,20 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 		return wire.ReleaseReply{}, refusal(wire.ErrorCodeReasonRequired)
 	}
 
+	// First try to find in regular holds
 	holds := e.sortedHolds(req.Pool)
 	var target *hold
 	if req.AttemptID != nil {
 		for _, h := range holds {
 			if h.attemptID == *req.AttemptID {
 				target = h
+				break
+			}
+		}
+		if target == nil {
+			// Try orphaned holds with the pool name
+			if orphanedHold, ok := e.orphanedHolds[*req.AttemptID]; ok && orphanedHold.pool == req.Pool {
+				target = orphanedHold
 			}
 		}
 		if target == nil {
@@ -550,7 +572,14 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 	if err != nil {
 		return wire.ReleaseReply{}, err
 	}
-	e.dropHold(target)
+
+	// Remove from orphaned holds if it was there
+	if _, wasOrphaned := e.orphanedHolds[target.attemptID]; wasOrphaned {
+		delete(e.orphanedHolds, target.attemptID)
+	} else {
+		// Release frees all pools the hold applies to
+		e.dropHold(target)
+	}
 	e.syncParticipant(target.participant)
 	return wire.ReleaseReply{Released: []string{target.attemptID}}, nil
 }

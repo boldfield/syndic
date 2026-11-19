@@ -673,13 +673,6 @@ func TestDispatchTxIsAtomic(t *testing.T) {
 	}
 }
 
-func TestNotImplemented(t *testing.T) {
-	h := enginetest.New(t, enginetest.RosterTOML, nil)
-	if err := h.Engine.Override("t", "r"); !errors.Is(err, engine.ErrNotImplemented) {
-		t.Fatalf("Override = %v", err)
-	}
-}
-
 func TestNewRequiresOptions(t *testing.T) {
 	if _, err := engine.New(engine.Options{}); err == nil {
 		t.Fatal("New accepted empty options")

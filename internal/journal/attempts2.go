@@ -439,3 +439,37 @@ func (s *Store) GetHold(attemptID string) (Hold, bool, error) {
 	})
 	return h, found, err
 }
+
+// SetAttemptText sets the reply text of an attempt.
+func (tx *Tx) SetAttemptText(attemptID, text string) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE attempts SET text = ? WHERE id = ?
+	`, text, attemptID); err != nil {
+		return fmt.Errorf("update text: %w", err)
+	}
+	return nil
+}
+
+// AttemptTexts returns the reply text of each of the turn's attempts that
+// has one, by attempt id.
+func (s *Store) AttemptTexts(turnID string) (map[string]string, error) {
+	out := map[string]string{}
+	err := s.Tx(func(tx *Tx) error {
+		rows, err := tx.tx.Query(`
+			SELECT id, text FROM attempts WHERE turn_id = ? AND text IS NOT NULL
+		`, turnID)
+		if err != nil {
+			return fmt.Errorf("query attempt texts: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id, text string
+			if err := rows.Scan(&id, &text); err != nil {
+				return fmt.Errorf("scan attempt text: %w", err)
+			}
+			out[id] = text
+		}
+		return rows.Err()
+	})
+	return out, err
+}
