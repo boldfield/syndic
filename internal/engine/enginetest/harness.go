@@ -101,14 +101,15 @@ allowed_destinations = []
 `
 
 type options struct {
-	skip         map[string]bool
-	outputBound  map[string]int
-	eligible     map[string]transport.Tri
-	contextBound map[string]int
-	calibration  map[string]float64
-	noStart      bool
-	unconfirmed  bool
-	clockStart   time.Time
+	skip           map[string]bool
+	outputBound    map[string]int
+	eligible       map[string]transport.Tri
+	contextBound   map[string]int
+	calibration    map[string]float64
+	noStart        bool
+	unconfirmed    bool
+	blockingCancel bool
+	clockStart     time.Time
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -152,6 +153,11 @@ func ClockStart(t time.Time) Option {
 // confirmation of unknown.
 func CancelUnconfirmed() Option {
 	return func(o *options) { o.unconfirmed = true }
+}
+
+// BlockingCancel makes every fake adapter block on Cancel until released.
+func BlockingCancel() Option {
+	return func(o *options) { o.blockingCancel = true }
 }
 
 // NoStart builds the engine without starting it.
@@ -253,7 +259,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		done:       make(chan struct{}),
 	}
 	for _, p := range roster.Participants {
-		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed})
+		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed, BlockingCancel: o.blockingCancel})
 		hn.Adapters[p.ID] = fa
 		hn.gated[p.ID] = &gatedAdapter{inner: fa}
 	}
@@ -450,4 +456,12 @@ func (h *Harness) Hold(participantID string) (release func()) {
 	release = g.hold()
 	h.T.Cleanup(release)
 	return release
+}
+
+// ReleaseBlockingCancel releases blocking Cancel calls on all adapters.
+// Only call this if BlockingCancel() was used.
+func (h *Harness) ReleaseBlockingCancel() {
+	for _, a := range h.Adapters {
+		a.ReleaseBlockingCancel()
+	}
 }

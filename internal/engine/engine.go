@@ -77,6 +77,9 @@ const defaultPool = "default"
 // ErrNotImplemented is returned by requests a later task implements.
 var ErrNotImplemented = errors.New("not implemented")
 
+// errClosed is returned by tx when the engine journal has been closed.
+var errClosed = errors.New("engine: journal closed")
+
 // RosterError is returned by Start when the roster fails to load or validate.
 type RosterError struct{ Err error }
 
@@ -157,6 +160,12 @@ type Engine struct {
 	cancelling    map[string]int    // Adapter.Cancel calls pending, per participant
 	pstate        map[string]string // cancelling or unknown last reported, per participant
 	failed        map[string]string // failure state of the last dispatch, per participant
+	deliveries    map[string]*openTurn
+	stop          *stopRun
+	stopping      bool
+	stoppingCh    chan struct{}
+	gate          sync.Mutex
+	closed        bool
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -193,6 +202,8 @@ func New(o Options) (*Engine, error) {
 		cancelling:    make(map[string]int),
 		pstate:        make(map[string]string),
 		failed:        make(map[string]string),
+		deliveries:    make(map[string]*openTurn),
+		stoppingCh:    make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
@@ -205,8 +216,15 @@ func New(o Options) (*Engine, error) {
 }
 
 // tx runs fn in one hub transaction. Events emitted through emit commit with
-// the row writes or not at all.
+// the row writes or not at all. If the engine is closed no transaction runs
+// and errClosed is returned.
 func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
+	e.gate.Lock()
+	if e.closed {
+		e.gate.Unlock()
+		return errClosed
+	}
+	e.gate.Unlock()
 	return e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return fn(tx, func(turnID, kind string, payload any) error {
 			if e.payloadHook != nil {
@@ -491,6 +509,9 @@ func (e *Engine) Override(turnID, reason string) error {
 	defer e.mu.Unlock()
 	if !e.started {
 		return errors.New("engine: not started")
+	}
+	if e.stopping {
+		return refusal(wire.ErrorCodeStopping)
 	}
 
 	row, err := e.store.GetTurn(turnID)

@@ -111,6 +111,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return reply, nil
 	}
 
+	if e.stopping {
+		return wire.SubmitReply{}, refusal(wire.ErrorCodeStopping)
+	}
+
 	if e.open != nil {
 		busy := refusal(wire.ErrorCodeBusy)
 		busy.TurnID = strPtr(e.open.id)

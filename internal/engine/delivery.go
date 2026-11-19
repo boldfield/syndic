@@ -61,6 +61,7 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 	msgs := prompt.Delivery(in)
 	t.delivering = true
 	t.deliveryState = state
+	e.deliveries[t.id] = t
 	for _, id := range recipients {
 		// A scheduling failure drops that one delivery and no other.
 		if err := e.schedule(t, id, func() { e.startDelivery(t, id, msgs) }); err != nil {
@@ -118,6 +119,7 @@ func (e *Engine) startDelivery(t *openTurn, id string, msgs []transport.Message)
 	d, sent, err := e.beginDelivery(t, id, msgs)
 	if err != nil || !sent {
 		e.releaseLocked(id)
+		e.pruneDelivery(t)
 		return
 	}
 	e.markRunning(id)
@@ -298,6 +300,7 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 		// Nothing durable changed; the attempt stays pending in the journal.
 		return
 	}
+	e.pruneDelivery(t)
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
@@ -358,9 +361,27 @@ func (e *Engine) onDeliveryDeadline(t *openTurn, d reviewerDispatch) {
 		return
 	}
 	e.attemptDone(t, d.attemptID)
+	e.pruneDelivery(t)
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
 	e.commitTerminal(t, term)
 	e.launchCancels(term)
+}
+
+// pruneDelivery stops tracking a delivering turn once it has no delivery
+// begun and none still waiting for a pool slot, so Stop can always find a
+// delivery that is in flight or about to start. e.mu is held.
+func (e *Engine) pruneDelivery(t *openTurn) {
+	if !t.delivering || len(t.pending) != 0 {
+		return
+	}
+	for _, p := range e.pools {
+		for _, q := range p.queue {
+			if q.t == t {
+				return
+			}
+		}
+	}
+	delete(e.deliveries, t.id)
 }

@@ -244,6 +244,79 @@ func (e *Engine) launchCancels(term *terminal) {
 	}()
 }
 
+// applyHolds applies a terminal's holds to the in-memory hold map,
+// marking them as calling if the attempt is currently in a Complete call.
+// e.mu is held.
+func (e *Engine) applyHolds(term *terminal) {
+	if term == nil {
+		return
+	}
+	for _, h := range term.holds {
+		h.calling = e.calling[h.attemptID]
+		if h.calling {
+			e.cancelled[h.attemptID] = true
+		}
+		e.holds[h.attemptID] = h
+		e.cancelling[h.participant]++
+		e.pstate[h.participant] = ParticipantCancelling
+		e.armHold(h)
+	}
+}
+
+// reportDroppedIn reports that queued participants of turn t are no longer
+// queued, inside the caller's Tx. e.mu is held.
+func (e *Engine) reportDroppedIn(emit hub.Emit, t *openTurn) error {
+	var queued []string
+	for _, p := range e.pools {
+		for _, q := range p.queue {
+			if q.t == t {
+				queued = append(queued, q.participant)
+			}
+		}
+	}
+	sort.Strings(queued)
+	for _, id := range queued {
+		next := e.specialState(id)
+		if next == "" {
+			next = ParticipantIdle
+		}
+		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: id, State: next}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// holdPendingIn requests cancellation of and holds capacity for attempts of
+// the given phase, inside the caller's Tx. e.mu is held.
+func (e *Engine) holdPendingIn(tx *journal.Tx, emit hub.Emit, term *terminal, attempts []journal.AttemptRow, phase string) error {
+	now := e.clock.Now().UTC()
+	cancelling := map[string]bool{}
+	for _, a := range attempts {
+		if a.State != "pending" || a.Phase != phase {
+			continue
+		}
+		if err := tx.SetCancellation(a.ID, cancellationRequested); err != nil {
+			return err
+		}
+		h, err := e.holdIn(tx, emit, a.ID, a.Participant, now)
+		if err != nil {
+			return err
+		}
+		if !cancelling[a.Participant] {
+			cancelling[a.Participant] = true
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+				Participant: a.Participant,
+				State:       ParticipantCancelling,
+			}); err != nil {
+				return err
+			}
+		}
+		term.holds = append(term.holds, h)
+	}
+	return nil
+}
+
 // endLocked runs the terminal path in a Tx of its own, after pre if given,
 // and applies it once committed. It returns nil when the Tx did not commit.
 // e.mu is held.
@@ -475,6 +548,10 @@ func (e *Engine) Cancel(turnID string) error {
 		e.mu.Unlock()
 		return errors.New("engine: not started")
 	}
+	if e.stopping {
+		e.mu.Unlock()
+		return refusal(wire.ErrorCodeStopping)
+	}
 	turn, err := e.store.GetTurn(turnID)
 	switch {
 	case errors.Is(err, journal.ErrTurnNotFound):
@@ -515,6 +592,9 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 	defer e.mu.Unlock()
 	if !e.started {
 		return wire.ReleaseReply{}, errors.New("engine: not started")
+	}
+	if e.stopping {
+		return wire.ReleaseReply{}, refusal(wire.ErrorCodeStopping)
 	}
 	if req.Reason == "" {
 		return wire.ReleaseReply{}, refusal(wire.ErrorCodeReasonRequired)

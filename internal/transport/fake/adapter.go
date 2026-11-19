@@ -54,12 +54,15 @@ type Adapter struct {
 	resolvedSecrets      []string
 	cancelUnconfirmed    bool
 	usageAvailable       bool
+	blockingCancel       bool
 
 	mu             sync.Mutex
 	calls          []CompleteCall
 	current        int
 	cancels        []string
 	hangingAttempt map[string]context.CancelFunc
+	cancelBlocked  chan struct{} // closed to let blocking cancels proceed
+	releaseOnce    sync.Once
 }
 
 // New creates a new fake adapter with the given script and options.
@@ -79,7 +82,9 @@ func New(script []Step, opts Options) *Adapter {
 		resolvedSecrets:      opts.ResolvedSecrets,
 		cancelUnconfirmed:    opts.CancelUnconfirmed,
 		usageAvailable:       opts.UsageAvailable,
+		blockingCancel:       opts.BlockingCancel,
 		hangingAttempt:       make(map[string]context.CancelFunc),
+		cancelBlocked:        make(chan struct{}),
 	}
 }
 
@@ -91,6 +96,7 @@ type Options struct {
 	ResolvedSecrets      []string
 	CancelUnconfirmed    bool
 	UsageAvailable       bool
+	BlockingCancel       bool // when true, Cancel blocks on cancelBlocked until released
 }
 
 // Probe returns the configured capability record.
@@ -285,6 +291,12 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 		cancel()
 	}
 
+	if a.blockingCancel {
+		a.mu.Unlock()
+		<-a.cancelBlocked
+		a.mu.Lock()
+	}
+
 	return transport.CancelStatus{
 		Requested:       true,
 		ServerConfirmed: confirmed,
@@ -300,6 +312,12 @@ func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
 		Prompt:     10,
 		Completion: 5,
 	}, nil
+}
+
+// ReleaseBlockingCancel releases blocking Cancel calls. Only call this if
+// BlockingCancel was enabled in Options.
+func (a *Adapter) ReleaseBlockingCancel() {
+	a.releaseOnce.Do(func() { close(a.cancelBlocked) })
 }
 
 // Calls returns deep copies of all CompleteCall records received, in order.
