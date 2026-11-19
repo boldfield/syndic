@@ -1232,20 +1232,7 @@ func TestNonReadingSubscriberIsDropped(t *testing.T) {
 	emitFlood(t, h.Hub, flood, 24<<10)
 
 	// Still without reading: the server has closed its end, so a write fails.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		f, err := wire.NewRequest("st", wire.RequestStatus, struct{}{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := slow.w.Write(f); err != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("server never closed the connection of a subscriber that does not read")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitPeerClosed(t, slow)
 
 	var n int
 	var lastEvent int64
@@ -1285,7 +1272,9 @@ func stalledSubscriber(t *testing.T, s *serving, h *enginetest.Harness, n int) *
 	if f := r.read(); f.Type != "reply" {
 		t.Fatalf("subscribe reply = %+v", f)
 	}
-	emitFlood(t, h.Hub, n, 24<<10)
+	// One transaction, so the stall is well short of stallGrace when the
+	// caller acts on it.
+	emitBatches(t, h.Hub, n, 24<<10, n)
 	return r
 }
 
