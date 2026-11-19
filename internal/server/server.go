@@ -9,7 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/boldfield/syndic/internal/hub"
@@ -49,7 +49,7 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	conns    map[*connection]bool
-	stopping atomic.Bool
+	wg       sync.WaitGroup
 }
 
 // New creates a new Server.
@@ -88,87 +88,86 @@ func (s *Server) Listen() error {
 	return nil
 }
 
-// Serve accepts connections and handles requests until ctx is done or the engine is stopping.
+// Serve accepts connections and handles requests until ctx is done or the
+// engine is stopping. Every open connection is sent error{code: "stopping"}
+// when the engine stops, and is closed either way before Serve returns.
 func (s *Server) Serve(ctx context.Context) error {
 	s.mu.Lock()
-	if s.listener == nil {
-		s.mu.Unlock()
-		return fmt.Errorf("server not listening")
-	}
 	listener := s.listener
 	s.mu.Unlock()
+	if listener == nil {
+		return errors.New("server not listening")
+	}
 
-	engineStopping := s.engine.Stopping()
-	stopped := false
+	stopped := make(chan bool, 1)
+	quit := make(chan struct{})
+	defer close(quit)
+	go func() {
+		select {
+		case <-s.engine.Stopping():
+			stopped <- true
+		case <-ctx.Done():
+			stopped <- false
+		case <-quit:
+			return
+		}
+		_ = listener.Close()
+	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			s.sendStoppingToAll()
-			_ = listener.Close()
-			return ctx.Err()
-		case <-engineStopping:
-			s.sendStoppingToAll()
-			_ = listener.Close()
-			s.stopping.Store(true)
-			return nil
-		default:
-		}
-
-		tcpListener := listener.(*net.UnixListener)
-		if err := tcpListener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			s.sendStoppingToAll()
-			return fmt.Errorf("set deadline: %w", err)
-		}
-
 		conn, err := listener.Accept()
 		if err != nil {
-			netErr, ok := err.(net.Error)
-			if ok && netErr.Timeout() {
-				if !stopped {
-					select {
-					case <-ctx.Done():
-						s.sendStoppingToAll()
-						_ = listener.Close()
-						return ctx.Err()
-					case <-engineStopping:
-						s.sendStoppingToAll()
-						_ = listener.Close()
-						s.stopping.Store(true)
-						return nil
-					default:
-					}
+			select {
+			case engineStopped := <-stopped:
+				if engineStopped {
+					s.notifyStopping()
 				}
-				continue
+				s.closeConnections()
+				s.wg.Wait()
+				return nil
+			default:
 			}
-			if err == io.EOF {
+			s.closeConnections()
+			s.wg.Wait()
+			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		c := &connection{
-			server: s,
-			conn:   conn,
-		}
+		c := &connection{server: s, conn: conn}
 		s.mu.Lock()
 		s.conns[c] = true
 		s.mu.Unlock()
-
-		go c.handle(ctx)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			c.handle()
+		}()
 	}
 }
 
-func (s *Server) sendStoppingToAll() {
+func (s *Server) snapshotConnections() []*connection {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	conns := make([]*connection, 0, len(s.conns))
 	for c := range s.conns {
 		conns = append(conns, c)
 	}
-	s.mu.Unlock()
+	return conns
+}
 
-	for _, c := range conns {
-		_ = c.sendError("", &wire.Error{Code: "stopping"})
+// notifyStopping tells every connection the engine is stopping.
+func (s *Server) notifyStopping() {
+	for _, c := range s.snapshotConnections() {
+		// A client that is not reading must not hold up shutdown.
+		_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
+		c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeStopping}))
+	}
+}
+
+func (s *Server) closeConnections() {
+	for _, c := range s.snapshotConnections() {
 		_ = c.conn.Close()
 	}
 }
@@ -176,23 +175,17 @@ func (s *Server) sendStoppingToAll() {
 // Close closes the listener and all connections.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	listener := s.listener
+	s.listener = nil
+	s.mu.Unlock()
 
 	var err error
-	if s.listener != nil {
-		if closeErr := s.listener.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-		s.listener = nil
-	}
-
-	for c := range s.conns {
-		if closeErr := c.conn.Close(); closeErr != nil && err == nil {
+	if listener != nil {
+		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			err = closeErr
 		}
 	}
-	s.conns = make(map[*connection]bool)
-
+	s.closeConnections()
 	return err
 }
 
@@ -213,14 +206,14 @@ type connection struct {
 	sub     *hub.Subscription
 }
 
-func (c *connection) handle(ctx context.Context) {
+func (c *connection) handle() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var requests sync.WaitGroup
 	defer func() {
-		c.subMu.Lock()
-		if c.sub != nil {
-			c.sub.Close()
-		}
-		c.subMu.Unlock()
+		cancel()
+		c.closeSubscription(nil)
 		_ = c.conn.Close()
+		requests.Wait()
 		c.server.removeConnection(c)
 	}()
 
@@ -230,397 +223,205 @@ func (c *connection) handle(ctx context.Context) {
 		c.writer.SetObserver(c.server.frameObserver)
 	}
 
-	// First frame must be hello
-	frame, err := c.reader.Read()
-	if err != nil {
-		if err == wire.ErrFrameTooLarge {
-			_ = c.sendError(frame.ID, &wire.Error{Code: "frame"})
-		} else if err != io.EOF {
-			fmt.Fprintf(os.Stderr, "read hello: %v\n", err)
-		}
+	if !c.handshake() {
 		return
 	}
 
-	if frame.Type != "hello" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "protocol"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send protocol error: %v\n", err)
-		}
-		return
-	}
-
-	var helloReq wire.HelloRequest
-	if err := json.Unmarshal(frame.Body, &helloReq); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "protocol"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send protocol error: %v\n", err)
-		}
-		return
-	}
-
-	if helloReq.Protocol != wire.ProtocolVersion {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "protocol"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send protocol error: %v\n", err)
-		}
-		return
-	}
-
-	helloReply := c.server.engine.Hello()
-	if err := c.sendReply(frame.ID, helloReply); err != nil {
-		fmt.Fprintf(os.Stderr, "send hello reply: %v\n", err)
-		return
-	}
-
-	// Handle subsequent requests
 	for {
 		frame, err := c.reader.Read()
 		if err != nil {
-			if err == wire.ErrFrameTooLarge {
-				_ = c.sendError(frame.ID, &wire.Error{Code: "frame"})
+			var syntaxErr *json.SyntaxError
+			var typeErr *json.UnmarshalTypeError
+			switch {
+			case errors.Is(err, wire.ErrFrameTooLarge):
+				c.rejectOversized()
 				return
-			} else if err != io.EOF {
-				fmt.Fprintf(os.Stderr, "read frame: %v\n", err)
+			case errors.As(err, &syntaxErr), errors.As(err, &typeErr):
+				c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeBadRequest}))
+				continue
 			}
 			return
 		}
 
-		// Handle subscribe requests specially to manage subscription state
+		// subscribe and unsubscribe touch connection state, so they run in
+		// read order; the event stream itself runs on its own goroutine.
 		switch frame.Type {
 		case wire.RequestSubscribe:
-			c.handleSubscribe(ctx, frame)
+			c.handleSubscribe(ctx, &requests, frame)
 		case wire.RequestUnsubscribe:
 			c.handleUnsubscribe(frame)
 		default:
-			// Run other requests concurrently
-			go c.handleRequest(frame)
+			requests.Add(1)
+			go func() {
+				defer requests.Done()
+				c.handleRequest(frame)
+			}()
 		}
 	}
+}
+
+// handshake reads the first frame and answers it. It reports whether the
+// connection may go on.
+func (c *connection) handshake() bool {
+	frame, err := c.reader.Read()
+	if err != nil {
+		if errors.Is(err, wire.ErrFrameTooLarge) {
+			c.rejectOversized()
+		}
+		return false
+	}
+	if frame.Type != wire.RequestHello {
+		c.logSend(c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeProtocol}))
+		return false
+	}
+	var req wire.HelloRequest
+	if err := json.Unmarshal(frame.Body, &req); err != nil || req.Protocol != wire.ProtocolVersion {
+		c.logSend(c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeProtocol}))
+		return false
+	}
+	if err := c.sendReply(frame.ID, c.server.engine.Hello()); err != nil {
+		c.logSend(err)
+		return false
+	}
+	return true
+}
+
+// rejectOversized answers a frame over the limit. The rest of the oversized
+// line is discarded for a moment first so the close does not reset the
+// connection under the error frame.
+func (c *connection) rejectOversized() {
+	c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeFrame}))
+	_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = io.Copy(io.Discard, io.LimitReader(c.conn, 16<<20))
 }
 
 func (c *connection) handleRequest(frame wire.Frame) {
 	switch frame.Type {
 	case wire.RequestStatus:
-		c.handleStatus(frame)
+		status, err := c.server.engine.Status()
+		c.respond(frame.ID, "status", status, err)
 	case wire.RequestSubmit:
-		c.handleSubmit(frame)
+		var req wire.SubmitRequest
+		if !c.decode(frame, &req, "submission_id", "input") {
+			return
+		}
+		reply, err := c.server.engine.Submit(req)
+		c.respond(frame.ID, "submit", reply, err)
 	case wire.RequestCancel:
-		c.handleCancel(frame)
+		var req wire.CancelRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		c.respond(frame.ID, "cancel", wire.CancelReply{Accepted: true}, c.server.engine.Cancel(req.TurnID))
 	case wire.RequestOverride:
-		c.handleOverride(frame)
+		var req wire.OverrideRequest
+		if !c.decode(frame, &req, "turn_id", "reason") {
+			return
+		}
+		c.respond(frame.ID, "override", wire.OverrideReply{State: "overridden"}, c.server.engine.Override(req.TurnID, req.Reason))
 	case wire.RequestRelease:
-		c.handleRelease(frame)
+		var req wire.ReleaseRequest
+		if !c.decode(frame, &req, "pool", "reason") {
+			return
+		}
+		reply, err := c.server.engine.Release(req)
+		c.respond(frame.ID, "release", reply, err)
 	case wire.RequestTurn:
-		c.handleTurn(frame)
+		var req wire.TurnRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		reply, err := buildTurnRecord(c.server.store, req.TurnID)
+		c.respond(frame.ID, "turn", reply, err)
 	case wire.RequestTranscript:
-		c.handleTranscript(frame)
+		var req wire.TranscriptRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		limit := maxTranscriptLimit
+		if req.Limit != nil && *req.Limit > 0 && *req.Limit < limit {
+			limit = *req.Limit
+		}
+		reply, err := buildTranscript(c.server.store, req.TurnID, req.Cursor, limit)
+		c.respond(frame.ID, "transcript", reply, err)
 	case wire.RequestContent:
-		c.handleContent(frame)
+		var req wire.ContentRequest
+		if !c.decode(frame, &req, "ref", "offset", "limit") {
+			return
+		}
+		if req.Offset < 0 || req.Limit <= 0 {
+			c.logSend(c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest}))
+			return
+		}
+		limit := min(req.Limit, wire.MaxContentPageBytes)
+		reply, err := getContent(c.server.store, req.Ref, req.Offset, limit)
+		c.respond(frame.ID, "content", reply, err)
 	default:
-		if err := c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
+		c.logSend(c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest}))
 	}
 }
 
-func (c *connection) handleStatus(frame wire.Frame) {
-	status, err := c.server.engine.Status()
+const maxTranscriptLimit = 200
+
+// decode unmarshals the request body into req and checks that every named
+// member is present. A missing member or a body that does not decode is
+// answered with bad_request and reported as false.
+func (c *connection) decode(frame wire.Frame, req any, required ...string) bool {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(frame.Body, &members); err != nil {
+		c.badRequest(frame.ID, errors.New("body is not an object"))
+		return false
+	}
+	for _, name := range required {
+		if v, ok := members[name]; !ok || string(v) == "null" {
+			c.badRequest(frame.ID, fmt.Errorf("missing %s", name))
+			return false
+		}
+	}
+	if err := json.Unmarshal(frame.Body, req); err != nil {
+		c.badRequest(frame.ID, err)
+		return false
+	}
+	return true
+}
+
+func (c *connection) badRequest(id string, cause error) {
+	detail := cause.Error()
+	c.logSend(c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest, Detail: &detail}))
+}
+
+// respond sends body as the reply to id, or the error err maps to.
+func (c *connection) respond(id, op string, body any, err error) {
 	if err != nil {
-		if wireErr, ok := err.(*wire.Error); ok {
-			if err := c.sendError(frame.ID, wireErr); err != nil {
-				fmt.Fprintf(os.Stderr, "send status error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "status: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
+		var wireErr *wire.Error
+		switch {
+		case errors.As(err, &wireErr):
+			c.logSend(c.sendError(id, wireErr))
+		case errors.Is(err, journal.ErrTurnNotFound), errors.Is(err, journal.ErrNoSuchContent):
+			c.logSend(c.sendError(id, &wire.Error{Code: "not_found"}))
+		case errors.Is(err, journal.ErrOutOfRange):
+			c.logSend(c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest}))
+		default:
+			fmt.Fprintf(os.Stderr, "%s: %v\n", op, err)
+			c.logSend(c.sendError(id, &wire.Error{Code: wire.ErrorCodeInternal, Detail: ptrStr(err.Error())}))
 		}
 		return
 	}
-
-	if err := c.sendReply(frame.ID, status); err != nil {
-		fmt.Fprintf(os.Stderr, "send status reply: %v\n", err)
-	}
+	c.logSend(c.sendReply(id, body))
 }
 
-func (c *connection) handleSubmit(frame wire.Frame) {
-	var req wire.SubmitRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	reply, err := c.server.engine.Submit(req)
-	if err != nil {
-		if wireErr, ok := err.(*wire.Error); ok {
-			if err := c.sendError(frame.ID, wireErr); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "submit: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, reply); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleCancel(frame wire.Frame) {
-	var req wire.CancelRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.TurnID == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	err := c.server.engine.Cancel(req.TurnID)
-	if err != nil {
-		if wireErr, ok := err.(*wire.Error); ok {
-			if err := c.sendError(frame.ID, wireErr); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "cancel: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, wire.CancelReply{Accepted: true}); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleOverride(frame wire.Frame) {
-	var req wire.OverrideRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.TurnID == "" || req.Reason == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	err := c.server.engine.Override(req.TurnID, req.Reason)
-	if err != nil {
-		if wireErr, ok := err.(*wire.Error); ok {
-			if err := c.sendError(frame.ID, wireErr); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "override: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, wire.OverrideReply{State: "overridden"}); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleRelease(frame wire.Frame) {
-	var req wire.ReleaseRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.Pool == "" || req.Reason == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	reply, err := c.server.engine.Release(req)
-	if err != nil {
-		if wireErr, ok := err.(*wire.Error); ok {
-			if err := c.sendError(frame.ID, wireErr); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "release: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, reply); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleTurn(frame wire.Frame) {
-	var req wire.TurnRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.TurnID == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	turnReply, err := buildTurnRecord(c.server.store, req.TurnID)
-	if err != nil {
-		if errors.Is(err, journal.ErrTurnNotFound) {
-			if err := c.sendError(frame.ID, &wire.Error{Code: "not_found"}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "build turn: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, turnReply); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleTranscript(frame wire.Frame) {
-	var req wire.TranscriptRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.TurnID == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	limit := 200
-	if req.Limit != nil && *req.Limit > 0 && *req.Limit < 200 {
-		limit = *req.Limit
-	}
-
-	transcript, err := buildTranscript(c.server.store, req.TurnID, req.Cursor, limit)
-	if err != nil {
-		if errors.Is(err, journal.ErrTurnNotFound) {
-			if err := c.sendError(frame.ID, &wire.Error{Code: "not_found"}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "build transcript: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, transcript); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleContent(frame wire.Frame) {
-	var req wire.ContentRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	if req.Ref == "" {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
-		return
-	}
-
-	limit := req.Limit
-	if limit > wire.MaxContentPageBytes {
-		limit = wire.MaxContentPageBytes
-	}
-
-	content, err := getContent(c.server.store, req.Ref, req.Offset, limit)
-	if err != nil {
-		if errors.Is(err, journal.ErrNoSuchContent) {
-			if err := c.sendError(frame.ID, &wire.Error{Code: "not_found"}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else if errors.Is(err, journal.ErrOutOfRange) {
-			if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "get content: %v\n", err)
-			if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-				fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-			}
-		}
-		return
-	}
-
-	if err := c.sendReply(frame.ID, content); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
-}
-
-func (c *connection) handleSubscribe(ctx context.Context, frame wire.Frame) {
+func (c *connection) handleSubscribe(ctx context.Context, requests *sync.WaitGroup, frame wire.Frame) {
 	var req wire.SubscribeRequest
-	if err := json.Unmarshal(frame.Body, &req); err != nil {
-		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
+	if !c.decode(frame, &req, "since_seq") {
 		return
 	}
 
-	c.subMu.Lock()
-	if c.sub != nil {
-		c.sub.Close()
-	}
-	c.subMu.Unlock()
+	// A second subscribe replaces the first.
+	c.closeSubscription(nil)
 
 	sub, liveFromSeq, err := c.server.hub.Subscribe(req.SinceSeq)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "subscribe: %v\n", err)
-		if err := c.sendError(frame.ID, &wire.Error{Code: "internal", Detail: ptrStr(err.Error())}); err != nil {
-			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
-		}
+		c.respond(frame.ID, "subscribe", nil, err)
 		return
 	}
 
@@ -629,85 +430,59 @@ func (c *connection) handleSubscribe(ctx context.Context, frame wire.Frame) {
 	c.subMu.Unlock()
 
 	if err := c.sendReply(frame.ID, wire.SubscribeReply{OK: true, LiveFromSeq: liveFromSeq}); err != nil {
-		fmt.Fprintf(os.Stderr, "send subscribe reply: %v\n", err)
-		c.subMu.Lock()
-		if c.sub != nil {
-			c.sub.Close()
-			c.sub = nil
-		}
-		c.subMu.Unlock()
+		c.logSend(err)
+		c.closeSubscription(sub)
 		return
 	}
 
-	go c.forwardSubscription(ctx)
+	requests.Add(1)
+	go func() {
+		defer requests.Done()
+		c.forwardSubscription(ctx, sub)
+	}()
 }
 
-func (c *connection) forwardSubscription(ctx context.Context) {
+// closeSubscription closes sub, or the current subscription when sub is nil,
+// and forgets it only if it is still the current one, so a goroutine for a
+// replaced subscription cannot tear down its replacement.
+func (c *connection) closeSubscription(sub *hub.Subscription) {
 	c.subMu.Lock()
-	sub := c.sub
-	c.subMu.Unlock()
 	if sub == nil {
-		return
+		sub = c.sub
 	}
+	if sub == c.sub {
+		c.sub = nil
+	}
+	c.subMu.Unlock()
+	if sub != nil {
+		sub.Close()
+	}
+}
 
+func (c *connection) forwardSubscription(ctx context.Context, sub *hub.Subscription) {
+	defer c.closeSubscription(sub)
 	for {
 		event, err := sub.Next(ctx)
 		if err != nil {
-			if laggingErr, ok := err.(*hub.LaggingError); ok {
-				_ = c.sendError("", &wire.Error{Code: "lagging", LastSeq: &laggingErr.LastSeq})
-				c.subMu.Lock()
-				if c.sub == sub {
-					c.sub = nil
-				}
-				c.subMu.Unlock()
-				sub.Close()
+			var lagging *hub.LaggingError
+			if errors.As(err, &lagging) {
+				c.logSend(c.sendError("", &wire.Error{Code: wire.ErrorCodeLagging, LastSeq: &lagging.LastSeq}))
 				_ = c.conn.Close()
-				return
+			} else if !errors.Is(err, hub.ErrClosed) && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "subscription: %v\n", err)
 			}
-			if err == hub.ErrClosed || err == context.Canceled || err == ctx.Err() {
-				c.subMu.Lock()
-				if c.sub == sub {
-					c.sub = nil
-				}
-				c.subMu.Unlock()
-				sub.Close()
-				return
-			}
-			fmt.Fprintf(os.Stderr, "get event: %v\n", err)
-			c.subMu.Lock()
-			if c.sub == sub {
-				c.sub = nil
-			}
-			c.subMu.Unlock()
-			sub.Close()
 			return
 		}
-
-		eventFrame := wire.NewEvent(event.Seq, event.Kind, event.At, event.Data)
-		if err := c.sendFrame(eventFrame); err != nil {
-			fmt.Fprintf(os.Stderr, "send event: %v\n", err)
-			c.subMu.Lock()
-			if c.sub == sub {
-				c.sub = nil
-			}
-			c.subMu.Unlock()
-			sub.Close()
+		if err := c.sendFrame(wire.NewEvent(event.Seq, event.Kind, event.At, event.Data)); err != nil {
+			c.logSend(err)
 			return
 		}
 	}
 }
 
 func (c *connection) handleUnsubscribe(frame wire.Frame) {
-	c.subMu.Lock()
-	if c.sub != nil {
-		c.sub.Close()
-		c.sub = nil
-	}
-	c.subMu.Unlock()
-
-	if err := c.sendReply(frame.ID, wire.UnsubscribeReply{OK: true}); err != nil {
-		fmt.Fprintf(os.Stderr, "send reply: %v\n", err)
-	}
+	c.closeSubscription(nil)
+	c.logSend(c.sendReply(frame.ID, wire.UnsubscribeReply{OK: true}))
 }
 
 func (c *connection) sendReply(id string, body any) error {
@@ -716,9 +491,8 @@ func (c *connection) sendReply(id string, body any) error {
 		return err
 	}
 	if err := c.sendFrame(frame); err != nil {
-		if err == wire.ErrFrameTooLarge {
-			// If reply is too large, send frame error instead
-			return c.sendError(id, &wire.Error{Code: "frame"})
+		if errors.Is(err, wire.ErrFrameTooLarge) {
+			return c.sendError(id, &wire.Error{Code: wire.ErrorCodeFrame})
 		}
 		return err
 	}
@@ -737,6 +511,15 @@ func (c *connection) sendFrame(frame wire.Frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.writer.Write(frame)
+}
+
+// logSend reports a failed write. A closed connection is the client leaving
+// and is not worth a line.
+func (c *connection) logSend(err error) {
+	if err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "server: send: %v\n", err)
 }
 
 func ptrStr(s string) *string {

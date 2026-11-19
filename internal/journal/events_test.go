@@ -524,3 +524,56 @@ func TestMaxSeqEmptyTable(t *testing.T) {
 		t.Errorf("expected MaxSeq=0 for empty table, got %d", maxSeq)
 	}
 }
+
+func TestLatestTurnStateEvent(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	conn := db.Conn()
+	if _, err := conn.Exec(`INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r', '{}', 'h')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"t1", "t2"} {
+		if _, err := conn.Exec(`INSERT INTO turns (id, run_id, mode) VALUES (?, 'r', 'solo')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	emit := func(turnID, kind, state string) {
+		t.Helper()
+		err := store.Tx(func(tx *journal.Tx) error {
+			_, err := tx.Emit(turnID, kind, json.RawMessage(fmt.Sprintf(`{"state":%q}`, state)))
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ev, err := store.LatestTurnStateEvent("t1")
+	if err != nil || ev != nil {
+		t.Fatalf("no events: got %+v, %v; want nil, nil", ev, err)
+	}
+
+	emit("t1", "turn_state", "submitted")
+	emit("t2", "turn_state", "submitted")
+	emit("t1", "turn_state", "author_dispatched")
+	emit("t1", "attempt_begun", "ignored")
+	emit("t2", "turn_state", "approved")
+	emit("t1", "turn_state", "candidate_frozen")
+	emit("t2", "turn_state", "ignored_later")
+	emit("t1", "attempt_begun", "ignored")
+
+	ev, err = store.LatestTurnStateEvent("t1")
+	if err != nil || ev == nil {
+		t.Fatalf("t1: got %+v, %v", ev, err)
+	}
+	if ev.Kind != "turn_state" || ev.TurnID != "t1" || string(ev.Data) != `{"state":"candidate_frozen"}` {
+		t.Fatalf("t1 latest = %+v (%s)", ev, ev.Data)
+	}
+
+	if ev, err = store.LatestTurnStateEvent("unknown"); err != nil || ev != nil {
+		t.Fatalf("unknown turn: got %+v, %v; want nil, nil", ev, err)
+	}
+}
