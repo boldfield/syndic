@@ -68,6 +68,7 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 			log.Printf("engine: turn %s: delivery to %s not scheduled: %v", t.id, id, err)
 		}
 	}
+	e.pruneDeliveries()
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return emit(t.id, wire.EventKindVerdictsDelivered, wire.EvVerdictsDelivered{TurnID: t.id, Recipients: recipients})
 	})
@@ -119,6 +120,7 @@ func (e *Engine) startDelivery(t *openTurn, id string, msgs []transport.Message)
 	d, sent, err := e.beginDelivery(t, id, msgs)
 	if err != nil || !sent {
 		e.releaseLocked(id)
+		e.pruneDeliveries()
 		return
 	}
 	e.markRunning(id)
@@ -295,6 +297,7 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 		return err
 	})
 	e.attemptDone(t, d.attemptID)
+	e.pruneDeliveries()
 	if err != nil {
 		// Nothing durable changed; the attempt stays pending in the journal.
 		return
@@ -359,9 +362,39 @@ func (e *Engine) onDeliveryDeadline(t *openTurn, d reviewerDispatch) {
 		return
 	}
 	e.attemptDone(t, d.attemptID)
+	e.pruneDeliveries()
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
 	e.commitTerminal(t, term)
 	e.launchCancels(term)
+}
+
+// pruneDeliveries forgets the turns whose deliveries have all completed,
+// failed or been dropped, so e.deliveries holds only turns with delivery work
+// still queued or in flight. e.mu is held.
+func (e *Engine) pruneDeliveries() {
+	kept := e.deliveries[:0]
+	for _, t := range e.deliveries {
+		if len(t.pending) > 0 || e.hasQueued(t) {
+			kept = append(kept, t)
+		}
+	}
+	for i := len(kept); i < len(e.deliveries); i++ {
+		e.deliveries[i] = nil
+	}
+	e.deliveries = kept
+}
+
+// hasQueued reports whether the scheduler still holds work of the turn. e.mu
+// is held.
+func (e *Engine) hasQueued(t *openTurn) bool {
+	for _, p := range e.pools {
+		for _, q := range p.queue {
+			if q.t == t {
+				return true
+			}
+		}
+	}
+	return false
 }

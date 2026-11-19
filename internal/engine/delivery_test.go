@@ -514,3 +514,17 @@ func TestSubmitAcceptedWhileDeliveryRuns(t *testing.T) {
 		t.Fatalf("delivery state = %s, want it still running", a.State)
 	}
 }
+
+func TestDeliveryForgetsTurnOnceFinished(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), ack()},
+		"r1":     {approveStep(), ack()},
+		"r2":     {approveStep(), ack()},
+	}
+	h := enginetest.New(t, reviewRoster("author", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	waitDeliveries(t, h, turnID, 3)
+	waitFor(t, "deliveries forgotten", func() bool { return h.Engine.PendingDeliveryTurns() == 0 })
+}

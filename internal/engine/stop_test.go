@@ -67,7 +67,7 @@ func wantRefusedStopping(t *testing.T, what string, err error) {
 	if err == nil {
 		t.Fatalf("%s was not refused after Stop", what)
 	}
-	wantRefusal(t, err, wire.ErrorCodeStopping)
+	_ = wantRefusal(t, err, wire.ErrorCodeStopping)
 }
 
 func lastEventKind(h *enginetest.Harness) string {
@@ -168,7 +168,7 @@ func TestSubmitRetryWithKnownIDDuringStop(t *testing.T) {
 		t.Fatalf("retry returned turn %q, want %q", reply.TurnID, turnID)
 	}
 	_, err = h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "something else"})
-	wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+	_ = wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
 }
 
 func TestStopWithBlockedCancelReturnsAtGraceAndHoldStays(t *testing.T) {

@@ -79,3 +79,11 @@ func (e *Engine) StopWaiters() int {
 	}
 	return e.stop.waiters
 }
+
+// PendingDeliveryTurns is the number of turns the engine still tracks for
+// delivery work.
+func (e *Engine) PendingDeliveryTurns() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.deliveries)
+}
