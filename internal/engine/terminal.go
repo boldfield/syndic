@@ -254,6 +254,7 @@ func (e *Engine) endLocked(t *openTurn, state, reason string, pre func(tx *journ
 		return nil
 	}
 	e.commitTerminal(t, term)
+	e.deliverTerminal(t, state, reason)
 	return term
 }
 

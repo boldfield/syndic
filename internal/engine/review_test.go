@@ -152,6 +152,7 @@ func waitCount(t *testing.T, h *enginetest.Harness, kind string, want int) {
 }
 
 func TestReviewApprove(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
 	turnID := submitReview(t, h, "s1")
 	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
@@ -414,6 +415,7 @@ func TestReviewApproveAndBlockEitherOrder(t *testing.T) {
 }
 
 func TestReviewLateResultIsQuarantined(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText)},
 		"r1":     {approveStep()},
@@ -570,6 +572,7 @@ func TestReviewCommentaryStored(t *testing.T) {
 }
 
 func TestReviewDispatchTxIsAtomic(t *testing.T) {
+	t.Cleanup(engine.DisableDelivery())
 	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
 	h.Engine.SetPayloadHook(func(kind string, payload any) any {
 		if p, ok := payload.(wire.EvTurnState); ok && p.State == engine.StateReviewersDispatched {

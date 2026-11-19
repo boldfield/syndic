@@ -38,6 +38,14 @@ type openTurn struct {
 	candidate     string
 	candidateHash string
 	approved      map[string]bool
+	// outputs is the Text of each accepted reviewer attempt, by attempt id,
+	// for the terminal delivery.
+	outputs map[string]string
+
+	// delivering is set once the turn has ended and its terminal deliveries
+	// are handed to the scheduler. They run after e.open has moved on.
+	delivering    bool
+	deliveryState string
 }
 
 // submissionHash is the SHA-256 over the canonical JSON of the request

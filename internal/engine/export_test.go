@@ -25,3 +25,12 @@ func SetRetryDelay(d time.Duration) (restore func()) {
 	retryDelay = d
 	return func() { retryDelay = old }
 }
+
+// DisableDelivery stops engines built afterwards from sending terminal
+// deliveries, for tests that pin the exact calls, events and participant
+// states of the turn itself. It returns a function that restores delivery.
+func DisableDelivery() (restore func()) {
+	old := deliveryOff
+	deliveryOff = true
+	return func() { deliveryOff = old }
+}
