@@ -223,6 +223,27 @@ func (e *Engine) attemptDone(t *openTurn, attemptID string) {
 	delete(t.pending, attemptID)
 }
 
+// armTerminalDeliveryDeadline starts the timer for a terminal delivery's deadline.
+// Unlike regular attempts, terminal deliveries need separate handling since their
+// turn may no longer be open. e.mu is held.
+func (e *Engine) armTerminalDeliveryDeadline(t *openTurn, attemptID string, deadline time.Time) {
+	t.pending[attemptID] = deadline
+	d := deadline.Sub(e.clock.Now())
+	t.stopAttempt[attemptID] = e.clock.AfterFunc(d, func() { e.onTerminalDeliveryDeadline(t, attemptID) })
+}
+
+// onTerminalDeliveryDeadline handles a terminal delivery deadline. Unlike
+// onAttemptDeadline, this doesn't require the turn to be open.
+func (e *Engine) onTerminalDeliveryDeadline(t *openTurn, attemptID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, pending := t.pending[attemptID]; !pending {
+		return
+	}
+	// Record the deadline interrupt for the delivery
+	e.endDeliveryLocked(t, attemptID)
+}
+
 // turnEnded is the cleanup every terminal path runs after the terminal state
 // committed: no timer of the turn fires and nothing it queued starts. e.mu is
 // held.
@@ -252,13 +273,6 @@ func (e *Engine) onAttemptDeadline(t *openTurn, attemptID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.open != t {
-		// For terminal deliveries, the turn is no longer open but the attempt
-		// deadline still needs to fire. Check if the attempt is still pending.
-		if _, pending := t.pending[attemptID]; !pending {
-			return
-		}
-		// End the delivery attempt without ending the turn (turn is already terminal)
-		e.endDeliveryLocked(t, attemptID)
 		return
 	}
 	if _, pending := t.pending[attemptID]; !pending {

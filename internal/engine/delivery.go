@@ -402,7 +402,7 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 	}
 
 	e.markRunning(id)
-	e.armAttempt(t, d.attemptID, d.req.Deadline)
+	e.armTerminalDeliveryDeadline(t, d.attemptID, d.req.Deadline)
 	return d, nil
 }
 
@@ -532,7 +532,15 @@ func (e *Engine) deliveryStatus(res transport.CompleteResult, fail *failure) (st
 // The turn is already terminal. e.mu is held.
 func (e *Engine) endDeliveryLocked(t *openTurn, attemptID string) {
 	var held *hold
+	var participant string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Look up the participant and other attempt details
+		attempt, err := tx.GetAttempt(attemptID)
+		if err != nil {
+			return err
+		}
+		participant = attempt.Participant
+
 		if err := tx.CompleteAttempt(attemptID, "", 0, "", "interrupted", "", ""); err != nil {
 			return err
 		}
@@ -548,7 +556,7 @@ func (e *Engine) endDeliveryLocked(t *openTurn, attemptID string) {
 
 		// Place a capacity hold (delivery didn't complete at deadline)
 		var err2 error
-		held, err2 = e.holdIn(tx, emit, attemptID, t.author, e.clock.Now().UTC())
+		held, err2 = e.holdIn(tx, emit, attemptID, participant, e.clock.Now().UTC())
 		return err2
 	})
 	e.attemptDone(t, attemptID)
