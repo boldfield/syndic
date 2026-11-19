@@ -75,6 +75,51 @@ func lastEventKind(h *enginetest.Harness) string {
 	return events[len(events)-1].Kind
 }
 
+// wantStoppingThenOutcomes checks that engine_stopping was emitted once and
+// that everything after it is the confirmed cancellation of attemptID, as
+// recorded during the grace period: its capacity release with how
+// server_confirmed, participant's state and, when the cancellation ended the
+// adapter call, the attempt's completion.
+func wantStoppingThenOutcomes(t *testing.T, h *enginetest.Harness, attemptID, participant string) {
+	t.Helper()
+	events := h.Events()
+	at := -1
+	for i, ev := range events {
+		if ev.Kind == wire.EventKindEngineStopping {
+			if at >= 0 {
+				t.Fatalf("engine_stopping emitted twice, at seq %d and %d", events[at].Seq, ev.Seq)
+			}
+			at = i
+		}
+	}
+	if at < 0 {
+		t.Fatal("no engine_stopping event")
+	}
+	released := false
+	for _, ev := range events[at+1:] {
+		switch p := ev.Payload.(type) {
+		case *wire.EvCapacity:
+			if p.HeldByAttempt != attemptID || p.State != "released" || p.How == nil || *p.How != "server_confirmed" {
+				t.Fatalf("capacity event after engine_stopping: %+v", p)
+			}
+			released = true
+		case *wire.EvAttemptCompleted:
+			if p.AttemptID != attemptID {
+				t.Fatalf("attempt_completed after engine_stopping: %+v", p)
+			}
+		case *wire.EvParticipantState:
+			if p.Participant != participant {
+				t.Fatalf("participant_state after engine_stopping: %+v", p)
+			}
+		default:
+			t.Fatalf("%s event after engine_stopping: %+v", ev.Kind, ev.Payload)
+		}
+	}
+	if !released {
+		t.Fatal("the hold was not released with how server_confirmed after engine_stopping")
+	}
+}
+
 func wantStopEnd(t *testing.T, h *enginetest.Harness, turnID, reason string) {
 	t.Helper()
 	row, err := h.Store.GetTurn(turnID)
@@ -101,21 +146,12 @@ func TestStopDuringReviewWithConfirmingFake(t *testing.T) {
 	if n := len(deliveryAttempts(t, h, turnID)); n != 0 {
 		t.Fatalf("%d terminal_delivery attempts for an engine_stop turn", n)
 	}
-	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
-		t.Fatalf("last event = %q, want engine_stopping", got)
-	}
+	// engine_stopping is the last event of the stop itself; only the
+	// confirmed cancellation, recorded during the grace period, follows it.
+	wantStoppingThenOutcomes(t, h, attemptID, "reviewer")
 	hold, found := getHold(t, h, attemptID)
 	if !found || hold.ReleasedAt == nil || hold.ReleasedHow != "server_confirmed" {
 		t.Fatalf("hold = %+v, found %v", hold, found)
-	}
-	released := false
-	for _, ev := range h.Events() {
-		if p, ok := ev.Payload.(*wire.EvCapacity); ok && p.HeldByAttempt == attemptID && p.State == "released" {
-			released = p.How != nil && *p.How == "server_confirmed"
-		}
-	}
-	if !released {
-		t.Fatal("no capacity released event with how server_confirmed")
 	}
 }
 
@@ -264,20 +300,24 @@ func TestStoppingClosedAfterEngineStoppingIsJournaled(t *testing.T) {
 	entered, _ := h.HoldCancel("reviewer")
 	done := stopAsync(h, context.Background())
 	<-entered
-	select {
-	case <-h.Engine.Stopping():
-		t.Fatal("Stopping() closed while a cancellation is outstanding")
-	default:
-	}
-	h.Clock.Advance(stopGrace)
+
+	// The Cancel is blocked and the clock has not moved: the engine is in its
+	// grace period and has already said it is stopping.
 	<-h.Engine.Stopping()
 	events, err := h.Store.EventsSince(0, 100000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := events[len(events)-1].Kind; got != wire.EventKindEngineStopping {
-		t.Fatalf("last journaled event when Stopping() closed = %q", got)
+		t.Fatalf("last journaled event while Cancel is blocked = %q", got)
 	}
+	select {
+	case err := <-done:
+		t.Fatalf("Stop returned before the grace period: %v", err)
+	default:
+	}
+
+	h.Clock.Advance(stopGrace)
 	if err := wantStopReturns(t, done); err != nil {
 		t.Fatal(err)
 	}
@@ -346,9 +386,7 @@ func TestStopCancelsEarlierTurnDelivery(t *testing.T) {
 	if after.TerminalState != before.TerminalState || after.TerminalReason != before.TerminalReason || after.Epoch != before.Epoch {
 		t.Fatalf("turn changed by Stop: %+v -> %+v", before, after)
 	}
-	if got := lastEventKind(h); got != wire.EventKindEngineStopping {
-		t.Fatalf("last event = %q, want engine_stopping", got)
-	}
+	wantStoppingThenOutcomes(t, h, hung, "r1")
 }
 
 // A delivery still queued for a slot when Stop runs never starts.

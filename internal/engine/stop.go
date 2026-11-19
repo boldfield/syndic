@@ -26,8 +26,9 @@ var errStopTerminal = errors.New("engine: stop: terminal transaction failed")
 // Release refuse from now on, the open turn ends as incomplete with reason
 // engine_stop, deliveries of earlier turns are dropped or cancelled, and the
 // adapter cancellations get stop_grace, measured with the engine's Clock, to
-// return. engine_stopping is the last event the engine writes; after Stop
-// returns nothing more is written to the journal.
+// return. engine_stopping is emitted, and Stopping() closed, before the
+// cancellations start; what they confirm within the grace period is recorded
+// after it, and after Stop returns nothing more is written to the journal.
 //
 // A call made while another runs waits for it and returns its result; a call
 // made after it finished returns nil. If ctx ends first Stop returns its
@@ -85,13 +86,29 @@ func (e *Engine) doStop(ctx context.Context) error {
 	stopGrace := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() { close(graceDone) })
 	defer stopGrace()
 
-	if err := e.stopTerminals(); err != nil {
+	term, deliveries, err := e.stopTerminals()
+	if err != nil {
 		e.mu.Unlock()
 		return err
 	}
+	// engine_stopping goes out before the adapter cancellations start, so it
+	// precedes everything they record and Stopping() is closed for the whole
+	// grace period.
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
+	})
+	if err != nil {
+		e.closeJournal()
+		e.mu.Unlock()
+		return err
+	}
+	close(e.stoppingCh)
+	e.launchCancels(term)
+	e.launchCancels(deliveries)
 	e.mu.Unlock()
 
-	// Wait for the cancellations, for at most the grace period.
+	// Wait for the cancellations, for at most the grace period. What they
+	// confirm meanwhile is recorded as usual.
 	var ctxErr error
 	for {
 		e.mu.Lock()
@@ -110,20 +127,11 @@ func (e *Engine) doStop(ctx context.Context) error {
 		e.mu.Lock()
 		break
 	}
-	defer e.mu.Unlock()
-
-	// Past this point no cancellation outcome is written: engine_stopping is
-	// the last event, and the journal closes with it. A context that ended
-	// leaves what was committed, as a crash would, plus the notice that the
-	// engine was stopping.
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
-	})
+	// The journal closes under the same lock as the decision to return:
+	// nothing is written after Stop returns. A context that ended leaves
+	// what was committed, as a crash would.
 	e.closeJournal()
-	if err != nil {
-		return err
-	}
-	close(e.stoppingCh)
+	e.mu.Unlock()
 	return ctxErr
 }
 
@@ -136,9 +144,10 @@ func (e *Engine) closeJournal() {
 
 // stopTerminals ends the open turn with engine_stop and requests
 // cancellation of the in-flight deliveries of earlier turns, dropping the
-// queued ones, in one Tx. It then starts the adapter cancellations. e.mu is
+// queued ones, in one Tx. It returns the open turn's terminal and the
+// deliveries' holds, whose adapter cancellations the caller starts. e.mu is
 // held.
-func (e *Engine) stopTerminals() error {
+func (e *Engine) stopTerminals() (*terminal, *terminal, error) {
 	var deliveries *terminal
 	pre := func(tx *journal.Tx, emit hub.Emit) error {
 		deliveries = &terminal{}
@@ -151,7 +160,7 @@ func (e *Engine) stopTerminals() error {
 			// Not committed: unless the journal already has the turn ended,
 			// as when a later engine recovered it, Stop has not ended it.
 			if row, err := e.store.GetTurn(t.id); err != nil || row.TerminalState == "" {
-				return errStopTerminal
+				return nil, nil, errStopTerminal
 			}
 			e.open = nil
 			e.turnEnded(t)
@@ -160,7 +169,7 @@ func (e *Engine) stopTerminals() error {
 	}
 	if t == nil {
 		if err := e.tx(pre); err != nil {
-			return errStopTerminal
+			return nil, nil, errStopTerminal
 		}
 	}
 	e.applyHolds(deliveries)
@@ -170,9 +179,7 @@ func (e *Engine) stopTerminals() error {
 		}
 		e.dropQueued(t)
 	}
-	e.launchCancels(term)
-	e.launchCancels(deliveries)
-	return nil
+	return term, deliveries, nil
 }
 
 // stopDeliveriesIn requests cancellation of and holds capacity for the
