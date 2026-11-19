@@ -11,7 +11,6 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-
 // Status reports the run, the participants, pools and quick profiles.
 func (e *Engine) Status() (wire.StatusReply, error) {
 	e.mu.Lock()
