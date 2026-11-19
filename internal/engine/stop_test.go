@@ -75,48 +75,23 @@ func lastEventKind(h *enginetest.Harness) string {
 	return events[len(events)-1].Kind
 }
 
-// wantStoppingThenOutcomes checks that engine_stopping was emitted once and
-// that everything after it is the confirmed cancellation of attemptID, as
-// recorded during the grace period: its capacity release with how
-// server_confirmed, participant's state and, when the cancellation ended the
-// adapter call, the attempt's completion.
-func wantStoppingThenOutcomes(t *testing.T, h *enginetest.Harness, attemptID, participant string) {
+// wantStoppingLast checks that engine_stopping was emitted once and is the
+// last event in the journal: what the cancellations confirm during the grace
+// period is recorded in the rows only.
+func wantStoppingLast(t *testing.T, h *enginetest.Harness) {
 	t.Helper()
 	events := h.Events()
-	at := -1
-	for i, ev := range events {
+	n := 0
+	for _, ev := range events {
 		if ev.Kind == wire.EventKindEngineStopping {
-			if at >= 0 {
-				t.Fatalf("engine_stopping emitted twice, at seq %d and %d", events[at].Seq, ev.Seq)
-			}
-			at = i
+			n++
 		}
 	}
-	if at < 0 {
-		t.Fatal("no engine_stopping event")
+	if n != 1 {
+		t.Fatalf("engine_stopping emitted %d times, want 1", n)
 	}
-	released := false
-	for _, ev := range events[at+1:] {
-		switch p := ev.Payload.(type) {
-		case *wire.EvCapacity:
-			if p.HeldByAttempt != attemptID || p.State != "released" || p.How == nil || *p.How != "server_confirmed" {
-				t.Fatalf("capacity event after engine_stopping: %+v", p)
-			}
-			released = true
-		case *wire.EvAttemptCompleted:
-			if p.AttemptID != attemptID {
-				t.Fatalf("attempt_completed after engine_stopping: %+v", p)
-			}
-		case *wire.EvParticipantState:
-			if p.Participant != participant {
-				t.Fatalf("participant_state after engine_stopping: %+v", p)
-			}
-		default:
-			t.Fatalf("%s event after engine_stopping: %+v", ev.Kind, ev.Payload)
-		}
-	}
-	if !released {
-		t.Fatal("the hold was not released with how server_confirmed after engine_stopping")
+	if last := events[len(events)-1]; last.Kind != wire.EventKindEngineStopping {
+		t.Fatalf("last event is %s %+v, want engine_stopping", last.Kind, last.Payload)
 	}
 }
 
@@ -146,9 +121,7 @@ func TestStopDuringReviewWithConfirmingFake(t *testing.T) {
 	if n := len(deliveryAttempts(t, h, turnID)); n != 0 {
 		t.Fatalf("%d terminal_delivery attempts for an engine_stop turn", n)
 	}
-	// engine_stopping is the last event of the stop itself; only the
-	// confirmed cancellation, recorded during the grace period, follows it.
-	wantStoppingThenOutcomes(t, h, attemptID, "reviewer")
+	wantStoppingLast(t, h)
 	hold, found := getHold(t, h, attemptID)
 	if !found || hold.ReleasedAt == nil || hold.ReleasedHow != "server_confirmed" {
 		t.Fatalf("hold = %+v, found %v", hold, found)
@@ -386,7 +359,7 @@ func TestStopCancelsEarlierTurnDelivery(t *testing.T) {
 	if after.TerminalState != before.TerminalState || after.TerminalReason != before.TerminalReason || after.Epoch != before.Epoch {
 		t.Fatalf("turn changed by Stop: %+v -> %+v", before, after)
 	}
-	wantStoppingThenOutcomes(t, h, hung, "r1")
+	wantStoppingLast(t, h)
 }
 
 // A delivery still queued for a slot when Stop runs never starts.

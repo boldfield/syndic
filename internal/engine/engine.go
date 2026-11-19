@@ -134,11 +134,15 @@ type Engine struct {
 	// further is written. It is set before any request.
 	crashHook func() bool
 
-	// gate guards closed: once Stop has returned the engine writes nothing
-	// more to the journal. Every transaction holds it shared; closing takes it
-	// exclusively, so it waits for transactions in flight.
-	gate   sync.RWMutex
-	closed bool
+	// gate guards closed and announced: once Stop has returned the engine
+	// writes nothing more to the journal, and once engine_stopping is in it
+	// the engine still records rows but emits no further events, so
+	// engine_stopping is the last event of the run. Every transaction holds
+	// gate shared; setting either flag takes it exclusively, so it waits for
+	// transactions in flight.
+	gate      sync.RWMutex
+	closed    bool
+	announced bool
 
 	// mu owns everything below.
 	mu            sync.Mutex
@@ -225,8 +229,12 @@ func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
 	if e.closed {
 		return errJournalClosed
 	}
+	announced := e.announced
 	return e.hub.Tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return fn(tx, func(turnID, kind string, payload any) error {
+			if announced {
+				return nil
+			}
 			if e.payloadHook != nil {
 				payload = e.payloadHook(kind, payload)
 			}

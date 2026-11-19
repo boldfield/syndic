@@ -27,8 +27,9 @@ var errStopTerminal = errors.New("engine: stop: terminal transaction failed")
 // engine_stop, deliveries of earlier turns are dropped or cancelled, and the
 // adapter cancellations get stop_grace, measured with the engine's Clock, to
 // return. engine_stopping is emitted, and Stopping() closed, before the
-// cancellations start; what they confirm within the grace period is recorded
-// after it, and after Stop returns nothing more is written to the journal.
+// cancellations start, and it is the run's last event: what they confirm
+// within the grace period is recorded in the journal's rows without events,
+// and after Stop returns nothing more is written to the journal.
 //
 // A call made while another runs waits for it and returns its result; a call
 // made after it finished returns nil. If ctx ends first Stop returns its
@@ -91,9 +92,10 @@ func (e *Engine) doStop(ctx context.Context) error {
 		e.mu.Unlock()
 		return err
 	}
-	// engine_stopping goes out before the adapter cancellations start, so it
-	// precedes everything they record and Stopping() is closed for the whole
-	// grace period.
+	// engine_stopping goes out before the adapter cancellations start, so
+	// Stopping() is closed for the whole grace period. It is the last event:
+	// what the cancellations confirm afterwards is recorded in the attempt
+	// and hold rows only.
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		return emit("", wire.EventKindEngineStopping, wire.EvEngineStopping{RunID: e.runID})
 	})
@@ -102,6 +104,9 @@ func (e *Engine) doStop(ctx context.Context) error {
 		e.mu.Unlock()
 		return err
 	}
+	e.gate.Lock()
+	e.announced = true
+	e.gate.Unlock()
 	close(e.stoppingCh)
 	e.launchCancels(term)
 	e.launchCancels(deliveries)
