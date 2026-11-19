@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -518,5 +519,39 @@ func TestEngineStoppingAfterTurnState(t *testing.T) {
 	}
 	if stoppingSeq <= turnStateSeq {
 		t.Fatalf("engine_stopping seq %d <= turn_state seq %d", stoppingSeq, turnStateSeq)
+	}
+}
+
+// A delivery that was queued behind a full pool when an earlier one finished
+// is still tracked, so Stop cancels it once it is in flight.
+func TestStopWithQueuedDeliveryStartedInSamePool(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	roster := strings.Replace(reviewRoster("author", "r1", "r2"), "[pools.reviewers]\nconcurrency = 10", "[pools.reviewers]\nconcurrency = 1", 1)
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), ack()},
+		"r1":     {approveStep(), ack()},
+		"r2":     {approveStep(), {Kind: fake.StepKindHang}},
+	}
+	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(farFuture))
+	turn1 := submitReview(t, h, "s1")
+	wantEnd(t, h, turn1, engine.StateApproved, "all_approved")
+	waitFor(t, "r2 delivery in flight", func() bool { return len(deliveryCalls(h, "r2")) == 1 })
+	deliveryID := deliveryCalls(h, "r2")[0].Envelope.AttemptID
+
+	if _, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: "next question"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Engine.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cancelled := false
+	for _, id := range h.Adapters["r2"].CancelCalls() {
+		cancelled = cancelled || id == deliveryID
+	}
+	if !cancelled {
+		t.Fatalf("queued-then-started delivery %s got no Cancel: %v", deliveryID, h.Adapters["r2"].CancelCalls())
+	}
+	if _, found := getHold(t, h, deliveryID); !found {
+		t.Fatal("no hold for the cancelled delivery")
 	}
 }

@@ -119,9 +119,7 @@ func (e *Engine) startDelivery(t *openTurn, id string, msgs []transport.Message)
 	d, sent, err := e.beginDelivery(t, id, msgs)
 	if err != nil || !sent {
 		e.releaseLocked(id)
-		if len(t.pending) == 0 && t.delivering {
-			delete(e.deliveries, t.id)
-		}
+		e.pruneDelivery(t)
 		return
 	}
 	e.markRunning(id)
@@ -302,9 +300,7 @@ func (e *Engine) completeDelivery(t *openTurn, d reviewerDispatch, res transport
 		// Nothing durable changed; the attempt stays pending in the journal.
 		return
 	}
-	if len(t.pending) == 0 && t.delivering {
-		delete(e.deliveries, t.id)
-	}
+	e.pruneDelivery(t)
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
@@ -365,12 +361,27 @@ func (e *Engine) onDeliveryDeadline(t *openTurn, d reviewerDispatch) {
 		return
 	}
 	e.attemptDone(t, d.attemptID)
-	if len(t.pending) == 0 && t.delivering {
-		delete(e.deliveries, t.id)
-	}
+	e.pruneDelivery(t)
 	if exceeded {
 		e.markExceeded(d.participant)
 	}
 	e.commitTerminal(t, term)
 	e.launchCancels(term)
+}
+
+// pruneDelivery stops tracking a delivering turn once it has no delivery
+// begun and none still waiting for a pool slot, so Stop can always find a
+// delivery that is in flight or about to start. e.mu is held.
+func (e *Engine) pruneDelivery(t *openTurn) {
+	if !t.delivering || len(t.pending) != 0 {
+		return
+	}
+	for _, p := range e.pools {
+		for _, q := range p.queue {
+			if q.t == t {
+				return
+			}
+		}
+	}
+	delete(e.deliveries, t.id)
 }
