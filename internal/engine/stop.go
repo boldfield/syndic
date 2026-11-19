@@ -77,10 +77,16 @@ func (e *Engine) doStop(ctx context.Context) error {
 
 	// The grace period starts here, before any cancellation can be asked
 	// for, so a test that advances the clock once a Cancel has begun is
-	// sure to find the timer.
+	// sure to find the timer. Close a channel on expiry to signal the main
+	// loop, and also broadcast on the cond to wake any Wait() in progress.
 	graceDone := make(chan struct{})
-	stopGrace := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() { close(graceDone) })
-	defer stopGrace()
+	stopGrace := e.clock.AfterFunc(e.roster.Engine.StopGrace.Duration, func() {
+		close(graceDone)
+		e.mu.Lock()
+		e.cancelersOut.Broadcast()
+		e.mu.Unlock()
+	})
+	defer func() { stopGrace() }()
 
 	term, deliveries, err := e.stopTerminals()
 	if err != nil {
@@ -105,32 +111,37 @@ func (e *Engine) doStop(ctx context.Context) error {
 
 	// Wait for the cancellations, for at most the grace period. What they
 	// confirm meanwhile is recorded as usual.
-	var ctxErr error
-	graceExpired := false
-	select {
-	case <-graceDone:
-		graceExpired = true
-	case <-ctx.Done():
-		ctxErr = ctx.Err()
-	default:
-	}
+	unsubscribeCtx := context.AfterFunc(ctx, func() {
+		// Context was cancelled; broadcast to wake any Wait() that might be in progress.
+		e.mu.Lock()
+		e.cancelersOut.Broadcast()
+		e.mu.Unlock()
+	})
+	defer unsubscribeCtx()
 
+	var ctxErr error
 	e.mu.Lock()
-	for e.cancelers > 0 && !graceExpired && ctxErr == nil {
-		// Check timeout again (it may have fired while we weren't holding mu).
+	for e.cancelers > 0 && ctxErr == nil {
+		// Check if grace or ctx has ended without blocking.
 		select {
 		case <-graceDone:
-			graceExpired = true
-		case <-ctx.Done():
-			ctxErr = ctx.Err()
-		default:
-		}
-		if graceExpired || ctxErr != nil {
+			// Grace period has expired; break without an error.
 			break
+		case <-ctx.Done():
+			// Context was cancelled.
+			ctxErr = ctx.Err()
+			break
+		default:
+			// Neither has fired yet; wait for a canceller to complete or for
+			// grace/ctx to fire (which will broadcast and wake this Wait).
+			e.cancelersOut.Wait()
+			// After Wait returns, loop back to check the conditions again.
+			continue
 		}
-		// Wait for a canceller to complete (broadcasts on cancelersOut).
-		e.cancelersOut.Wait()
+		// Grace or ctx fired, so break.
+		break
 	}
+
 	// The journal closes under the same lock as the decision to return:
 	// nothing is written after Stop returns. A context that ended leaves
 	// what was committed, as a crash would.

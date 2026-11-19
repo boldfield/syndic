@@ -139,7 +139,6 @@ type Engine struct {
 	started       bool
 	cancelers     int        // goroutines calling Adapter.Cancel; Stop waits for none
 	cancelersOut  *sync.Cond // signalled on e.mu when cancelers drops to zero
-	cancelersIdle chan struct{}
 	rosterAbs     string
 	roster        *config.Roster
 	adapters      map[string]transport.Adapter
@@ -205,7 +204,6 @@ func New(o Options) (*Engine, error) {
 		failed:        make(map[string]string),
 		deliveries:    make(map[string]*openTurn),
 		stoppingCh:    make(chan struct{}),
-		cancelersIdle: make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {

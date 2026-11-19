@@ -297,9 +297,12 @@ func TestStoppingChannelClosed(t *testing.T) {
 
 func TestStopWithBlockingCancelAndGrace(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
-	h, turnID, attemptID := inReview(t, enginetest.CancelUnconfirmed())
+	h, turnID, attemptID := inReview(t, enginetest.BlockingCancel())
 
 	done := stopAsync(h, context.Background())
+
+	// Give Stop time to reach the grace period waiting loop
+	time.Sleep(100 * time.Millisecond)
 
 	// Advance clock by grace period to allow grace to expire
 	h.Clock.Advance(5 * time.Second)
@@ -308,7 +311,7 @@ func TestStopWithBlockingCancelAndGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The hold should be unreleased because CancelUnconfirmed means Cancel never returns
+	// The hold should be unreleased because Cancel was blocking and grace expired
 	if hold, found := getHold(t, h, attemptID); !found || hold.ReleasedAt != nil {
 		t.Fatalf("hold = %+v, found %v; want unreleased after grace", hold, found)
 	}
@@ -318,12 +321,12 @@ func TestStopWithBlockingCancelAndGrace(t *testing.T) {
 
 func TestStopWithContextCancelledDuringGrace(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
-	h, turnID, attemptID := inReview(t)
+	h, turnID, attemptID := inReview(t, enginetest.BlockingCancel())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := stopAsync(h, ctx)
 
-	// Cancel the context during the grace period
+	// Let Stop start the grace period
 	time.Sleep(10 * time.Millisecond)
 	cancel()
 

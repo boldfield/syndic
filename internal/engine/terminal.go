@@ -241,10 +241,6 @@ func (e *Engine) launchCancels(term *terminal) {
 		if e.cancelers--; e.cancelers == 0 {
 			e.cancelersOut.Broadcast()
 		}
-		select {
-		case e.cancelersIdle <- struct{}{}:
-		default:
-		}
 	}()
 }
 
