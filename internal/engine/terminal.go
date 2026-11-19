@@ -506,12 +506,20 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 		return wire.ReleaseReply{}, refusal(wire.ErrorCodeReasonRequired)
 	}
 
+	// First try to find in regular holds
 	holds := e.sortedHolds(req.Pool)
 	var target *hold
 	if req.AttemptID != nil {
 		for _, h := range holds {
 			if h.attemptID == *req.AttemptID {
 				target = h
+				break
+			}
+		}
+		if target == nil {
+			// Try orphaned holds with the pool name
+			if orphanedHold, ok := e.orphanedHolds[*req.AttemptID]; ok && orphanedHold.pool == req.Pool {
+				target = orphanedHold
 			}
 		}
 		if target == nil {
@@ -550,7 +558,13 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 	if err != nil {
 		return wire.ReleaseReply{}, err
 	}
-	e.dropHold(target)
+
+	// Remove from orphaned holds if it was there
+	if _, wasOrphaned := e.orphanedHolds[target.attemptID]; wasOrphaned {
+		delete(e.orphanedHolds, target.attemptID)
+	} else {
+		e.dropHold(target)
+	}
 	e.syncParticipant(target.participant)
 	return wire.ReleaseReply{Released: []string{target.attemptID}}, nil
 }

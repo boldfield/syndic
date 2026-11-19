@@ -66,7 +66,6 @@ const (
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
 	reasonCancelled    = "cancelled"
-	reasonOverride     = "override"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
@@ -132,30 +131,31 @@ type Engine struct {
 	crashHook func() bool
 
 	// mu owns everything below.
-	mu           sync.Mutex
-	started      bool
-	cancelers    int        // goroutines calling Adapter.Cancel; Stop waits for none
-	cancelersOut *sync.Cond // signalled on e.mu when cancelers drops to zero
-	rosterAbs    string
-	roster       *config.Roster
-	adapters     map[string]transport.Adapter
-	built        manifest.Built
-	runID        string
-	manifestHash string
-	runFirstSeq  int64
-	startedAt    time.Time
-	open         *openTurn
-	running      map[string]bool
-	inflight     map[string]int // dispatches holding a pool slot, per participant
-	queued       map[string]bool
-	pools        map[string]*pool
-	exceeded     map[string]bool   // participants whose estimate was exceeded this run
-	holds        map[string]*hold  // unreleased capacity holds, by attempt id
-	calling      map[string]bool   // attempts whose Complete call has not returned
-	cancelled    map[string]bool   // calling attempts the engine itself cancelled
-	cancelling   map[string]int    // Adapter.Cancel calls pending, per participant
-	pstate       map[string]string // cancelling or unknown last reported, per participant
-	failed       map[string]string // failure state of the last dispatch, per participant
+	mu            sync.Mutex
+	started       bool
+	cancelers     int        // goroutines calling Adapter.Cancel; Stop waits for none
+	cancelersOut  *sync.Cond // signalled on e.mu when cancelers drops to zero
+	rosterAbs     string
+	roster        *config.Roster
+	adapters      map[string]transport.Adapter
+	built         manifest.Built
+	runID         string
+	manifestHash  string
+	runFirstSeq   int64
+	startedAt     time.Time
+	open          *openTurn
+	running       map[string]bool
+	inflight      map[string]int // dispatches holding a pool slot, per participant
+	queued        map[string]bool
+	pools         map[string]*pool
+	exceeded      map[string]bool   // participants whose estimate was exceeded this run
+	holds         map[string]*hold  // unreleased capacity holds, by attempt id
+	orphanedHolds map[string]*hold  // holds whose group has no members in new roster
+	calling       map[string]bool   // attempts whose Complete call has not returned
+	cancelled     map[string]bool   // calling attempts the engine itself cancelled
+	cancelling    map[string]int    // Adapter.Cancel calls pending, per participant
+	pstate        map[string]string // cancelling or unknown last reported, per participant
+	failed        map[string]string // failure state of the last dispatch, per participant
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -172,25 +172,26 @@ func New(o Options) (*Engine, error) {
 		return nil, errors.New("engine: NewAdapter is required")
 	}
 	e := &Engine{
-		store:      o.Store,
-		hub:        o.Hub,
-		rosterPath: o.RosterPath,
-		version:    o.EngineVersion,
-		clock:      o.Clock,
-		rand:       o.Rand,
-		retryDelay: retryDelay,
-		noDelivery: deliveryOff,
-		newAdapter: o.NewAdapter,
-		running:    make(map[string]bool),
-		inflight:   make(map[string]int),
-		queued:     make(map[string]bool),
-		pools:      make(map[string]*pool),
-		holds:      make(map[string]*hold),
-		calling:    make(map[string]bool),
-		cancelled:  make(map[string]bool),
-		cancelling: make(map[string]int),
-		pstate:     make(map[string]string),
-		failed:     make(map[string]string),
+		store:         o.Store,
+		hub:           o.Hub,
+		rosterPath:    o.RosterPath,
+		version:       o.EngineVersion,
+		clock:         o.Clock,
+		rand:          o.Rand,
+		retryDelay:    retryDelay,
+		noDelivery:    deliveryOff,
+		newAdapter:    o.NewAdapter,
+		running:       make(map[string]bool),
+		inflight:      make(map[string]int),
+		queued:        make(map[string]bool),
+		pools:         make(map[string]*pool),
+		holds:         make(map[string]*hold),
+		orphanedHolds: make(map[string]*hold),
+		calling:       make(map[string]bool),
+		cancelled:     make(map[string]bool),
+		cancelling:    make(map[string]int),
+		pstate:        make(map[string]string),
+		failed:        make(map[string]string),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
@@ -427,6 +428,12 @@ func (e *Engine) Start() error {
 		return err
 	}
 
+	// Load all unreleased holds into memory and arm their timers
+	err = e.loadHoldsIntoMemory(roster)
+	if err != nil {
+		return fmt.Errorf("engine: load holds: %w", err)
+	}
+
 	e.roster = roster
 	e.rosterAbs = path
 	e.adapters = adapters
@@ -481,30 +488,57 @@ func (e *Engine) Hello() wire.HelloReply {
 // Override marks a turn as overridden with the given reason.
 func (e *Engine) Override(turnID, reason string) error {
 	if reason == "" {
-		return fmt.Errorf("engine: reason_required")
+		return refusal(wire.ErrorCodeReasonRequired)
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if !e.started {
+		e.mu.Unlock()
 		return errors.New("engine: not started")
 	}
 
+	t := e.open
+	if t == nil || t.id != turnID {
+		e.mu.Unlock()
+		turnRow, err := e.store.GetTurn(turnID)
+		switch {
+		case errors.Is(err, journal.ErrTurnNotFound):
+			notFound := refusal(wire.ErrorCodeNotFound)
+			notFound.TurnID = strPtr(turnID)
+			return notFound
+		case err != nil:
+			return err
+		case turnRow.TerminalState != StateIncomplete:
+			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
+			notIncomplete.TurnID = strPtr(turnID)
+			return notIncomplete
+		case turnRow.CandidateID == "":
+			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
+			notIncomplete.TurnID = strPtr(turnID)
+			return notIncomplete
+		default:
+			notOpen := refusal(wire.ErrorCodeNotOpen)
+			notOpen.TurnID = strPtr(turnID)
+			return notOpen
+		}
+	}
+
+	if t.candidateHash == "" {
+		e.mu.Unlock()
+		notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
+		notIncomplete.TurnID = strPtr(turnID)
+		return notIncomplete
+	}
+
 	// Perform the override in a transaction
-	return e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		// Check that turn exists and is incomplete with a candidate
-		turnRow, err := tx.GetTurn(turnID)
+	var blocks []journal.Block
+
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Read open blocks BEFORE OverrideTurn
+		var err error
+		blocks, err = tx.OpenBlocks(turnID)
 		if err != nil {
-			return fmt.Errorf("not_found")
-		}
-
-		if turnRow.TerminalState != StateIncomplete {
-			return fmt.Errorf("not_incomplete")
-		}
-
-		if turnRow.CandidateID == "" {
-			return fmt.Errorf("not_incomplete")
+			return fmt.Errorf("get open blocks: %w", err)
 		}
 
 		// Bump epoch
@@ -512,21 +546,16 @@ func (e *Engine) Override(turnID, reason string) error {
 			return fmt.Errorf("bump epoch: %w", err)
 		}
 
-		// Override the turn and emit the override event
+		// Now override the turn (which will also override blocks and emit override event)
 		if err := tx.OverrideTurn(turnID, reason); err != nil {
 			return fmt.Errorf("override turn: %w", err)
 		}
 
-		// Get the open blocks and emit block_state events for each
-		blocks, err := tx.OpenBlocks(turnID)
-		if err != nil {
-			return fmt.Errorf("get open blocks: %w", err)
-		}
-
+		// Emit block_state events for each block that was overridden
 		for _, block := range blocks {
 			if err := emit(turnID, wire.EventKindBlockState, wire.EvBlockState{
 				BlockID: block.ID,
-				State:   "overridden",
+				State:   StateOverridden,
 			}); err != nil {
 				return fmt.Errorf("emit block_state: %w", err)
 			}
@@ -543,6 +572,20 @@ func (e *Engine) Override(turnID, reason string) error {
 
 		return nil
 	})
+
+	if err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("override: %w", err)
+	}
+
+	// Record the override in memory and prepare for delivery
+	if t != nil {
+		e.commitTerminal(t, &terminal{holds: []*hold{}})
+		e.deliverTerminal(t, StateOverridden, reason)
+	}
+
+	e.mu.Unlock()
+	return nil
 }
 
 // mapHoldsToNewRoster maps unreleased holds from previous runs to the new roster.
@@ -557,11 +600,12 @@ func (e *Engine) mapHoldsToNewRoster(tx *journal.Tx, newRoster *config.Roster) (
 	// Build a map of pools to participants for quick lookup
 	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
 	for _, p := range newRoster.Participants {
+		pool := poolName(p)
 		key := p.Endpoint + ":" + p.Model
-		if poolParticipants[p.Pool] == nil {
-			poolParticipants[p.Pool] = make(map[string]bool)
+		if poolParticipants[pool] == nil {
+			poolParticipants[pool] = make(map[string]bool)
 		}
-		poolParticipants[p.Pool][key] = true
+		poolParticipants[pool][key] = true
 	}
 
 	uncertainCapacitySet := make(map[string]bool)
@@ -611,8 +655,85 @@ func (e *Engine) mapHoldsToNewRoster(tx *journal.Tx, newRoster *config.Roster) (
 	return uncertainCapacity, orphanedHolds, nil
 }
 
+// loadHoldsIntoMemory loads all unreleased holds from the journal into e.holds
+// and e.orphanedHolds, and arms their timers. e.mu is held.
+func (e *Engine) loadHoldsIntoMemory(newRoster *config.Roster) error {
+	holds, err := e.store.UnreleasedHolds()
+	if err != nil {
+		return fmt.Errorf("get unreleased holds: %w", err)
+	}
+
+	// Build a map of pools to participants for quick lookup
+	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
+	for _, p := range newRoster.Participants {
+		pool := poolName(p)
+		key := p.Endpoint + ":" + p.Model
+		if poolParticipants[pool] == nil {
+			poolParticipants[pool] = make(map[string]bool)
+		}
+		poolParticipants[pool][key] = true
+	}
+
+	for _, journalHold := range holds {
+		// Convert journal hold to wire hold with group members
+		var group []wire.GroupMember
+		for _, m := range journalHold.Group {
+			group = append(group, wire.GroupMember{
+				EndpointName: m.EndpointName,
+				Model:        m.Model,
+			})
+		}
+
+		// Check if this hold applies to any pool in the new roster
+		appliesToAnyPool := false
+		var appliedPools []string
+
+		for pool := range poolParticipants {
+			// Check if any participant in this pool is in the hold's group
+			for _, member := range journalHold.Group {
+				key := member.EndpointName + ":" + member.Model
+				if poolParticipants[pool][key] {
+					appliesToAnyPool = true
+					appliedPools = append(appliedPools, pool)
+					break
+				}
+			}
+		}
+
+		if appliesToAnyPool {
+			// For now, add hold only for the first pool it applies to.
+			// TODO: handle holds that apply to multiple pools (e.g. after pool split)
+			// by using a composite key or multiple hold entries
+			sort.Strings(appliedPools)
+			pool := appliedPools[0]
+			h := &hold{
+				attemptID:   journalHold.AttemptID,
+				pool:        pool,
+				participant: journalHold.EndpointName + ":" + journalHold.Model,
+				since:       journalHold.HeldSince,
+				group:       group,
+			}
+			e.holds[journalHold.AttemptID] = h
+			e.armHold(h)
+		} else {
+			// This hold is orphaned - store it in orphanedHolds
+			h := &hold{
+				attemptID:   journalHold.AttemptID,
+				pool:        journalHold.Pool,
+				participant: journalHold.EndpointName + ":" + journalHold.Model,
+				since:       journalHold.HeldSince,
+				group:       group,
+			}
+			e.orphanedHolds[journalHold.AttemptID] = h
+		}
+	}
+
+	return nil
+}
+
 // extractParticipantInfoFromManifest extracts participant info from the manifest JSON.
 // Returns group, pool, endpoint_name, model, error.
+// Pool names are normalized: empty pool becomes defaultPool.
 func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, participantID string) ([]journal.GroupMember, string, string, string, error) {
 	var manifestData map[string]interface{}
 	if err := json.Unmarshal(manifest, &manifestData); err != nil {
@@ -648,6 +769,8 @@ func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, pa
 			}
 			if pool, ok := pMap["pool"].(string); ok {
 				poolName = pool
+			} else {
+				poolName = ""
 			}
 			break
 		}
@@ -655,6 +778,11 @@ func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, pa
 
 	if targetParticipant == nil {
 		return nil, "", "", "", fmt.Errorf("participant %s not found in manifest", participantID)
+	}
+
+	// Normalize pool name: empty becomes default
+	if poolName == "" {
+		poolName = defaultPool
 	}
 
 	// Now build the group by finding all participants in the same pool
@@ -666,7 +794,15 @@ func (e *Engine) extractParticipantInfoFromManifest(manifest json.RawMessage, pa
 		if !ok {
 			continue
 		}
-		if pool, ok := pMap["pool"].(string); ok && pool == poolName {
+		currentPool := ""
+		if pool, ok := pMap["pool"].(string); ok {
+			currentPool = pool
+		}
+		// Normalize pool name for comparison
+		if currentPool == "" {
+			currentPool = defaultPool
+		}
+		if currentPool == poolName {
 			if ep, ok := pMap["endpoint"].(string); ok {
 				if m, ok := pMap["model"].(string); ok {
 					key := ep + ":" + m

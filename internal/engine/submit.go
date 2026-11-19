@@ -117,6 +117,24 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, busy
 	}
 
+	if len(e.orphanedHolds) > 0 {
+		orphanedErr := refusal(wire.ErrorCodeOrphanedHolds)
+		orphanedHolds := make([]wire.Hold, 0, len(e.orphanedHolds))
+		for _, h := range e.orphanedHolds {
+			orphanedHolds = append(orphanedHolds, wire.Hold{
+				Pool:      h.pool,
+				AttemptID: h.attemptID,
+				Group:     h.group,
+			})
+		}
+		body, err := json.Marshal(orphanedHolds)
+		if err != nil {
+			return wire.SubmitReply{}, err
+		}
+		orphanedErr.Holds = body
+		return wire.SubmitReply{}, orphanedErr
+	}
+
 	presetName, quickName := "", ""
 	if req.Preset != nil {
 		presetName = *req.Preset
