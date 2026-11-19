@@ -33,11 +33,12 @@ const (
 
 // hold is the in-memory mirror of an unreleased capacity_holds row.
 type hold struct {
-	attemptID   string
-	pool        string
-	participant string
-	since       time.Time
-	group       []wire.GroupMember
+	attemptID    string
+	pool         string   // original pool name from the hold record (for orphaned holds)
+	appliedPools []string // all pools this hold applies to in the new roster
+	participant  string
+	since        time.Time
+	group        []wire.GroupMember
 	// calling is true while the attempt's Complete call has not returned, in
 	// which case its pool slot is already counted as running.
 	calling bool
@@ -55,8 +56,13 @@ type terminal struct {
 func (e *Engine) occupied(name string) int {
 	n := e.poolState(name).running
 	for _, h := range e.holds {
-		if h.pool == name && !h.calling {
-			n++
+		if !h.calling {
+			for _, pool := range h.appliedPools {
+				if pool == name {
+					n++
+					break
+				}
+			}
 		}
 	}
 	return n
@@ -114,7 +120,7 @@ func (e *Engine) holdIn(tx *journal.Tx, emit hub.Emit, attemptID, participant st
 	}); err != nil {
 		return nil, err
 	}
-	return &hold{attemptID: attemptID, pool: pool, participant: participant, since: now, group: group}, nil
+	return &hold{attemptID: attemptID, pool: pool, appliedPools: []string{pool}, participant: participant, since: now, group: group}, nil
 }
 
 // endIn is the one terminal path, run inside the Tx that ends the turn:
@@ -440,8 +446,11 @@ func (e *Engine) syncParticipant(id string) {
 func (e *Engine) sortedHolds(pool string) []*hold {
 	var out []*hold
 	for _, h := range e.holds {
-		if h.pool == pool {
-			out = append(out, h)
+		for _, p := range h.appliedPools {
+			if p == pool {
+				out = append(out, h)
+				break
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -563,6 +572,7 @@ func (e *Engine) Release(req wire.ReleaseRequest) (wire.ReleaseReply, error) {
 	if _, wasOrphaned := e.orphanedHolds[target.attemptID]; wasOrphaned {
 		delete(e.orphanedHolds, target.attemptID)
 	} else {
+		// Release frees all pools the hold applies to
 		e.dropHold(target)
 	}
 	e.syncParticipant(target.participant)

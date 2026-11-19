@@ -428,12 +428,7 @@ func (e *Engine) Start() error {
 		return err
 	}
 
-	// Load all unreleased holds into memory and arm their timers
-	err = e.loadHoldsIntoMemory(roster)
-	if err != nil {
-		return fmt.Errorf("engine: load holds: %w", err)
-	}
-
+	// Set roster before loading holds so armHold can use it
 	e.roster = roster
 	e.rosterAbs = path
 	e.adapters = adapters
@@ -442,6 +437,13 @@ func (e *Engine) Start() error {
 	e.manifestHash = manifestHash
 	e.runFirstSeq = firstSeq
 	e.startedAt = startedAt
+
+	// Load all unreleased holds into memory and arm their timers
+	err = e.loadHoldsIntoMemory()
+	if err != nil {
+		return fmt.Errorf("engine: load holds: %w", err)
+	}
+
 	e.started = true
 	return nil
 }
@@ -516,18 +518,41 @@ func (e *Engine) Override(turnID, reason string) error {
 			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
 			notIncomplete.TurnID = strPtr(turnID)
 			return notIncomplete
-		default:
-			notOpen := refusal(wire.ErrorCodeNotOpen)
-			notOpen.TurnID = strPtr(turnID)
-			return notOpen
+		}
+		// At this point, turnRow is incomplete with a candidate,
+		// but it's not the currently open turn. We can still override it.
+		// Lock back and proceed.
+		e.mu.Lock()
+	} else {
+		// t matches e.open and e.mu is held
+		if t.candidateHash == "" {
+			e.mu.Unlock()
+			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
+			notIncomplete.TurnID = strPtr(turnID)
+			return notIncomplete
 		}
 	}
 
-	if t.candidateHash == "" {
-		e.mu.Unlock()
-		notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
-		notIncomplete.TurnID = strPtr(turnID)
-		return notIncomplete
+	// Get candidateHash for delivery. If this is e.open, use the in-memory hash.
+	// Otherwise, retrieve it from the database.
+	var candidateHash string
+	if t != nil {
+		candidateHash = t.candidateHash
+	} else {
+		// Retrieve candidate hash from the database for a recovered incomplete turn
+		turn, err := e.store.GetTurn(turnID)
+		if err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("override: get turn for delivery: %w", err)
+		}
+		if turn.CandidateID != "" {
+			cand, err := e.store.GetCandidate(turn.CandidateID)
+			if err != nil {
+				e.mu.Unlock()
+				return fmt.Errorf("override: get candidate: %w", err)
+			}
+			candidateHash = cand.ContentHash
+		}
 	}
 
 	// Perform the override in a transaction
@@ -578,9 +603,11 @@ func (e *Engine) Override(turnID, reason string) error {
 		return fmt.Errorf("override: %w", err)
 	}
 
-	// Record the override in memory and prepare for delivery
+	// Record the override in memory and prepare for delivery if this is e.open
 	if t != nil {
 		e.commitTerminal(t, &terminal{holds: []*hold{}})
+		// Set candidateHash for delivery
+		t.candidateHash = candidateHash
 		e.deliverTerminal(t, StateOverridden, reason)
 	}
 
@@ -656,8 +683,8 @@ func (e *Engine) mapHoldsToNewRoster(tx *journal.Tx, newRoster *config.Roster) (
 }
 
 // loadHoldsIntoMemory loads all unreleased holds from the journal into e.holds
-// and e.orphanedHolds, and arms their timers. e.mu is held.
-func (e *Engine) loadHoldsIntoMemory(newRoster *config.Roster) error {
+// and e.orphanedHolds, and arms their timers. e.roster must already be set. e.mu is held.
+func (e *Engine) loadHoldsIntoMemory() error {
 	holds, err := e.store.UnreleasedHolds()
 	if err != nil {
 		return fmt.Errorf("get unreleased holds: %w", err)
@@ -665,7 +692,7 @@ func (e *Engine) loadHoldsIntoMemory(newRoster *config.Roster) error {
 
 	// Build a map of pools to participants for quick lookup
 	poolParticipants := make(map[string]map[string]bool) // pool -> {endpoint:model} set
-	for _, p := range newRoster.Participants {
+	for _, p := range e.roster.Participants {
 		pool := poolName(p)
 		key := p.Endpoint + ":" + p.Model
 		if poolParticipants[pool] == nil {
@@ -684,45 +711,41 @@ func (e *Engine) loadHoldsIntoMemory(newRoster *config.Roster) error {
 			})
 		}
 
-		// Check if this hold applies to any pool in the new roster
-		appliesToAnyPool := false
+		// Find all pools this hold applies to in the new roster
 		var appliedPools []string
-
 		for pool := range poolParticipants {
 			// Check if any participant in this pool is in the hold's group
 			for _, member := range journalHold.Group {
 				key := member.EndpointName + ":" + member.Model
 				if poolParticipants[pool][key] {
-					appliesToAnyPool = true
 					appliedPools = append(appliedPools, pool)
 					break
 				}
 			}
 		}
 
-		if appliesToAnyPool {
-			// For now, add hold only for the first pool it applies to.
-			// TODO: handle holds that apply to multiple pools (e.g. after pool split)
-			// by using a composite key or multiple hold entries
+		if len(appliedPools) > 0 {
+			// Sort for deterministic order
 			sort.Strings(appliedPools)
-			pool := appliedPools[0]
 			h := &hold{
-				attemptID:   journalHold.AttemptID,
-				pool:        pool,
-				participant: journalHold.EndpointName + ":" + journalHold.Model,
-				since:       journalHold.HeldSince,
-				group:       group,
+				attemptID:    journalHold.AttemptID,
+				pool:         journalHold.Pool, // original pool for display
+				appliedPools: appliedPools,
+				participant:  journalHold.EndpointName + ":" + journalHold.Model,
+				since:        journalHold.HeldSince,
+				group:        group,
 			}
 			e.holds[journalHold.AttemptID] = h
 			e.armHold(h)
 		} else {
 			// This hold is orphaned - store it in orphanedHolds
 			h := &hold{
-				attemptID:   journalHold.AttemptID,
-				pool:        journalHold.Pool,
-				participant: journalHold.EndpointName + ":" + journalHold.Model,
-				since:       journalHold.HeldSince,
-				group:       group,
+				attemptID:    journalHold.AttemptID,
+				pool:         journalHold.Pool,
+				appliedPools: []string{},
+				participant:  journalHold.EndpointName + ":" + journalHold.Model,
+				since:        journalHold.HeldSince,
+				group:        group,
 			}
 			e.orphanedHolds[journalHold.AttemptID] = h
 		}
