@@ -196,6 +196,29 @@ func (e *Engine) beginDelivery(t *openTurn, id string, emitVerdictsDelivered boo
 			}
 		}
 
+		// Check if turn budget is exhausted
+		budgetRec, hasBudget, err := readBudget(turn)
+		if err != nil {
+			return err
+		}
+		if hasBudget && budgetRec.Exhausted {
+			// Turn budget exhausted: record delivery as not_sent:budget without checking context
+			attemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
+				TurnID:      t.id,
+				Participant: id,
+				Phase:       phaseDelivery,
+				Epoch:       turn.Epoch,
+			})
+			if err != nil {
+				return err
+			}
+			if err := tx.CompleteAttempt(attemptID, "", 0, "", "error", "", "not_sent:budget"); err != nil {
+				return err
+			}
+			notSent = true
+			return nil
+		}
+
 		// Check budget constraints within the transaction
 		pb, missing := e.budgetFor(t.eff, id)
 		if missing != "" {
