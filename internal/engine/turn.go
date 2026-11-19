@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -49,32 +48,17 @@ func (e *Engine) startAuthor(t *openTurn) {
 // runAuthor calls the author, handles its result and gives back the pool slot
 // before anything else is dispatched.
 func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
-	res := e.complete(t.author, req)
+	res, fail := e.complete(t, t.author, req)
 	if t.mode != modeSolo {
-		proceed := e.completeAuthorReview(t, attemptID, req, res)
+		proceed := e.completeAuthorReview(t, attemptID, req, res, fail)
 		e.release(t.author)
 		if proceed {
 			e.runReviewers(t)
 		}
 		return
 	}
-	e.completeAuthor(t, attemptID, req, res)
+	e.completeAuthor(t, attemptID, req, res, fail)
 	e.release(t.author)
-}
-
-// complete calls the participant's adapter and turns a Go error into an
-// error result.
-func (e *Engine) complete(participant string, req transport.CompleteRequest) transport.CompleteResult {
-	res, err := e.adapterFor(participant).Complete(context.Background(), req)
-	e.returned(req.Envelope.AttemptID)
-	if err != nil {
-		res = transport.CompleteResult{
-			Envelope:        req.Envelope,
-			Status:          transport.StatusError,
-			TransportStatus: "adapter_error:" + err.Error(),
-		}
-	}
-	return res
 }
 
 // returned records that the attempt's Complete call has returned. A hold on
@@ -184,14 +168,14 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 	if err != nil {
 		return transport.CompleteRequest{}, "", err
 	}
-	e.running[t.author] = true
+	e.markRunning(t.author)
 	e.armAttempt(t, attemptID, deadline)
 	return req, attemptID, nil
 }
 
 // completeAuthor runs accept, gate and the terminal path for the author's
 // result in one transaction.
-func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult) {
+func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -200,8 +184,9 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 
 	quarantined, exceeded := false, false
 	var term *terminal
+	var held *hold
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		quarantined, exceeded, term = false, false, nil
+		quarantined, exceeded, term, held = false, false, nil, nil
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
@@ -249,10 +234,13 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		if e.lastInflight(t.author) {
 			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
 				Participant: t.author,
-				State:       ParticipantIdle,
+				State:       fail.participantState(),
 			}); err != nil {
 				return err
 			}
+		}
+		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
+			return err
 		}
 		if gate == nil {
 			term, err = e.endIn(tx, emit, t, StateSoloComplete, reasonSoloOK)
@@ -278,6 +266,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		return
 	}
+	e.failedCommitted(t.author, fail, held)
 	if e.lastInflight(t.author) {
 		delete(e.running, t.author)
 	}

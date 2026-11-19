@@ -154,6 +154,8 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.State = ParticipantUnknown
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning
+	case e.failed[p.ID] != "":
+		ws.State = e.failed[p.ID]
 	default:
 		ws.State = ParticipantIdle
 	}

@@ -299,7 +299,7 @@ func TestSoloFailures(t *testing.T) {
 		{"refused", fake.Step{Kind: fake.StepKindReply, Text: "no", Status: transport.StatusRefused, TransportStatus: transport.TransportStatusOK}, "author_failed:refused", true},
 		{"truncated", fake.Step{Kind: fake.StepKindReply, Text: "cut", Status: transport.StatusTruncated, TransportStatus: transport.TransportStatusOK}, "author_failed:truncated", true},
 		{"identity mismatch", fake.Step{Kind: fake.StepKindReply, Text: "x", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK, ReportedModel: "other-model"}, "author_failed:gate:identity mismatch", true},
-		{"transport status", fake.Step{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnreachable}, "author_failed:unreachable", true},
+		{"transport status", fake.Step{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnauthorized}, "author_failed:unauthorized", true},
 		{"go error", fake.Step{Kind: fake.StepKindError, Err: errors.New("boom")}, "author_failed:adapter_error:boom", true},
 	}
 	for _, tc := range cases {

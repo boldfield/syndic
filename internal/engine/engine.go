@@ -113,6 +113,7 @@ type Engine struct {
 	version    string
 	clock      Clock
 	rand       io.Reader
+	retryDelay time.Duration // the package-level retryDelay when the engine was built
 	newAdapter func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 
 	// payloadHook lets tests replace an event payload (for example with one
@@ -149,6 +150,7 @@ type Engine struct {
 	calling      map[string]bool   // attempts whose Complete call has not returned
 	cancelling   map[string]int    // Adapter.Cancel calls pending, per participant
 	pstate       map[string]string // cancelling or unknown last reported, per participant
+	failed       map[string]string // failure state of the last dispatch, per participant
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -171,6 +173,7 @@ func New(o Options) (*Engine, error) {
 		version:    o.EngineVersion,
 		clock:      o.Clock,
 		rand:       o.Rand,
+		retryDelay: retryDelay,
 		newAdapter: o.NewAdapter,
 		running:    make(map[string]bool),
 		inflight:   make(map[string]int),
@@ -180,6 +183,7 @@ func New(o Options) (*Engine, error) {
 		calling:    make(map[string]bool),
 		cancelling: make(map[string]int),
 		pstate:     make(map[string]string),
+		failed:     make(map[string]string),
 	}
 	if e.clock == nil {
 		e.clock = realClock{}
