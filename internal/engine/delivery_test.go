@@ -91,6 +91,7 @@ func userContent(req transport.CompleteRequest) string {
 }
 
 func TestDeliveryApprovedToEveryParticipant(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
 		// A delivery reply that is a well-formed approve must still be ignored.
@@ -172,6 +173,7 @@ func TestDeliveryApprovedToEveryParticipant(t *testing.T) {
 }
 
 func TestDeliveryCarriesCommentaryAndRepairOutput(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
 		"r1": {
@@ -201,6 +203,7 @@ func TestDeliveryCarriesCommentaryAndRepairOutput(t *testing.T) {
 }
 
 func TestDeliveryCarriesOpenBlock(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
 		"r1":     {blockStep("b1"), ack()},
@@ -227,6 +230,7 @@ func TestDeliveryCarriesOpenBlock(t *testing.T) {
 }
 
 func TestDeliveryNoneForSoloCancelledOrNoCandidate(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	t.Run("solo", func(t *testing.T) {
 		h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{"author": {enginetest.Reply(authorText), ack()}})
 		reply, err := h.Engine.Submit(soloReq("s1"))
@@ -280,6 +284,7 @@ func wantNoDelivery(t *testing.T, h *enginetest.Harness, turnID string) {
 }
 
 func TestDeliveryHangEndsAtDeliveryDeadline(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), {Kind: fake.StepKindHang}},
 		"r1":     {approveStep(), ack()},
@@ -312,6 +317,7 @@ func TestDeliveryHangEndsAtDeliveryDeadline(t *testing.T) {
 }
 
 func TestDeliveryUnreachableIsNotRetried(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	unreachable := fake.Step{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: transport.TransportStatusUnreachable}
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), unreachable, ack()},
@@ -338,6 +344,7 @@ func TestDeliveryUnreachableIsNotRetried(t *testing.T) {
 }
 
 func TestDeliveryCompletionsDistinguishSuccessFromFailure(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	failed := fake.Step{Kind: fake.StepKindReply, Status: transport.StatusError, TransportStatus: "http_500"}
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
@@ -370,6 +377,7 @@ func TestDeliveryCompletionsDistinguishSuccessFromFailure(t *testing.T) {
 }
 
 func TestDeliveryNotSentWhenItDoesNotFitContext(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	big := strings.Repeat("long dissent. ", 1500)
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
@@ -425,6 +433,7 @@ func TestDeliveryNotSentWhenItDoesNotFitContext(t *testing.T) {
 }
 
 func TestDeliveryNotSentWhenTurnBudgetExhausted(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	spent := approveStep()
 	spent.Usage = &transport.Usage{Prompt: 10_000_000, Completion: 1}
 	scripts := map[string][]fake.Step{
@@ -449,6 +458,7 @@ func TestDeliveryNotSentWhenTurnBudgetExhausted(t *testing.T) {
 }
 
 func TestDeliveriesShareAPoolOneAtATime(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	roster := schedRoster("300s", "900s", []reviewer{{"r1", "default"}}, nil, "")
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), ack()},
@@ -483,6 +493,7 @@ func TestDeliveriesShareAPoolOneAtATime(t *testing.T) {
 }
 
 func TestSubmitAcceptedWhileDeliveryRuns(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
 	scripts := map[string][]fake.Step{
 		"author": {enginetest.Reply(authorText), {Kind: fake.StepKindHang}},
 		"r1":     {approveStep(), ack()},
