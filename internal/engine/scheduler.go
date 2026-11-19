@@ -25,6 +25,7 @@ type queuedDispatch struct {
 	t           *openTurn
 	participant string
 	start       func()
+	terminal    bool // true for terminal deliveries that bypass turn state checks
 }
 
 // poolOf returns the pool a participant dispatches through.
@@ -64,7 +65,31 @@ func (e *Engine) schedule(t *openTurn, participant string, start func()) error {
 		return err
 	}
 	e.queued[participant] = true
-	p.queue = append(p.queue, &queuedDispatch{t: t, participant: participant, start: start})
+	p.queue = append(p.queue, &queuedDispatch{t: t, participant: participant, start: start, terminal: false})
+	return nil
+}
+
+// scheduleTerminalDelivery schedules a terminal delivery dispatch. Unlike
+// regular schedule, it bypasses the e.open check since deliveries run after
+// the turn is terminal. e.mu is held.
+func (e *Engine) scheduleTerminalDelivery(t *openTurn, participant string, start func()) error {
+	name := e.poolOf(participant)
+	p := e.poolState(name)
+	concurrency, _ := e.roster.PoolFor(name)
+	if e.occupied(name) < concurrency && len(p.queue) == 0 {
+		p.running++
+		e.inflight[participant]++
+		start()
+		return nil
+	}
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantQueued})
+	})
+	if err != nil {
+		return err
+	}
+	e.queued[participant] = true
+	p.queue = append(p.queue, &queuedDispatch{t: t, participant: participant, start: start, terminal: true})
 	return nil
 }
 
@@ -122,7 +147,8 @@ func (e *Engine) kick(name string) {
 		}
 		p.queue = p.queue[1:]
 		delete(e.queued, head.participant)
-		if e.open != head.t {
+		// Skip non-terminal deliveries of turns that are no longer open
+		if !head.terminal && e.open != head.t {
 			continue
 		}
 		p.running++
@@ -226,6 +252,13 @@ func (e *Engine) onAttemptDeadline(t *openTurn, attemptID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.open != t {
+		// For terminal deliveries, the turn is no longer open but the attempt
+		// deadline still needs to fire. Check if the attempt is still pending.
+		if _, pending := t.pending[attemptID]; !pending {
+			return
+		}
+		// End the delivery attempt without ending the turn (turn is already terminal)
+		e.endDeliveryLocked(t, attemptID)
 		return
 	}
 	if _, pending := t.pending[attemptID]; !pending {
