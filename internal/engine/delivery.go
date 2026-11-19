@@ -11,7 +11,10 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-const phaseDelivery = "terminal_delivery"
+const (
+	phaseDelivery = "terminal_delivery"
+	phaseRepair   = "repair"
+)
 
 // deliveryDispatch is one begun delivery attempt.
 type deliveryDispatch struct {
@@ -22,7 +25,7 @@ type deliveryDispatch struct {
 
 // deliveryRecipients gathers all participants who should receive terminal delivery:
 // the author and all reviewers who were dispatched, in that order. e.mu is held.
-func (e *Engine) deliveryRecipients(t *openTurn, turnRow *journal.TurnRow) ([]string, error) {
+func (e *Engine) deliveryRecipients(t *openTurn) ([]string, error) {
 	recipients := []string{t.author}
 	seen := map[string]bool{t.author: true}
 
@@ -50,7 +53,8 @@ func (e *Engine) reviewerOutputs(t *openTurn) ([]prompt.ReviewerOutput, error) {
 
 	var outputs []prompt.ReviewerOutput
 	for _, a := range attempts {
-		if a.Phase == phaseReview && a.RawOutput != nil && *a.RawOutput != "" {
+		// Include both review and repair attempts
+		if (a.Phase == phaseReview || a.Phase == phaseRepair) && a.RawOutput != nil && *a.RawOutput != "" {
 			outputs = append(outputs, prompt.ReviewerOutput{
 				Participant: a.Participant,
 				Output:      *a.RawOutput,
@@ -96,26 +100,15 @@ func (e *Engine) runDeliveries(t *openTurn) error {
 		return nil
 	}
 
-	recipients, err := e.deliveryRecipients(t, turnRow)
+	recipients, err := e.deliveryRecipients(t)
 	if err != nil {
 		return err
 	}
 
-	for _, id := range recipients {
-		if err := e.schedule(t, id, func() { e.startDelivery(t, id) }); err != nil {
-			return err
-		}
-	}
-
-	// Emit verdicts_delivered event after all deliveries are queued
-	if len(recipients) > 0 {
-		err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-			return emit(t.id, wire.EventKindVerdictsDelivered, wire.EvVerdictsDelivered{
-				TurnID:     t.id,
-				Recipients: recipients,
-			})
-		})
-		if err != nil {
+	for i, id := range recipients {
+		// Mark the first delivery so it emits verdicts_delivered
+		isFirst := i == 0
+		if err := e.schedule(t, id, func() { e.startDelivery(t, id, isFirst, recipients) }); err != nil {
 			return err
 		}
 	}
@@ -125,10 +118,15 @@ func (e *Engine) runDeliveries(t *openTurn) error {
 
 // startDelivery begins the delivery attempt and calls the adapter on its own
 // goroutine. It runs with e.mu held and the pool slot taken.
-func (e *Engine) startDelivery(t *openTurn, id string) {
-	d, err := e.beginDelivery(t, id)
+func (e *Engine) startDelivery(t *openTurn, id string, emitVerdictsDelivered bool, recipients []string) {
+	d, notSent, err := e.beginDelivery(t, id, emitVerdictsDelivered, recipients)
+	if notSent {
+		// Budget refusal: delivery was recorded but not sent
+		e.releaseLocked(id)
+		return
+	}
 	if err != nil {
-		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		// Error recording the attempt
 		e.releaseLocked(id)
 		return
 	}
@@ -146,10 +144,13 @@ func (e *Engine) runDelivery(t *openTurn, d deliveryDispatch) {
 }
 
 // beginDelivery creates a delivery attempt within a transaction. e.mu is held.
-func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error) {
+// It performs the budget check and records not_sent:budget if the delivery does not fit.
+// If emitVerdictsDelivered is true, it also emits the verdicts_delivered event.
+// Returns (dispatch, notSent, error). notSent indicates the attempt was recorded as not_sent:budget.
+func (e *Engine) beginDelivery(t *openTurn, id string, emitVerdictsDelivered bool, recipients []string) (deliveryDispatch, bool, error) {
 	turnRow, err := e.store.GetTurn(t.id)
 	if err != nil {
-		return deliveryDispatch{}, err
+		return deliveryDispatch{}, false, err
 	}
 
 	p := e.participantConfig(id)
@@ -158,18 +159,18 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 
 	reviewerOuts, err := e.reviewerOutputs(t)
 	if err != nil {
-		return deliveryDispatch{}, err
+		return deliveryDispatch{}, false, err
 	}
 
 	blocks, err := e.openBlocks(t.id)
 	if err != nil {
-		return deliveryDispatch{}, err
+		return deliveryDispatch{}, false, err
 	}
 
 	deliveryInput := prompt.DeliveryInput{
 		TerminalState:   turnRow.TerminalState,
 		TerminalReason:  turnRow.TerminalReason,
-		CandidateHash:   turnRow.CandidateID,
+		CandidateHash:   t.candidateHash,
 		ReviewerOutputs: reviewerOuts,
 		OpenBlocks:      blocks,
 	}
@@ -177,12 +178,73 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 	msgs := prompt.Delivery(deliveryInput)
 
 	var d deliveryDispatch
+	var notSent bool
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		notSent = false
 		turn, err := tx.GetTurn(t.id)
 		if err != nil {
 			return err
 		}
 
+		// Emit verdicts_delivered on the first delivery
+		if emitVerdictsDelivered && len(recipients) > 0 {
+			if err := emit(t.id, wire.EventKindVerdictsDelivered, wire.EvVerdictsDelivered{
+				TurnID:     t.id,
+				Recipients: recipients,
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Check budget constraints within the transaction
+		pb, missing := e.budgetFor(t.eff, id)
+		if missing != "" {
+			// Missing budget constraint: record as not_sent:budget
+			attemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
+				TurnID:      t.id,
+				Participant: id,
+				Phase:       phaseDelivery,
+				Epoch:       turn.Epoch,
+			})
+			if err != nil {
+				return err
+			}
+			if err := tx.CompleteAttempt(attemptID, "", 0, "", "error", "", "not_sent:budget"); err != nil {
+				return err
+			}
+			notSent = true
+			return nil
+		}
+
+		// Estimate the payload size and check context bound
+		estimatedPromptTokens, err := e.estimateDelivery(msgs, pb)
+		if err != nil {
+			return err
+		}
+
+		admissionTokens := budget.AdmissionTokens(msgs, pb.tokensPerByteMax, pb.overheads)
+		usableBound := int(float64(pb.contextBound) * (1 - pb.margin))
+
+		// Check if delivery fits in recipient's context
+		if admissionTokens+maxOut > usableBound {
+			// Does not fit: record as not_sent:budget
+			attemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
+				TurnID:      t.id,
+				Participant: id,
+				Phase:       phaseDelivery,
+				Epoch:       turn.Epoch,
+			})
+			if err != nil {
+				return err
+			}
+			if err := tx.CompleteAttempt(attemptID, "", 0, "", "error", "", "not_sent:budget"); err != nil {
+				return err
+			}
+			notSent = true
+			return nil
+		}
+
+		// Record the attempt for sending
 		attemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
 			TurnID:                t.id,
 			Participant:           id,
@@ -190,7 +252,7 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 			Epoch:                 turn.Epoch,
 			Deadline:              &deadline,
 			MaxOutputTokens:       maxOut,
-			EstimatedPromptTokens: 0,
+			EstimatedPromptTokens: estimatedPromptTokens,
 		})
 		if err != nil {
 			return err
@@ -203,7 +265,7 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 			Epoch:                 int64(turn.Epoch),
 			Deadline:              deadline.Format(time.RFC3339Nano),
 			MaxOutputTokens:       int64(maxOut),
-			EstimatedPromptTokens: 0,
+			EstimatedPromptTokens: int64(estimatedPromptTokens),
 		}); err != nil {
 			return err
 		}
@@ -228,12 +290,29 @@ func (e *Engine) beginDelivery(t *openTurn, id string) (deliveryDispatch, error)
 		return nil
 	})
 	if err != nil {
-		return deliveryDispatch{}, err
+		return deliveryDispatch{}, notSent, err
+	}
+
+	if notSent {
+		return deliveryDispatch{}, true, nil
 	}
 
 	e.markRunning(id)
 	e.armAttempt(t, d.attemptID, d.req.Deadline)
-	return d, nil
+	return d, false, nil
+}
+
+// estimateDelivery estimates the prompt tokens for a delivery payload.
+func (e *Engine) estimateDelivery(msgs []transport.Message, pb partBudget) (int, error) {
+	var totalBytes int
+	for _, msg := range msgs {
+		totalBytes += len(msg.Content)
+	}
+	estimated := int(float64(totalBytes)/pb.bytesPerToken) + pb.overheads.RequestTokens
+	if estimated < 0 {
+		estimated = 0
+	}
+	return estimated, nil
 }
 
 // completeDelivery handles the result of a delivery attempt. The result is
@@ -262,20 +341,16 @@ func (e *Engine) completeDelivery(t *openTurn, attemptID, participant string, re
 			return err
 		}
 
-		// Record the completion with the appropriate status
-		status := "complete"
-		if fail != nil {
-			status = "error"
-		}
-		if res.Status == transport.StatusInterrupted {
-			status = "interrupted"
-		}
+		// Determine status and transport status
+		status, transportStatus := e.deliveryStatus(res, fail)
 
+		// Charge usage to the turn budget (for accounting purposes)
 		if _, err := e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
 			return err
 		}
 
-		return tx.CompleteAttempt(attemptID, res.Text, 0, "", status, "", res.TransportStatus)
+		// Record the completion without retries or holds
+		return tx.CompleteAttempt(attemptID, res.Text, 0, "", status, "", transportStatus)
 	})
 	e.attemptDone(t, attemptID)
 	if err == nil && quarantined {
@@ -289,4 +364,20 @@ func (e *Engine) completeDelivery(t *openTurn, attemptID, participant string, re
 		delete(e.running, participant)
 	}
 	e.syncParticipant(participant)
+}
+
+// deliveryStatus determines the status and transport status for a delivery result.
+func (e *Engine) deliveryStatus(res transport.CompleteResult, fail *failure) (status, transportStatus string) {
+	if fail != nil {
+		status = string(fail.attemptStatus)
+		transportStatus = fail.transportStatus
+		return
+	}
+
+	status = "complete"
+	if res.Status == transport.StatusInterrupted {
+		status = "interrupted"
+	}
+	transportStatus = res.TransportStatus
+	return
 }
