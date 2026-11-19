@@ -97,10 +97,25 @@ func (e *Engine) releaseLocked(participant string) {
 	}
 	// A newer dispatch of the same participant may still be running.
 	if e.inflight[participant] == 0 && e.running[participant] {
-		delete(e.running, participant)
-		_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-			return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
-		})
+		// Check if there are any unreleased holds for this participant
+		hasUnreleasedHold := false
+		if holds, err := e.store.UnreleasedHolds(); err == nil {
+			for _, h := range holds {
+				attempt, _ := e.store.GetAttempt(h.AttemptID)
+				if attempt != nil && attempt.Participant == participant {
+					hasUnreleasedHold = true
+					break
+				}
+			}
+		}
+
+		// Only mark as idle if there are no unreleased holds
+		if !hasUnreleasedHold {
+			delete(e.running, participant)
+			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+				return emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: participant, State: ParticipantIdle})
+			})
+		}
 	}
 	concurrency, _ := e.roster.PoolFor(name)
 	for p.running < concurrency && len(p.queue) > 0 {

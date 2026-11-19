@@ -138,6 +138,8 @@ type Engine struct {
 	queued       map[string]bool
 	pools        map[string]*pool
 	exceeded     map[string]bool // participants whose estimate was exceeded this run
+	cancelling   map[string]bool // participants in cancelling state
+	unknown      map[string]bool // participants in unknown state (hold unreleased)
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -165,6 +167,8 @@ func New(o Options) (*Engine, error) {
 		inflight:   make(map[string]int),
 		queued:     make(map[string]bool),
 		pools:      make(map[string]*pool),
+		cancelling: make(map[string]bool),
+		unknown:    make(map[string]bool),
 	}
 	if e.clock == nil {
 		e.clock = realClock{}

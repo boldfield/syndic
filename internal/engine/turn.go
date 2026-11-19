@@ -267,8 +267,8 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	e.turnEnded(t)
 }
 
-// finishLocked is finishTurn with e.mu held. It must release e.mu before
-// calling cancelInflightAttempts to avoid deadlock.
+// finishLocked is finishTurn with e.mu held. It ends the turn, opens holds
+// for in-flight attempts, and calls adapter.Cancel() on them.
 func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 	inflight := e.getInflightAttempts(t)
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -277,14 +277,13 @@ func (e *Engine) finishLocked(t *openTurn, state, reason string) {
 	if err != nil {
 		return
 	}
+
 	if e.open == t {
 		e.open = nil
 		e.turnEnded(t)
 	}
 
-	// cancelInflightAttempts must be called without holding e.mu.
-	// Temporarily release, call it, then re-acquire. The caller's defer
-	// unlock will happen after we return, so we need to restore the lock state.
+	// Call cancelInflightAttempts without holding the lock to avoid deadlock
 	e.mu.Unlock()
 	e.cancelInflightAttempts(inflight)
 	e.mu.Lock()
@@ -472,9 +471,9 @@ func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 		result, _ := info.adapter.Cancel(ctx, info.attemptID)
 		cancel()
 
-		// If server confirmed, release the hold
+		e.mu.Lock()
 		if result.ServerConfirmed == transport.TriYes {
-			e.mu.Lock()
+			// Server confirmed the cancellation, release the hold
 			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 				if err := tx.SetCancellation(info.attemptID, "confirmed"); err != nil {
 					return err
@@ -504,15 +503,20 @@ func (e *Engine) cancelInflightAttempts(inflightIDs []string) {
 				}
 				return nil
 			})
-			e.mu.Unlock()
+			// Don't update participant state here - let it stay running
+			// until the original Complete() call returns and calls release()
+			delete(e.cancelling, info.participant)
+			delete(e.unknown, info.participant)
 		} else {
-			// Mark as unknown, hold stays
-			e.mu.Lock()
+			// Server didn't confirm, mark as unknown (hold stays unreleased)
 			_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 				return tx.SetCancellation(info.attemptID, "unknown")
 			})
-			e.mu.Unlock()
+			// Update in-memory state to unknown
+			delete(e.cancelling, info.participant)
+			e.unknown[info.participant] = true
 		}
+		e.mu.Unlock()
 	}
 }
 

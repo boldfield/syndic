@@ -117,6 +117,7 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	for _, role := range p.EligibleRoles {
 		ws.EligibleRoles = append(ws.EligibleRoles, string(role))
 	}
+
 	switch {
 	case !mp.Usable:
 		ws.State = ParticipantUnprobed
@@ -124,6 +125,13 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 			detail := mp.Detail
 			ws.Detail = &detail
 		}
+	case e.cancelling[p.ID]:
+		ws.State = ParticipantCancelling
+	case e.unknown[p.ID]:
+		ws.State = ParticipantUnknown
+	case e.inflight[p.ID] > 0:
+		// Participant has in-flight attempts, keep them as running
+		ws.State = ParticipantRunning
 	case e.running[p.ID]:
 		ws.State = ParticipantRunning
 	case e.queued[p.ID]:
