@@ -525,6 +525,18 @@ func (e *Engine) Override(turnID, reason string) error {
 		e.mu.Lock()
 	} else {
 		// t matches e.open and e.mu is held
+		// For the open turn, verify it's actually in incomplete state
+		turnRow, err := e.store.GetTurn(turnID)
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		if turnRow.TerminalState != StateIncomplete {
+			e.mu.Unlock()
+			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
+			notIncomplete.TurnID = strPtr(turnID)
+			return notIncomplete
+		}
 		if t.candidateHash == "" {
 			e.mu.Unlock()
 			notIncomplete := refusal(wire.ErrorCodeNotIncomplete)
@@ -603,8 +615,8 @@ func (e *Engine) Override(turnID, reason string) error {
 		return fmt.Errorf("override: %w", err)
 	}
 
-	// Record the override in memory and prepare for delivery if this is e.open
-	if t != nil {
+	// If this is e.open, prepare for delivery
+	if t != nil && e.open == t {
 		e.commitTerminal(t, &terminal{holds: []*hold{}})
 		// Set candidateHash for delivery
 		t.candidateHash = candidateHash

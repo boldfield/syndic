@@ -710,7 +710,17 @@ func TestNewRequiresOptions(t *testing.T) {
 
 // TestRecoveryKillMidReview: Kill mid-review, restart: turn is incomplete with engine_restart
 func TestRecoveryKillMidReview(t *testing.T) {
-	reviewScript := map[string][]fake.Step{"author": {enginetest.Reply("candidate")}, "reviewer": {}}
+	// Use Reply with delay to simulate a hanging reviewer that takes time but doesn't timeout
+	reviewScript := map[string][]fake.Step{
+		"author": {enginetest.Reply("candidate")},
+		"reviewer": {{
+			Kind:            fake.StepKindReply,
+			Text:            "accept",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+			Delay:           10 * time.Second, // Delay to keep reviewer busy
+		}},
+	}
 	h := enginetest.New(t, enginetest.RosterTOML, reviewScript)
 
 	preset := "review"
@@ -723,7 +733,7 @@ func TestRecoveryKillMidReview(t *testing.T) {
 	// Wait for author to complete
 	h.WaitTurnState(turnID, engine.StateCandidateFrozen)
 
-	// Now make reviewer hang so the turn stays open
+	// Now hold the reviewer so it stays pending
 	release := h.Hold("reviewer")
 
 	// Wait a bit for the reviewer dispatch to start
@@ -753,7 +763,14 @@ func TestRecoveryKillMidReview(t *testing.T) {
 	if err := eng2.Start(); err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
-	defer eng2.Stop(context.Background())
+	defer func() {
+		if err := eng2.Stop(context.Background()); err != nil {
+			t.Errorf("eng2.Stop: %v", err)
+		}
+	}()
+
+	// Give the recovery events time to be fully written
+	time.Sleep(50 * time.Millisecond)
 
 	// Check that the turn is still incomplete but now has engine_restart reason
 	states := h.TurnStates(turnID)
@@ -763,16 +780,24 @@ func TestRecoveryKillMidReview(t *testing.T) {
 
 	// Find the engine_restart event
 	found := false
+	var lastIncompleteReason *string
 	for _, ev := range h.Events() {
-		if p, ok := ev.Payload.(*wire.EvTurnState); ok && p.TurnID == turnID && p.State == engine.StateIncomplete {
-			if p.Reason != nil && *p.Reason == "engine_restart" {
-				found = true
-				break
+		if p, ok := ev.Payload.(*wire.EvTurnState); ok && p.TurnID == turnID {
+			if p.State == engine.StateIncomplete {
+				lastIncompleteReason = p.Reason
+				if p.Reason != nil && *p.Reason == "engine_restart" {
+					found = true
+					break
+				}
 			}
 		}
 	}
 	if !found {
-		t.Fatal("no engine_restart reason in recovery events")
+		reasonStr := "<nil>"
+		if lastIncompleteReason != nil {
+			reasonStr = *lastIncompleteReason
+		}
+		t.Fatalf("no engine_restart reason in recovery events (last incomplete reason: %s)", reasonStr)
 	}
 
 	release()
@@ -821,7 +846,11 @@ func TestRecoveryHoldBlocksDispatch(t *testing.T) {
 	if err := eng2.Start(); err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
-	defer eng2.Stop(context.Background())
+	defer func() {
+		if err := eng2.Stop(context.Background()); err != nil {
+			t.Errorf("eng2.Stop: %v", err)
+		}
+	}()
 
 	// Check that the hold appears in uncertain_capacity
 	started := false

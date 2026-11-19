@@ -335,7 +335,7 @@ func releaseHoldIn(tx *journal.Tx, emit hub.Emit, h *hold, how, reason string) e
 	return emit("", wire.EventKindCapacity, ev)
 }
 
-// dropHold forgets a hold whose row was released and lets its pool's queue
+// dropHold forgets a hold whose row was released and lets its pools' queues
 // move. e.mu is held.
 func (e *Engine) dropHold(h *hold) {
 	if e.holds[h.attemptID] != h {
@@ -345,13 +345,18 @@ func (e *Engine) dropHold(h *hold) {
 	if h.stop != nil {
 		h.stop()
 	}
-	e.kick(h.pool)
+	for _, pool := range h.appliedPools {
+		e.kick(pool)
+	}
 }
 
-// armHold starts the operator-configured release timer of the hold's pool.
+// armHold starts the operator-configured release timer of the hold's first applied pool.
 // Zero means the hold is never released on its own. e.mu is held.
 func (e *Engine) armHold(h *hold) {
-	_, after := e.roster.PoolFor(h.pool)
+	var after time.Duration
+	if len(h.appliedPools) > 0 {
+		_, after = e.roster.PoolFor(h.appliedPools[0])
+	}
 	if after <= 0 {
 		return
 	}
