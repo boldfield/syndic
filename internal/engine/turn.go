@@ -209,6 +209,17 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		finalStatus = newStatus
 	}
 
+	// Determine if we should update participant state based on the failure type
+	participantState := ""
+	var participantDetail *string
+	if res.TransportStatus == transport.TransportStatusUnreachable && retryCount > 0 {
+		participantState = ParticipantUnreachable
+	} else if res.TransportStatus == transport.TransportStatusUnauthorized {
+		participantState = ParticipantUnauthorized
+	} else if res.TransportStatus == transport.TransportStatusModelUnavailable {
+		participantState = ParticipantUnavailable
+	}
+
 	quarantined, exceeded := false, false
 	var term *terminal
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -285,6 +296,17 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 				Participant: t.author,
 				State:       ParticipantIdle,
 			}); err != nil {
+				return err
+			}
+		}
+
+		// Emit participant state if needed
+		if participantState != "" {
+			detail := ""
+			if participantDetail != nil {
+				detail = *participantDetail
+			}
+			if err := e.emitParticipantState(emit, t.author, participantState, detail); err != nil {
 				return err
 			}
 		}

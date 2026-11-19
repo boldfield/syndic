@@ -56,11 +56,21 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	var openHold bool
 	var newStatus, terminalReason string
 	var retryCount int
+	var participantState string
 	if goErr != nil || (res.TransportStatus != "" && res.TransportStatus != transport.TransportStatusOK) {
 		if attempt, err := e.getAttempt(attemptID); err == nil && attempt != nil && attempt.RetryCount != nil {
 			retryCount = *attempt.RetryCount
 		}
 		_, openHold, newStatus, terminalReason = decideDispatchFailure("author", t.author, retryCount, res.TransportStatus, goErr)
+
+		// Determine if we should update participant state based on the failure type
+		if res.TransportStatus == transport.TransportStatusUnreachable && retryCount > 0 {
+			participantState = ParticipantUnreachable
+		} else if res.TransportStatus == transport.TransportStatusUnauthorized {
+			participantState = ParticipantUnauthorized
+		} else if res.TransportStatus == transport.TransportStatusModelUnavailable {
+			participantState = ParticipantUnavailable
+		}
 	}
 
 	var hash string
@@ -106,6 +116,13 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 				Group:        members,
 				HeldSince:    now,
 			}); err != nil {
+				return err
+			}
+		}
+
+		// Emit participant state if needed
+		if participantState != "" {
+			if err := e.emitParticipantState(emit, t.author, participantState, ""); err != nil {
 				return err
 			}
 		}
@@ -505,6 +522,16 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		_, openHold, newStatus, terminalReason = decideDispatchFailure("reviewer", d.participant, retryCount, res.TransportStatus, goErr)
 	}
 
+	// Determine if we should update participant state based on the failure type
+	participantState := ""
+	if res.TransportStatus == transport.TransportStatusUnreachable && retryCount > 0 {
+		participantState = ParticipantUnreachable
+	} else if res.TransportStatus == transport.TransportStatusUnauthorized {
+		participantState = ParticipantUnauthorized
+	} else if res.TransportStatus == transport.TransportStatusModelUnavailable {
+		participantState = ParticipantUnavailable
+	}
+
 	var quarantined, approvedNow, exceeded bool
 	var endState, endReason string
 	var repair bool
@@ -631,6 +658,14 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				repair = true
 			}
 		}
+
+		// Emit participant state if needed
+		if participantState != "" {
+			if err := e.emitParticipantState(emit, d.participant, participantState, ""); err != nil {
+				return err
+			}
+		}
+
 		if endState == "" {
 			return nil
 		}

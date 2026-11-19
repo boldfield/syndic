@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 // dispatchRetryDelay is the fixed delay for retrying an unreachable attempt.
@@ -126,4 +128,22 @@ func decideDispatchFailure(role string, participant string, retryCount int, stat
 	}
 
 	return false, outcome.openHold, outcome.attemptStatus, terminalReason
+}
+
+// emitParticipantState emits a participant state change event and records it in pstate.
+// Called from within a transaction.
+func (e *Engine) emitParticipantState(emit hub.Emit, participant, state, detail string) error {
+	// Update the in-memory participant state tracker
+	if state != "" {
+		e.pstate[participant] = state
+	}
+
+	ev := wire.EvParticipantState{
+		Participant: participant,
+		State:       state,
+	}
+	if detail != "" {
+		ev.Detail = &detail
+	}
+	return emit("", wire.EventKindParticipantState, ev)
 }

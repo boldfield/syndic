@@ -39,10 +39,13 @@ const (
 
 // Participant states.
 const (
-	ParticipantIdle     = "idle"
-	ParticipantQueued   = "queued"
-	ParticipantRunning  = "running"
-	ParticipantUnprobed = "unprobed"
+	ParticipantIdle         = "idle"
+	ParticipantQueued       = "queued"
+	ParticipantRunning      = "running"
+	ParticipantUnprobed     = "unprobed"
+	ParticipantUnreachable  = "unreachable"
+	ParticipantUnauthorized = "unauthorized"
+	ParticipantUnavailable  = "model_unavailable"
 	// ParticipantCancelling lasts from the terminal Tx until Adapter.Cancel
 	// returns; ParticipantUnknown while an attempt of the participant is held.
 	ParticipantCancelling = "cancelling"
