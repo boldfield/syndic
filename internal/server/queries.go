@@ -11,23 +11,21 @@ import (
 
 // getTurnStateForOpen gets the most recent turn_state from the events table for an open turn
 func getTurnStateForOpen(store *journal.Store, turnID string) (string, error) {
-	events, err := store.EventsSince(0, 1000000)
+	event, err := store.LatestTurnStateEvent(turnID)
 	if err != nil {
 		return "", err
 	}
+	if event == nil {
+		return "", nil
+	}
 
-	// Find the latest turn_state event for this turn, working backwards
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].TurnID == turnID && events[i].Kind == "turn_state" {
-			var data map[string]interface{}
-			if err := json.Unmarshal(events[i].Data, &data); err != nil {
-				continue
-			}
-			if state, ok := data["state"]; ok {
-				if stateStr, ok := state.(string); ok {
-					return stateStr, nil
-				}
-			}
+	var data map[string]interface{}
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		return "", nil
+	}
+	if state, ok := data["state"]; ok {
+		if stateStr, ok := state.(string); ok {
+			return stateStr, nil
 		}
 	}
 	return "", nil
@@ -171,7 +169,7 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 		verdictRecord := wire.VerdictRecord{
 			ID:               v.ID,
 			AttemptID:        v.AttemptID,
-			Parsed:           v.Parsed == "true",
+			Parsed:           v.Parsed == "approve" || v.Parsed == "block",
 			ValidationStatus: v.ValidationStatus,
 		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
@@ -211,6 +209,12 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 
 // buildTranscript builds a transcript for a turn, paging with cursor.
 func buildTranscript(store *journal.Store, turnID string, cursor *string, limit int) (*wire.TranscriptReply, error) {
+	// Verify the turn exists
+	_, err := store.GetTurn(turnID)
+	if err != nil {
+		return nil, err
+	}
+
 	cursorStr := ""
 	if cursor != nil {
 		cursorStr = *cursor

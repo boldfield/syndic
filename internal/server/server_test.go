@@ -161,7 +161,7 @@ func TestServerHandshakeSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -215,7 +215,7 @@ func TestServerHandshakeBadProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -270,7 +270,7 @@ func TestServerStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -339,7 +339,7 @@ func TestServerCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -402,7 +402,7 @@ func TestServerFrameSizeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -488,7 +488,7 @@ func TestOversizedClientFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -549,7 +549,7 @@ func TestStoppingDeliveredToConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -623,7 +623,7 @@ func TestFrameObserverLimitGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open journal: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	store := journal.NewStore(db)
 	h := hub.New(store, 1024)
@@ -722,7 +722,7 @@ func TestBadProtocolVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)
@@ -779,7 +779,7 @@ func TestNonHelloFirstFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	r := wire.NewReader(conn)
 	w := wire.NewWriter(conn)

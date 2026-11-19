@@ -105,11 +105,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.sendStoppingToAll()
-			listener.Close()
+			_ = listener.Close()
 			return ctx.Err()
 		case <-engineStopping:
 			s.sendStoppingToAll()
-			listener.Close()
+			_ = listener.Close()
 			s.stopping.Store(true)
 			return nil
 		default:
@@ -129,11 +129,11 @@ func (s *Server) Serve(ctx context.Context) error {
 					select {
 					case <-ctx.Done():
 						s.sendStoppingToAll()
-						listener.Close()
+						_ = listener.Close()
 						return ctx.Err()
 					case <-engineStopping:
 						s.sendStoppingToAll()
-						listener.Close()
+						_ = listener.Close()
 						s.stopping.Store(true)
 						return nil
 					default:
@@ -283,11 +283,12 @@ func (c *connection) handle(ctx context.Context) {
 		}
 
 		// Handle subscribe requests specially to manage subscription state
-		if frame.Type == wire.RequestSubscribe {
+		switch frame.Type {
+		case wire.RequestSubscribe:
 			c.handleSubscribe(ctx, frame)
-		} else if frame.Type == wire.RequestUnsubscribe {
+		case wire.RequestUnsubscribe:
 			c.handleUnsubscribe(frame)
-		} else {
+		default:
 			// Run other requests concurrently
 			go c.handleRequest(frame)
 		}
@@ -378,6 +379,13 @@ func (c *connection) handleCancel(frame wire.Frame) {
 		return
 	}
 
+	if req.TurnID == "" {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
 	err := c.server.engine.Cancel(req.TurnID)
 	if err != nil {
 		if wireErr, ok := err.(*wire.Error); ok {
@@ -401,6 +409,13 @@ func (c *connection) handleCancel(frame wire.Frame) {
 func (c *connection) handleOverride(frame wire.Frame) {
 	var req wire.OverrideRequest
 	if err := json.Unmarshal(frame.Body, &req); err != nil {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
+	if req.TurnID == "" || req.Reason == "" {
 		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
 			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 		}
@@ -436,6 +451,13 @@ func (c *connection) handleRelease(frame wire.Frame) {
 		return
 	}
 
+	if req.Pool == "" || req.Reason == "" {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
 	reply, err := c.server.engine.Release(req)
 	if err != nil {
 		if wireErr, ok := err.(*wire.Error); ok {
@@ -459,6 +481,13 @@ func (c *connection) handleRelease(frame wire.Frame) {
 func (c *connection) handleTurn(frame wire.Frame) {
 	var req wire.TurnRequest
 	if err := json.Unmarshal(frame.Body, &req); err != nil {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
+	if req.TurnID == "" {
 		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
 			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 		}
@@ -494,6 +523,13 @@ func (c *connection) handleTranscript(frame wire.Frame) {
 		return
 	}
 
+	if req.TurnID == "" {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
 	limit := 200
 	if req.Limit != nil && *req.Limit > 0 && *req.Limit < 200 {
 		limit = *req.Limit
@@ -522,6 +558,13 @@ func (c *connection) handleTranscript(frame wire.Frame) {
 func (c *connection) handleContent(frame wire.Frame) {
 	var req wire.ContentRequest
 	if err := json.Unmarshal(frame.Body, &req); err != nil {
+		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
+			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
+		}
+		return
+	}
+
+	if req.Ref == "" {
 		if err := c.sendError(frame.ID, &wire.Error{Code: "bad_request"}); err != nil {
 			fmt.Fprintf(os.Stderr, "send error: %v\n", err)
 		}
