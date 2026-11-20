@@ -1,6 +1,7 @@
 package enginetest
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -11,10 +12,14 @@ type FakeClock struct {
 	now    time.Time
 	nextID int
 	timers map[int]*fakeTimer
+	// scheduled is closed and replaced whenever a timer is added, so
+	// WaitTimer blocks until one arrives instead of polling.
+	scheduled chan struct{}
 }
 
 type fakeTimer struct {
 	id   int
+	d    time.Duration
 	at   time.Time
 	f    func()
 	done bool
@@ -22,7 +27,7 @@ type fakeTimer struct {
 
 // NewFakeClock returns a clock reading start.
 func NewFakeClock(start time.Time) *FakeClock {
-	return &FakeClock{now: start, timers: make(map[int]*fakeTimer)}
+	return &FakeClock{now: start, timers: make(map[int]*fakeTimer), scheduled: make(chan struct{})}
 }
 
 // Now returns the fake time.
@@ -38,8 +43,10 @@ func (c *FakeClock) AfterFunc(d time.Duration, f func()) func() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.nextID++
-	t := &fakeTimer{id: c.nextID, at: c.now.Add(d), f: f}
+	t := &fakeTimer{id: c.nextID, d: d, at: c.now.Add(d), f: f}
 	c.timers[t.id] = t
+	close(c.scheduled)
+	c.scheduled = make(chan struct{})
 	return func() bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -83,5 +90,27 @@ func (c *FakeClock) Advance(d time.Duration) {
 		}
 		c.mu.Unlock()
 		next.f()
+	}
+}
+
+// WaitTimer blocks until a timer scheduled for the delay d is pending, or ctx
+// ends. It is how a test learns that the engine is waiting on the clock (a
+// retry delay, say) before it advances the clock, without polling.
+func (c *FakeClock) WaitTimer(ctx context.Context, d time.Duration) error {
+	for {
+		c.mu.Lock()
+		for _, t := range c.timers {
+			if t.d == d {
+				c.mu.Unlock()
+				return nil
+			}
+		}
+		scheduled := c.scheduled
+		c.mu.Unlock()
+		select {
+		case <-scheduled:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
