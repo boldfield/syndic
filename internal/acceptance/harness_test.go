@@ -87,7 +87,7 @@ func newSuite(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, o
 	// has stopped, and the server stops after the clients have closed.
 	t.Cleanup(func() {
 		_ = os.RemoveAll(dir)
-		if n := s.largestFrame.Load(); n >= frameLimit {
+		if n, bad := s.oversizedFrame(); bad {
 			t.Errorf("an engine frame measured %d bytes encoded, want under %d", n, frameLimit)
 		}
 	})
@@ -96,23 +96,35 @@ func newSuite(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, o
 	return s
 }
 
+// observeFrame is the hook on the server's writer: it records the largest
+// encoded frame written.
+func (s *suite) observeFrame(n int) {
+	for {
+		cur := s.largestFrame.Load()
+		if int64(n) <= cur || s.largestFrame.CompareAndSwap(cur, int64(n)) {
+			return
+		}
+	}
+}
+
+// oversizedFrame is the check run when the test ends: it returns the largest
+// frame recorded and whether that is too large. A frame must measure under
+// frameLimit, so exactly frameLimit is too large.
+func (s *suite) oversizedFrame() (largest int64, tooLarge bool) {
+	largest = s.largestFrame.Load()
+	return largest, largest >= frameLimit
+}
+
 // startServer serves the current engine on the socket. The server goroutine is
 // started after its cancel is registered, and stopServer waits for it.
 func (s *suite) startServer() {
 	s.t.Helper()
 	srv := server.New(server.Options{
-		Paths:  s.paths,
-		Engine: s.Engine,
-		Store:  s.Store,
-		Hub:    s.Hub,
-		FrameObserver: func(n int) {
-			for {
-				cur := s.largestFrame.Load()
-				if int64(n) <= cur || s.largestFrame.CompareAndSwap(cur, int64(n)) {
-					return
-				}
-			}
-		},
+		Paths:         s.paths,
+		Engine:        s.Engine,
+		Store:         s.Store,
+		Hub:           s.Hub,
+		FrameObserver: s.observeFrame,
 	})
 	if err := srv.Listen(); err != nil {
 		s.t.Fatalf("Listen: %v", err)
