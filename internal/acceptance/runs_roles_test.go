@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/client"
@@ -60,6 +61,10 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 
+	if manifest["kind"] != "engine" {
+		t.Errorf("manifest kind = %v, want engine", manifest["kind"])
+	}
+
 	ordered, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("re-marshal manifest: %v", err)
@@ -71,20 +76,31 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 	}
 
 	expected, ok := manifest["expected"].(map[string]interface{})
-	if !ok || len(expected) == 0 {
-		t.Error("expected is empty; want seeded exports")
+	if !ok || len(expected) != 2 {
+		t.Errorf("expected map has %d entries, want 2", len(expected))
 	}
-	for id, entry := range expected {
-		e, ok := entry.(map[string]interface{})
+
+	for _, participant := range []string{"author", "reviewer"} {
+		entry, ok := expected[participant].(map[string]interface{})
 		if !ok {
-			t.Errorf("expected[%q] not a map", id)
+			t.Errorf("expected[%q] not a map", participant)
 			continue
 		}
-		if _, ok := e["identity"]; !ok {
-			t.Errorf("expected[%q] missing identity", id)
+		identity, ok := entry["identity"].(map[string]interface{})
+		if !ok {
+			t.Errorf("expected[%q] identity not a map", participant)
+			continue
 		}
-		if _, ok := e["reported_model"]; !ok {
-			t.Errorf("expected[%q] missing reported_model", id)
+		if _, ok := identity["Kind"]; !ok {
+			t.Errorf("expected[%q].identity missing Kind", participant)
+		}
+		reportedModel, ok := entry["reported_model"].(string)
+		if !ok {
+			t.Errorf("expected[%q].reported_model not a string", participant)
+			continue
+		}
+		if reportedModel != enginetest.DefaultReportedModel {
+			t.Errorf("expected[%q].reported_model = %q, want %q", participant, reportedModel, enginetest.DefaultReportedModel)
 		}
 	}
 }
@@ -228,42 +244,147 @@ func TestRunsManifest_UnprobedNoRecord(t *testing.T) {
 	if err == nil {
 		t.Fatal("submit with unprobed reviewer should be refused")
 	}
+	if !strings.Contains(err.Error(), "unprobed") {
+		t.Errorf("submit error should mention unprobed, got: %v", err)
+	}
 }
 
 func TestRunsManifest_UnprobedFingerprintMismatch(t *testing.T) {
 	t.Parallel()
+
+	rosterWithDifferentBaseURL := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11435/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[quick.fast]
+preset = "solo"
+drafts = false
+[quick.fast.budgets]
+author_max_output_tokens = 2048
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
-	}, enginetest.SkipProbe("reviewer"))
+	})
 
-	c := s.Dial(t)
-	status := s.Status(t, c)
+	_ = s.Dial(t)
 
+	s.Restart(rosterWithDifferentBaseURL, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c2 := s.Dial(t)
+	status := s.Status(t, c2)
+
+	found := false
 	for _, p := range status.Participants {
-		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_record" {
-			return
+		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "fingerprint_mismatch" {
+			found = true
 		}
 	}
-	gap(t, "engine does not parse seeded fingerprint mismatches in test harness; would need probe record with manipulated fingerprint")
+	if !found {
+		t.Error("reviewer should be unprobed:fingerprint_mismatch with different base_url")
+	}
 }
 
 func TestRunsManifest_UnprobedNoFingerprint(t *testing.T) {
 	t.Parallel()
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	}, enginetest.SkipProbe("reviewer"))
 
-	c := s.Dial(t)
-	status := s.Status(t, c)
+	_ = s.Dial(t)
 
+	bareExport := json.RawMessage(`{
+		"endpoint_name":"local",
+		"model":"llama3",
+		"redaction_rule":"redaction/v1",
+		"redacted":true,
+		"declared_location":"local",
+		"declared_execution":"local",
+		"declared_billing":"none",
+		"network_dependency":"none",
+		"auth_mode":"none",
+		"streaming":"unknown",
+		"cancel_observable":"unknown",
+		"usage_available":"unknown",
+		"reported_model":"enginetest-model",
+		"identity":{"kind":"unknown"},
+		"eligible_required_reviewer":"unknown",
+		"observed_at":"2026-01-01T00:00:00Z"
+	}`)
+
+	if _, _, err := s.Store.CreateRun(bareExport); err != nil {
+		t.Fatalf("seed bare export probe: %v", err)
+	}
+
+	s.Restart("", map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c2 := s.Dial(t)
+	status := s.Status(t, c2)
+
+	found := false
 	for _, p := range status.Participants {
-		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_record" {
-			return
+		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_fingerprint" {
+			found = true
 		}
 	}
-	gap(t, "engine does not construct no_fingerprint state; would require seeding probe record without fingerprint field")
+	if !found {
+		t.Error("reviewer should be unprobed:no_fingerprint for bare export")
+	}
 }
 
 func TestRunsManifest_SharedRecordSameEndpointModel(t *testing.T) {
@@ -390,6 +511,9 @@ func TestRunsManifest_IneligibleRequiredReviewerPresetInvalid(t *testing.T) {
 	if err == nil {
 		t.Fatal("submit with ineligible required reviewer should be refused")
 	}
+	if !strings.Contains(err.Error(), "preset_invalid") {
+		t.Errorf("submit error should mention preset_invalid, got: %v", err)
+	}
 }
 
 func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
@@ -433,28 +557,65 @@ func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	firstEvent := true
+	seenSeqs := map[int64]bool{}
+	var engineStartedSeen bool
 	for {
 		frame, err := c3.NextEvent(s.ctx())
 		if err != nil {
 			t.Fatalf("NextEvent: %v", err)
 		}
-		if firstEvent && frame.Seq != firstSeq2 {
-			t.Errorf("first event after subscribe(run_first_seq-1) has seq %d, want %d", frame.Seq, firstSeq2)
+		if frame.Seq < firstSeq2 {
+			t.Errorf("event seq %d before run_first_seq %d", frame.Seq, firstSeq2)
 		}
-		firstEvent = false
+		if _, dup := seenSeqs[frame.Seq]; dup {
+			t.Errorf("duplicate seq %d", frame.Seq)
+		}
+		seenSeqs[frame.Seq] = true
 		if frame.Kind == wire.EventKindEngineStarted {
+			engineStartedSeen = true
 			break
 		}
+	}
+	if !engineStartedSeen {
+		t.Error("replay did not reach engine_started")
 	}
 }
 
 func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 	t.Parallel()
+
+	probeExport := json.RawMessage(`{
+		"endpoint_name":"local",
+		"model":"llama2",
+		"redaction_rule":"redaction/v1",
+		"redacted":true,
+		"declared_location":"local",
+		"declared_execution":"local",
+		"declared_billing":"none",
+		"network_dependency":"none",
+		"auth_mode":"none",
+		"streaming":"unknown",
+		"cancel_observable":"unknown",
+		"usage_available":"unknown",
+		"reported_model":"enginetest-model",
+		"identity":{"kind":"unknown"},
+		"eligible_required_reviewer":"unknown",
+		"observed_at":"2026-01-01T00:00:00Z"
+	}`)
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	})
+
+	_, _, err := s.Store.CreateRun(probeExport)
+	if err != nil {
+		t.Fatalf("seed probe: %v", err)
+	}
+
+	if err := s.Store.AppendEvent("probe_completed", json.RawMessage(`{"test":"probe_completed"}`)); err != nil {
+		t.Fatalf("append probe_completed event: %v", err)
+	}
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -468,20 +629,20 @@ func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 	}
 
 	engineStartedFound := false
-	firstSeqFound := false
+	probeCompletedCount := 0
 	for _, ev := range s.Events() {
-		if ev.Seq == 1 && ev.Kind == wire.EventKindEngineStarted {
-			firstSeqFound = true
-		}
 		if ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq {
 			engineStartedFound = true
+		}
+		if ev.Kind == "probe_completed" {
+			probeCompletedCount++
 		}
 	}
 	if !engineStartedFound {
 		t.Error("subscribe(0) should replay engine_started event at run_first_seq")
 	}
-	if !firstSeqFound {
-		t.Error("subscribe(0) should replay events starting from seq 1 (engine_started)")
+	if probeCompletedCount > 0 {
+		t.Errorf("subscribe(0) replayed %d probe_completed events, should ignore them", probeCompletedCount)
 	}
 }
 
@@ -503,6 +664,38 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 	var manifest map[string]interface{}
 	if err := json.Unmarshal(run.Manifest, &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	roster, ok := manifest["roster"].(map[string]interface{})
+	if !ok {
+		t.Fatal("roster not a map")
+	}
+
+	endpoints, ok := roster["endpoints"].([]interface{})
+	if !ok {
+		t.Fatal("endpoints not an array")
+	}
+
+	allowedMembers := map[string]bool{
+		"name": true, "base_url": true, "dialect": true, "max_tokens_field": true,
+		"declared_location": true, "declared_execution": true, "declared_billing": true,
+		"network_dependency": true, "models": true, "terms_note": true,
+		"tokens_per_byte_max": true,
+	}
+
+	for _, ep := range endpoints {
+		epMap, ok := ep.(map[string]interface{})
+		if !ok {
+			t.Error("endpoint not a map")
+			continue
+		}
+		for key := range epMap {
+			if !allowedMembers[key] && (key == "auth" || key == "extra_headers") {
+				if epMap[key] != nil {
+					t.Errorf("endpoint contains unexpected key %q with value %v", key, epMap[key])
+				}
+			}
+		}
 	}
 
 	probeRecords, ok := manifest["probe_records"].(map[string]interface{})
@@ -531,7 +724,7 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 
 func TestRunsManifest_ProbeManifestWithAndWithoutUsage(t *testing.T) {
 	t.Parallel()
-	gap(t, "syndic probe integration is in cmd/syndic; engine only writes engine runs with seeded probe records")
+	gap(t, "probe behavior with and without usage is tested in cmd/syndic: TestProbeSuccess (with usage, calibration field) and TestProbeNoUsage (without usage, calibration: unavailable). Engine acceptance tests only verify engine runs with seeded probe records.")
 }
 
 func TestNAndRoles_TwoReviewersNeeded(t *testing.T) {
@@ -697,11 +890,15 @@ allowed_destinations = []
 	if turn.TerminalReason == nil {
 		t.Error("turn missing terminal reason")
 	}
+	if !strings.Contains(*turn.TerminalReason, "block") {
+		t.Errorf("terminal reason should contain block reference, got %q", *turn.TerminalReason)
+	}
 }
 
 func TestNAndRoles_AuthorAsReviewerRefused(t *testing.T) {
 	t.Parallel()
-	gap(t, "engine refuses author as required reviewer at roster validation (engine.Start), not at submit; design requires refusal at submit")
+
+	gap(t, "config validator refuses author as required reviewer at engine.Start (roster validation), not at submit as design requires. Engine rejects the roster during validation, not during submit. Design requires preset_invalid error at submit time.")
 }
 
 func TestNAndRoles_MultipleReviewers(t *testing.T) {
@@ -898,6 +1095,9 @@ allowed_destinations = []
 	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
 	if err == nil {
 		t.Fatal("submit with exceeded budget should be refused")
+	}
+	if !strings.Contains(err.Error(), "budget") {
+		t.Errorf("submit error should mention budget, got: %v", err)
 	}
 
 	rosterRaised := bytes.Replace([]byte(rosterExceed),
