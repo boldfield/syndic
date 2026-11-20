@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -15,7 +16,7 @@ jobs:
       - run: make fmt-check
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -timeout 5m ./...
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.15.0
