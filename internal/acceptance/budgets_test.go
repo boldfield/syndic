@@ -1051,18 +1051,18 @@ func TestBudgets_RacingReservations(t *testing.T) {
 	})
 	c := s.Dial(t)
 
-	// How the two BeginAttempt transactions are made to race. The reviewers
-	// are in pools of their own, so neither waits for the other's slot, and
-	// both become runnable on the one event that freezes the candidate: the
-	// turn hands both dispatches to the scheduler together and each begins
-	// its attempt in a journal transaction that reads the turn's total. The
-	// order flips every turn (review2 and review2r name the reviewers the
-	// other way round), so each reviewer is first half the time and a result
-	// that depended on who got in first would show; 24 turns run under -race.
-	// The limit leaves room for one reservation and not two, so a transaction
-	// that read the total before the other's write had committed would let
-	// both through. The journal serializes them and the second must see the
-	// first's reservation.
+	// What this test can and cannot force. The reviewers are in pools of
+	// their own, so neither waits for the other's slot, and both become
+	// runnable on the one event that freezes the candidate. The engine
+	// however hands them out in runReviewers with Engine.mu held, and each
+	// beginReviewer transaction completes before the next starts, so a black
+	// box test cannot make the two BeginAttempt transactions overlap; the
+	// harness has no hook at that point and the engine mutex rules one out.
+	// That conflict with the spec is reported in the pull request. What the
+	// test does cover is both serial orders: the order flips every turn
+	// (review2 and review2r name the reviewers the other way round), 24 turns
+	// run under -race, and the limit leaves room for one reservation and not
+	// two, so the second reservation must see the first and be refused.
 	for i := 0; i < turns; i++ {
 		preset, first := "review2", "reviewer"
 		if i%2 == 1 {
