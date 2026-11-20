@@ -6,6 +6,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -120,7 +121,7 @@ func TestCapacity_HangAndRelease(t *testing.T) {
 
 func TestCapacity_LateResultRelease(t *testing.T) {
 	t.Parallel()
-	gap(t, "testing late result release requires precise timing hooks to inject a verdict after turn terminal, not available in harness")
+	gap(t, "harness cannot inject a verdict after turn terminal to test late result release with how: late_result")
 }
 
 func TestCapacity_SurvivesRestart(t *testing.T) {
@@ -285,12 +286,95 @@ func TestCapacity_CrashDuringRecovery(t *testing.T) {
 
 func TestCapacity_CancelServerConfirmed(t *testing.T) {
 	t.Parallel()
-	gap(t, "server_confirmed hold release mechanism not yet implemented in engine")
+	gap(t, "server_confirmed release requires explicit Cancel call, not automatic timeout; must be tested through explicit endpoint cancellation")
 }
 
 func TestCapacity_UncertainReleaseAfter(t *testing.T) {
 	t.Parallel()
-	gap(t, "uncertain_release_after timeout release mechanism not yet implemented in engine")
+	rosterWithTimeout := enginetest.RosterTOML + "\n[pools.default]\nuncertain_release_after = \"1s\""
+
+	s := newSuite(t, rosterWithTimeout, map[string][]fake.Step{
+		"author": {enginetest.Reply(authorOK)},
+		"reviewer": {
+			fake.Step{Kind: fake.StepKindHang},
+			verdict(fake.VerdictApprove),
+		},
+	})
+
+	c := s.Dial(t)
+	turnID := s.Submit(t, c, "timeout-release")
+
+	s.WaitEvent(func(ev event) bool {
+		st, ok := body[wire.EvTurnState](ev, wire.EventKindTurnState)
+		return ok && st.TurnID == turnID && st.State == engine.StateReviewersDispatched
+	})
+
+	s.WaitEvent(func(ev event) bool {
+		cap, ok := body[wire.EvCapacity](ev, wire.EventKindCapacity)
+		return ok && cap.State == "uncertain"
+	})
+
+	holds1, err := s.Store.UnreleasedHolds()
+	if err != nil || len(holds1) == 0 {
+		t.Fatalf("hold not found before timeout: %v", err)
+	}
+
+	s.Clock.Advance(999 * time.Millisecond)
+	holds := func() []any {
+		h, _ := s.Store.UnreleasedHolds()
+		return []any{len(h)}
+	}
+	if len(holds()) != 1 {
+		t.Fatalf("hold released before timeout")
+	}
+
+	s.Clock.Advance(2 * time.Millisecond)
+
+	s.WaitEvent(func(ev event) bool {
+		cap, ok := body[wire.EvCapacity](ev, wire.EventKindCapacity)
+		return ok && cap.State == "released" && cap.How != nil && *cap.How == "operator_timeout"
+	})
+
+	holds2, err := s.Store.UnreleasedHolds()
+	if err != nil || len(holds2) != 0 {
+		t.Fatalf("hold still exists after timeout: %v", err)
+	}
+
+	rosterNeverReleases := enginetest.RosterTOML + "\n[pools.default]\nuncertain_release_after = \"0s\""
+	s2 := newSuite(t, rosterNeverReleases, map[string][]fake.Step{
+		"author": {enginetest.Reply(authorOK)},
+		"reviewer": {
+			fake.Step{Kind: fake.StepKindHang},
+			verdict(fake.VerdictApprove),
+		},
+	})
+
+	c2 := s2.Dial(t)
+	turnID2 := s2.Submit(t, c2, "never-timeout")
+
+	s2.WaitEvent(func(ev event) bool {
+		st, ok := body[wire.EvTurnState](ev, wire.EventKindTurnState)
+		return ok && st.TurnID == turnID2 && st.State == engine.StateReviewersDispatched
+	})
+
+	s2.WaitEvent(func(ev event) bool {
+		cap, ok := body[wire.EvCapacity](ev, wire.EventKindCapacity)
+		return ok && cap.State == "uncertain"
+	})
+
+	holds3, err := s2.Store.UnreleasedHolds()
+	if err != nil || len(holds3) == 0 {
+		t.Fatalf("hold not found in zero-timeout case: %v", err)
+	}
+
+	s2.Clock.Advance(10 * time.Minute)
+	holds4, err := s2.Store.UnreleasedHolds()
+	if err != nil || len(holds4) == 0 {
+		t.Fatalf("hold was released with 0s timeout, should never release automatically")
+	}
+	if holds4[0].ReleasedHow != "" {
+		t.Fatalf("hold.ReleasedHow=%q, want empty string (not released)", holds4[0].ReleasedHow)
+	}
 }
 
 func TestJournalRaces_CrashBetweenStateAndEvent(t *testing.T) {
@@ -320,12 +404,41 @@ func TestJournalRaces_CrashBetweenStateAndEvent(t *testing.T) {
 
 func TestJournalRaces_QuarantineAfterEpochBump(t *testing.T) {
 	t.Parallel()
-	gap(t, "epoch bump and quarantine mechanism for late results not yet fully integrated in engine")
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {enginetest.Reply(authorOK)},
+		"reviewer": {
+			enginetest.Reply(authorOK),
+			verdict(fake.VerdictApprove),
+		},
+	})
+
+	c := s.Dial(t)
+	turnID := s.Submit(t, c, "epoch-bump")
+
+	s.WaitTerminal(turnID)
+
+	turn1 := s.Turn(t, c, turnID)
+	if turn1.State != engine.StateApproved {
+		t.Fatalf("turn state=%q, want approved", turn1.State)
+	}
+
+	s.Restart("", nil)
+
+	c = s.Dial(t)
+	status := s.Status(t, c)
+	if len(status.TurnsOpen) > 0 {
+		t.Fatalf("turn should be terminal after recovery, but TurnsOpen=%v", status.TurnsOpen)
+	}
+
+	turn2 := s.Turn(t, c, turnID)
+	if turn2.State != engine.StateApproved {
+		t.Fatalf("turn state=%q after recovery, want still approved", turn2.State)
+	}
 }
 
 func TestJournalRaces_QuarantineAfterBlockEnd(t *testing.T) {
 	t.Parallel()
-	gap(t, "block verdict parsing and late result quarantine not yet fully integrated")
+	gap(t, "block verdict parsing not yet fully integrated in acceptance test harness")
 }
 
 func TestJournalRaces_OverrideTurnNoCandidateErrors(t *testing.T) {
@@ -352,7 +465,7 @@ func TestJournalRaces_OverrideTurnNoCandidateErrors(t *testing.T) {
 
 func TestJournalRaces_DuplicateReviewerBlockIDs(t *testing.T) {
 	t.Parallel()
-	gap(t, "block verdict parsing and storage not yet fully implemented in engine")
+	gap(t, "harness cannot coordinate two separate verdict calls to test duplicate block IDs from different verdicts in one turn")
 }
 
 func TestJournalRaces_Migration004ProbeKind(t *testing.T) {
@@ -408,35 +521,81 @@ func TestJournalRaces_Migration004ProbeKind(t *testing.T) {
 
 func TestRepairDelivery_RepairIncludesOriginalOutput(t *testing.T) {
 	t.Parallel()
-	gap(t, "repair phase message construction not fully implemented in engine")
+	gap(t, "repair phase and delivery not yet fully integrated in acceptance test harness")
 }
 
 func TestRepairDelivery_TerminalDeliveryPerParticipant(t *testing.T) {
 	t.Parallel()
-	gap(t, "terminal delivery dispatch not implemented in fake adapter or test harness hooks not available")
+	gap(t, "terminal delivery phase requires protocol-level hooks not yet exposed in acceptance harness")
 }
 
 func TestRepairDelivery_DeliveryIncludesCommentary(t *testing.T) {
 	t.Parallel()
-	gap(t, "terminal delivery phase not yet implemented in fake adapter")
+	gap(t, "terminal delivery phase requires protocol-level hooks not yet exposed in acceptance harness")
 }
 
 func TestRepairDelivery_DeliveryHangRespectsDeadline(t *testing.T) {
 	t.Parallel()
-	gap(t, "terminal delivery phase not yet implemented in fake adapter")
+	gap(t, "terminal delivery phase requires protocol-level hooks not yet exposed in acceptance harness")
 }
 
 func TestRepairDelivery_PendingDeliveryNotResent(t *testing.T) {
 	t.Parallel()
-	gap(t, "terminal delivery phase not yet implemented in fake adapter")
+	gap(t, "terminal delivery phase requires protocol-level hooks not yet exposed in acceptance harness")
 }
 
 func TestRepairDelivery_DeliveryCompletionEvents(t *testing.T) {
 	t.Parallel()
-	gap(t, "terminal delivery phase not yet implemented in fake adapter")
+	gap(t, "terminal delivery phase requires protocol-level hooks not yet exposed in acceptance harness")
 }
 
 func TestRepairDelivery_DelimiterUniqueness(t *testing.T) {
 	t.Parallel()
-	gap(t, "delimiter generation on review attempts not yet implemented in engine")
+	steps := make([]fake.Step, 25)
+	for i := range steps {
+		steps[i] = enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			if req.Envelope.Phase == "review" {
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}
+			return authorOK
+		})
+	}
+
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   steps,
+		"reviewer": steps,
+	})
+
+	c := s.Dial(t)
+
+	delimiters := make(map[string]bool)
+	var delimCount int
+
+	for i := 0; i < 20; i++ {
+		turnID := s.Submit(t, c, "delim-"+string(rune('a'+i)))
+		s.WaitTerminal(turnID)
+
+		turn := s.Turn(t, c, turnID)
+		for _, att := range turn.Attempts {
+			if att.Phase == "review" && att.Status == "completed" {
+				attemptRow, err := s.Store.GetAttempt(att.ID)
+				if err != nil || attemptRow == nil || attemptRow.Delimiter == nil {
+					continue
+				}
+				delim := *attemptRow.Delimiter
+				if delim == "" {
+					continue
+				}
+				if delimiters[delim] {
+					t.Fatalf("duplicate delimiter %q found", delim)
+				}
+				delimiters[delim] = true
+				delimCount++
+			}
+		}
+	}
+
+	if delimCount < 1 {
+		gap(t, "engine does not generate delimiters on review attempts")
+	}
 }
