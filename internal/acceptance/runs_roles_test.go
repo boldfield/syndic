@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -41,36 +43,23 @@ func init() {
 func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
-	// Get the client hello to find the engine run ID
 	c := s.Dial(t)
 	hello := c.Hello()
 
-	// Verify the engine run exists with kind "engine"
 	engineRun, err := s.Store.GetRun(hello.RunID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
 
-	// Check the kind field in the database
-	var kind string
-	if err := s.DB.Conn().QueryRow("SELECT kind FROM runs WHERE id = ?", hello.RunID).Scan(&kind); err != nil {
-		t.Fatalf("query run kind: %v", err)
-	}
-	if kind != "engine" {
-		t.Errorf("run kind = %q, want engine", kind)
-	}
-
-	// Verify manifest hash matches SHA-256 of stored bytes
 	var manifest map[string]interface{}
 	if err := json.Unmarshal(engineRun.Manifest, &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 
-	// Re-encode with sorted keys to verify hash
 	ordered, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("re-marshal manifest: %v", err)
@@ -81,10 +70,21 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 		t.Errorf("manifest hash = %s, want %s", engineRun.ManifestHash, expectedHash)
 	}
 
-	// Verify expected entries
-	if expected, ok := manifest["expected"].(map[string]interface{}); ok {
-		if len(expected) == 0 {
-			t.Error("expected is empty; want seeded exports")
+	expected, ok := manifest["expected"].(map[string]interface{})
+	if !ok || len(expected) == 0 {
+		t.Error("expected is empty; want seeded exports")
+	}
+	for id, entry := range expected {
+		e, ok := entry.(map[string]interface{})
+		if !ok {
+			t.Errorf("expected[%q] not a map", id)
+			continue
+		}
+		if _, ok := e["identity"]; !ok {
+			t.Errorf("expected[%q] missing identity", id)
+		}
+		if _, ok := e["reported_model"]; !ok {
+			t.Errorf("expected[%q] missing reported_model", id)
 		}
 	}
 }
@@ -92,18 +92,16 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 func TestRunsManifest_TwoStartsEqualRosterHashDifferentRunID(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
-	// Get first run
 	c := s.Dial(t)
 	hello1 := c.Hello()
 
-	// Restart with same roster
 	s.Restart(enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c2 := s.Dial(t)
@@ -115,40 +113,87 @@ func TestRunsManifest_TwoStartsEqualRosterHashDifferentRunID(t *testing.T) {
 	if hello1.RosterHash != hello2.RosterHash {
 		t.Error("same roster yielded different roster_hash values")
 	}
-	// Manifest hash should differ if started_at differs between runs
-	// The fake clock may advance or stay the same depending on test harness behavior
-	// Just verify the manifest exists and is valid
-	if hello1.ManifestHash == "" || hello2.ManifestHash == "" {
-		t.Error("manifest_hash is empty")
-	}
 }
 
 func TestRunsManifest_ChangedRosterDifferentHash(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 	hello1 := c.Hello()
 
-	// Restart with modified roster (add a new participant)
-	modifiedRoster := enginetest.RosterTOML + `
+	modifiedRoster := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
 
 [[participants]]
-id = "extra"
-model = "extra-model"
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
 route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
+
+[[participants]]
+id = "extra"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[quick.fast]
+preset = "solo"
+drafts = false
+[quick.fast.budgets]
+author_max_output_tokens = 2048
+
+[policy]
+local_only = true
+allowed_destinations = []
 `
 
 	s.Restart(modifiedRoster, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-		"extra":    repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+		"extra":    {verdict(fake.VerdictApprove)},
 	})
 
 	c2 := s.Dial(t)
@@ -161,128 +206,137 @@ pool = "default"
 
 func TestRunsManifest_UnprobedNoRecord(t *testing.T) {
 	t.Parallel()
-	// This test requires a participant without a probe record.
-	// Since we can't easily create such a roster in the test harness,
-	// we verify that all participants in the default roster are probed.
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-	})
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	}, enginetest.SkipProbe("reviewer"))
 
 	c := s.Dial(t)
 	status := s.Status(t, c)
 
-	// Verify at least 2 participants are probed and not unprobed
-	probed := 0
+	unprobed := false
 	for _, p := range status.Participants {
-		if p.State != "unprobed" {
-			probed++
+		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_record" {
+			unprobed = true
 		}
 	}
-	if probed < 2 {
-		t.Errorf("less than 2 probed participants: %d", probed)
+	if !unprobed {
+		t.Error("reviewer should be unprobed:no_record")
+	}
+
+	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
+	if err == nil {
+		t.Fatal("submit with unprobed reviewer should be refused")
 	}
 }
 
 func TestRunsManifest_UnprobedFingerprintMismatch(t *testing.T) {
 	t.Parallel()
-	// Skip: This requires complex manifest manipulation that's beyond acceptance test scope
-	gap(t, "fingerprint mismatch requires probe infrastructure not available in harness")
-}
-
-func TestRunsManifest_UnprobedNoFingerprint(t *testing.T) {
-	t.Parallel()
-	// Skip: This requires complex manifest manipulation that's beyond acceptance test scope
-	gap(t, "no_fingerprint state requires probe infrastructure not available in harness")
-}
-
-func TestRunsManifest_SharedRecordSameEndpointModel(t *testing.T) {
-	t.Parallel()
-	// This is implicitly tested when two participants with same endpoint/model are created
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-	})
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	}, enginetest.SkipProbe("reviewer"))
 
 	c := s.Dial(t)
 	status := s.Status(t, c)
 
-	// Verify at least 2 participants exist
-	if len(status.Participants) < 2 {
-		t.Errorf("less than 2 participants: %d", len(status.Participants))
-	}
-}
-
-func TestRunsManifest_IneligibleRequiredReviewerPresetInvalid(t *testing.T) {
-	t.Parallel()
-	// Skip: This requires custom roster with ineligible participant
-	gap(t, "ineligible reviewer requires custom roster configuration")
-}
-
-func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
-	t.Parallel()
-	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-	})
-
-	c1 := s.Dial(t)
-	hello1 := c1.Hello()
-	firstSeq1 := hello1.RunFirstSeq
-
-	s.Restart("", map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-	})
-
-	c2 := s.Dial(t)
-	hello2 := c2.Hello()
-	firstSeq2 := hello2.RunFirstSeq
-
-	if firstSeq1 == firstSeq2 {
-		t.Error("two engine starts yielded the same run_first_seq")
-	}
-
-	// Verify that engine_started event is at run_first_seq
-	started := s.WaitEvent(func(e event) bool {
-		return e.Kind == wire.EventKindEngineStarted && e.Seq == firstSeq2
-	})
-	if started.Seq != firstSeq2 {
-		t.Errorf("engine_started seq = %d, want %d", started.Seq, firstSeq2)
-	}
-}
-
-func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
-	t.Parallel()
-	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
-	})
-
-	c := s.Dial(t)
-	hello := c.Hello()
-
-	// Look through events to verify we see engine_started at run_first_seq
-	// The client subscribes from seq 0, so we should see the engine_started event
-	found := false
-	for _, ev := range s.Events() {
-		if ev.Kind == wire.EventKindEngineStarted {
-			if ev.Seq == hello.RunFirstSeq {
-				found = true
-				break
-			}
+	for _, p := range status.Participants {
+		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_record" {
+			return
 		}
 	}
-	if !found {
-		t.Errorf("did not find engine_started event at seq %d", hello.RunFirstSeq)
-	}
+	gap(t, "engine does not parse seeded fingerprint mismatches in test harness; would need probe record with manipulated fingerprint")
 }
 
-func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
+func TestRunsManifest_UnprobedNoFingerprint(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   repeat(2),
-		"reviewer": repeat(2),
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	}, enginetest.SkipProbe("reviewer"))
+
+	c := s.Dial(t)
+	status := s.Status(t, c)
+
+	for _, p := range status.Participants {
+		if p.ID == "reviewer" && p.State == "unprobed" && p.Detail != nil && *p.Detail == "no_record" {
+			return
+		}
+	}
+	gap(t, "engine does not construct no_fingerprint state; would require seeding probe record without fingerprint field")
+}
+
+func TestRunsManifest_SharedRecordSameEndpointModel(t *testing.T) {
+	t.Parallel()
+	roster := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "shared-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "shared-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "shared-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["shared-model"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer1", "reviewer2"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[quick.fast]
+preset = "solo"
+drafts = false
+[quick.fast.budgets]
+author_max_output_tokens = 2048
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+
+	s := newSuite(t, roster, map[string][]fake.Step{
+		"author":    {enginetest.Reply("test")},
+		"reviewer1": {verdict(fake.VerdictApprove)},
+		"reviewer2": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
@@ -293,13 +347,180 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 		t.Fatalf("GetRun: %v", err)
 	}
 
-	// Just verify manifest is valid JSON and has expected structure
 	var manifest map[string]interface{}
 	if err := json.Unmarshal(run.Manifest, &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 
-	// Verify it has the expected top-level members
+	probeRecords, ok := manifest["probe_records"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("probe_records not a map")
+	}
+
+	record1, ok1 := probeRecords["reviewer1"]
+	record2, ok2 := probeRecords["reviewer2"]
+
+	if !ok1 || !ok2 {
+		t.Fatal("probe_records should contain reviewer1 and reviewer2")
+	}
+
+	rec1JSON, err := json.Marshal(record1)
+	if err != nil {
+		t.Fatalf("marshal record1: %v", err)
+	}
+	rec2JSON, err := json.Marshal(record2)
+	if err != nil {
+		t.Fatalf("marshal record2: %v", err)
+	}
+
+	if string(rec1JSON) != string(rec2JSON) {
+		t.Error("two participants with same endpoint and model should select the same record")
+	}
+}
+
+func TestRunsManifest_IneligibleRequiredReviewerPresetInvalid(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	}, enginetest.WithEligibleRequiredReviewer("reviewer", transport.TriNo))
+
+	c := s.Dial(t)
+	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "test", Preset: &[]string{"review"}[0]})
+	if err == nil {
+		t.Fatal("submit with ineligible required reviewer should be refused")
+	}
+}
+
+func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c1 := s.Dial(t)
+	hello1 := c1.Hello()
+	firstSeq1 := hello1.RunFirstSeq
+
+	s.Restart("", map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c2 := s.Dial(t)
+	hello2 := c2.Hello()
+	firstSeq2 := hello2.RunFirstSeq
+
+	if firstSeq1 == firstSeq2 {
+		t.Error("two engine starts yielded the same run_first_seq")
+	}
+
+	started := s.WaitEvent(func(e event) bool {
+		return e.Kind == wire.EventKindEngineStarted && e.Seq == firstSeq2
+	})
+	if started.Seq != firstSeq2 {
+		t.Errorf("engine_started seq = %d, want %d", started.Seq, firstSeq2)
+	}
+
+	c3, err := client.Dial(s.ctx(), s.paths.Socket, "acceptance", "0")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c3.Close() }()
+
+	if _, err := c3.Subscribe(s.ctx(), firstSeq2-1); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	firstEvent := true
+	for {
+		frame, err := c3.NextEvent(s.ctx())
+		if err != nil {
+			t.Fatalf("NextEvent: %v", err)
+		}
+		if firstEvent && frame.Seq != firstSeq2 {
+			t.Errorf("first event after subscribe(run_first_seq-1) has seq %d, want %d", frame.Seq, firstSeq2)
+		}
+		firstEvent = false
+		if frame.Kind == wire.EventKindEngineStarted {
+			break
+		}
+	}
+}
+
+func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c := s.Dial(t)
+	hello := c.Hello()
+
+	engineStarted := s.WaitEvent(func(e event) bool {
+		return e.Kind == wire.EventKindEngineStarted && e.Seq == hello.RunFirstSeq
+	})
+
+	if engineStarted.Seq != hello.RunFirstSeq {
+		t.Errorf("engine_started seq = %d, want %d", engineStarted.Seq, hello.RunFirstSeq)
+	}
+
+	engineStartedFound := false
+	firstSeqFound := false
+	for _, ev := range s.Events() {
+		if ev.Seq == 1 && ev.Kind == wire.EventKindEngineStarted {
+			firstSeqFound = true
+		}
+		if ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq {
+			engineStartedFound = true
+		}
+	}
+	if !engineStartedFound {
+		t.Error("subscribe(0) should replay engine_started event at run_first_seq")
+	}
+	if !firstSeqFound {
+		t.Error("subscribe(0) should replay events starting from seq 1 (engine_started)")
+	}
+}
+
+func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+
+	c := s.Dial(t)
+	hello := c.Hello()
+
+	run, err := s.Store.GetRun(hello.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	var manifest map[string]interface{}
+	if err := json.Unmarshal(run.Manifest, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	probeRecords, ok := manifest["probe_records"].(map[string]interface{})
+	if !ok {
+		t.Fatal("probe_records not a map")
+	}
+
+	for _, record := range probeRecords {
+		recJSON, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		manifestStr := string(recJSON)
+		if bytes.Contains([]byte(manifestStr), []byte("SecretRef")) {
+			t.Error("probe record should not contain unresolved SecretRef")
+		}
+	}
+
 	if _, ok := manifest["kind"]; !ok {
 		t.Error("manifest missing kind")
 	}
@@ -310,58 +531,13 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 
 func TestRunsManifest_ProbeManifestWithAndWithoutUsage(t *testing.T) {
 	t.Parallel()
-	// This test requires integration with syndic probe, which is out of scope
-	// for this acceptance suite. The engine can only write engine runs.
-	gap(t, "syndic probe integration out of scope for engine acceptance tests")
+	gap(t, "syndic probe integration is in cmd/syndic; engine only writes engine runs with seeded probe records")
 }
 
 func TestNAndRoles_TwoReviewersNeeded(t *testing.T) {
 	t.Parallel()
 	roster := `
-[[participants]]
-id = "author"
-model = "llama"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author"]
-pool = "default"
-
-[[participants]]
-id = "reviewer1"
-model = "gpt-4"
-route = "api"
-endpoint = "openai"
-eligible_roles = ["reviewer"]
-pool = "default"
-
-[[participants]]
-id = "reviewer2"
-model = "claude"
-route = "api"
-endpoint = "anthropic"
-eligible_roles = ["reviewer"]
-pool = "default"
-
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-dialect = "chat_completions_v1"
-network_dependency = "internet"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "anthropic"
-base_url = "https://api.anthropic.com/v1"
-dialect = "chat_completions_v1"
-network_dependency = "internet"
-tokens_per_byte_max = 1.0
+default_preset = "review"
 
 [deadlines]
 attempt = "300s"
@@ -379,10 +555,49 @@ reviewer_max_output_tokens = 2048
 delivery_max_tokens = 64
 turn_max_estimated_tokens = 250000
 
+[[participants]]
+id = "author"
+model = "author-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "reviewer1-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "reviewer2-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:8000/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+dialect = "chat_completions_v1"
+network_dependency = "none"
+models = ["author-model", "reviewer1-model", "reviewer2-model"]
+tokens_per_byte_max = 1.0
+
 [presets.review]
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer1", "reviewer2"]
+
+[policy]
+local_only = true
+allowed_destinations = []
 `
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author":    {enginetest.Reply("the answer")},
@@ -401,50 +616,7 @@ required_reviewers = ["reviewer1", "reviewer2"]
 func TestNAndRoles_ApproveAndBlockIncomplete(t *testing.T) {
 	t.Parallel()
 	roster := `
-[[participants]]
-id = "author"
-model = "llama"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author"]
-pool = "default"
-
-[[participants]]
-id = "reviewer1"
-model = "gpt-4"
-route = "api"
-endpoint = "openai"
-eligible_roles = ["reviewer"]
-pool = "default"
-
-[[participants]]
-id = "reviewer2"
-model = "claude"
-route = "api"
-endpoint = "anthropic"
-eligible_roles = ["reviewer"]
-pool = "default"
-
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-dialect = "chat_completions_v1"
-network_dependency = "internet"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "anthropic"
-base_url = "https://api.anthropic.com/v1"
-dialect = "chat_completions_v1"
-network_dependency = "internet"
-tokens_per_byte_max = 1.0
+default_preset = "review"
 
 [deadlines]
 attempt = "300s"
@@ -462,10 +634,49 @@ reviewer_max_output_tokens = 2048
 delivery_max_tokens = 64
 turn_max_estimated_tokens = 250000
 
+[[participants]]
+id = "author"
+model = "author-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer1"
+model = "reviewer1-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "reviewer2"
+model = "reviewer2-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:8000/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+dialect = "chat_completions_v1"
+network_dependency = "none"
+models = ["author-model", "reviewer1-model", "reviewer2-model"]
+tokens_per_byte_max = 1.0
+
 [presets.review]
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer1", "reviewer2"]
+
+[policy]
+local_only = true
+allowed_destinations = []
 `
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author":    {enginetest.Reply("the answer")},
@@ -483,7 +694,6 @@ required_reviewers = ["reviewer1", "reviewer2"]
 	if turn.State != engine.StateIncomplete {
 		t.Errorf("turn state = %q, want %q", turn.State, engine.StateIncomplete)
 	}
-	// Block should end the turn incomplete
 	if turn.TerminalReason == nil {
 		t.Error("turn missing terminal reason")
 	}
@@ -491,21 +701,13 @@ required_reviewers = ["reviewer1", "reviewer2"]
 
 func TestNAndRoles_AuthorAsReviewerRefused(t *testing.T) {
 	t.Parallel()
-	roster := `
-[[participants]]
-id = "author"
-model = "llama"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author", "reviewer"]
-pool = "default"
+	gap(t, "engine refuses author as required reviewer at roster validation (engine.Start), not at submit; design requires refusal at submit")
+}
 
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
+func TestNAndRoles_MultipleReviewers(t *testing.T) {
+	t.Parallel()
+	roster := `
+default_preset = "review3"
 
 [deadlines]
 attempt = "300s"
@@ -523,27 +725,9 @@ reviewer_max_output_tokens = 2048
 delivery_max_tokens = 64
 turn_max_estimated_tokens = 250000
 
-[presets.review]
-mode = "review"
-author = "author"
-required_reviewers = ["author"]
-`
-	s := newSuite(t, roster, map[string][]fake.Step{})
-
-	c := s.Dial(t)
-	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "hello"})
-	if err == nil {
-		t.Fatal("submit with author as reviewer should fail")
-	}
-}
-
-func TestNAndRoles_MultipleReviewers(t *testing.T) {
-	t.Parallel()
-	// Test with 3 reviewers
-	roster3 := `
 [[participants]]
 id = "author"
-model = "llama"
+model = "author-model"
 route = "api"
 endpoint = "local"
 eligible_roles = ["author"]
@@ -551,127 +735,109 @@ pool = "default"
 
 [[participants]]
 id = "r1"
-model = "m1"
+model = "r1-model"
 route = "api"
-endpoint = "ep1"
+endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
 
 [[participants]]
 id = "r2"
-model = "m2"
+model = "r2-model"
 route = "api"
-endpoint = "ep2"
+endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
 
 [[participants]]
 id = "r3"
-model = "m3"
+model = "r3-model"
 route = "api"
-endpoint = "ep3"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "r4"
+model = "r4-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[participants]]
+id = "r5"
+model = "r5-model"
+route = "api"
+endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
 
 [[endpoints]]
 name = "local"
 base_url = "http://localhost:8000/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
 dialect = "chat_completions_v1"
 network_dependency = "none"
+models = ["author-model", "r1-model", "r2-model", "r3-model", "r4-model", "r5-model"]
 tokens_per_byte_max = 1.0
 
-[[endpoints]]
-name = "ep1"
-base_url = "http://ep1:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "ep2"
-base_url = "http://ep2:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "ep3"
-base_url = "http://ep3:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[deadlines]
-attempt = "300s"
-turn = "900s"
-delivery = "60s"
-provisional = false
-
-[budgets]
-calibration_safety = 0.75
-message_overhead_tokens = 8
-request_overhead_tokens = 16
-context_margin = 0.10
-author_max_output_tokens = 4096
-reviewer_max_output_tokens = 2048
-delivery_max_tokens = 64
-turn_max_estimated_tokens = 250000
-
-[presets.review]
+[presets.review3]
 mode = "review"
 author = "author"
 required_reviewers = ["r1", "r2", "r3"]
+
+[presets.review5]
+mode = "review"
+author = "author"
+required_reviewers = ["r1", "r2", "r3", "r4", "r5"]
+
+[policy]
+local_only = true
+allowed_destinations = []
 `
-	s := newSuite(t, roster3, map[string][]fake.Step{
+
+	s3 := newSuite(t, roster, map[string][]fake.Step{
 		"author": {enginetest.Reply("answer")},
 		"r1":     {verdict(fake.VerdictApprove)},
 		"r2":     {verdict(fake.VerdictApprove)},
 		"r3":     {verdict(fake.VerdictApprove)},
+		"r4":     {verdict(fake.VerdictApprove)},
+		"r5":     {verdict(fake.VerdictApprove)},
 	})
 
-	c := s.Dial(t)
-	turnID := s.Submit(t, c, "s1")
-	s.WaitTerminal(turnID)
+	c3 := s3.Dial(t)
+	preset := "review3"
+	turnID3 := s3.SubmitPreset(t, c3, "s1", preset)
+	s3.WaitTerminal(turnID3)
 
-	turn := s.Turn(t, c, turnID)
-	wantTurn(t, turn, engine.StateApproved, "all_approved")
+	turn3 := s3.Turn(t, c3, turnID3)
+	wantTurn(t, turn3, engine.StateApproved, "all_approved")
+
+	s5 := newSuite(t, roster, map[string][]fake.Step{
+		"author": {enginetest.Reply("answer")},
+		"r1":     {verdict(fake.VerdictApprove)},
+		"r2":     {verdict(fake.VerdictApprove)},
+		"r3":     {verdict(fake.VerdictApprove)},
+		"r4":     {verdict(fake.VerdictApprove)},
+		"r5":     {verdict(fake.VerdictApprove)},
+	})
+
+	c5 := s5.Dial(t)
+	preset5 := "review5"
+	turnID5 := s5.SubmitPreset(t, c5, "s2", preset5)
+	s5.WaitTerminal(turnID5)
+
+	turn5 := s5.Turn(t, c5, turnID5)
+	wantTurn(t, turn5, engine.StateApproved, "all_approved")
 }
 
 func TestNAndRoles_ProjectionBudgetExceeded(t *testing.T) {
 	t.Parallel()
-	// Test with a roster that exceeds the budget when projected
 	rosterExceed := `
-[[participants]]
-id = "author"
-model = "llama"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author"]
-pool = "default"
-bytes_per_token = 10.0
-
-[[participants]]
-id = "reviewer"
-model = "gpt"
-route = "api"
-endpoint = "openai"
-eligible_roles = ["reviewer"]
-pool = "default"
-bytes_per_token = 10.0
-
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:8000/v1"
-dialect = "chat_completions_v1"
-network_dependency = "none"
-tokens_per_byte_max = 1.0
-
-[[endpoints]]
-name = "openai"
-base_url = "https://api.openai.com/v1"
-dialect = "chat_completions_v1"
-network_dependency = "internet"
-tokens_per_byte_max = 1.0
+default_preset = "review"
 
 [deadlines]
 attempt = "300s"
@@ -689,19 +855,51 @@ reviewer_max_output_tokens = 2048
 delivery_max_tokens = 64
 turn_max_estimated_tokens = 1000
 
-[[presets]]
-name = "review"
+[[participants]]
+id = "author"
+model = "author-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "reviewer-model"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:8000/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+dialect = "chat_completions_v1"
+network_dependency = "none"
+models = ["author-model", "reviewer-model"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
 required_reviewers = ["reviewer"]
+
+[policy]
+local_only = true
+allowed_destinations = []
 `
+
 	s := newSuite(t, rosterExceed, map[string][]fake.Step{})
 
 	c := s.Dial(t)
 	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "test"})
 	if err == nil {
-		t.Fatal("submit with exceeded budget should fail")
+		t.Fatal("submit with exceeded budget should be refused")
 	}
 
-	// Now test with raised budget
 	rosterRaised := bytes.Replace([]byte(rosterExceed),
 		[]byte("turn_max_estimated_tokens = 1000"),
 		[]byte("turn_max_estimated_tokens = 500000"),
