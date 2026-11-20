@@ -148,3 +148,36 @@ func formatRefusal(err error) string {
 	}
 	return err.Error()
 }
+
+// transcriptPageSize is the page size asked of the engine, its maximum.
+const transcriptPageSize = 200
+
+// transcriptMsg carries every item of a turn's transcript, or the error that
+// stopped the load.
+type transcriptMsg struct {
+	gen   int
+	turn  string
+	items []wire.TranscriptItem
+	err   error
+}
+
+// transcriptCmd loads a turn's transcript, following next_cursor until there
+// is none. It returns the whole list at once, so a reload never leaves a
+// half-loaded transcript on screen.
+func transcriptCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea.Cmd {
+	return func() tea.Msg {
+		var items []wire.TranscriptItem
+		cursor := ""
+		for {
+			reply, err := cl.Transcript(ctx, turnID, cursor, transcriptPageSize)
+			if err != nil {
+				return transcriptMsg{gen: gen, turn: turnID, err: err}
+			}
+			items = append(items, reply.Items...)
+			if reply.NextCursor == nil || *reply.NextCursor == "" {
+				return transcriptMsg{gen: gen, turn: turnID, items: items}
+			}
+			cursor = *reply.NextCursor
+		}
+	}
+}

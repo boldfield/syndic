@@ -362,6 +362,7 @@ type AttemptRecord struct {
 	ScrubCount            int            `json:"scrub_count"`
 	TransportStatus       string         `json:"transport_status"`
 	Usage                 *ReportedUsage `json:"usage,omitempty"`
+	Quarantined           bool           `json:"quarantined,omitempty"`
 }
 
 type ReportedUsage struct {

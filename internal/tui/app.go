@@ -53,6 +53,19 @@ type App struct {
 	candidateIDByTurn map[string]string
 	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons   map[string]string           // the reason of each override event
+
+	// The transcript tab: the loaded items of one turn, their rendering
+	// at the current width, and the scroll position within it.
+	tTurn       string
+	tItems      []wire.TranscriptItem
+	tLoading    bool // a load is in flight
+	tReload     bool // a trigger arrived while it was
+	tStale      bool // tLines no longer matches what is known
+	tLines      []string
+	tRow        int  // first visible line
+	tFollow     bool // the view is at the bottom and stays there as lines arrive
+	quarantined map[string]bool
+	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
 }
 
 // Option configures an App.
@@ -79,6 +92,8 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		candidateIDByTurn: make(map[string]string),
 		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
 		overrideReasons:   make(map[string]string),
+		quarantined:       make(map[string]bool),
+		blockDetail:       make(map[string]wire.OpenBlock),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -122,6 +137,112 @@ func (a *App) fetchAnswerContent() tea.Cmd {
 	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
 }
 
+// transcriptIn gathers what the transcript tab needs.
+func (a *App) transcriptIn() transcriptInput {
+	return transcriptInput{items: a.tItems, content: a.content, quarantined: a.quarantined, blockDetail: a.blockDetail}
+}
+
+// fetchTranscriptContent starts the fetches the transcript tab is waiting on.
+func (a *App) fetchTranscriptContent() tea.Cmd {
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, transcriptRefs(a.tItems))...)
+}
+
+// syncTranscript points the transcript at the turn the UI is showing, and
+// starts loading it when that changes.
+func (a *App) syncTranscript() tea.Cmd {
+	t := answerTurn(a.state)
+	if t == a.tTurn {
+		return nil
+	}
+	a.tTurn, a.tItems = t, nil
+	a.tRow, a.tFollow, a.tStale = 0, false, true
+	return a.reloadTranscript()
+}
+
+// reloadTranscript loads the transcript again, or notes that it must be once
+// the load in flight ends.
+func (a *App) reloadTranscript() tea.Cmd {
+	if a.cl == nil || a.tTurn == "" {
+		return nil
+	}
+	if a.tLoading {
+		a.tReload = true
+		return nil
+	}
+	a.tLoading = true
+	return transcriptCmd(a.ctx, a.gen, a.cl, a.tTurn)
+}
+
+// onTranscript replaces the loaded items with a complete reload.
+func (a *App) onTranscript(msg transcriptMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	a.tLoading = false
+	if msg.err != nil {
+		a.refusal = "transcript: " + formatRefusal(msg.err)
+		a.tReload = false
+		return a, nil
+	}
+	if msg.turn == a.tTurn {
+		a.tItems = msg.items
+	}
+	if a.tReload || msg.turn != a.tTurn {
+		a.tReload = false
+		return a, a.reloadTranscript()
+	}
+	return a, nil
+}
+
+// transcriptTrigger reloads the transcript when an event concerns the turn it shows.
+func (a *App) transcriptTrigger(turnID string) tea.Cmd {
+	cmd := a.syncTranscript()
+	if turnID != "" && turnID == a.tTurn {
+		return tea.Batch(cmd, a.reloadTranscript())
+	}
+	return cmd
+}
+
+// refreshTranscript renders the tab again when something it shows changed, and
+// keeps the view where it was, or at the bottom if it was there.
+func (a *App) refreshTranscript() {
+	if a.tab != tabTranscript || !a.tStale {
+		return
+	}
+	a.tStale = false
+	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
+	a.tRow = a.clampTranscriptRow(a.tRow)
+	if a.tFollow {
+		a.tRow = a.maxTranscriptRow()
+	}
+}
+
+func (a *App) maxTranscriptRow() int { return max(len(a.tLines)-a.bodyHeight(), 0) }
+
+func (a *App) clampTranscriptRow(row int) int { return min(max(row, 0), a.maxTranscriptRow()) }
+
+// scrollTranscript handles a scroll key; the view follows new lines only when
+// it ends at the bottom.
+func (a *App) scrollTranscript(key string) {
+	page := max(a.bodyHeight()-1, 1)
+	switch key {
+	case "up":
+		a.tRow--
+	case "down":
+		a.tRow++
+	case "pgup":
+		a.tRow -= page
+	case "pgdown":
+		a.tRow += page
+	case "home":
+		a.tRow = 0
+	case "end":
+		a.tRow = a.maxTranscriptRow()
+	}
+	a.tRow = a.clampTranscriptRow(a.tRow)
+	a.tFollow = key != "home" && a.tRow >= a.maxTranscriptRow()
+}
+
 // Init starts the first connection, from the beginning of the journal.
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
@@ -132,10 +253,19 @@ func (a *App) Init() tea.Cmd {
 // on the next event or tick, not in a loop.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
-	if _, ok := msg.(contentMsg); !ok {
-		cmd = tea.Batch(cmd, a.fetchAnswerContent())
+	cmds := []tea.Cmd{cmd, a.syncTranscript()}
+	switch m := msg.(type) {
+	case tea.KeyMsg:
+		a.tStale = a.tStale || m.String() == "tab" || m.String() == "shift+tab"
+	case tickMsg:
+	default:
+		a.tStale = true
 	}
-	return a, cmd
+	a.refreshTranscript()
+	if _, ok := msg.(contentMsg); !ok {
+		cmds = append(cmds, a.fetchAnswerContent(), a.fetchTranscriptContent())
+	}
+	return a, tea.Batch(cmds...)
 }
 
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -157,6 +287,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onTurn(msg)
 	case contentMsg:
 		return a.onContent(msg)
+	case transcriptMsg:
+		return a.onTranscript(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -183,6 +315,13 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.enter()
 	}
 
+	if a.tab == tabTranscript {
+		switch msg.String() {
+		case "up", "down", "pgup", "pgdown", "home", "end":
+			a.scrollTranscript(msg.String())
+			return a, nil
+		}
+	}
 	if a.tab == tabAnswer {
 		page := max(a.bodyHeight()-1, 1)
 		switch msg.String() {
@@ -291,7 +430,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 		// The limit and deadline of a turn that is already open come from its record.
 		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
 	}
-	cmds = append(cmds, a.ensureTick())
+	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
 }
 
@@ -337,9 +476,52 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		if json.Unmarshal(msg.frame.Body, &body) == nil && isTerminalState(body.State) {
 			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
 		}
+	case wire.EventKindMessageAppended:
+		var body wire.EvMessageAppended
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			cmds = append(cmds, a.transcriptTrigger(body.TurnID))
+		}
+	case wire.EventKindAttemptBegun, wire.EventKindAttemptCompleted, wire.EventKindAttemptUnknown:
+		var body struct {
+			AttemptID string `json:"attempt_id"`
+		}
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			// An attempt begun after the turn ended (terminal delivery) has no turn of its own.
+			turnID := a.state.Attempts[body.AttemptID].TurnID
+			if turnID == "" {
+				turnID = answerTurn(a.state)
+			}
+			cmds = append(cmds, a.transcriptTrigger(turnID))
+			if msg.frame.Kind == wire.EventKindAttemptCompleted && a.state.Attempts[body.AttemptID].TurnID != "" && isTerminalState(a.state.TurnState[turnID]) {
+				// An attempt of the turn that completes after the turn ended is a late result,
+				// and only the turn record says it was quarantined.
+				cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, turnID))
+			}
+		}
+	}
+	if msg.frame.Kind == wire.EventKindCapacity {
+		cmds = append(cmds, a.onLateResult(msg.frame))
 	}
 	cmds = append(cmds, a.ensureTick())
 	return a, tea.Batch(cmds...)
+}
+
+// onLateResult handles the release of a hold by a late result. The result was
+// quarantined and no attempt event says so, so the transcript and the turn
+// record, which carries the mark, are read again.
+func (a *App) onLateResult(f wire.Frame) tea.Cmd {
+	var body wire.EvCapacity
+	if json.Unmarshal(f.Body, &body) != nil || body.State != "released" || body.How == nil || *body.How != "late_result" {
+		return nil
+	}
+	turnID := a.state.Attempts[body.HeldByAttempt].TurnID
+	if turnID == "" {
+		turnID = answerTurn(a.state)
+	}
+	if turnID == "" {
+		return nil
+	}
+	return tea.Batch(a.transcriptTrigger(turnID), turnCmd(a.ctx, a.gen, a.cl, turnID))
 }
 
 // requestStatus asks for a fresh status, coalescing a burst: while one request
@@ -383,7 +565,17 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	prevHash := a.state.Turns[msg.id].CandidateHash
+	prevAttempts := a.state.Attempts
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
+	// A reply read while an attempt was running can arrive after the event that
+	// completed it; a completed attempt is never shown as running again.
+	for id, before := range prevAttempts {
+		if now := a.state.Attempts[id]; attemptDone(before) && !attemptDone(now) {
+			attempts := copyMap(a.state.Attempts)
+			attempts[id] = before
+			a.state.Attempts = attempts
+		}
+	}
 	// A reply read before the candidate was frozen can arrive after a newer one;
 	// a candidate once seen is never forgotten.
 	if ti, ok := a.state.Turns[msg.id]; ok && ti.CandidateHash == nil && prevHash != nil {
@@ -391,6 +583,14 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		ti.CandidateHash = prevHash
 		turns[msg.id] = ti
 		a.state.Turns = turns
+	}
+	for _, at := range msg.turn.Attempts {
+		if at.Quarantined {
+			a.quarantined[at.ID] = true
+		}
+	}
+	for _, b := range msg.turn.OpenBlocks {
+		a.blockDetail[b.ID] = b
 	}
 	if msg.turn.CandidateID != nil {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
@@ -403,6 +603,9 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	}
 	return a, nil
 }
+
+// attemptDone reports whether the attempt has a final status.
+func attemptDone(ai AttemptInfo) bool { return ai.Status != "" && ai.Status != "in_progress" }
 
 // onContent stores a fetched body.
 func (a *App) onContent(msg contentMsg) (tea.Model, tea.Cmd) {
@@ -422,6 +625,7 @@ func (a *App) reconnect() tea.Cmd {
 	}
 	a.state.ConnState = ConnStateReconnecting
 	a.statusRefreshPending, a.statusDirty = false, false
+	a.tLoading, a.tReload = false, false
 	return connectCmd(a.ctx, a.gen, a.socket, a.state.LastSeq)
 }
 
@@ -469,7 +673,7 @@ func (a *App) View() string {
 		turnID := answerTurn(a.state)
 		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
 	case tabTranscript:
-		tabView = renderTranscript(a.state, w, bodyHeight)
+		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
 		tabView = renderParticipants(a.state, w, bodyHeight)
 	}

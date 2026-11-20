@@ -138,6 +138,7 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			Participant: a.Participant,
 			Phase:       a.Phase,
 			Epoch:       int64(a.Epoch),
+			Quarantined: a.Quarantined,
 		}
 
 		if a.MaxOutputTokens != nil {
