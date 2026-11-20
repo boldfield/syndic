@@ -299,6 +299,7 @@ func TestMergeStatusPopulatesParticipants(t *testing.T) {
 				EligibleRoles:       []string{"author", "reviewer"},
 				BytesPerTokenSource: "probe",
 				ContextSource:       "probe",
+				DeclaredBilling:     "flat",
 			},
 		},
 	}
@@ -311,6 +312,9 @@ func TestMergeStatusPopulatesParticipants(t *testing.T) {
 	p := s.Participants["author"]
 	if p.State != "idle" || p.ReportedModel != "reported-model1" {
 		t.Errorf("participant data mismatch: state=%s, reported=%s", p.State, p.ReportedModel)
+	}
+	if p.DeclaredBilling != "flat" {
+		t.Errorf("declared billing = %q, want flat", p.DeclaredBilling)
 	}
 	if s.Run.RosterHash != "hash123" {
 		t.Errorf("run info not merged: hash=%s", s.Run.RosterHash)

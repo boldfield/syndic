@@ -68,6 +68,7 @@ type App struct {
 	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
+	pSelected   int                       // index of the selected row of the participants tab, in id order
 }
 
 // Option configures an App.
@@ -348,6 +349,17 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "pgdown":
 			a.scrollAnswer(page)
+			return a, nil
+		}
+	}
+
+	if a.tab == tabParticipants {
+		switch msg.String() {
+		case "up":
+			a.pSelected = max(a.selectedParticipant()-1, 0)
+			return a, nil
+		case "down":
+			a.pSelected = a.selectedParticipant() + 1
 			return a, nil
 		}
 	}
@@ -687,7 +699,12 @@ func (a *App) View() string {
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
-		tabView = renderParticipants(a.state, w, bodyHeight)
+		ids := participantIDs(a.state)
+		selected := ""
+		if len(ids) > 0 {
+			selected = ids[a.selectedParticipant()]
+		}
+		tabView = renderParticipants(a.state, w, bodyHeight, selected, a.now())
 	}
 	lines := strings.Split(tabView, "\n")
 
@@ -707,6 +724,12 @@ func (a *App) View() string {
 	output = append(output, lines...)
 	output = append(output, renderInput(a.input, a.refusal, w))
 	return strings.Join(output, "\n")
+}
+
+// selectedParticipant is the index of the selected participants row, kept
+// within the roster as it stands.
+func (a *App) selectedParticipant() int {
+	return min(max(a.pSelected, 0), max(len(a.state.Participants)-1, 0))
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps
