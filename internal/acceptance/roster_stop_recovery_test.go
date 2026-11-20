@@ -32,7 +32,7 @@ func init() {
 	cover(rosterStop, "`SIGTERM` during review ends the turn `incomplete:engine_stop`, calls `Cancel` on the in-flight attempt, sends no terminal delivery, emits `engine_stopping`, and closes the client with `stopping`", "TestRoster_SIGTERMDuringReview")
 	cover(rosterStop, "with `CancelUnconfirmed` the hold survives into the next start's `engine_started`", "TestRoster_CancelUnconfirmedHold")
 	cover(rosterStop, "`submit` during the grace period is refused with `stopping`", "TestRoster_SubmitDuringGrace")
-	cover(rosterStop, "a second `SIGTERM` during the grace period exits and the next start recovers the attempt as `unknown`", "TestRoster_SecondSIGTERM")
+	cover(rosterStop, "a second `SIGTERM` during the grace period exits and the next start recovers the attempt as `unknown`", "cmd/syndicd.TestDoubleSignalExits130AndRecovers")
 	cover(rosterStop, "`syndic probe` against the running engine's journal exits with its distinct code naming the PID and still writes the export", "cmd/syndic.TestProbeLockContention")
 
 	cover(recovery, "kill the engine mid-review, restart, the turn is `incomplete:engine_restart`, the pending attempt is `unknown`, the fake adapter's call count shows nothing re-sent", "TestRecovery_KillMidReview")
@@ -464,6 +464,13 @@ func TestRoster_SubmitDuringGrace(t *testing.T) {
 	t.Parallel()
 	s, _, _ := rosterInFlight(t, enginetest.RosterTOML, "reviewer", []string{"author", "reviewer"}, enginetest.BlockingCancel())
 
+	// A client connected before the stop, subscribed as the TUI is: a new
+	// connection cannot be made once the engine is stopping.
+	late := s.Dial(t)
+	if _, err := late.Subscribe(s.ctx(), 0); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
 	stopped := make(chan error, 1)
 	go func() { stopped <- s.Engine.Stop(s.ctx()) }()
 	// engine_stopping is out, and the Cancel is blocked, so the grace period
@@ -475,11 +482,36 @@ func TestRoster_SubmitDuringGrace(t *testing.T) {
 	default:
 	}
 
-	// The control socket closes every connection as the engine begins to
-	// stop, so the request goes to the engine, which is what the server hands
-	// every submit to.
-	_, err := s.Engine.Submit(wire.SubmitRequest{SubmissionID: "late", Input: "what is the answer?"})
+	// The server notices the stop and closes every connection with stopping, so
+	// the refusal reaches the client either as the reply to its submit or as
+	// the closing notice; it is never accepted.
+	_, err := late.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "late-socket", Input: "what is the answer?"})
 	var refused *wire.Error
+	if errors.As(err, &refused) {
+		if refused.Code != wire.ErrorCodeStopping {
+			t.Fatalf("submit during the grace period over the socket: %v, want error{code: stopping}", err)
+		}
+	} else {
+		if !errors.Is(err, client.ErrClosed) {
+			t.Fatalf("submit during the grace period over the socket: %v, want stopping or a closed connection", err)
+		}
+		// The connection was already closed: its closing notice was stopping.
+		var closing *wire.Error
+		for {
+			if _, nerr := late.NextEvent(s.ctx()); nerr != nil {
+				if !errors.As(nerr, &closing) || closing.Code != wire.ErrorCodeStopping {
+					t.Fatalf("the closed connection ended with %v, want error{code: stopping}", nerr)
+				}
+				break
+			}
+		}
+	}
+	if _, found, ferr := s.Store.FindSubmission("late-socket"); ferr != nil || found {
+		t.Fatalf("the submission refused over the socket was recorded: found=%v err=%v", found, ferr)
+	}
+
+	// The engine's own answer, which the server hands every submit to.
+	_, err = s.Engine.Submit(wire.SubmitRequest{SubmissionID: "late", Input: "what is the answer?"})
 	if !errors.As(err, &refused) || refused.Code != wire.ErrorCodeStopping {
 		t.Fatalf("submit during the grace period: %v, want error{code: stopping}", err)
 	}
@@ -493,7 +525,11 @@ func TestRoster_SubmitDuringGrace(t *testing.T) {
 	}
 }
 
-func TestRoster_SecondSIGTERM(t *testing.T) {
+// TestStopGrace_SecondStopCancelsGrace proves the engine side of a second
+// SIGTERM: cancelling the stop's context (what cmd/syndicd does on the second
+// signal) ends the stop at once, and the next start recovers the attempt as
+// unknown. The process exit is proven by cmd/syndicd.
+func TestStopGrace_SecondStopCancelsGrace(t *testing.T) {
 	t.Parallel()
 	s, turnID, attemptID := rosterInFlight(t, enginetest.RosterTOML, "reviewer", []string{"author", "reviewer"}, enginetest.BlockingCancel())
 
