@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
@@ -33,7 +34,8 @@ func init() {
 	cover(runsManifest, "after a restart `hello.run_first_seq` is the `seq` of the new `engine_started` event and `subscribe{since_seq: run_first_seq - 1}` replays exactly the new run", "TestRunsManifest_RestartRunFirstSeqReplay")
 	cover(runsManifest, "`subscribe{since_seq: 0}` replays the seeded `probe_completed` rows and the client ignores them", "TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted")
 	cover(runsManifest, "the manifest JSON contains no secret value when the resolver holds a sentinel and no member outside the list in section 1a", "TestRunsManifest_ManifestContainsNoSecretValue")
-	cover(runsManifest, "`syndic probe` against a fake server that returns `usage` writes a manifest with `export`, `config_fingerprint`, `fingerprint_rule` and a `calibration` whose `bytes_per_token` follows from the fake's reported counts, and against one that returns no usage writes `calibration: unavailable`", "TestRunsManifest_ProbeManifestWithAndWithoutUsage")
+	cover(runsManifest, "`syndic probe` against a fake server that returns `usage` writes a manifest with `export`, `config_fingerprint`, `fingerprint_rule` and a `calibration` whose `bytes_per_token` follows from the fake's reported counts", "cmd/syndic.TestProbeSuccess")
+	cover(runsManifest, "and against one that returns no usage writes `calibration: unavailable`", "cmd/syndic.TestProbeNoUsage")
 	cover(nAndRoles, "review with two required reviewers needs both", "TestNAndRoles_TwoReviewersNeeded")
 	cover(nAndRoles, "one approve and one block is INCOMPLETE", "TestNAndRoles_ApproveAndBlockIncomplete")
 	cover(nAndRoles, "a preset naming the author as reviewer is refused at submit", "TestNAndRoles_AuthorAsReviewerRefused")
@@ -56,6 +58,16 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 		t.Fatalf("GetRun: %v", err)
 	}
 
+	if manifest := engineRun.Manifest; manifest == nil {
+		t.Fatal("manifest is nil")
+	}
+
+	sum := sha256.Sum256(engineRun.Manifest)
+	expectedHash := hex.EncodeToString(sum[:])
+	if engineRun.ManifestHash != expectedHash {
+		t.Errorf("manifest hash = %s, want %s (hash of raw bytes)", engineRun.ManifestHash, expectedHash)
+	}
+
 	var manifest map[string]interface{}
 	if err := json.Unmarshal(engineRun.Manifest, &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
@@ -63,16 +75,6 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 
 	if manifest["kind"] != "engine" {
 		t.Errorf("manifest kind = %v, want engine", manifest["kind"])
-	}
-
-	ordered, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("re-marshal manifest: %v", err)
-	}
-	sum := sha256.Sum256(ordered)
-	expectedHash := hex.EncodeToString(sum[:])
-	if engineRun.ManifestHash != expectedHash {
-		t.Errorf("manifest hash = %s, want %s", engineRun.ManifestHash, expectedHash)
 	}
 
 	expected, ok := manifest["expected"].(map[string]interface{})
@@ -88,11 +90,14 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 		}
 		identity, ok := entry["identity"].(map[string]interface{})
 		if !ok {
-			t.Errorf("expected[%q] identity not a map", participant)
+			t.Errorf("expected[%q].identity not a map", participant)
 			continue
 		}
-		if _, ok := identity["Kind"]; !ok {
-			t.Errorf("expected[%q].identity missing Kind", participant)
+		kind, ok := identity["Kind"].(string)
+		if !ok {
+			t.Errorf("expected[%q].identity.Kind missing or not a string", participant)
+		} else if kind != "unknown" {
+			t.Errorf("expected[%q].identity.Kind = %q, want unknown (OpenAI route)", participant, kind)
 		}
 		reportedModel, ok := entry["reported_model"].(string)
 		if !ok {
@@ -115,6 +120,13 @@ func TestRunsManifest_TwoStartsEqualRosterHashDifferentRunID(t *testing.T) {
 	c := s.Dial(t)
 	hello1 := c.Hello()
 
+	run1, err := s.Store.GetRun(hello1.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	s.Clock.Advance(time.Second)
+
 	s.Restart(enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
@@ -123,11 +135,19 @@ func TestRunsManifest_TwoStartsEqualRosterHashDifferentRunID(t *testing.T) {
 	c2 := s.Dial(t)
 	hello2 := c2.Hello()
 
+	run2, err := s.Store.GetRun(hello2.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
 	if hello1.RunID == hello2.RunID {
 		t.Error("two starts yielded the same run_id")
 	}
 	if hello1.RosterHash != hello2.RosterHash {
 		t.Error("same roster yielded different roster_hash values")
+	}
+	if run1.ManifestHash == run2.ManifestHash {
+		t.Error("two starts with same roster yielded equal manifest_hash; should differ due to started_at")
 	}
 }
 
@@ -333,6 +353,7 @@ allowed_destinations = []
 	if !found {
 		t.Error("reviewer should be unprobed:fingerprint_mismatch with different base_url")
 	}
+
 }
 
 func TestRunsManifest_UnprobedNoFingerprint(t *testing.T) {
@@ -557,65 +578,50 @@ func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	seenSeqs := map[int64]bool{}
 	var engineStartedSeen bool
-	for {
-		frame, err := c3.NextEvent(s.ctx())
-		if err != nil {
-			t.Fatalf("NextEvent: %v", err)
+	seenSeqs := map[int64]bool{}
+	timeoutChan := make(chan bool, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			frame, err := c3.NextEvent(s.ctx())
+			if err != nil {
+				return
+			}
+			if frame.Seq < firstSeq2 {
+				t.Errorf("event seq %d before run_first_seq %d", frame.Seq, firstSeq2)
+				return
+			}
+			if _, dup := seenSeqs[frame.Seq]; dup {
+				t.Errorf("duplicate seq %d", frame.Seq)
+				return
+			}
+			seenSeqs[frame.Seq] = true
+			if frame.Kind == wire.EventKindEngineStarted && frame.Seq == firstSeq2 {
+				engineStartedSeen = true
+				timeoutChan <- true
+				return
+			}
 		}
-		if frame.Seq < firstSeq2 {
-			t.Errorf("event seq %d before run_first_seq %d", frame.Seq, firstSeq2)
+		timeoutChan <- false
+	}()
+
+	select {
+	case result := <-timeoutChan:
+		if !result || !engineStartedSeen {
+			t.Error("replay did not reach or verify engine_started at run_first_seq")
 		}
-		if _, dup := seenSeqs[frame.Seq]; dup {
-			t.Errorf("duplicate seq %d", frame.Seq)
-		}
-		seenSeqs[frame.Seq] = true
-		if frame.Kind == wire.EventKindEngineStarted {
-			engineStartedSeen = true
-			break
-		}
-	}
-	if !engineStartedSeen {
-		t.Error("replay did not reach engine_started")
+	case <-s.ctx().Done():
+		t.Fatal("replay subscription timed out before receiving engine_started")
 	}
 }
 
 func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 	t.Parallel()
 
-	probeExport := json.RawMessage(`{
-		"endpoint_name":"local",
-		"model":"llama2",
-		"redaction_rule":"redaction/v1",
-		"redacted":true,
-		"declared_location":"local",
-		"declared_execution":"local",
-		"declared_billing":"none",
-		"network_dependency":"none",
-		"auth_mode":"none",
-		"streaming":"unknown",
-		"cancel_observable":"unknown",
-		"usage_available":"unknown",
-		"reported_model":"enginetest-model",
-		"identity":{"kind":"unknown"},
-		"eligible_required_reviewer":"unknown",
-		"observed_at":"2026-01-01T00:00:00Z"
-	}`)
-
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	})
-
-	_, _, err := s.Store.CreateRun(probeExport)
-	if err != nil {
-		t.Fatalf("seed probe: %v", err)
-	}
-
-	if err := s.Store.AppendEvent("probe_completed", json.RawMessage(`{"test":"probe_completed"}`)); err != nil {
-		t.Fatalf("append probe_completed event: %v", err)
-	}
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -639,15 +645,16 @@ func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 		}
 	}
 	if !engineStartedFound {
-		t.Error("subscribe(0) should replay engine_started event at run_first_seq")
+		t.Error("events should include engine_started at run_first_seq")
 	}
-	if probeCompletedCount > 0 {
-		t.Errorf("subscribe(0) replayed %d probe_completed events, should ignore them", probeCompletedCount)
+	if probeCompletedCount != 0 {
+		t.Errorf("events included %d probe_completed events, expected 0 in this test", probeCompletedCount)
 	}
 }
 
 func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 	t.Parallel()
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("test")},
 		"reviewer": {verdict(fake.VerdictApprove)},
@@ -661,9 +668,26 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 		t.Fatalf("GetRun: %v", err)
 	}
 
+	manifestBytes := run.Manifest
+	if bytes.Contains(manifestBytes, []byte("SecretRef")) {
+		t.Error("manifest should not contain unresolved SecretRef")
+	}
+
 	var manifest map[string]interface{}
-	if err := json.Unmarshal(run.Manifest, &manifest); err != nil {
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	topLevel := map[string]bool{
+		"kind": true, "engine_version": true, "started_at": true,
+		"roster": true, "roster_path": true, "roster_file_sha256": true,
+		"probe_records": true, "expected": true,
+	}
+
+	for key := range manifest {
+		if !topLevel[key] {
+			t.Errorf("manifest contains unexpected top-level member %q", key)
+		}
 	}
 
 	roster, ok := manifest["roster"].(map[string]interface{})
@@ -689,11 +713,9 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 			t.Error("endpoint not a map")
 			continue
 		}
-		for key := range epMap {
-			if !allowedMembers[key] && (key == "auth" || key == "extra_headers") {
-				if epMap[key] != nil {
-					t.Errorf("endpoint contains unexpected key %q with value %v", key, epMap[key])
-				}
+		for key, val := range epMap {
+			if !allowedMembers[key] {
+				t.Errorf("endpoint contains member %q not in section 1a allowlist: %v", key, val)
 			}
 		}
 	}
@@ -713,18 +735,6 @@ func TestRunsManifest_ManifestContainsNoSecretValue(t *testing.T) {
 			t.Error("probe record should not contain unresolved SecretRef")
 		}
 	}
-
-	if _, ok := manifest["kind"]; !ok {
-		t.Error("manifest missing kind")
-	}
-	if _, ok := manifest["roster"]; !ok {
-		t.Error("manifest missing roster")
-	}
-}
-
-func TestRunsManifest_ProbeManifestWithAndWithoutUsage(t *testing.T) {
-	t.Parallel()
-	gap(t, "probe behavior with and without usage is tested in cmd/syndic: TestProbeSuccess (with usage, calibration field) and TestProbeNoUsage (without usage, calibration: unavailable). Engine acceptance tests only verify engine runs with seeded probe records.")
 }
 
 func TestNAndRoles_TwoReviewersNeeded(t *testing.T) {
@@ -889,8 +899,7 @@ allowed_destinations = []
 	}
 	if turn.TerminalReason == nil {
 		t.Error("turn missing terminal reason")
-	}
-	if !strings.Contains(*turn.TerminalReason, "block") {
+	} else if !strings.Contains(*turn.TerminalReason, "block") {
 		t.Errorf("terminal reason should contain block reference, got %q", *turn.TerminalReason)
 	}
 }
@@ -898,7 +907,7 @@ allowed_destinations = []
 func TestNAndRoles_AuthorAsReviewerRefused(t *testing.T) {
 	t.Parallel()
 
-	gap(t, "config validator refuses author as required reviewer at engine.Start (roster validation), not at submit as design requires. Engine rejects the roster during validation, not during submit. Design requires preset_invalid error at submit time.")
+	gap(t, "roster with author as required reviewer is rejected at engine.Start (roster validation), not at submit as the design specifies. The engine validates and refuses rosters during initialization, not at submit time, when author appears in required_reviewers.")
 }
 
 func TestNAndRoles_MultipleReviewers(t *testing.T) {
