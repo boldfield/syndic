@@ -107,6 +107,21 @@ func statusCmd(ctx context.Context, cl *client.Client) tea.Cmd {
 	}
 }
 
+// turnMsg carries a fetched turn reply or the error that occurred.
+type turnMsg struct {
+	turn *wire.TurnReply
+	id   string
+	err  error
+}
+
+// turnCmd requests the full turn record from the engine.
+func turnCmd(ctx context.Context, cl *client.Client, turnID string) tea.Cmd {
+	return func() tea.Msg {
+		turn, err := cl.Turn(ctx, turnID)
+		return turnMsg{turn: &turn, id: turnID, err: err}
+	}
+}
+
 // formatRefusal renders a refusal as its code and detail on one line.
 func formatRefusal(err error) string {
 	var we *wire.Error

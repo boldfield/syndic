@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/client"
@@ -94,6 +95,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case statusMsg:
 		return a.onStatusRefresh(msg)
+	case turnMsg:
+		return a.onTurn(msg)
 	}
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
@@ -155,7 +158,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	a.cl = msg.cl
 	a.state.Hello = msg.cl.Hello()
-	a.state.Status = &msg.status
+	a.state = MergeStatus(a.state, &msg.status)
 	a.state.ConnState = ConnStateConnected
 	if len(msg.status.TurnsOpen) > 0 {
 		a.state.CurrentTurn = msg.status.TurnsOpen[0]
@@ -183,13 +186,23 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	// Trigger status refresh after certain events (coalesced by not requesting until the next read).
 	var cmd tea.Cmd
 	needsStatusRefresh := false
+	requestTurnID := ""
 	switch msg.frame.Kind {
 	case wire.EventKindEngineStarted, wire.EventKindParticipantState, wire.EventKindCapacity:
 		needsStatusRefresh = true
+	case wire.EventKindTurnState:
+		var body wire.EvTurnState
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			if isTerminalState(body.State) {
+				requestTurnID = body.TurnID
+			}
+		}
 	}
 
 	if needsStatusRefresh && a.cl != nil {
 		cmd = statusCmd(a.ctx, a.cl)
+	} else if requestTurnID != "" && a.cl != nil {
+		cmd = turnCmd(a.ctx, a.cl, requestTurnID)
 	} else {
 		cmd = readCmd(a.ctx, a.gen, a.cl)
 	}
@@ -199,7 +212,18 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 // onStatusRefresh applies a status update and continues reading events.
 func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil {
-		a.state.Status = &msg.status
+		a.state = MergeStatus(a.state, &msg.status)
+	}
+	if a.cl != nil {
+		return a, readCmd(a.ctx, a.gen, a.cl)
+	}
+	return a, nil
+}
+
+// onTurn applies a turn reply and continues reading events.
+func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if msg.err == nil && msg.turn != nil {
+		a.state = MergeTurn(a.state, msg.id, msg.turn)
 	}
 	if a.cl != nil {
 		return a, readCmd(a.ctx, a.gen, a.cl)

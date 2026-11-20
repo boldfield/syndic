@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // renderStrip returns the status strip line. It is a single line showing:
 // [preset] [quick:<name>?] [turn state] [elapsed / turn_deadline]
 // [est. tokens / limit] author:<id> <state> reviewers: <id> <state> … identity: unknown(name-matched)
 // At 80 columns with five reviewers the strip is at most 80 cells wide and ends with …
-// when needed, dropping segments from the right in whole segments.
+// when needed, dropping segments from the right in whole segments. Uses terminal display width.
 func renderStrip(s State, width int) string {
 	switch s.ConnState {
-	case ConnStateReconnecting:
-		return "engine: reconnecting"
 	case ConnStateConnecting:
 		return "engine: connecting"
 	}
@@ -24,11 +24,7 @@ func renderStrip(s State, width int) string {
 		segments := []string{}
 		if s.Status != nil {
 			segments = append(segments, fmt.Sprintf("[%s]", s.Status.DefaultPreset))
-			if s.Status.DeadlinesProvisional {
-				segments = append(segments, "[idle]")
-			} else {
-				segments = append(segments, "[idle]")
-			}
+			segments = append(segments, "[idle]")
 		}
 		return strings.Join(segments, " ")
 	}
@@ -75,10 +71,11 @@ func renderStrip(s State, width int) string {
 		segments = append(segments, fmt.Sprintf("author:%s %s", ti.Author, ti.AuthorState))
 	}
 
-	// reviewers: <id> <state> …
+	// reviewers: <id> <state> … (in order from Reviewers list, not map iteration)
 	if len(ti.Reviewers) > 0 {
 		reviewerParts := []string{"reviewers:"}
-		for id, state := range ti.Reviewers {
+		for _, id := range ti.Reviewers {
+			state := ti.ReviewerStates[id]
 			reviewerParts = append(reviewerParts, fmt.Sprintf("%s %s", id, state))
 		}
 		segments = append(segments, strings.Join(reviewerParts, " "))
@@ -89,21 +86,25 @@ func renderStrip(s State, width int) string {
 
 	line := strings.Join(segments, " ")
 
-	// If line fits, return it.
-	if len(line) <= width {
+	// If line fits (measured by display width, not bytes), return it.
+	displayWidth := runewidth.StringWidth(line)
+	if displayWidth <= width {
 		return line
 	}
 
 	// Drop segments from the right, adding … at the end.
+	ellipsis := "…"
+	ellipsisWidth := runewidth.StringWidth(ellipsis)
 	for len(segments) > 0 {
 		segments = segments[:len(segments)-1]
 		line = strings.Join(segments, " ")
-		if len(line) <= width-1 {
-			return line + "…"
+		lineWidth := runewidth.StringWidth(line)
+		if lineWidth+ellipsisWidth <= width {
+			return line + ellipsis
 		}
 	}
 
-	return "…"
+	return ellipsis
 }
 
 // formatDuration returns a human-readable duration string (e.g., "1m23s", "12s").
@@ -134,6 +135,11 @@ func renderBanners(s State) []string {
 	if s.ConnState == ConnStateReconnecting {
 		banners = append(banners, "engine: reconnecting")
 	}
+
+	// Quick profile unapproved slot: will be filled by later task
+	// if unapproved {
+	//   banners = append(banners, "quick: unapproved <name>")
+	// }
 
 	return banners
 }
