@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/boldfield/syndic/internal/client"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,9 +43,8 @@ func (cc *ContentCache) Store(ref string, data string, err error) {
 
 // contentMsg carries the result of a content fetch or the error that occurred.
 type contentMsg struct {
-	ref string
-	err error
-	// data is base64 encoded text; decoded before storing in cache
+	ref  string
+	err  error
 	data string
 }
 
@@ -60,16 +58,4 @@ func fetchContentCmd(ctx context.Context, cl *client.Client, ref string) tea.Cmd
 			err:  err,
 		}
 	}
-}
-
-// RenderContent renders a ContentItem for display, with appropriate handling for
-// loading and error states.
-func RenderContent(item ContentItem, maxWidth, maxHeight int) string {
-	if !item.Ready {
-		return "loading…"
-	}
-	if item.Err != nil {
-		return fmt.Sprintf("error: %v", item.Err)
-	}
-	return item.Data
 }

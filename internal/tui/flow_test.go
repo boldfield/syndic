@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -551,5 +552,149 @@ func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
 	}
 	if got := ti.Remaining(t0.Add(5 * time.Minute)); got != 10*time.Minute {
 		t.Errorf("Remaining = %v", got)
+	}
+}
+
+// TestAnswerTabOpenTurnNoDraft tests that answer tab is empty during open turn with drafts off.
+func TestAnswerTabOpenTurnNoDraft(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	s.Turns = map[string]TurnInfo{
+		"t1": {ID: "t1", State: "submitted"},
+	}
+	cc := NewContentCache()
+
+	output := renderAnswer(s, 80, 24, cc, false, 0)
+	if !strings.Contains(output, "turn in progress") {
+		t.Fatalf("open turn should show 'turn in progress': %s", output)
+	}
+}
+
+// TestAnswerTabApprovedWithHash tests approved state with hash prefix and reviewer list.
+func TestAnswerTabApprovedWithHash(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	hash := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	s.Turns = map[string]TurnInfo{
+		"t1": {
+			ID:            "t1",
+			State:         "approved",
+			Reviewers:     []string{"r1", "r2"},
+			CandidateHash: &hash,
+		},
+	}
+	s.Attempts = map[string]AttemptInfo{
+		"a1": {ID: "a1", TurnID: "t1", Phase: "review", Participant: "r1", Status: "complete"},
+		"a2": {ID: "a2", TurnID: "t1", Phase: "review", Participant: "r2", Status: "complete"},
+	}
+	s.Verdicts = map[string]VerdictInfo{
+		"v1": {ID: "v1", AttemptID: "a1", Parsed: true, Class: "valid"},
+		"v2": {ID: "v2", AttemptID: "a2", Parsed: true, Class: "valid"},
+	}
+	cc := NewContentCache()
+	cc.Store("candidate:t1", "the approved text", nil)
+
+	output := renderAnswer(s, 80, 24, cc, false, 0)
+	if !strings.Contains(output, "approved by") {
+		t.Fatalf("should show approved by: %s", output)
+	}
+	if !strings.Contains(output, "abcdef") {
+		t.Fatalf("should show hash prefix: %s", output)
+	}
+	if !strings.Contains(output, "the approved text") {
+		t.Fatalf("should show candidate text: %s", output)
+	}
+}
+
+// TestAnswerTabBlockShownWithSeverity tests that incomplete state shows blocks with severity.
+func TestAnswerTabBlockShownWithSeverity(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	hash := strings.Repeat("c", 64)
+	reason := "block:b1"
+	s.Turns = map[string]TurnInfo{
+		"t1": {
+			ID:             "t1",
+			State:          "incomplete",
+			TerminalReason: &reason,
+			CandidateHash:  &hash,
+		},
+	}
+	s.Attempts = map[string]AttemptInfo{
+		"a1": {ID: "a1", TurnID: "t1", Phase: "review", Participant: "r1", Status: "complete"},
+	}
+	s.Verdicts = map[string]VerdictInfo{
+		"v1": {ID: "v1", AttemptID: "a1", Parsed: true, Class: "block"},
+	}
+	s.Blocks = map[string]BlockInfo{
+		"v1:b1": {ID: "v1:b1", Severity: "major", State: "open"},
+	}
+	cc := NewContentCache()
+	cc.Store("candidate:t1", "incomplete answer", nil)
+
+	output := renderAnswer(s, 80, 24, cc, false, 0)
+	if !strings.Contains(output, "block:b1") {
+		t.Fatalf("should show terminal reason: %s", output)
+	}
+	if !strings.Contains(output, "[major]") {
+		t.Fatalf("should show block severity: %s", output)
+	}
+	if !strings.Contains(output, "INCOMPLETE, not approved") {
+		t.Fatalf("should show incomplete banner: %s", output)
+	}
+	if !strings.Contains(output, "incomplete answer") {
+		t.Fatalf("should show candidate text: %s", output)
+	}
+}
+
+// TestAnswerTabCancelledBeforeCandidateNotAfter tests cancelled state handling.
+func TestAnswerTabCancelledBeforeCandidateNotAfter(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	s.Turns = map[string]TurnInfo{
+		"t1": {ID: "t1", State: "cancelled", CandidateHash: nil},
+	}
+	cc := NewContentCache()
+
+	output := renderAnswer(s, 80, 24, cc, false, 0)
+	if !strings.Contains(output, "cancelled before candidate") {
+		t.Fatalf("should show 'cancelled before candidate': %s", output)
+	}
+}
+
+// TestAnswerTabLongContentScrolls tests that long content (5000+ lines) can be rendered.
+func TestAnswerTabLongContentScrolls(t *testing.T) {
+	// Create a very long text with 5000+ lines
+	var longText strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&longText, "line %d\n", i)
+	}
+
+	s := NewState()
+	s.CurrentTurn = "t1"
+	hash := strings.Repeat("a", 64)
+	s.Turns = map[string]TurnInfo{
+		"t1": {
+			ID:            "t1",
+			State:         "approved",
+			Reviewers:     []string{"r1"},
+			CandidateHash: &hash,
+		},
+	}
+	cc := NewContentCache()
+	cc.Store("candidate:t1", longText.String(), nil)
+
+	// Render the answer (scrolling is applied by View, not renderAnswer)
+	output := renderAnswer(s, 80, 24, cc, false, 0)
+
+	// Should contain the long text and approved by line
+	if !strings.Contains(output, "line 0") {
+		t.Fatalf("should contain first line of long text: %s", output[:100])
+	}
+	if !strings.Contains(output, "line 4999") {
+		t.Fatalf("should contain last line of long text")
+	}
+	if !strings.Contains(output, "approved by") {
+		t.Fatalf("should contain approved by line")
 	}
 }

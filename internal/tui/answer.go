@@ -145,7 +145,7 @@ func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int)
 		lines = append(lines, *ti.TerminalReason)
 	}
 
-	// Add open blocks with severity
+	// Add open blocks with severity (evidence and remedy would come from the turn reply via OpenBlock fields when available)
 	for _, blockID := range getBlocksForTurn(s, s.CurrentTurn) {
 		if bi, ok := s.Blocks[blockID]; ok && bi.State == "open" {
 			lines = append(lines, fmt.Sprintf("[%s] %s", bi.Severity, blockID))
