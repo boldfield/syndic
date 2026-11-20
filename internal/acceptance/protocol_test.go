@@ -315,18 +315,22 @@ func TestProtocol_AuthorTruncated(t *testing.T) {
 // TestProtocol_ReviewerModelMismatch tests that a reviewer result with
 // mismatched ReportedModel fails CheckResult and is never parsed.
 func TestProtocol_ReviewerModelMismatch(t *testing.T) {
+	mismatchStep := fake.Step{
+		Kind: fake.StepKindReply,
+		Build: func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		},
+		Status:          transport.StatusComplete,
+		TransportStatus: transport.TransportStatusOK,
+		ReportedModel:   "different-model", // Mismatch
+	}
+
 	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author": {
 			enginetest.Reply("author answer"),
 		},
 		"reviewer": {
-			fake.Step{
-				Kind:            fake.StepKindReply,
-				Text:            fake.VerdictApprove("hash", "attempt"),
-				Status:          transport.StatusComplete,
-				TransportStatus: transport.TransportStatusOK,
-				ReportedModel:   "different-model", // Mismatch
-			},
+			mismatchStep,
 		},
 	})
 

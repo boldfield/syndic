@@ -96,7 +96,7 @@ func TestCoverage_NamedTestsExist(t *testing.T) {
 	}
 }
 
-// TestCoverage_Gaps logs every test that calls gap.
+// TestCoverage_Gaps logs every test that calls gap with its message.
 func TestCoverage_Gaps(t *testing.T) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
@@ -119,8 +119,9 @@ func TestCoverage_Gaps(t *testing.T) {
 			if !ok || !strings.HasPrefix(fd.Name.Name, "Test") {
 				continue
 			}
-			if hasGapCall(fd) {
-				t.Logf("%s: contains gap call", fd.Name.Name)
+			msg := extractGapMessage(fd)
+			if msg != "" {
+				t.Logf("%s: gap: %s", fd.Name.Name, msg)
 				gapCount++
 			}
 		}
@@ -130,46 +131,58 @@ func TestCoverage_Gaps(t *testing.T) {
 	}
 }
 
-// hasGapCall checks if a function contains a call to gap.
-func hasGapCall(fd *ast.FuncDecl) bool {
-	for _, stmt := range fd.Body.List {
-		if callsGap(stmt) {
-			return true
-		}
-	}
-	return false
+// extractGapMessage extracts the message from a gap() call in a function,
+// or returns empty string if no gap call is found.
+func extractGapMessage(fd *ast.FuncDecl) string {
+	// Look for a gap call that's the first statement or only statement
+	msg := gapMessageFromStmts(fd.Body.List)
+	return msg
 }
 
-// callsGap recursively checks if a statement contains a gap() call.
-func callsGap(node interface{}) bool {
-	// This is a simplified check that looks for "gap" in call expressions
-	// A production implementation would fully walk the AST
+// gapMessageFromStmts recursively extracts gap message from statements.
+func gapMessageFromStmts(stmts []ast.Stmt) string {
+	for _, stmt := range stmts {
+		if msg := gapMessageFromStmt(stmt); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// gapMessageFromStmt extracts gap message from a single statement.
+func gapMessageFromStmt(node ast.Stmt) string {
 	switch n := node.(type) {
 	case *ast.ExprStmt:
 		if ce, ok := n.X.(*ast.CallExpr); ok {
 			if id, ok := ce.Fun.(*ast.Ident); ok && id.Name == "gap" {
-				return true
+				// Extract the message argument (second arg)
+				if len(ce.Args) >= 2 {
+					if lit, ok := ce.Args[1].(*ast.BasicLit); ok {
+						// Remove quotes from string literal
+						msg := lit.Value
+						if len(msg) >= 2 && msg[0] == '"' && msg[len(msg)-1] == '"' {
+							return msg[1 : len(msg)-1]
+						}
+					}
+				}
+				return "gap called but message not extracted"
 			}
 		}
 	case *ast.IfStmt:
-		for _, stmt := range n.Body.List {
-			if callsGap(stmt) {
-				return true
-			}
+		if msg := gapMessageFromStmt(n.Body); msg != "" {
+			return msg
 		}
-		if n.Else != nil && callsGap(n.Else) {
-			return true
+		if n.Else != nil {
+			if msg := gapMessageFromStmt(n.Else); msg != "" {
+				return msg
+			}
 		}
 	case *ast.BlockStmt:
 		if n != nil {
-			for _, stmt := range n.List {
-				if callsGap(stmt) {
-					return true
-				}
-			}
+			return gapMessageFromStmts(n.List)
 		}
 	}
-	return false
+	return ""
 }
 
 // TestCoverage_NoBareSkips fails if any file calls t.Skip, t.Skipf, or
@@ -202,17 +215,57 @@ func TestCoverage_NoBareSkips(t *testing.T) {
 }
 
 // hasBareSkip checks if a function has a bare skip (not inside gap).
+// Skips are only allowed inside gap calls.
 func hasBareSkip(fd *ast.FuncDecl) bool {
-	// Check if first statement is gap; if so, skip is allowed after it
-	if len(fd.Body.List) > 0 {
-		if isGapCall(fd.Body.List[0]) {
-			return false
+	return hasBareSkinStmt(fd.Body.List, false)
+}
+
+// hasBareSkinStmt recursively checks for bare skips, tracking whether we're inside a gap call.
+func hasBareSkinStmt(stmts []ast.Stmt, inGap bool) bool {
+	for _, stmt := range stmts {
+		// Check if this statement is a gap call
+		if !inGap && isGapCall(stmt) {
+			// Skip is allowed inside gap, so we don't recurse with inGap=true
+			continue
+		}
+		if hasBareSkinFromStmt(stmt, inGap) {
+			return true
 		}
 	}
-	// Check rest for bare skips
-	for _, stmt := range fd.Body.List {
-		if isSkipCall(stmt) {
-			return true
+	return false
+}
+
+// hasBareSkinFromStmt checks a single statement for bare skips.
+func hasBareSkinFromStmt(node ast.Stmt, inGap bool) bool {
+	switch n := node.(type) {
+	case *ast.ExprStmt:
+		return !inGap && isSkipCall(n)
+	case *ast.IfStmt:
+		if n.Body != nil {
+			if hasBareSkinStmt(n.Body.List, inGap) {
+				return true
+			}
+		}
+		if n.Else != nil {
+			if hasBareSkinStmt([]ast.Stmt{n.Else}, inGap) {
+				return true
+			}
+		}
+	case *ast.BlockStmt:
+		if n != nil {
+			return hasBareSkinStmt(n.List, inGap)
+		}
+	case *ast.ForStmt:
+		if n.Body != nil {
+			return hasBareSkinStmt(n.Body.List, inGap)
+		}
+	case *ast.RangeStmt:
+		if n.Body != nil {
+			return hasBareSkinStmt(n.Body.List, inGap)
+		}
+	case *ast.SwitchStmt:
+		if n.Body != nil {
+			return hasBareSkinStmt(n.Body.List, inGap)
 		}
 	}
 	return false
