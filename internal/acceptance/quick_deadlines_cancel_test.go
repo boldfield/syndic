@@ -796,18 +796,24 @@ func TestCancellation_CancelDuringAuthor(t *testing.T) {
 func TestCancellation_CancelDuringReviewKeepsCandidate(t *testing.T) {
 	t.Parallel()
 	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
-	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {fake.Step{Kind: fake.StepKindHang}},
+	s := newSuite(t, twoReviewerRoster, map[string][]fake.Step{
+		"author": {enginetest.Reply("the answer is 42")},
+		"reviewer1": {enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})},
+		"reviewer2": {fake.Step{Kind: fake.StepKindHang}},
 	}, enginetest.ClockStart(farFuture))
 	c := s.Dial(t)
 
 	turnID := s.Submit(t, c, "s1")
 
-	// Wait for reviewer dispatch
-	s.WaitTurnState(turnID, engine.StateReviewersDispatched)
+	// Wait for the second reviewer (which will hang) to be dispatched
+	s.WaitEvent(func(ev event) bool {
+		ab, ok := body[wire.EvAttemptBegun](ev, wire.EventKindAttemptBegun)
+		return ok && ab.Participant == "reviewer2"
+	})
 
-	// Cancel the turn while reviewer is still executing (hanging)
+	// Cancel the turn while reviewer2 is hanging
 	err := c.Cancel(s.ctx(), turnID)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -825,10 +831,13 @@ func TestCancellation_CancelDuringReviewKeepsCandidate(t *testing.T) {
 		t.Fatalf("cancelled turn during review has no candidate_hash")
 	}
 
-	// Verify gathered verdicts in the transcript: should have no verdicts since reviewer was hanging
+	// Verify gathered verdicts in the transcript: reviewer1 already submitted an approval
 	verdicts := s.verdictRows(t, turnID)
-	if len(verdicts) > 0 {
-		t.Fatalf("got %d verdicts after cancel during review, want 0", len(verdicts))
+	if len(verdicts) != 1 {
+		t.Fatalf("got %d verdicts after cancel during review, want 1", len(verdicts))
+	}
+	if verdicts[0].Parsed != "approve" {
+		t.Fatalf("verdict parsed = %q, want approve", verdicts[0].Parsed)
 	}
 }
 
@@ -837,28 +846,34 @@ func TestCancellation_LateOutputQuarantined(t *testing.T) {
 	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("the answer is 42")},
-		"reviewer": {
-			fake.Step{Kind: fake.StepKindHang},
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
-			}),
-		},
+		"reviewer": {enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})},
 	}, enginetest.ClockStart(farFuture))
 	c := s.Dial(t)
 
+	// Hold the reviewer initially so we can control when it replies
+	release := s.h.Hold("reviewer")
+	defer release()
+
 	turnID := s.Submit(t, c, "s1")
 
-	// Wait for review dispatch
-	s.WaitTurnState(turnID, engine.StateReviewersDispatched)
+	// Wait for author to complete and reviewer to be queued
+	s.WaitEvent(func(ev event) bool {
+		return ev.Kind == wire.EventKindMessageAppended
+	})
 
-	// Cancel the turn while reviewer is hanging
+	// Cancel the turn before releasing the reviewer
 	err := c.Cancel(s.ctx(), turnID)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	// Wait for cancel to process
+	// Wait for the turn to end after cancel
 	s.WaitTerminal(turnID)
+
+	// Now release the reviewer - it will try to send output, but it should be quarantined
+	release()
 
 	// The turn should be cancelled
 	turn := s.Turn(t, c, turnID)
@@ -866,13 +881,17 @@ func TestCancellation_LateOutputQuarantined(t *testing.T) {
 		t.Fatalf("turn.State = %s, want cancelled", turn.State)
 	}
 
-	// Check that any late output from the reviewer is quarantined
-	// (the second ReplyFunc step won't be processed because the attempt is cancelled)
-	// We verify this by checking that there are no verdicts from the cancelled attempt
+	// Check that the output is quarantined: there should be no verdicts
+	// because the reviewer's output arrived after cancel and was quarantined
 	verdicts := s.verdictRows(t, turnID)
-	// No verdicts should exist since the reviewer never completed
 	if len(verdicts) > 0 {
-		t.Fatalf("got %d verdicts after cancel, want 0", len(verdicts))
+		t.Fatalf("got %d verdicts after late output, want 0 (output should be quarantined)", len(verdicts))
+	}
+
+	// Verify the turn state did not change - it should still be cancelled
+	turnAfter := s.Turn(t, c, turnID)
+	if turnAfter.State != engine.StateCancelled {
+		t.Fatalf("turn state changed after late output: %s, want cancelled", turnAfter.State)
 	}
 }
 
@@ -917,5 +936,12 @@ func TestCancellation_CancelUnconfirmedKeepsHold(t *testing.T) {
 
 	// With CancelUnconfirmed, the hold should still be retained after the turn ends
 	// (because the cancel was not confirmed by the adapter)
+	s.wantHold(t, c, reviewerAttemptID)
+
+	// Verify no automatic release occurs: advance the clock past attempt and delivery deadlines
+	s.Clock.Advance(300 * time.Second) // past attempt deadline
+	s.Clock.Advance(60 * time.Second)  // past delivery deadline
+
+	// The hold should still exist - no automatic release should have occurred
 	s.wantHold(t, c, reviewerAttemptID)
 }
