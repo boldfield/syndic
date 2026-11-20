@@ -91,6 +91,12 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		if err != nil {
 			return nil, err
 		}
+		// Read the turn row again, after the state, so a turn that ended in
+		// between is not reported with a terminal state but no candidate.
+		turn, err = store.GetTurn(turnID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	reply := &wire.TurnReply{

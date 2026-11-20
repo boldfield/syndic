@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -12,10 +13,11 @@ import (
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/exp/teatest"
 )
 
-// These tests run the App against a real engine with fake adapters, driving
-// it message by message, and read what the answer tab shows through View.
+// These tests run the App under teatest against a real engine with fake
+// adapters, and read what the answer tab shows through View.
 
 func blockVerdict() fake.Step {
 	return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
@@ -32,76 +34,110 @@ func scripted(t *testing.T, author, reviewer fake.Step, replace ...string) *engi
 	return enginetest.New(t, roster, map[string][]fake.Step{"author": {author}, "reviewer": {reviewer}})
 }
 
-func (d *driver) tab() string { return d.app.View() }
-
-func (d *driver) submit(req wire.SubmitRequest) string {
-	d.t.Helper()
-	reply, err := dial(d.t, d.paths).Submit(context.Background(), req)
-	if err != nil {
-		d.t.Fatal(err)
-	}
-	return reply.TurnID
+// startAnswerRig serves the harness and runs an App on it under teatest.
+func startAnswerRig(t *testing.T, h *enginetest.Harness) *rig {
+	t.Helper()
+	paths := newPaths(t)
+	r := &rig{h: h, paths: paths, seen: &seen{}}
+	r.srv = startServer(t, paths, h.Engine, h)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	r.app = NewApp(ctx, paths.Socket)
+	r.tm = teatest.NewTestModel(t, &probe{app: r.app}, teatest.WithInitialTermSize(80, 24))
+	t.Cleanup(func() { _ = r.tm.Quit() })
+	r.waitConnected(t)
+	return r
 }
 
-func (d *driver) viewHas(parts ...string) func(string) bool {
-	return func(view string) bool {
+// viewHas is a condition on the App's View.
+func viewHas(parts ...string) func(*App) (string, bool) {
+	return func(a *App) (string, bool) {
+		v := a.View()
 		for _, p := range parts {
-			if !strings.Contains(view, p) {
-				return false
+			if !strings.Contains(v, p) {
+				return v, false
 			}
 		}
-		return true
+		return v, true
+	}
+}
+
+// untilView waits for the View to hold every part and returns it.
+func untilView(t *testing.T, r *rig, parts ...string) string {
+	t.Helper()
+	return r.until(t, fmt.Sprintf("a view with %q", parts), viewHas(parts...))
+}
+
+// view is the View after every message sent so far.
+func view(t *testing.T, r *rig) string {
+	t.Helper()
+	return r.until(t, "the view", func(a *App) (string, bool) { return a.View(), true })
+}
+
+func send(r *rig, msgs ...tea.Msg) {
+	for _, m := range msgs {
+		r.tm.Send(m)
+	}
+}
+
+// turnIn waits for a turn in one of the states and returns its id.
+func turnIn(t *testing.T, r *rig, state string) string {
+	t.Helper()
+	return r.until(t, "a turn in "+state, func(a *App) (string, bool) {
+		id := answerTurn(a.state)
+		return id, id != "" && a.state.Turns[id].State == state
+	})
+}
+
+func submit(t *testing.T, r *rig, req wire.SubmitRequest) {
+	t.Helper()
+	if _, err := dial(t, r.paths).Submit(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
 }
 
 // openReviewTurn types a prompt and waits until the reviewers have the candidate.
-func (d *driver) openReviewTurn() string {
-	d.t.Helper()
-	d.typeLine("question")
-	d.until("reviewers dispatched", func(string) bool { return d.sawStrip("[reviewers_dispatched]") })
-	return d.app.state.CurrentTurn
+func openReviewTurn(t *testing.T, r *rig) string {
+	t.Helper()
+	r.typeLine("question")
+	return turnIn(t, r, "reviewers_dispatched")
 }
 
 func TestAnswerOpenTurnShowsNoAuthorText(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	release := h.Hold("reviewer")
-	d := startRig(t, h)
-	d.openReviewTurn()
-	d.until("hint", d.viewHas("turn in progress"))
-	if v := d.tab(); strings.Contains(v, answerText) || strings.Contains(v, "UNREVIEWED DRAFT") {
+	r := startAnswerRig(t, h)
+	openReviewTurn(t, r)
+	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) || strings.Contains(v, "UNREVIEWED DRAFT") {
 		t.Fatalf("author text shown during an open turn:\n%s", v)
 	}
 	release()
-	d.until("approved", d.viewHas(answerText, "approved by"))
+	untilView(t, r, answerText, "approved by")
 }
 
 func TestAnswerApproved(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("approved line", d.viewHas("approved by"))
-	h.WaitTurnState(latest(d), engine.StateApproved)
-	reply, err := dial(t, d.paths).Turn(context.Background(), latest(d))
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turn := turnIn(t, r, "approved")
+	h.WaitTurnState(turn, engine.StateApproved)
+	reply, err := dial(t, r.paths).Turn(context.Background(), turn)
 	if err != nil || reply.CandidateHash == nil {
 		t.Fatalf("turn reply %+v, %v", reply, err)
 	}
 	want := "approved by reviewer against " + (*reply.CandidateHash)[:12]
-	d.until("candidate text and approval line", d.viewHas(answerText, want))
-	if v := d.tab(); strings.Index(v, answerText) > strings.Index(v, "approved by") {
+	v := untilView(t, r, answerText, want)
+	if strings.Index(v, answerText) > strings.Index(v, "approved by") {
 		t.Fatalf("approval line precedes the text:\n%s", v)
 	}
 }
 
-// latest is the most recently submitted turn the App knows.
-func latest(d *driver) string { return answerTurn(d.app.state) }
-
 func TestAnswerSoloIsMarkedUnreviewed(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
-	d := startRig(t, h)
+	r := startAnswerRig(t, h)
 	solo := "solo"
-	d.submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q", Preset: &solo})
-	d.until("solo answer", d.viewHas("UNREVIEWED (solo)", answerText))
-	v := d.tab()
+	submit(t, r, wire.SubmitRequest{SubmissionID: "s1", Input: "q", Preset: &solo})
+	v := untilView(t, r, "UNREVIEWED (solo)", answerText)
 	if strings.Index(v, "UNREVIEWED (solo)") > strings.Index(v, answerText) {
 		t.Fatalf("banner does not precede the text:\n%s", v)
 	}
@@ -112,11 +148,10 @@ func TestAnswerSoloIsMarkedUnreviewed(t *testing.T) {
 
 func TestAnswerBlockEndsIncomplete(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("incomplete banner", d.viewHas("INCOMPLETE, not approved", answerText))
-	v := d.tab()
-	for _, want := range []string{"block:", "[medium]", "line 3 divides by zero", "guard the divisor"} {
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	v := untilView(t, r, "INCOMPLETE, not approved", answerText, "line 3 divides by zero", "guard the divisor")
+	for _, want := range []string{"block:", "[medium]"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view lacks %q:\n%s", want, v)
 		}
@@ -128,10 +163,9 @@ func TestAnswerBlockEndsIncomplete(t *testing.T) {
 
 func TestAnswerAuthorFailureShowsReasonAndNoCandidate(t *testing.T) {
 	h := scripted(t, fake.Step{Kind: fake.StepKindReply, Text: "cut off", Status: transport.StatusTruncated, TransportStatus: transport.TransportStatusOK}, approve())
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("reason", d.viewHas("author_failed:truncated"))
-	v := d.tab()
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	v := untilView(t, r, "author_failed:truncated")
 	if strings.Contains(v, "cut off") || strings.Contains(v, "INCOMPLETE, not approved") || strings.Contains(v, "approved by") {
 		t.Fatalf("a turn without a candidate shows candidate text or banners:\n%s", v)
 	}
@@ -139,38 +173,42 @@ func TestAnswerAuthorFailureShowsReasonAndNoCandidate(t *testing.T) {
 
 func TestAnswerOverriddenShowsHumanReason(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("incomplete", d.viewHas("INCOMPLETE, not approved"))
-	turn := latest(d)
-	if err := dial(t, d.paths).Override(context.Background(), turn, "accepted operational risk"); err != nil {
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turn := turnIn(t, r, "incomplete")
+	if err := dial(t, r.paths).Override(context.Background(), turn, "accepted operational risk"); err != nil {
 		t.Fatal(err)
 	}
-	d.until("override", d.viewHas("HUMAN OVERRIDE: accepted operational risk", answerText))
+	untilView(t, r, "HUMAN OVERRIDE: accepted operational risk", answerText)
 	// The terminal turn reply must not replace the reason with the literal "override".
-	h.WaitTurnState(turn, engine.StateOverridden)
-	d.send(tickMsg{})
-	if reply, err := dial(t, d.paths).Turn(context.Background(), turn); err != nil || reply.TerminalReason == nil {
-		t.Fatalf("turn reply %+v, %v", reply, err)
-	} else {
-		d.send(turnMsg{gen: d.app.gen, id: turn, turn: &reply})
-	}
-	if v := d.tab(); !strings.Contains(v, "HUMAN OVERRIDE: accepted operational risk") || strings.Contains(v, "INCOMPLETE") {
-		t.Fatalf("override reason lost: reasons=%v turn=%s answerTurn=%s turns=%d\n%s", d.app.overrideReasons, turn, latest(d), len(d.app.state.Turns), v)
+	r.until(t, "the terminal turn record", func(a *App) (string, bool) {
+		ti := a.state.Turns[turn]
+		return "", ti.State == "overridden" && ti.TerminalReason != nil && *ti.TerminalReason == "override"
+	})
+	if v := view(t, r); !strings.Contains(v, "HUMAN OVERRIDE: accepted operational risk") || strings.Contains(v, "INCOMPLETE") {
+		t.Fatalf("override reason lost:\n%s", v)
 	}
 }
 
 func TestAnswerCancelledDuringAuthor(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	defer h.Hold("author")()
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("author running", func(string) bool { return d.sawStrip("author:author running") })
-	if err := dial(t, d.paths).Cancel(context.Background(), d.app.state.CurrentTurn); err != nil {
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turn := r.waitTurn(t)
+	r.until(t, "the author running", func(a *App) (string, bool) {
+		for _, ai := range a.state.Attempts {
+			if ai.TurnID == turn && ai.Phase == "author" && ai.Status == "in_progress" {
+				return "", true
+			}
+		}
+		return "", false
+	})
+	if err := dial(t, r.paths).Cancel(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
-	d.until("cancelled", d.viewHas("cancelled before candidate"))
-	if v := d.tab(); strings.Contains(v, "CANCELLED, not approved") || strings.Contains(v, answerText) {
+	v := untilView(t, r, "cancelled before candidate")
+	if strings.Contains(v, "CANCELLED, not approved") || strings.Contains(v, answerText) {
 		t.Fatalf("cancel before a candidate shows a candidate:\n%s", v)
 	}
 }
@@ -178,13 +216,13 @@ func TestAnswerCancelledDuringAuthor(t *testing.T) {
 func TestAnswerCancelledDuringReview(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	defer h.Hold("reviewer")()
-	d := startRig(t, h)
-	turn := d.openReviewTurn()
-	if err := dial(t, d.paths).Cancel(context.Background(), turn); err != nil {
+	r := startAnswerRig(t, h)
+	turn := openReviewTurn(t, r)
+	if err := dial(t, r.paths).Cancel(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
-	d.until("cancelled with candidate", d.viewHas("CANCELLED, not approved", answerText))
-	if v := d.tab(); strings.Contains(v, "approved by") || strings.Contains(v, "cancelled before candidate") {
+	v := untilView(t, r, "CANCELLED, not approved", answerText)
+	if strings.Contains(v, "approved by") || strings.Contains(v, "cancelled before candidate") {
 		t.Fatalf("view:\n%s", v)
 	}
 }
@@ -192,13 +230,12 @@ func TestAnswerCancelledDuringReview(t *testing.T) {
 func TestAnswerDraftsOnWhileReviewersRun(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	release := h.Hold("reviewer")
-	d := startRig(t, h)
-	d.app.SetDraftsEnabled(true)
-	d.openReviewTurn()
-	d.until("draft", d.viewHas("UNREVIEWED DRAFT", answerText))
+	r := startAnswerRig(t, h)
+	r.until(t, "drafts on", func(a *App) (string, bool) { a.SetDraftsEnabled(true); return "", true })
+	openReviewTurn(t, r)
+	untilView(t, r, "UNREVIEWED DRAFT", answerText)
 	release()
-	d.until("approved", d.viewHas("approved by"))
-	if v := d.tab(); strings.Contains(v, "UNREVIEWED DRAFT") {
+	if v := untilView(t, r, "approved by"); strings.Contains(v, "UNREVIEWED DRAFT") {
 		t.Fatalf("draft banner survives the terminal state:\n%s", v)
 	}
 }
@@ -206,14 +243,15 @@ func TestAnswerDraftsOnWhileReviewersRun(t *testing.T) {
 func TestAnswerDraftsToggledOnMidTurn(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	defer h.Hold("reviewer")()
-	d := startRig(t, h)
-	d.openReviewTurn()
-	if strings.Contains(d.tab(), answerText) {
-		t.Fatalf("author text shown with drafts off:\n%s", d.tab())
+	r := startAnswerRig(t, h)
+	openReviewTurn(t, r)
+	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) {
+		t.Fatalf("author text shown with drafts off:\n%s", v)
 	}
-	d.app.SetDraftsEnabled(true)
-	d.send(tickMsg{})
-	d.until("draft after toggling", d.viewHas("UNREVIEWED DRAFT", answerText))
+	// Set through the program, so the App is not touched from this goroutine.
+	r.until(t, "drafts on", func(a *App) (string, bool) { a.SetDraftsEnabled(true); return "", true })
+	send(r, tickMsg{})
+	untilView(t, r, "UNREVIEWED DRAFT", answerText)
 }
 
 const draftsQuickRoster = "[quick.fast]\npreset = \"solo\"\ndrafts = false"
@@ -223,26 +261,25 @@ func TestAnswerQuickProfileDrafts(t *testing.T) {
 	on := "[quick.fast]\npreset = \"review\"\ndrafts = true"
 	h := scripted(t, enginetest.Reply(answerText), approve(), draftsQuickRoster, on)
 	release := h.Hold("reviewer")
-	d := startRig(t, h)
+	r := startAnswerRig(t, h)
 	quick := "fast"
-	d.submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q", QuickProfile: &quick})
-	d.until("draft from the profile", d.viewHas("UNREVIEWED DRAFT", answerText))
+	submit(t, r, wire.SubmitRequest{SubmissionID: "s1", Input: "q", QuickProfile: &quick})
+	untilView(t, r, "UNREVIEWED DRAFT", answerText)
 	release()
-	d.until("terminal", d.viewHas("approved by"))
+	untilView(t, r, "approved by")
 }
 
 func TestAnswerQuickProfileDraftsOffByUser(t *testing.T) {
 	on := "[quick.fast]\npreset = \"review\"\ndrafts = true"
 	h := scripted(t, enginetest.Reply(answerText), approve(), draftsQuickRoster, on)
 	defer h.Hold("reviewer")()
-	d := startRig(t, h)
-	d.app.SetDraftsEnabled(false)
+	r := startAnswerRig(t, h)
+	r.until(t, "drafts off", func(a *App) (string, bool) { a.SetDraftsEnabled(false); return "", true })
 	quick := "fast"
-	d.submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q", QuickProfile: &quick})
-	d.until("reviewers dispatched", func(string) bool { return d.sawStrip("[reviewers_dispatched]") })
-	d.until("hint", d.viewHas("turn in progress"))
-	if strings.Contains(d.tab(), answerText) {
-		t.Fatalf("draft shown although the user turned drafts off:\n%s", d.tab())
+	submit(t, r, wire.SubmitRequest{SubmissionID: "s1", Input: "q", QuickProfile: &quick})
+	turnIn(t, r, "reviewers_dispatched")
+	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) {
+		t.Fatalf("draft shown although the user turned drafts off:\n%s", v)
 	}
 }
 
@@ -252,45 +289,47 @@ func TestAnswerLongCandidateScrollsToTheLastLine(t *testing.T) {
 		fmt.Fprintf(&text, "line %d\n", i)
 	}
 	h := scripted(t, enginetest.Reply(strings.TrimRight(text.String(), "\n")), approve())
-	d := startRig(t, h)
-	d.typeLine("question")
-	d.until("first line", d.viewHas("line 0\n"))
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	untilView(t, r, "line 0\n", "line 1\n")
 
-	key := func(k tea.KeyType) { d.send(tea.KeyMsg{Type: k}) }
-	seen := map[string]bool{}
-	record := func() {
-		for _, l := range strings.Split(d.tab(), "\n") {
-			seen[strings.TrimSpace(l)] = true
+	// A waiter on the program's goroutine records every line any View showed.
+	seenLines := map[string]bool{}
+	w := &waiter{done: make(chan string, 1), cond: func(a *App) (string, bool) {
+		for _, l := range strings.Split(a.View(), "\n") {
+			seenLines[strings.TrimSpace(l)] = true
 		}
-	}
-	record()
-	for i := 0; i < 600 && !seen["line 4999"]; i++ {
-		key(tea.KeyPgDown)
-		record()
-	}
-	for i := 0; i < 5000; i++ {
-		if !seen[fmt.Sprintf("line %d", i)] {
-			t.Fatalf("line %d was never visible", i)
+		for i := 0; i < 5000; i++ {
+			if !seenLines[fmt.Sprintf("line %d", i)] {
+				return "", false
+			}
 		}
+		return "", true
+	}}
+	r.tm.Send(waitMsg{w})
+	for i := 0; i < 700; i++ {
+		send(r, tea.KeyMsg{Type: tea.KeyPgDown})
 	}
-	// Past the end: the last line and the approval line stay, nothing panics,
-	// and Up still moves at once.
+	select {
+	case <-w.done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("not every line became visible")
+	}
+
+	// Past the end: the approval line stays, nothing panics, and Up moves at once.
 	for i := 0; i < 50; i++ {
-		key(tea.KeyDown)
+		send(r, tea.KeyMsg{Type: tea.KeyDown})
 	}
-	end := d.tab()
-	if !strings.Contains(end, "approved by") {
-		t.Fatalf("end of the text lacks the approval line:\n%s", end)
-	}
-	key(tea.KeyUp)
-	if d.tab() == end {
+	end := untilView(t, r, "approved by")
+	send(r, tea.KeyMsg{Type: tea.KeyUp})
+	if view(t, r) == end {
 		t.Fatal("Up after over-scrolling did not move")
 	}
 	for i := 0; i < 1000; i++ {
-		key(tea.KeyPgUp)
+		send(r, tea.KeyMsg{Type: tea.KeyPgUp})
 	}
-	if !strings.Contains(d.tab(), "line 0\n") {
-		t.Fatalf("PgUp did not return to the top:\n%s", d.tab())
+	if v := view(t, r); !strings.Contains(v, "line 0\n") {
+		t.Fatalf("PgUp did not return to the top:\n%s", v)
 	}
 }
 

@@ -382,7 +382,16 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		a.refusal = "turn: " + formatRefusal(msg.err)
 		return a, nil
 	}
+	prevHash := a.state.Turns[msg.id].CandidateHash
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
+	// A reply read before the candidate was frozen can arrive after a newer one;
+	// a candidate once seen is never forgotten.
+	if ti, ok := a.state.Turns[msg.id]; ok && ti.CandidateHash == nil && prevHash != nil {
+		turns := copyMap(a.state.Turns)
+		ti.CandidateHash = prevHash
+		turns[msg.id] = ti
+		a.state.Turns = turns
+	}
 	if msg.turn.CandidateID != nil {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
 	}
