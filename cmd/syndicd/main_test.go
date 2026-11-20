@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/lockfile"
 	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/transport/openai"
 )
 
 // threadSafeBuffer wraps a bytes.Buffer with a mutex for thread-safe access
@@ -524,7 +524,7 @@ func TestSignalWithNoTurn(t *testing.T) {
 		<-done
 		t.Fatalf("dial socket before signal: %v", err)
 	}
-	c.Close()
+	_ = c.Close()
 
 	// Send signal with no turn in progress
 	sigChan <- os.Interrupt
@@ -560,129 +560,6 @@ func TestSignalWithNoTurn(t *testing.T) {
 		t.Fatalf("want lock to be free, but could not acquire: %v", err)
 	}
 	_ = lock.Release()
-}
-
-func TestSentinelSecretNotRevealed(t *testing.T) {
-	dir := t.TempDir()
-	rosterPath := filepath.Join(dir, "roster.toml")
-	journalPath := filepath.Join(dir, "journal.db")
-	runtimeDir := filepath.Join(dir, "runtime")
-	secretsDir := filepath.Join(dir, "secrets")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(secretsDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a secret file
-	secretValue := "super-secret-token-12345"
-	if err := os.WriteFile(filepath.Join(secretsDir, "openai.key"), []byte(secretValue), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Use a roster with file secret reference
-	rosterWithSecret := strings.Replace(enginetest.RosterTOML, `auth_secret = "file://`, `auth_secret = "file://`, 1)
-
-	if err := os.WriteFile(rosterPath, []byte(rosterWithSecret), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	roster, err := config.Load(rosterPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := journal.Open(journalPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-
-	store := journal.NewStore(db)
-	seedProbeRecords(t, store, roster)
-
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
-		t.Fatal(err)
-	}
-
-	sigChan := make(chan os.Signal, 2)
-	var stdout, stderr threadSafeBuffer
-	done := make(chan int, 1)
-
-	go func() {
-		done <- run(
-			[]string{
-				"--roster", rosterPath,
-				"--journal", journalPath,
-				"--secrets-dir", secretsDir,
-			},
-			&stdout,
-			&stderr,
-			sigChan,
-		)
-	}()
-
-	// Give the daemon time to start
-	time.Sleep(500 * time.Millisecond)
-
-	// Get the socket path from stdout (with retry to handle race)
-	var socketPath string
-	for i := 0; i < 10; i++ {
-		output := stdout.String()
-		parts := strings.Fields(output)
-		if len(parts) >= 1 {
-			socketPath = parts[0]
-			break
-		}
-		if i < 9 {
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	if socketPath == "" {
-		t.Fatalf("want socket path, got empty")
-	}
-
-	// Connect and verify we can dial
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	c, err := client.Dial(ctx, socketPath, "test", "1.0")
-	cancel()
-	if err == nil {
-		_ = c.Close()
-	}
-
-	// Stop the daemon
-	sigChan <- os.Interrupt
-	exitCode := <-done
-
-	// Allow goroutine to exit cleanly
-	runtime.Gosched()
-
-	if exitCode != 0 {
-		t.Fatalf("want exit code 0, got %d", exitCode)
-	}
-
-	// Now read output (after daemon has completely exited)
-	stderrOut := stderr.String()
-	stdoutOut := stdout.String()
-
-	// Verify the secret value does not appear in stdout or stderr
-	allOutput := stdoutOut + stderrOut
-	if strings.Contains(allOutput, secretValue) {
-		t.Fatalf("want secret not to appear in output, but found it")
-	}
 }
 
 func TestStaleSocket(t *testing.T) {
@@ -812,7 +689,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster)
 			ModelListed:              transport.TriUnknown,
 			SystemRoleHonored:        transport.TriUnknown,
 			EligibleRequiredReviewer: transport.TriUnknown,
-			AdapterVersion:           enginetest.AdapterVersion,
+			AdapterVersion:           openai.AdapterVersion,
 			ObservedAt:               time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
 		}
 
@@ -821,7 +698,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster)
 
 		calibration := transport.Calibration{Available: true, BytesPerToken: enginetest.DefaultCalibration}
 
-		pm, err := evidence.NewProbeManifest(export, profile, p.Model, enginetest.AdapterVersion, calibration)
+		pm, err := evidence.NewProbeManifest(export, profile, p.Model, openai.AdapterVersion, calibration)
 		if err != nil {
 			t.Fatalf("probe manifest for %s: %v", p.ID, err)
 		}

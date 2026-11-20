@@ -213,18 +213,34 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 						if err != nil {
 							_, _ = fmt.Fprintf(stderr, "stop engine: %v\n", err)
 						}
+						// A second signal that arrived while Stop was finishing
+						// still counts.
+						select {
+						case <-signals:
+							sigCount++
+						default:
+						}
 						if sigCount > 1 {
 							// We got a second signal, skip waits and return 130
 							_ = srv.Close()
+							waitServe(serveDone)
 							return 130
 						}
-						// First signal completed normally
-						// Close the server and wait for it to finish
-						_ = srv.Close()
-						cancelServe()
-						if err := <-serveDone; err != nil {
-							_, _ = fmt.Fprintf(stderr, "serve: %v\n", err)
+						// First signal completed normally. Serve sees the
+						// engine stopping, tells the clients and returns on
+						// its own; closing the server first would cut the
+						// notice short.
+						select {
+						case err := <-serveDone:
+							if err != nil {
+								_, _ = fmt.Fprintf(stderr, "serve: %v\n", err)
+							}
+						case <-time.After(5 * time.Second):
+							cancelServe()
+							_ = srv.Close()
+							waitServe(serveDone)
 						}
+						_ = srv.Close()
 						return 0
 					}
 				}
@@ -256,6 +272,7 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 					if sigCount > 0 {
 						// Return 130 if we got a signal
 						_ = srv.Close()
+						waitServe(serveDone)
 						return 130
 					}
 					// Serve errored, return 1 if Serve had an error, otherwise 0
@@ -267,6 +284,15 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 				}
 			}
 		}
+	}
+}
+
+// waitServe waits a bounded time for Serve to return after the server is
+// closed, so the journal is not closed under it.
+func waitServe(serveDone <-chan error) {
+	select {
+	case <-serveDone:
+	case <-time.After(3 * time.Second):
 	}
 }
 
