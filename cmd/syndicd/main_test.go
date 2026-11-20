@@ -150,7 +150,9 @@ func TestNormalStart(t *testing.T) {
 		exitCode := <-done
 		t.Fatalf("dial socket: %v (exit code %d)", err, exitCode)
 	}
-	defer c.Close()
+	defer func() {
+		_ = c.Close()
+	}()
 
 	status, err := c.Status(ctx)
 	if err != nil {
@@ -165,7 +167,7 @@ func TestNormalStart(t *testing.T) {
 	}
 
 	// Close the client and send signal to stop
-	c.Close()
+	_ = c.Close()
 	sigChan <- os.Interrupt
 	exitCode := <-done
 
@@ -347,7 +349,7 @@ func TestBadRoster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("want lock to be free after bad roster, but could not acquire: %v", err)
 	}
-	lock.Release()
+	_ = lock.Release()
 
 	// Check that no engine run was written
 	db, err := journal.Open(journalPath)
@@ -557,7 +559,7 @@ func TestSignalWithNoTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("want lock to be free, but could not acquire: %v", err)
 	}
-	lock.Release()
+	_ = lock.Release()
 }
 
 func TestSentinelSecretNotRevealed(t *testing.T) {
@@ -658,7 +660,7 @@ func TestSentinelSecretNotRevealed(t *testing.T) {
 	c, err := client.Dial(ctx, socketPath, "test", "1.0")
 	cancel()
 	if err == nil {
-		c.Close()
+		_ = c.Close()
 	}
 
 	// Stop the daemon
