@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ func init() {
 	cover(rosterStop, "`SIGTERM` during review ends the turn `incomplete:engine_stop`, calls `Cancel` on the in-flight attempt, sends no terminal delivery, emits `engine_stopping`, and closes the client with `stopping`", "TestRoster_SIGTERMDuringReview")
 	cover(rosterStop, "with `CancelUnconfirmed` the hold survives into the next start's `engine_started`", "TestRoster_CancelUnconfirmedHold")
 	cover(rosterStop, "`submit` during the grace period is refused with `stopping`", "TestRoster_SubmitDuringGrace")
-	cover(rosterStop, "a second `SIGTERM` during the grace period exits and the next start recovers the attempt as `unknown`", "cmd/syndicd.TestDoubleSignalExits130AndRecovers")
+	cover(rosterStop, "a second `SIGTERM` during the grace period exits and the next start recovers the attempt as `unknown`", "TestRoster_SecondSIGTERM")
 	cover(rosterStop, "`syndic probe` against the running engine's journal exits with its distinct code naming the PID and still writes the export", "cmd/syndic.TestProbeLockContention")
 
 	cover(recovery, "kill the engine mid-review, restart, the turn is `incomplete:engine_restart`, the pending attempt is `unknown`, the fake adapter's call count shows nothing re-sent", "TestRecovery_KillMidReview")
@@ -482,29 +483,26 @@ func TestRoster_SubmitDuringGrace(t *testing.T) {
 	default:
 	}
 
-	// The server notices the stop and closes every connection with stopping, so
-	// the refusal reaches the client either as the reply to its submit or as
-	// the closing notice; it is never accepted.
+	// The server closes every connection with stopping as the stop begins. The
+	// client may see that closure before or after it writes, so the test first
+	// reads the connection to its end: the closing notice is stopping.
+	var closing *wire.Error
+	for {
+		if _, nerr := late.NextEvent(s.ctx()); nerr != nil {
+			if !errors.As(nerr, &closing) || closing.Code != wire.ErrorCodeStopping {
+				t.Fatalf("the connection open during the grace period ended with %v, want error{code: stopping}", nerr)
+			}
+			break
+		}
+	}
+	// A submit over that connection is refused and nothing is recorded.
 	_, err := late.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "late-socket", Input: "what is the answer?"})
 	var refused *wire.Error
-	if errors.As(err, &refused) {
-		if refused.Code != wire.ErrorCodeStopping {
-			t.Fatalf("submit during the grace period over the socket: %v, want error{code: stopping}", err)
-		}
-	} else {
-		if !errors.Is(err, client.ErrClosed) {
-			t.Fatalf("submit during the grace period over the socket: %v, want stopping or a closed connection", err)
-		}
-		// The connection was already closed: its closing notice was stopping.
-		var closing *wire.Error
-		for {
-			if _, nerr := late.NextEvent(s.ctx()); nerr != nil {
-				if !errors.As(nerr, &closing) || closing.Code != wire.ErrorCodeStopping {
-					t.Fatalf("the closed connection ended with %v, want error{code: stopping}", nerr)
-				}
-				break
-			}
-		}
+	if err == nil || (!errors.Is(err, client.ErrClosed) && !errors.As(err, &refused)) {
+		t.Fatalf("submit over the socket during the grace period: %v, want the connection closed or error{code: stopping}", err)
+	}
+	if refused != nil && refused.Code != wire.ErrorCodeStopping {
+		t.Fatalf("submit over the socket during the grace period: %v, want error{code: stopping}", err)
 	}
 	if _, found, ferr := s.Store.FindSubmission("late-socket"); ferr != nil || found {
 		t.Fatalf("the submission refused over the socket was recorded: found=%v err=%v", found, ferr)
@@ -525,12 +523,18 @@ func TestRoster_SubmitDuringGrace(t *testing.T) {
 	}
 }
 
-// TestStopGrace_SecondStopCancelsGrace proves the engine side of a second
-// SIGTERM: cancelling the stop's context (what cmd/syndicd does on the second
-// signal) ends the stop at once, and the next start recovers the attempt as
-// unknown. The process exit is proven by cmd/syndicd.
-func TestStopGrace_SecondStopCancelsGrace(t *testing.T) {
+// TestRoster_SecondSIGTERM proves both halves of the clause. The process exit
+// is proven by running cmd/syndicd's double-signal test, which sends two
+// signals to the daemon and requires exit 130. The recovery is proven here:
+// cancelling the stop's context (what cmd/syndicd does on the second signal)
+// ends the stop at once, and the next start recovers the attempt as unknown.
+func TestRoster_SecondSIGTERM(t *testing.T) {
 	t.Parallel()
+	cmd := exec.Command("go", "test", "-count=1", "-run", "^TestDoubleSignalExits130AndRecovers$", "./cmd/syndicd")
+	cmd.Dir = "../.."
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cmd/syndicd double-signal test (exit 130 on the second signal): %v\n%s", err, out)
+	}
 	s, turnID, attemptID := rosterInFlight(t, enginetest.RosterTOML, "reviewer", []string{"author", "reviewer"}, enginetest.BlockingCancel())
 
 	// The first signal starts the stop; its Cancel never returns. The second
