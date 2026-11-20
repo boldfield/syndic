@@ -54,6 +54,7 @@ type App struct {
 	candidateIDByTurn      map[string]string
 	transcriptsByTurn      map[string][]wire.TranscriptItem // transcript items from turn replies
 	transcriptCursorByTurn map[string]string                // next_cursor for pagination
+	transcriptLoadByTurn   map[string]bool                  // true if we've started loading transcript for this turn
 	openBlocksByTurn       map[string][]wire.OpenBlock      // open blocks from turn replies
 	overrideReasons        map[string]string                // the reason of each override event
 }
@@ -82,6 +83,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		candidateIDByTurn:      make(map[string]string),
 		transcriptsByTurn:      make(map[string][]wire.TranscriptItem),
 		transcriptCursorByTurn: make(map[string]string),
+		transcriptLoadByTurn:   make(map[string]bool),
 		openBlocksByTurn:       make(map[string][]wire.OpenBlock),
 		overrideReasons:        make(map[string]string),
 	}
@@ -401,6 +403,25 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		if json.Unmarshal(msg.frame.Body, &body) == nil && isTerminalState(body.State) {
 			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
 		}
+	case wire.EventKindMessageAppended:
+		var body wire.EvMessageAppended
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			// Reload transcript when a message is appended
+			a.transcriptsByTurn[body.TurnID] = nil
+			a.transcriptCursorByTurn[body.TurnID] = ""
+			cmds = append(cmds, transcriptCmd(a.ctx, a.gen, a.cl, body.TurnID, ""))
+		}
+	case wire.EventKindAttemptCompleted:
+		var body wire.EvAttemptCompleted
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			// Reload transcript when an attempt completes
+			turnID := a.state.CurrentTurn
+			if turnID != "" {
+				a.transcriptsByTurn[turnID] = nil
+				a.transcriptCursorByTurn[turnID] = ""
+				cmds = append(cmds, transcriptCmd(a.ctx, a.gen, a.cl, turnID, ""))
+			}
+		}
 	}
 	cmds = append(cmds, a.ensureTick())
 	return a, tea.Batch(cmds...)
@@ -465,7 +486,10 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
-	// Fetch transcript items for the turn
+	// Fetch transcript items for the turn - clear old items and start fresh
+	a.transcriptsByTurn[msg.id] = nil
+	a.transcriptCursorByTurn[msg.id] = ""
+	a.transcriptLoadByTurn[msg.id] = true
 	cmd := transcriptCmd(a.ctx, a.gen, a.cl, msg.id, "")
 	return a, cmd
 }
@@ -476,10 +500,27 @@ func (a *App) onTranscript(msg transcriptMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if msg.err == nil {
-		// Append items to existing items for this turn
-		a.transcriptsByTurn[msg.id] = append(a.transcriptsByTurn[msg.id], msg.items...)
+		// Remember if we're at the top before adding new items
+		wasAtTop := a.transcriptRow == 0
+
+		// Check if we're continuing pagination (cursor set means we have more to fetch)
+		// or starting fresh (no cursor stored means first batch)
+		prevCursor := a.transcriptCursorByTurn[msg.id]
+		if prevCursor != "" {
+			// We have a cursor from the previous page, so append
+			a.transcriptsByTurn[msg.id] = append(a.transcriptsByTurn[msg.id], msg.items...)
+		} else {
+			// Fresh load or only batch, replace items
+			a.transcriptsByTurn[msg.id] = msg.items
+		}
 		// Store the cursor for the next page
 		a.transcriptCursorByTurn[msg.id] = msg.nextCursor
+
+		// Preserve scroll position: if we were at the top, stay at top; if at bottom, follow
+		if wasAtTop {
+			a.transcriptRow = 0
+		}
+
 		// If there are more items, fetch them
 		if msg.nextCursor != "" {
 			return a, transcriptCmd(a.ctx, a.gen, a.cl, msg.id, msg.nextCursor)
