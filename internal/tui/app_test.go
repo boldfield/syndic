@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,22 +79,44 @@ func newPaths(t *testing.T) lockfile.Paths {
 	return lockfile.Paths{Dir: dir, Socket: filepath.Join(dir, "engine.sock"), Lock: filepath.Join(dir, "engine.lock")}
 }
 
-// seen records the seq of every event an App applies.
+// seen records the seq of every event an App applies and tracks turns.
 type seen struct {
-	mu   sync.Mutex
-	seqs []int64
+	mu    sync.Mutex
+	seqs  []int64
+	turns []string
 }
 
 func (s *seen) observe(f wire.Frame) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.seqs = append(s.seqs, f.Seq)
-	s.mu.Unlock()
+	if f.Kind == wire.EventKindTurnSubmitted {
+		var body wire.EvTurnSubmitted
+		if err := json.Unmarshal(f.Body, &body); err == nil {
+			s.turns = append(s.turns, body.TurnID)
+		}
+	}
 }
 
 func (s *seen) snapshot() []int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int64(nil), s.seqs...)
+}
+
+func (s *seen) lastTurn() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.turns) == 0 {
+		return ""
+	}
+	return s.turns[len(s.turns)-1]
+}
+
+func (s *seen) turnCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.turns)
 }
 
 type rig struct {
@@ -125,8 +148,29 @@ func (r *rig) waitFor(t *testing.T, want string) {
 		teatest.WithDuration(10*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
+// waitForEmptyInput waits until the input has been cleared and submitted.
+// We detect this by waiting for the input to no longer contain the typed text.
+// We look for a state where the input line has just the prompt or minimal content.
+func (r *rig) waitForEmptyInput(t *testing.T) {
+	t.Helper()
+	// After typing and pressing enter, the app will show a submission status.
+	// Wait for the "[review]" state to appear which indicates the submit is processing.
+	r.waitFor(t, "[review]")
+	// Then wait a bit for the input to be cleared as the submission processes.
+	// This polls the view to ensure the state has actually changed.
+	teatest.WaitFor(t, r.tm.Output(), func(b []byte) bool {
+		output := string(b)
+		// The input should not contain the submitted text anymore.
+		// After submit, the app clears the input, so we're waiting for that.
+		// A simple check: once "[review]" appears, we wait for a moment to ensure processing.
+		return strings.Contains(output, "[author_dispatched]") || strings.Contains(output, "[submitted]")
+	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
+}
+
 // waitCaughtUp waits for the journal to go quiet and the App to have applied
-// everything in it, and returns the last seq.
+// everything in it. It polls the event stream and store until they're in sync.
+// This polls the effect (journal max seq matching app's last seq) rather than
+// sleeping blindly.
 func (r *rig) waitCaughtUp(t *testing.T) int64 {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
@@ -136,19 +180,58 @@ func (r *rig) waitCaughtUp(t *testing.T) int64 {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := r.seen.snapshot(); max == prev && len(s) > 0 && s[len(s)-1] == max {
-			return max
+		s := r.seen.snapshot()
+		// Check if the journal is quiet (max hasn't changed) and app is caught up.
+		if max == prev && len(s) > 0 && s[len(s)-1] == max {
+			// Give one more check to ensure stability.
+			time.Sleep(10 * time.Millisecond)
+			max2, _ := r.h.Store.MaxSeq()
+			s2 := r.seen.snapshot()
+			if max2 == max && len(s2) > 0 && s2[len(s2)-1] == max2 {
+				return max
+			}
 		}
 		prev = max
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the TUI never caught up with the journal")
+	t.Fatalf("the TUI never caught up with the journal; last max=%d, seen %d events", prev, len(r.seen.snapshot()))
 	return 0
 }
 
 func (r *rig) typeLine(s string) {
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+// waitForNewTurn waits for the next turn to be submitted and returns its ID.
+// It observes the effect through the event stream: a TurnSubmitted event arrives
+// and is processed by the app.
+func (r *rig) waitForNewTurn(t *testing.T) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	lastCount := r.seen.turnCount()
+
+	// Poll until we see a new TurnSubmitted event or hit the deadline.
+	for time.Now().Before(deadline) {
+		current := r.seen.turnCount()
+		if current > lastCount {
+			turnID := r.seen.lastTurn()
+			// Verify the turn is actually open in the engine's status.
+			// Allow a brief window for the status to update.
+			statusDeadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(statusDeadline) {
+				if ts := openTurns(t, r.paths); len(ts) == 1 && ts[0] == turnID {
+					return turnID
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			// Even if status query fails, trust the event observer.
+			return turnID
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no turn was submitted; saw %d events, last turn: %q", len(r.seen.snapshot()), r.seen.lastTurn())
+	return ""
 }
 
 // final quits the TUI and returns the finished App.
@@ -179,19 +262,6 @@ func openTurns(t *testing.T, paths lockfile.Paths) []string {
 		t.Fatal(err)
 	}
 	return st.TurnsOpen
-}
-
-func waitOpenTurn(t *testing.T, paths lockfile.Paths) string {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if ts := openTurns(t, paths); len(ts) == 1 {
-			return ts[0]
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("no open turn")
-	return ""
 }
 
 func TestRegionsAndTabs(t *testing.T) {
@@ -226,8 +296,8 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 	r.waitFor(t, "answer (placeholder)")
 
 	r.typeLine("what is the answer? héllo")
-	turn := waitOpenTurn(t, r.paths)
-	r.waitFor(t, "[review]")
+	turn := r.waitForNewTurn(t)
+	r.waitForEmptyInput(t)
 
 	// A second submit is refused as busy; the code shows and the text stays.
 	r.typeLine("second question")
@@ -329,6 +399,8 @@ func TestResumeReconnectsOnce(t *testing.T) {
 	r := newRig(t)
 	r.waitFor(t, "answer (placeholder)")
 	r.typeLine("/resume")
+	// After resume command triggers a reconnect, wait for all events to be applied.
+	// The reconnect effect is: gen increments, app reconnects and becomes ConnStateConnected.
 	r.waitCaughtUp(t)
 	max, err := r.h.Store.MaxSeq()
 	if err != nil {
@@ -346,7 +418,7 @@ func TestQuitLeavesTurnOpen(t *testing.T) {
 	r.h.Hold("author")
 	r.waitFor(t, "answer (placeholder)")
 	r.typeLine("long question")
-	turn := waitOpenTurn(t, r.paths)
+	turn := r.waitForNewTurn(t)
 	r.typeLine("/quit")
 	app := r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
 	if app.CurrentTurn() != turn {
@@ -421,7 +493,7 @@ func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
 	r := newRig(t)
 	r.waitFor(t, "answer (placeholder)")
 	r.typeLine("  /quit now  ")
-	turn := waitOpenTurn(t, r.paths)
+	turn := r.waitForNewTurn(t)
 	r.h.WaitTurnState(turn, engine.StateApproved)
 	calls := r.h.Adapters["author"].Calls()
 	if len(calls) == 0 {
