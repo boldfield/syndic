@@ -3,10 +3,15 @@
 // A subscriber whose socket stops taking frames for stallGrace, or that the
 // hub finds lagging, is sent error{code: "lagging", last_seq} and closed. A
 // frame already partly written is finished before the notice, so a client
-// that reads again always finds whole frames ending in the notice. On Linux
-// the server keeps room in the socket for the notice, so a client that stops
-// reading is closed promptly; elsewhere it cannot tell how full the socket
-// is, and the notice, with the close, waits for the client to read.
+// that reads again finds whole frames ending in the notice. On Linux the
+// server raises the socket's send buffer to hold a frame of the largest size
+// and keeps room in it for the notice, so a client that stops reading gets
+// the notice and is closed promptly. Where the kernel will not raise the
+// buffer that far, a frame larger than it can be left partly written by a
+// client that stops reading; after lagGrace that client is closed without
+// the notice, as nothing can follow the partial frame. Elsewhere the server
+// cannot tell how full the socket is, and every lagging client is closed
+// within lagGrace, with the notice only if it read meanwhile.
 package server
 
 import (
@@ -54,6 +59,7 @@ type Server struct {
 	store         *journal.Store
 	hub           *hub.Hub
 	frameObserver func(encodedLen int)
+	turnStates    turnStates
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -216,6 +222,12 @@ func (s *Server) Close() error {
 	return err
 }
 
+// openTurnState returns the state in the most recent turn_state event of an
+// open turn.
+func (s *Server) openTurnState(turnID string) (string, error) {
+	return s.turnStates.latest(s.store, s.engine.Hello().RunFirstSeq, turnID)
+}
+
 func (s *Server) removeConnection(c *connection) {
 	s.mu.Lock()
 	delete(s.conns, c)
@@ -230,6 +242,10 @@ const maxOutbound = 256
 // stallGrace is how long one frame may wait for a subscriber's socket to take
 // it before the subscriber is lagging.
 const stallGrace = 2 * time.Second
+
+// lagGrace bounds the writes that end a lagging connection: the rest of a
+// frame already partly written, the replies queued, and the notice.
+const lagGrace = 2 * time.Second
 
 // roomPoll is how often a frame waiting for socket room looks again.
 const roomPoll = 5 * time.Millisecond
@@ -374,13 +390,15 @@ func (c *connection) stalled() {
 }
 
 // lagLocked drops the queued events and makes lagging, with the last event
-// the client was written, the last frame. Queued replies still go first. No
-// write deadline is set: a frame already partly written is finished first, so
-// whatever the client reads ends with the notice.
+// the client was written, the last frame. Queued replies still go first. A
+// frame already partly written is finished first, so whatever the client
+// reads ends with the notice; all of it must be written within lagGrace, or
+// the connection is closed without the notice.
 func (c *connection) lagLocked() {
 	if c.final != nil || c.shut {
 		return
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(lagGrace))
 	c.final = &finalFrame{err: wire.Error{Code: wire.ErrorCodeLagging}, lagging: true}
 	c.dropLocked()
 	c.signal()
@@ -733,7 +751,7 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		if !c.decode(frame, &req, "turn_id") {
 			return
 		}
-		reply, err := buildTurnRecord(c.server.store, req.TurnID)
+		reply, err := buildTurnRecord(c.server.store, c.server.openTurnState, req.TurnID)
 		c.respond(frame.ID, "turn", reply, err)
 	case wire.RequestTranscript:
 		var req wire.TranscriptRequest

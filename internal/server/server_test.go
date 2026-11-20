@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -838,9 +840,10 @@ func TestLaggingSubscriberIsDisconnected(t *testing.T) {
 	}
 	h.WaitTurnState(turn.TurnID, engine.StateAuthorDispatched)
 
-	// slow reads nothing, so its socket and the server's queue for it fill,
-	// and the flood is more than the hub queues for it besides.
-	const flood = 2000
+	// slow reads nothing, so its socket (raised to hold a frame of the
+	// largest size) and the server's queue for it fill, and the flood is more
+	// than the hub queues for it besides.
+	const flood = 6000
 	emitBatches(t, h.Hub, flood, 1<<10, 100)
 	release()
 	waitTerminal(t, h, turn.TurnID)
@@ -1297,7 +1300,7 @@ func waitServe(t *testing.T, s *serving, limit time.Duration) {
 func TestStopWithStalledSubscriber(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
-	r := stalledSubscriber(t, s, h, 60)
+	r := stalledSubscriber(t, s, h, 160)
 	time.Sleep(200 * time.Millisecond)
 
 	if err := h.Engine.Stop(context.Background()); err != nil {
@@ -1447,8 +1450,9 @@ func TestLaggingKeepsQueuedReplies(t *testing.T) {
 	if f := slow.read(); f.Type != "reply" {
 		t.Fatalf("subscribe reply = %+v", f)
 	}
-	// Enough to fill the socket, so the reply queues behind events.
-	emitBatches(t, h.Hub, 40, 24<<10, 40)
+	// Enough to fill the socket, raised to hold a frame of the largest size,
+	// so the reply queues behind events.
+	emitBatches(t, h.Hub, 160, 24<<10, 160)
 	slow.send("st", wire.RequestStatus, struct{}{})
 
 	waitPeerClosed(t, slow)
@@ -1496,11 +1500,32 @@ func waitPeerClosed(t *testing.T, r *rawConn) {
 	}
 }
 
-// TestNonReadingSubscriberLargeEvents has a subscriber stop reading while
-// events larger than the socket buffer arrive, so one is only partly written
-// when the subscriber lags. The partial event is finished before the notice:
-// reading again yields whole events, then lagging with last_seq, then the
-// end. Another client is unaffected meanwhile.
+// wholeFramesFit reports whether the server can raise a socket's send buffer
+// to hold a frame of the largest size and the room it keeps for a notice
+// (room_linux.go), so a frame is never left partly written.
+func wholeFramesFit(t *testing.T) bool {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	raw, err := os.ReadFile("/proc/sys/net/core/wmem_max")
+	if err != nil {
+		return false
+	}
+	wmemMax, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wmemMax >= wire.MaxFrameBytes+16<<10
+}
+
+// TestNonReadingSubscriberLargeEvents has a subscriber stop reading for good
+// while events larger than a default socket buffer arrive. The server closes
+// it without its help. Read afterwards, it finds whole events in order and
+// then lagging with last_seq, the end. Where the kernel caps the send buffer
+// below one large frame, the server may have had to leave a frame partly
+// written; then the whole events are followed only by the end. Another client
+// is unaffected meanwhile.
 func TestNonReadingSubscriberLargeEvents(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
@@ -1518,18 +1543,33 @@ func TestNonReadingSubscriberLargeEvents(t *testing.T) {
 	const flood = 40
 	emitBatches(t, h.Hub, flood, 400<<10, 10)
 
-	// Long enough for the stalled event to make the subscriber lag.
-	time.Sleep(3 * time.Second)
+	waitPeerClosed(t, slow)
 	other := s.dial()
 	if _, err := other.Status(ctx); err != nil {
 		t.Fatalf("another client's status: %v", err)
 	}
 
+	notice := wholeFramesFit(t)
+	if err := slow.c.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	var n int
-	var lastEvent int64
+	lastEvent := start
 	for {
-		f := slow.read()
+		f, err := slow.r.Read()
+		if err != nil {
+			if notice {
+				t.Fatalf("after %d events: %v, want lagging", n, err)
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatal("connection not closed")
+			}
+			break
+		}
 		if f.Type == "event" {
+			if f.Seq != lastEvent+1 {
+				t.Fatalf("event seq %d after %d", f.Seq, lastEvent)
+			}
 			n++
 			lastEvent = f.Seq
 			continue
@@ -1541,9 +1581,9 @@ func TestNonReadingSubscriberLargeEvents(t *testing.T) {
 		if e.LastSeq == nil || *e.LastSeq != lastEvent {
 			t.Fatalf("last_seq = %v, want %d", e.LastSeq, lastEvent)
 		}
+		slow.wantClosed()
 		break
 	}
-	slow.wantClosed()
 	if n >= flood {
 		t.Fatalf("got all %d events, the subscriber never lagged", n)
 	}

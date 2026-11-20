@@ -4,33 +4,65 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// getTurnStateForOpen gets the most recent turn_state from the events table for an open turn
-func getTurnStateForOpen(store *journal.Store, turnID string) (string, error) {
-	event, err := store.LatestTurnStateEvent(turnID)
-	if err != nil {
-		return "", err
-	}
-	if event == nil {
-		return "", nil
-	}
+// turnStatePage is how many events a turnStates catch-up reads at a time.
+const turnStatePage = 1000
 
-	var data struct {
-		State string `json:"state"`
+// turnStates follows the journal's turn_state events, so an open turn's
+// current state is known without scanning the events table on every turn
+// request. Each catch-up reads only the events written since the last one.
+// It starts at the current run: recovery makes every turn an earlier run left
+// open terminal before engine_started, so the turn_state events of a turn
+// that is open now all come after it.
+type turnStates struct {
+	mu      sync.Mutex
+	started bool
+	cursor  int64 // seq of the last event read
+	states  map[string]string
+}
+
+// latest returns the state in the most recent turn_state event of turnID, or
+// "" if it has none. runFirstSeq is where the first catch-up starts.
+func (t *turnStates) latest(store *journal.Store, runFirstSeq int64, turnID string) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.started {
+		t.started = true
+		t.cursor = max(runFirstSeq-1, 0)
+		t.states = make(map[string]string)
 	}
-	if err := json.Unmarshal(event.Data, &data); err != nil {
-		return "", fmt.Errorf("turn_state event %d: %w", event.Seq, err)
+	for {
+		events, err := store.EventsSince(t.cursor, turnStatePage)
+		if err != nil {
+			return "", err
+		}
+		for _, ev := range events {
+			if ev.Kind == "turn_state" {
+				var data struct {
+					State string `json:"state"`
+				}
+				if err := json.Unmarshal(ev.Data, &data); err != nil {
+					return "", fmt.Errorf("turn_state event %d: %w", ev.Seq, err)
+				}
+				t.states[ev.TurnID] = data.State
+			}
+			t.cursor = ev.Seq
+		}
+		if len(events) < turnStatePage {
+			return t.states[turnID], nil
+		}
 	}
-	return data.State, nil
 }
 
 // buildTurnRecord builds a full turn record from the journal.
-func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, error) {
+// openState gives the current state of a turn that has no terminal state.
+func buildTurnRecord(store *journal.Store, openState func(turnID string) (string, error), turnID string) (*wire.TurnReply, error) {
 	turn, err := store.GetTurn(turnID)
 	if err != nil {
 		return nil, err
@@ -54,7 +86,7 @@ func buildTurnRecord(store *journal.Store, turnID string) (*wire.TurnReply, erro
 	// Get state: terminal state if available, otherwise most recent turn_state event
 	state := turn.TerminalState
 	if state == "" {
-		state, err = getTurnStateForOpen(store, turnID)
+		state, err = openState(turnID)
 		if err != nil {
 			return nil, err
 		}
