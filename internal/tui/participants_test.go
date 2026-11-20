@@ -66,7 +66,7 @@ func TestModelFamilyMatch(t *testing.T) {
 
 func TestRenderParticipantsNoParticipants(t *testing.T) {
 	s := NewState()
-	output := renderParticipants(s, 80, 24)
+	output := renderParticipants(s, 80, 24, "")
 	if output != "no participants" {
 		t.Errorf("renderParticipants with no participants = %q, want 'no participants'", output)
 	}
@@ -96,7 +96,7 @@ func TestRenderParticipantsBasic(t *testing.T) {
 		},
 	}
 
-	output := renderParticipants(s, 80, 24)
+	output := renderParticipants(s, 80, 24, "")
 
 	// Check that output contains participants
 	if output == "" {
@@ -145,7 +145,7 @@ func TestRenderParticipantsWithTurn(t *testing.T) {
 		},
 	}
 
-	output := renderParticipants(s, 80, 24)
+	output := renderParticipants(s, 80, 24, "")
 
 	// Check that author line is shown
 	if !contains(output, "author: author-1") {
@@ -181,7 +181,7 @@ func TestRenderParticipantsWithOrphanedHolds(t *testing.T) {
 		},
 	}
 
-	output := renderParticipants(s, 80, 24)
+	output := renderParticipants(s, 80, 24, "")
 
 	if !contains(output, "orphaned holds") {
 		t.Error("output does not contain orphaned holds section")
@@ -194,51 +194,23 @@ func TestRenderParticipantsWithOrphanedHolds(t *testing.T) {
 	}
 }
 
-func TestFormatAge(t *testing.T) {
+func TestTruncateStringRuneSafe(t *testing.T) {
 	tests := []struct {
-		name     string
-		offset   time.Duration
-		expected string
-	}{
-		{"30 seconds ago", -30 * time.Second, "30s"},
-		{"5 minutes ago", -5 * time.Minute, "5m"},
-		{"2 hours ago", -2 * time.Hour, "2h"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			timestamp := time.Now().Add(tt.offset).Format(time.RFC3339)
-			got := formatAge(timestamp)
-			if !contains(got, "s") && !contains(got, "m") && !contains(got, "h") {
-				t.Errorf("formatAge(%q) = %q, expected format with time unit", timestamp, got)
-			}
-		})
-	}
-}
-
-func TestFormatAgeInvalid(t *testing.T) {
-	got := formatAge("invalid-timestamp")
-	if got != "unknown" {
-		t.Errorf("formatAge(invalid) = %q, want 'unknown'", got)
-	}
-}
-
-func TestTruncateString(t *testing.T) {
-	tests := []struct {
-		input  string
-		maxLen int
-		want   string
+		input    string
+		maxRunes int
+		want     string
 	}{
 		{"hello", 10, "hello"},
 		{"hello", 3, "hel"},
 		{"", 5, ""},
 		{"x", 1, "x"},
+		{"🎉hello", 2, "🎉h"},
 	}
 
 	for _, tt := range tests {
-		got := truncateString(tt.input, tt.maxLen)
+		got := truncateStringRuneSafe(tt.input, tt.maxRunes)
 		if got != tt.want {
-			t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			t.Errorf("truncateStringRuneSafe(%q, %d) = %q, want %q", tt.input, tt.maxRunes, got, tt.want)
 		}
 	}
 }
@@ -260,5 +232,35 @@ func TestPadRight(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("padRight(%q, %d) = %q, want %q", tt.input, tt.length, got, tt.want)
 		}
+	}
+}
+
+func TestFormatAgeAt(t *testing.T) {
+	tests := []struct {
+		name     string
+		offset   time.Duration
+		expected string
+	}{
+		{"30 seconds ago", -30 * time.Second, "30s"},
+		{"5 minutes ago", -5 * time.Minute, "5m"},
+		{"2 hours ago", -2 * time.Hour, "2h"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
+			timestamp := now.Add(tt.offset).Format(time.RFC3339)
+			got := formatAgeAt(timestamp, func() time.Time { return now })
+			if got != tt.expected {
+				t.Errorf("formatAgeAt(%q) = %q, want %q", timestamp, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFormatAgeAtInvalid(t *testing.T) {
+	got := formatAgeAt("invalid-timestamp", time.Now)
+	if got != "unknown" {
+		t.Errorf("formatAgeAt(invalid) = %q, want 'unknown'", got)
 	}
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,6 +69,10 @@ type App struct {
 	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
+
+	// The participants tab: sorted participant IDs and the index of the selected participant.
+	pIDs      []string // sorted participant IDs
+	pSelected int      // index of the selected participant in pIDs
 }
 
 // Option configures an App.
@@ -274,6 +279,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tStale = true
 	}
 	a.refreshTranscript()
+	a.syncParticipants()
 	if _, ok := msg.(contentMsg); !ok {
 		cmds = append(cmds, a.fetchAnswerContent(), a.fetchTranscriptContent())
 	}
@@ -348,6 +354,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "pgdown":
 			a.scrollAnswer(page)
+			return a, nil
+		}
+	}
+	if a.tab == tabParticipants {
+		switch msg.String() {
+		case "up":
+			a.selectParticipant(-1)
+			return a, nil
+		case "down":
+			a.selectParticipant(1)
 			return a, nil
 		}
 	}
@@ -687,7 +703,11 @@ func (a *App) View() string {
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
-		tabView = renderParticipants(a.state, w, bodyHeight)
+		selectedID := ""
+		if a.pSelected >= 0 && a.pSelected < len(a.pIDs) {
+			selectedID = a.pIDs[a.pSelected]
+		}
+		tabView = renderParticipants(a.state, w, bodyHeight, selectedID)
 	}
 	lines := strings.Split(tabView, "\n")
 
@@ -707,6 +727,22 @@ func (a *App) View() string {
 	output = append(output, lines...)
 	output = append(output, renderInput(a.input, a.refusal, w))
 	return strings.Join(output, "\n")
+}
+
+// syncParticipants updates the sorted list of participant IDs and clamps selection.
+func (a *App) syncParticipants() {
+	var pIDs []string
+	for id := range a.state.Participants {
+		pIDs = append(pIDs, id)
+	}
+	sort.Strings(pIDs)
+	a.pIDs = pIDs
+	a.pSelected = min(a.pSelected, max(len(pIDs)-1, 0))
+}
+
+// selectParticipant moves the selection by delta rows.
+func (a *App) selectParticipant(delta int) {
+	a.pSelected = min(max(a.pSelected+delta, 0), max(len(a.pIDs)-1, 0))
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps
