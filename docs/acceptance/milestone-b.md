@@ -35,7 +35,7 @@ The following gaps are observed in the milestone B acceptance test suite. Each g
 
 **Design clause:** A preset naming the author as reviewer is refused at submit.
 
-**Gap:** The config validator rejects a preset whose required_reviewers contains its author when the roster is loaded (config/validator.go: "author is also in required reviewers"), so the engine refuses to start on such a roster and no submit can ever name the preset. The design specifies the engine should start normally and refuse the submit with the preset.
+**Gap:** The config validator rejects a preset whose required_reviewers contains its author when the roster is loaded (config/validator.go: "author is also in required reviewers"), so the engine refuses to start on such a roster and no submit can ever name the preset. The design specifies the engine should start normally and refuse the submit with the preset. The engine's behaviour is kept and the question is recorded as OQ-4 in `docs/design/open-questions.md`.
 
 ## Milestone C Items
 
