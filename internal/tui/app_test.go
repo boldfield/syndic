@@ -267,7 +267,7 @@ func TestRegionsAndTabs(t *testing.T) {
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	r.waitFor(t, "no turn yet")
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	r.waitFor(t, "participants (placeholder)")
+	r.waitFor(t, "> author")
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyShiftTab})
 	r.waitFor(t, "no turn yet")
 

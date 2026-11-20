@@ -68,6 +68,9 @@ type App struct {
 	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
+	pSelected   int                       // index of the selected row of the participants tab, in id order
+	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
+	pScroll     int                       // first line shown while pScrolled
 }
 
 // Option configures an App.
@@ -348,6 +351,35 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "pgdown":
 			a.scrollAnswer(page)
+			return a, nil
+		}
+	}
+
+	if a.tab == tabParticipants {
+		switch msg.String() {
+		case "up":
+			a.pSelected = max(a.selectedParticipant()-1, 0)
+			a.pScrolled = false
+			return a, nil
+		case "down":
+			a.pSelected = a.selectedParticipant() + 1
+			a.pScrolled = false
+			return a, nil
+		case "pgup", "pgdown":
+			// Page through the full content, which the fitted view cuts: the
+			// pools and orphaned holds below the detail.
+			page := max(a.bodyHeight()-1, 1)
+			if msg.String() == "pgup" {
+				page = -page
+			}
+			if !a.pScrolled {
+				a.pScrolled, a.pScroll = true, 0
+			}
+			last := a.participantsMaxScroll()
+			a.pScroll = min(max(min(a.pScroll, last)+page, 0), last)
+			if a.pScroll == 0 && page < 0 {
+				a.pScrolled = false
+			}
 			return a, nil
 		}
 	}
@@ -687,7 +719,14 @@ func (a *App) View() string {
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
-		tabView = renderParticipants(a.state, w, bodyHeight)
+		if a.pScrolled {
+			// A refresh can shorten the content under the offset, so the
+			// start is kept within the last full page as it is now.
+			full := strings.Split(a.participantsFull(w), "\n")
+			tabView = strings.Join(full[min(a.pScroll, max(len(full)-bodyHeight, 0)):], "\n")
+		} else {
+			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
+		}
 	}
 	lines := strings.Split(tabView, "\n")
 
@@ -707,6 +746,32 @@ func (a *App) View() string {
 	output = append(output, lines...)
 	output = append(output, renderInput(a.input, a.refusal, w))
 	return strings.Join(output, "\n")
+}
+
+// selectedParticipantID is the id of the selected participants row, or "".
+func (a *App) selectedParticipantID() string {
+	ids := participantIDs(a.state)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[a.selectedParticipant()]
+}
+
+// participantsFull is the participants tab at full length, not fitted to the body.
+func (a *App) participantsFull(w int) string {
+	return renderParticipants(a.state, w, 0, a.selectedParticipantID(), a.now())
+}
+
+// participantsMaxScroll is the last first-line that still fills the body.
+func (a *App) participantsMaxScroll() int {
+	n := len(strings.Split(a.participantsFull(max(a.width, 1)), "\n"))
+	return max(n-a.bodyHeight(), 0)
+}
+
+// selectedParticipant is the index of the selected participants row, kept
+// within the roster as it stands.
+func (a *App) selectedParticipant() int {
+	return min(max(a.pSelected, 0), max(len(a.state.Participants)-1, 0))
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps

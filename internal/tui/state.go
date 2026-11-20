@@ -45,6 +45,7 @@ type ParticipantInfo struct {
 	ContextSource            string
 	EligibleRequiredReviewer string
 	Estimate                 string
+	DeclaredBilling          string
 }
 
 // TurnInfo holds information about the current turn.
@@ -529,6 +530,7 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 			ContextSource:            p.ContextSource,
 			EligibleRequiredReviewer: p.EligibleRequiredReviewer,
 			Estimate:                 p.Estimate,
+			DeclaredBilling:          p.DeclaredBilling,
 		}
 	}
 	s.Participants = participants
