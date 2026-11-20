@@ -395,7 +395,10 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if msg.turn.CandidateID != nil {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
 	}
-	if msg.turn.OpenBlocks != nil {
+	// A stale reply (read before the blocks were raised) carries an empty list
+	// and can arrive after the terminal one, even claiming a terminal state; known
+	// blocks are never wiped by it.
+	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
 	return a, nil
