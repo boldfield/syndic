@@ -45,7 +45,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	}
 
 	if *showVersion {
-		fmt.Fprintf(stdout, "syndicd version %s\n", version)
+		if _, err := fmt.Fprintf(stdout, "syndicd version %s\n", version); err != nil {
+			return 1
+		}
 		return 0
 	}
 
@@ -67,7 +69,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	// Convert to absolute path for the roster (required for manifest)
 	rosterAbs, err := filepath.Abs(*rosterPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "resolve roster path: %v\n", err)
+		if _, err := fmt.Fprintf(stderr, "resolve roster path: %v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 
@@ -83,7 +87,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		}
 	}, os.Getenv("HOME"))
 	if err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
+		if _, err := fmt.Fprintf(stderr, "%v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 
@@ -92,41 +98,46 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	if err != nil {
 		var heldErr *lockfile.HeldError
 		if errors.As(err, &heldErr) {
-			fmt.Fprintf(stderr, "an engine with PID %d is already running\n", heldErr.Holder.PID)
+			if _, err := fmt.Fprintf(stderr, "an engine with PID %d is already running\n", heldErr.Holder.PID); err != nil {
+				return 1
+			}
 			return 3
 		}
-		fmt.Fprintf(stderr, "acquire lock: %v\n", err)
+		if _, err := fmt.Fprintf(stderr, "acquire lock: %v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 	defer func() {
-		_ = lock.Release()
+		if err := lock.Release(); err != nil {
+			fmt.Fprintf(stderr, "release lock: %v\n", err)
+		}
 	}()
 
 	// Create journal directory if it doesn't exist
 	journalDir := filepath.Dir(*journalPath)
 	if err := os.MkdirAll(journalDir, 0700); err != nil {
-		fmt.Fprintf(stderr, "create journal directory: %v\n", err)
+		if _, err := fmt.Fprintf(stderr, "create journal directory: %v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 
 	// Open the journal
 	db, err := journal.Open(*journalPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "open journal: %v\n", err)
+		if _, err := fmt.Fprintf(stderr, "open journal: %v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 	defer func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			fmt.Fprintf(stderr, "close journal: %v\n", err)
+		}
 	}()
 
 	store := journal.NewStore(db)
-
-	// Load the roster (validation will happen in engine.Start)
-	roster, err := config.Load(rosterAbs)
-	if err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
-		return 1
-	}
 
 	// Create the hub
 	eventHub := hub.New(store, 1024)
@@ -149,7 +160,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		NewAdapter:    newAdapterFunc,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "create engine: %v\n", err)
+		if _, err := fmt.Fprintf(stderr, "create engine: %v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 
@@ -157,10 +170,14 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	if err := eng.Start(); err != nil {
 		var rosterErr *engine.RosterError
 		if errors.As(err, &rosterErr) {
-			fmt.Fprintf(stderr, "%v\n", err)
+			if _, err := fmt.Fprintf(stderr, "%v\n", err); err != nil {
+				return 1
+			}
 			return 2
 		}
-		fmt.Fprintf(stderr, "%v\n", err)
+		if _, err := fmt.Fprintf(stderr, "%v\n", err); err != nil {
+			return 1
+		}
 		return 1
 	}
 
@@ -173,8 +190,12 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	})
 
 	if err := srv.Listen(); err != nil {
-		fmt.Fprintf(stderr, "server listen: %v\n", err)
-		_ = eng.Stop(context.Background())
+		if _, err := fmt.Fprintf(stderr, "server listen: %v\n", err); err != nil {
+			return 1
+		}
+		if err := eng.Stop(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "stop engine: %v\n", err)
+		}
 		return 1
 	}
 
@@ -188,59 +209,71 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 
 	// Print startup info
 	hello := eng.Hello()
-	fmt.Fprintf(stdout, "%s %s %s\n", paths.Socket, hello.RunID, rosterAbs)
-
-	// Get stop_grace from roster (default 5s)
-	stopGrace := 5 * time.Second
-	if roster.Engine.StopGrace != nil {
-		stopGrace = roster.Engine.StopGrace.Duration
+	if _, err := fmt.Fprintf(stdout, "%s %s %s\n", paths.Socket, hello.RunID, rosterAbs); err != nil {
+		return 1
 	}
 
-	// Channel to track if we're stopping
-	stopping := false
-	var stopCtx context.Context
-	var cancelStop context.CancelFunc
-
 	// Wait for signals and handle graceful shutdown
+	sigCount := 0
+
 	for {
 		select {
 		case <-signals:
-			if !stopping {
+			sigCount++
+			if sigCount == 1 {
 				// First signal: graceful stop
-				stopping = true
-				stopCtx, cancelStop = context.WithTimeout(context.Background(), stopGrace)
+				// Use a cancellable context (engine enforces stop_grace)
+				stopCtx, cancelStop := context.WithCancel(context.Background())
 				defer cancelStop()
+
+				// Start engine stop in a goroutine so we can listen for a second signal
+				stopDone := make(chan error, 1)
 				go func() {
-					_ = eng.Stop(stopCtx)
-					// After engine stops, close the server
-					cancelServe()
+					stopDone <- eng.Stop(stopCtx)
 				}()
-			} else {
-				// Second signal: immediate stop
-				if cancelStop != nil {
-					cancelStop()
+
+				// Close the server
+				cancelServe()
+
+				// Wait for engine stop to complete, listening for a second signal
+				for {
+					select {
+					case <-signals:
+						sigCount++
+						// Second signal: cancel the stop context
+						cancelStop()
+						// Keep waiting for stop to actually finish
+					case err := <-stopDone:
+						if err != nil {
+							fmt.Fprintf(stderr, "stop engine: %v\n", err)
+						}
+						if sigCount > 1 {
+							// We got a second signal, return immediately
+							return 130
+						}
+						// First signal completed normally
+						// Wait for server to finish
+						if err := <-serveDone; err != nil {
+							fmt.Fprintf(stderr, "serve: %v\n", err)
+						}
+						return 0
+					}
 				}
-				return 130
 			}
 
 		case err := <-serveDone:
-			if stopping {
-				// We're already stopping, just exit
-				if cancelStop != nil {
-					cancelStop()
-				}
-				return 0
-			}
-			// Server stopped on its own, do graceful stop
+			// Server stopped on its own
 			if err != nil {
-				fmt.Fprintf(stderr, "serve: %v\n", err)
-				_ = eng.Stop(context.Background())
-				return 1
+				if _, err := fmt.Fprintf(stderr, "serve: %v\n", err); err != nil {
+					return 1
+				}
 			}
-			// Server returned successfully with no signal
-			stopCtx, cancelStop = context.WithTimeout(context.Background(), stopGrace)
+			// Stop the engine gracefully
+			stopCtx, cancelStop := context.WithCancel(context.Background())
 			defer cancelStop()
-			_ = eng.Stop(stopCtx)
+			if err := eng.Stop(stopCtx); err != nil {
+				fmt.Fprintf(stderr, "stop engine: %v\n", err)
+			}
 			return 0
 		}
 	}
