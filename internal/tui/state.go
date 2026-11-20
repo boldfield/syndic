@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/json"
+
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -11,6 +13,7 @@ type State struct {
 	CurrentTurn string
 	LastSeq     int64
 	ConnState   ConnectionState
+	TurnState   map[string]string
 }
 
 type ConnectionState string
@@ -28,12 +31,28 @@ func Apply(s State, event wire.Frame) State {
 		s.LastSeq = event.Seq
 	}
 
+	if s.TurnState == nil {
+		s.TurnState = make(map[string]string)
+	}
+
 	switch event.Kind {
 	case "turn_submitted":
 		// Turn submitted - CurrentTurn is set by handleSubmitResult
+	case "turn_state":
+		var body wire.EvTurnState
+		if err := json.Unmarshal(event.Body, &body); err == nil {
+			s.TurnState[body.TurnID] = body.State
+			if isTerminalState(body.State) && s.CurrentTurn == body.TurnID {
+				s.CurrentTurn = ""
+			}
+		}
 	case "engine_stopping":
 		s.ConnState = ConnStateReconnecting
 	}
 
 	return s
+}
+
+func isTerminalState(state string) bool {
+	return state == "approved" || state == "solo_complete" || state == "incomplete" || state == "cancelled" || state == "overridden"
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	_ "github.com/charmbracelet/x/exp/teatest"
 )
 
 // TestAppRendersThreeRegions tests that the app renders three regions at 80x24.

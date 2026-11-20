@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -101,7 +102,7 @@ func (c *connector) helloCmd(ctx context.Context) tea.Cmd {
 
 		subscribeSeq := int64(0)
 		if c.lastSeq > 0 {
-			subscribeSeq = c.lastSeq + 1
+			subscribeSeq = c.lastSeq
 		}
 
 		_, err := c.client.Subscribe(ctx, subscribeSeq)
@@ -170,7 +171,7 @@ func (c *connector) submitCmd(ctx context.Context, input string) tea.Cmd {
 		result, err := c.client.Submit(ctx, req)
 
 		if err != nil {
-			detail := err.Error()
+			detail := formatRefusal(err)
 			return SubmitResultMsg{Err: err, RefusalDetail: detail}
 		}
 
@@ -181,6 +182,11 @@ func (c *connector) submitCmd(ctx context.Context, input string) tea.Cmd {
 // reconnectCmd reconnects with backoff.
 func (c *connector) reconnectCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if c.client != nil {
+			_ = c.client.Close()
+			c.client = nil
+		}
+
 		backoff := 100 * time.Millisecond
 		maxBackoff := 10 * time.Second
 
@@ -210,4 +216,15 @@ func (c *connector) reconnectCmd(ctx context.Context) tea.Cmd {
 func generateUUID() string {
 	u := uuid.New()
 	return u.String()
+}
+
+func formatRefusal(err error) string {
+	var we *wire.Error
+	if errors.As(err, &we) {
+		if we.Detail != nil {
+			return we.Code + ": " + *we.Detail
+		}
+		return we.Code
+	}
+	return err.Error()
 }
