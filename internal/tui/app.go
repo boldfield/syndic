@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -217,7 +218,8 @@ func (a *App) refreshTranscript() {
 	atBottom := a.tFollow || (!a.tHome && a.tHad && a.tRow >= a.maxTranscriptRow())
 	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
 	a.tRow = a.clampTranscriptRow(a.tRow)
-	a.tHad = len(a.tItems) > 0
+	// A frame still waiting on bodies is not a bottom the user chose.
+	a.tHad = len(a.tItems) > 0 && !slices.ContainsFunc(a.tLines, func(l string) bool { return strings.Contains(l, "(loading…)") })
 	if atBottom {
 		a.tRow = a.maxTranscriptRow()
 	}

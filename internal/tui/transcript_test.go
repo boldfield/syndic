@@ -287,8 +287,6 @@ func TestTranscriptLargeOutputReachableByScrolling(t *testing.T) {
 	}
 	openTranscript(t, r, len(reply.Items), 80, 24)
 	var v string
-	// A view at the bottom follows the output as it loads; start from the top.
-	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	if v = view(t, r); strings.Contains(v, "row-19999") {
 		t.Fatal("the last line is visible at the top")
 	}
@@ -573,5 +571,24 @@ func TestWrapTextKeepsEveryRune(t *testing.T) {
 	}
 	if got := wrapText("a\x1b[31mb", 80); got[0] != "a·[31mb" {
 		t.Fatalf("control characters reach the terminal: %q", got)
+	}
+}
+
+func TestTranscriptOpenedFinishedTurnStartsAtTop(t *testing.T) {
+	a := transcriptApp(80, 24)
+	var items []wire.TranscriptItem
+	for i := 0; i < 3; i++ {
+		items = append(items, wire.TranscriptItem{ID: fmt.Sprintf("m%d", i), Ref: fmt.Sprintf("msg:m%d", i), ByteLen: 400})
+	}
+	a.Update(transcriptMsg{turn: "t1", items: items})
+	for i := 0; i < 3; i++ {
+		var lines []string
+		for j := 0; j < 30; j++ {
+			lines = append(lines, fmt.Sprintf("item%d-line%02d", i, j))
+		}
+		a.Update(contentMsg{ref: fmt.Sprintf("msg:m%d", i), data: strings.Join(lines, "\n")})
+	}
+	if v := a.View(); !strings.Contains(v, "item0-line00") {
+		t.Fatalf("bodies arriving moved the view off the top:\n%s", v)
 	}
 }
