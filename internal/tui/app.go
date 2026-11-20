@@ -63,7 +63,9 @@ type App struct {
 	tStale      bool // tLines no longer matches what is known
 	tLines      []string
 	tRow        int  // first visible line
-	tFollow     bool // the view is at the bottom and stays there as lines arrive
+	tFollow     bool // the user pressed End or paged to the bottom
+	tHad        bool // the lines last drawn included loaded items
+	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
 }
@@ -139,7 +141,7 @@ func (a *App) fetchAnswerContent() tea.Cmd {
 
 // transcriptIn gathers what the transcript tab needs.
 func (a *App) transcriptIn() transcriptInput {
-	return transcriptInput{items: a.tItems, content: a.content, quarantined: a.quarantined, blockDetail: a.blockDetail}
+	return transcriptInput{items: a.tItems, content: a.content, quarantined: a.quarantined, blockDetail: a.blockDetail, reloading: a.tLoading || a.tReload}
 }
 
 // fetchTranscriptContent starts the fetches the transcript tab is waiting on.
@@ -155,7 +157,8 @@ func (a *App) syncTranscript() tea.Cmd {
 		return nil
 	}
 	a.tTurn, a.tItems = t, nil
-	a.tRow, a.tFollow, a.tStale = 0, false, true
+	a.tRow, a.tFollow, a.tHome, a.tStale = 0, false, false, true
+	a.tLines, a.tHad = nil, false
 	return a.reloadTranscript()
 }
 
@@ -210,9 +213,12 @@ func (a *App) refreshTranscript() {
 		return
 	}
 	a.tStale = false
+	// Already at the bottom of what was shown: stay there as lines arrive.
+	atBottom := a.tFollow || (!a.tHome && a.tHad && a.tRow >= a.maxTranscriptRow())
 	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
 	a.tRow = a.clampTranscriptRow(a.tRow)
-	if a.tFollow {
+	a.tHad = len(a.tItems) > 0
+	if atBottom {
 		a.tRow = a.maxTranscriptRow()
 	}
 }
@@ -240,7 +246,8 @@ func (a *App) scrollTranscript(key string) {
 		a.tRow = a.maxTranscriptRow()
 	}
 	a.tRow = a.clampTranscriptRow(a.tRow)
-	a.tFollow = key != "home" && a.tRow >= a.maxTranscriptRow()
+	a.tHome = key == "home" || (a.tHome && a.tRow == 0)
+	a.tFollow = !a.tHome && a.tRow >= a.maxTranscriptRow()
 }
 
 // Init starts the first connection, from the beginning of the journal.

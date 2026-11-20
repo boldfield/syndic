@@ -55,7 +55,7 @@ func openTranscript(t *testing.T, r *rig, want, w, h int) string {
 	send(r, tea.WindowSizeMsg{Width: w, Height: h})
 	return r.until(t, "a loaded transcript", func(a *App) (string, bool) {
 		v := a.View()
-		return v, a.tab == tabTranscript && len(a.tItems) == want && !strings.Contains(v, "(loading…)")
+		return v, a.tab == tabTranscript && len(a.tItems) == want && !a.tLoading && !a.tReload && !strings.Contains(v, "(loading…)")
 	})
 }
 
@@ -285,9 +285,12 @@ func TestTranscriptLargeOutputReachableByScrolling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := openTranscript(t, r, len(reply.Items), 80, 24)
-	if strings.Contains(v, "row-19999") {
-		t.Fatal("the last line is visible before any scrolling")
+	openTranscript(t, r, len(reply.Items), 80, 24)
+	var v string
+	// A view at the bottom follows the output as it loads; start from the top.
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
+	if v = view(t, r); strings.Contains(v, "row-19999") {
+		t.Fatal("the last line is visible at the top")
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyEnd})
 	if v = view(t, r); !strings.Contains(v, "row-19999") {
@@ -428,6 +431,15 @@ func TestTranscriptViewFollowsWhileAtTheBottom(t *testing.T) {
 	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 80)})
 	if a.View() != held {
 		t.Fatal("the view moved after scrolling up from the bottom")
+	}
+}
+
+func TestTranscriptShortTranscriptFollowsOnceItGrows(t *testing.T) {
+	a := transcriptApp(80, 24)
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 3)})
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 60)})
+	if v := a.View(); !strings.Contains(v, "body 059") {
+		t.Fatalf("a view at the bottom did not follow:\n%s", v)
 	}
 }
 

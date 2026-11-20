@@ -28,6 +28,7 @@ type transcriptInput struct {
 	content     *ContentCache
 	quarantined map[string]bool           // attempts whose result arrived late
 	blockDetail map[string]wire.OpenBlock // evidence and remedy by block id
+	reloading   bool                      // a newer snapshot of the items is on its way
 }
 
 // transcriptLines renders the whole transcript tab for the turn, unclipped,
@@ -157,8 +158,14 @@ func wrapHeader(parts []string, width int) []string {
 func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	if it.ByteLen == 0 {
 		if id, ok := strings.CutPrefix(it.Ref, "attempt:"); ok {
-			if ai, known := s.Attempts[id]; known && !attemptDone(ai) {
-				return "(waiting for output)"
+			if ai, known := s.Attempts[id]; known {
+				switch {
+				case !attemptDone(ai):
+					return "(waiting for output)"
+				case in.reloading:
+					// The snapshot may predate the output.
+					return "(loading…)"
+				}
 			}
 		}
 		return "(no output)"
