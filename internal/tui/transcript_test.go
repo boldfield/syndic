@@ -282,11 +282,8 @@ func TestTranscriptLargeOutputReachableByScrolling(t *testing.T) {
 	r := startAnswerRig(t, h)
 	submit(t, r, wire.SubmitRequest{SubmissionID: "big", Input: "question", Preset: ptr("solo")})
 	turn := turnIn(t, r, "solo_complete")
-	reply, err := dial(t, r.paths).Transcript(context.Background(), turn, "", 200)
-	if err != nil {
-		t.Fatal(err)
-	}
-	openTranscript(t, r, len(reply.Items), 80, 24)
+	// Opened once the turn is over, so the view starts at the top.
+	openTranscript(t, r, settled(t, r, turn), 80, 24)
 	var v string
 	if v = view(t, r); strings.Contains(v, "row-19999") {
 		t.Fatal("the last line is visible at the top")

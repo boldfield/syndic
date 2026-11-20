@@ -64,7 +64,7 @@ type App struct {
 	tLines      []string
 	tRow        int  // first visible line
 	tFollow     bool // the view stays at the bottom as lines arrive, until the user scrolls away
-	tHad        bool // the lines last drawn had items and every body loaded
+	tHad        bool // the lines last drawn had items, every body loaded and no reload pending
 	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
@@ -220,9 +220,9 @@ func (a *App) refreshTranscript() {
 	}
 	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
 	a.tRow = a.clampTranscriptRow(a.tRow)
-	// A frame still waiting on bodies is not a bottom the user chose, so
-	// following never starts from one.
-	a.tHad = len(a.tItems) > 0 && !transcriptPending(a.tItems, a.content)
+	// A frame still waiting on bodies, or on a newer snapshot of the items, is
+	// not a bottom the user chose, so following never starts from one.
+	a.tHad = len(a.tItems) > 0 && !a.tLoading && !a.tReload && !transcriptPending(a.tItems, a.content)
 	if a.tFollow {
 		a.tRow = a.maxTranscriptRow()
 	}
