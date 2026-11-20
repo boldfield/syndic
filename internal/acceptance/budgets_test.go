@@ -9,7 +9,6 @@ import (
 	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
-	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
@@ -267,12 +266,16 @@ func TestBudgets_NoTokensPerByteMaxRefused(t *testing.T) {
 	s := newSuite(t, budgetsRosterNoTokensPerByteMax(), nil, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
-	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
+	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
 	if err == nil {
-		t.Fatalf("expected submit to fail, got turn %s", reply.TurnID)
+		t.Fatalf("expected submit to fail with budget error")
 	}
-	if !strings.Contains(err.Error(), "tokens_per_byte_max") {
-		t.Fatalf("expected tokens_per_byte_max error, got: %v", err)
+	we, ok := err.(*wire.Error)
+	if !ok {
+		t.Fatalf("expected *wire.Error, got %T: %v", err, err)
+	}
+	if we.Code != wire.ErrorCodeBudget || we.Budget == nil || *we.Budget != "context_unknown" || we.Missing == nil || *we.Missing != "tokens_per_byte_max" {
+		t.Fatalf("expected context_unknown with missing tokens_per_byte_max, got: %+v", we)
 	}
 }
 
@@ -616,8 +619,12 @@ turn_max_estimated_tokens = 100
 
 func TestBudgets_RacingReservations(t *testing.T) {
 	t.Parallel()
+	// Budget set so both reviewers can dispatch but their combined usage approaches
+	// the limit, forcing one to be refused with budget:turn under racing BeginAttempt.
+	// The race is forced because both reviewers' transactions contend for the same
+	// turn budget in the journal, with the second seeing the first's reservation.
 	budgetConfig := `[budgets]
-turn_max_estimated_tokens = 25000
+turn_max_estimated_tokens = 100000
 `
 	rostTOML := budgetsRosterWithMultipleReviewersAndBudget(budgetConfig)
 
