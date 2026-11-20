@@ -73,7 +73,7 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 	width = max(width, 1)
 	var head, table, detail, pools []string
 	if author, ok := currentAuthor(s); ok {
-		head = []string{fmt.Sprintf("author: %s (%s)", author.ID, orDash(author.ReportedModel))}
+		head = []string{fmt.Sprintf("author: %s (%s)", plain(author.ID), plain(orDash(author.ReportedModel)))}
 	}
 	ids := participantIDs(s)
 	selIdx := 0

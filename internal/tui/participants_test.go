@@ -138,6 +138,21 @@ func TestRenderParticipantsControlCharacters(t *testing.T) {
 	}
 }
 
+func TestRenderParticipantsAuthorControlCharacters(t *testing.T) {
+	s := NewState()
+	s.Participants["a\x1b[Hx"] = ParticipantInfo{ID: "a\x1b[Hx", State: "busy", ReportedModel: "model\x1b[2J"}
+	s.Participants["r"] = ParticipantInfo{ID: "r", State: "busy", ReportedModel: "model"}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "a\x1b[Hx", Reviewers: []string{"r"}}
+	s.CurrentTurn = "t1"
+	out := renderParticipants(s, 80, 20, "r", time.Now())
+	if strings.ContainsRune(out, 0x1b) {
+		t.Fatalf("escape reached the output: %q", out)
+	}
+	if !strings.Contains(out, "author: a·[Hx (model·[2J)") {
+		t.Fatalf("author line not sanitized as expected: %q", out)
+	}
+}
+
 // partRoster has an author, two reviewers on different endpoints and pools, and
 // three participants whose records are missing, bare or for another base_url.
 func partRoster() string {
