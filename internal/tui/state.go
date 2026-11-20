@@ -82,6 +82,7 @@ type AttemptInfo struct {
 	EstimatedPromptText string
 	ReportedPrompt      *int64
 	ReportedCompletion  *int64
+	ScrubCount          int
 }
 
 // BlockInfo holds information about a block.
@@ -152,12 +153,13 @@ func NewState() State {
 
 // apply folds one event frame into the state and returns the result. It is a
 // pure function that tolerates unknown event kinds and unknown members. It does
-// not call time.Now() and does not mutate shared input maps. The now parameter
-// is used for SubmittedAt; pass time.Now() when called from Update.
-func apply(s State, f wire.Frame, now time.Time) State {
+// not call time.Now() and does not mutate shared input maps.
+func apply(s State, f wire.Frame) State {
 	if f.Seq > s.LastSeq {
 		s.LastSeq = f.Seq
 	}
+
+	frameTime, _ := time.Parse(time.RFC3339, f.At)
 
 	switch f.Kind {
 	case wire.EventKindEngineStarted:
@@ -181,7 +183,7 @@ func apply(s State, f wire.Frame, now time.Time) State {
 				State:           "submitted",
 				Preset:          body.Preset,
 				QuickProfile:    body.QuickProfile,
-				SubmittedAt:     now,
+				SubmittedAt:     frameTime,
 				EstimatedTokens: body.EstimatedTokens,
 				ReviewerStates:  make(map[string]string),
 			}
@@ -255,12 +257,12 @@ func apply(s State, f wire.Frame, now time.Time) State {
 			if s.CurrentTurn != "" {
 				turns := copyMap(s.Turns)
 				if ti, ok := turns[s.CurrentTurn]; ok {
-					if body.Phase == "author_dispatch" && ti.Author == "" {
+					if body.Phase == "author" && ti.Author == "" {
 						ti.Author = body.Participant
 						if pi, ok := s.Participants[body.Participant]; ok {
 							ti.AuthorState = pi.State
 						}
-					} else if body.Phase == "reviewer_dispatch" || body.Phase == "reviewer_repair" {
+					} else if body.Phase == "review" {
 						if ti.ReviewerStates[body.Participant] == "" {
 							ti.Reviewers = append(ti.Reviewers, body.Participant)
 							reviewerStates := copyMap(ti.ReviewerStates)
@@ -285,6 +287,7 @@ func apply(s State, f wire.Frame, now time.Time) State {
 			if ai, ok := attempts[body.AttemptID]; ok {
 				ai.Status = body.Status
 				ai.TransportStatus = body.TransportStatus
+				ai.ScrubCount = body.ScrubCount
 				if body.Usage != nil {
 					ai.ReportedPrompt = body.Usage.PromptTokens
 					ai.ReportedCompletion = body.Usage.CompletionTokens
@@ -405,7 +408,7 @@ func apply(s State, f wire.Frame, now time.Time) State {
 			if s.CurrentTurn == body.TurnID {
 				turns := copyMap(s.Turns)
 				if ti, ok := turns[body.TurnID]; ok {
-					deadline := now.Add(time.Duration(body.RemainingMs) * time.Millisecond)
+					deadline := frameTime.Add(time.Duration(body.RemainingMs) * time.Millisecond)
 					ti.TurnDeadline = &deadline
 					turns[body.TurnID] = ti
 					s.Turns = turns
@@ -528,8 +531,8 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		ti.LimitTokens = *turn.Budget.Limit
 	}
 
-	if turn.Deadlines.Turn > 0 {
-		deadline := now.Add(time.Duration(turn.Deadlines.Turn) * time.Millisecond)
+	if turn.Deadlines.Turn > 0 && !ti.SubmittedAt.IsZero() {
+		deadline := ti.SubmittedAt.Add(time.Duration(turn.Deadlines.Turn) * time.Millisecond)
 		ti.TurnDeadline = &deadline
 	}
 
@@ -538,13 +541,13 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	var reviewerOrder []string
 	seenReviewers := make(map[string]bool)
 	for _, ar := range turn.Attempts {
-		if ar.Phase == "author_dispatch" && ti.Author == "" {
+		if ar.Phase == "author" && ti.Author == "" {
 			ti.Author = ar.Participant
 			// Get author state from participants
 			if pi, ok := s.Participants[ar.Participant]; ok {
 				ti.AuthorState = pi.State
 			}
-		} else if ar.Phase == "reviewer_dispatch" || ar.Phase == "reviewer_repair" {
+		} else if ar.Phase == "review" {
 			if !seenReviewers[ar.Participant] {
 				seenReviewers[ar.Participant] = true
 				reviewerOrder = append(reviewerOrder, ar.Participant)
@@ -576,6 +579,7 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 			Status:          ar.Status,
 			TransportStatus: ar.TransportStatus,
 			RepairOf:        ar.RepairOf,
+			ScrubCount:      ar.ScrubCount,
 		}
 		if ar.Usage != nil {
 			ai.ReportedPrompt = ar.Usage.PromptTokens

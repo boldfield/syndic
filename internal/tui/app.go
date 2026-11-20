@@ -101,8 +101,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnMsg:
 		return a.onTurn(msg)
 	case tickMsg:
-		// Tick message: trigger re-render by returning with no command change
-		// (elapsed time will be re-calculated in View based on current time)
+		// Tick message: trigger re-render, reschedule if turn is open
+		if a.state.CurrentTurn != "" {
+			return a, tickCmd()
+		}
 		return a, nil
 	}
 	var cmd tea.Cmd
@@ -186,7 +188,7 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return a, a.reconnect()
 	}
-	a.state = apply(a.state, msg.frame, time.Now())
+	a.state = apply(a.state, msg.frame)
 	if a.onEvent != nil {
 		a.onEvent(msg.frame)
 	}
@@ -219,39 +221,31 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, turnCmd(a.ctx, a.cl, requestTurnID))
 	}
 
-	// Manage tick based on turn state
-	if a.state.CurrentTurn == "" && a.tickRunning {
-		a.tickRunning = false
-	}
+	// Start tick if turn becomes open
 	if a.state.CurrentTurn != "" && !a.tickRunning {
 		a.tickRunning = true
 		cmds = append(cmds, tickCmd())
-	} else if a.tickRunning {
-		cmds = append(cmds, tickCmd())
+	}
+	if a.state.CurrentTurn == "" && a.tickRunning {
+		a.tickRunning = false
 	}
 
 	return a, tea.Batch(cmds...)
 }
 
-// onStatusRefresh applies a status update and continues reading events.
+// onStatusRefresh applies a status update.
 func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
 	a.statusRefreshPending = false
 	if msg.err == nil {
 		a.state = MergeStatus(a.state, &msg.status)
 	}
-	if a.cl != nil {
-		return a, readCmd(a.ctx, a.gen, a.cl)
-	}
 	return a, nil
 }
 
-// onTurn applies a turn reply and continues reading events.
+// onTurn applies a turn reply.
 func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil && msg.turn != nil {
 		a.state = MergeTurn(a.state, msg.id, msg.turn, time.Now())
-	}
-	if a.cl != nil {
-		return a, readCmd(a.ctx, a.gen, a.cl)
 	}
 	return a, nil
 }

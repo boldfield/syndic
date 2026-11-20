@@ -27,7 +27,7 @@ func TestApplyTurnSubmitted(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	if s.CurrentTurn != "turn-1" {
 		t.Errorf("CurrentTurn = %q, want turn-1", s.CurrentTurn)
@@ -62,7 +62,7 @@ func TestApplyTurnState(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	if s.TurnState["turn-1"] != "approved" {
 		t.Errorf("TurnState[turn-1] = %q, want approved", s.TurnState["turn-1"])
@@ -81,7 +81,7 @@ func TestApplyAttemptBegun(t *testing.T) {
 	body := wire.EvAttemptBegun{
 		AttemptID:             "attempt-1",
 		Participant:           "author",
-		Phase:                 "author_dispatch",
+		Phase:                 "author",
 		Epoch:                 0,
 		Deadline:              time.Now().Add(5 * time.Minute).Format(time.RFC3339),
 		MaxOutputTokens:       4096,
@@ -94,7 +94,7 @@ func TestApplyAttemptBegun(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	ai, ok := s.Attempts["attempt-1"]
 	if !ok {
@@ -128,7 +128,7 @@ func TestApplyAttemptCompleted(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	ai := s.Attempts["attempt-1"]
 	if ai.Status != "complete" {
@@ -151,7 +151,7 @@ func TestApplyIgnoresUnknownEventKind(t *testing.T) {
 		Body: []byte("{}"),
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	if s.LastSeq != 11 {
 		t.Errorf("LastSeq not updated for unknown event")
@@ -169,7 +169,7 @@ func TestApplyIgnoresUnknownMembers(t *testing.T) {
 	}
 
 	// Should not panic even with unknown members
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	if s.CurrentTurn != "turn-1" {
 		t.Errorf("CurrentTurn = %q, want turn-1", s.CurrentTurn)
@@ -188,7 +188,7 @@ func TestApplyBudgetEvents(t *testing.T) {
 	}
 	bodyBytes1, _ := json.Marshal(body1)
 	f1 := wire.Frame{Seq: 1, Kind: wire.EventKindBudget, Body: bodyBytes1}
-	s = apply(s, f1, testTime)
+	s = apply(s, f1)
 
 	if s.LastBudgetNotice == nil || s.LastBudgetNotice.Kind != "turn_max_estimated_tokens" {
 		t.Errorf("Budget event not applied correctly")
@@ -203,7 +203,7 @@ func TestApplyBudgetEvents(t *testing.T) {
 	}
 	bodyBytes2, _ := json.Marshal(body2)
 	f2 := wire.Frame{Seq: 2, Kind: wire.EventKindBudgetEstimateExceeded, Body: bodyBytes2}
-	s = apply(s, f2, testTime)
+	s = apply(s, f2)
 
 	if s.LastBudgetExceeded == nil || s.LastBudgetExceeded.Reported != 600 {
 		t.Errorf("Budget estimate exceeded not applied correctly")
@@ -217,7 +217,7 @@ func TestApplyBudgetEvents(t *testing.T) {
 	}
 	bodyBytes3, _ := json.Marshal(body3)
 	f3 := wire.Frame{Seq: 3, Kind: wire.EventKindBudgetExhausted, Body: bodyBytes3}
-	s = apply(s, f3, testTime)
+	s = apply(s, f3)
 
 	if s.LastBudgetExhausted == nil || s.LastBudgetExhausted.Charged != 100000 {
 		t.Errorf("Budget exhausted not applied correctly")
@@ -238,7 +238,7 @@ func TestApplyBlockOpened(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	bi, ok := s.Blocks["block-1"]
 	if !ok {
@@ -267,7 +267,7 @@ func TestApplyMessageAppended(t *testing.T) {
 		Body: bodyBytes,
 	}
 
-	s = apply(s, f, testTime)
+	s = apply(s, f)
 
 	mi, ok := s.Messages["msg-1"]
 	if !ok {
@@ -291,7 +291,7 @@ func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
 		EstimatedTokens: 1000,
 	}
 	submitBytes, _ := json.Marshal(submit)
-	s = apply(s, wire.Frame{Seq: 1, Kind: wire.EventKindTurnSubmitted, Body: submitBytes}, testTime)
+	s = apply(s, wire.Frame{Seq: 1, Kind: wire.EventKindTurnSubmitted, Body: submitBytes})
 
 	if s.CurrentTurn != "turn-1" {
 		t.Fatalf("After submit: CurrentTurn = %q, want turn-1", s.CurrentTurn)
@@ -301,14 +301,14 @@ func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
 	attemptBegun := wire.EvAttemptBegun{
 		AttemptID:             "attempt-1",
 		Participant:           "author",
-		Phase:                 "author_dispatch",
+		Phase:                 "author",
 		Epoch:                 0,
 		Deadline:              time.Now().Add(5 * time.Minute).Format(time.RFC3339),
 		MaxOutputTokens:       4096,
 		EstimatedPromptTokens: 500,
 	}
 	attemptBegunBytes, _ := json.Marshal(attemptBegun)
-	s = apply(s, wire.Frame{Seq: 2, Kind: wire.EventKindAttemptBegun, Body: attemptBegunBytes}, testTime)
+	s = apply(s, wire.Frame{Seq: 2, Kind: wire.EventKindAttemptBegun, Body: attemptBegunBytes})
 
 	if _, ok := s.Attempts["attempt-1"]; !ok {
 		t.Fatalf("After attempt_begun: attempt not found")
@@ -325,7 +325,7 @@ func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
 		},
 	}
 	attemptCompletedBytes, _ := json.Marshal(attemptCompleted)
-	s = apply(s, wire.Frame{Seq: 3, Kind: wire.EventKindAttemptCompleted, Body: attemptCompletedBytes}, testTime)
+	s = apply(s, wire.Frame{Seq: 3, Kind: wire.EventKindAttemptCompleted, Body: attemptCompletedBytes})
 
 	if s.Attempts["attempt-1"].Status != "complete" {
 		t.Fatalf("After attempt_completed: status = %q", s.Attempts["attempt-1"].Status)
@@ -339,7 +339,7 @@ func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
 		Reason: &reason,
 	}
 	turnStateBytes, _ := json.Marshal(turnState)
-	s = apply(s, wire.Frame{Seq: 4, Kind: wire.EventKindTurnState, Body: turnStateBytes}, testTime)
+	s = apply(s, wire.Frame{Seq: 4, Kind: wire.EventKindTurnState, Body: turnStateBytes})
 
 	if s.TurnState["turn-1"] != "approved" {
 		t.Errorf("After turn_state: state = %q, want approved", s.TurnState["turn-1"])
@@ -402,8 +402,8 @@ func TestMergeTurnPopulatesAuthorAndReviewers(t *testing.T) {
 		State:  "approved",
 		Preset: "review",
 		Attempts: []wire.AttemptRecord{
-			{ID: "a1", Participant: "author", Phase: "author_dispatch", Status: "complete", TransportStatus: "ok"},
-			{ID: "a2", Participant: "reviewer1", Phase: "reviewer_dispatch", Status: "complete", TransportStatus: "ok"},
+			{ID: "a1", Participant: "author", Phase: "author", Status: "complete", TransportStatus: "ok"},
+			{ID: "a2", Participant: "reviewer1", Phase: "review", Status: "complete", TransportStatus: "ok"},
 		},
 	}
 
@@ -432,7 +432,7 @@ func TestApplyPureOnParticipantState(t *testing.T) {
 	bodyBytes, _ := json.Marshal(body)
 	f := wire.Frame{Seq: 1, Kind: wire.EventKindParticipantState, Body: bodyBytes}
 
-	s1 := apply(s, f, testTime)
+	s1 := apply(s, f)
 
 	// Original should be unchanged (no mutations)
 	if s.Participants["p1"].State != "idle" {
