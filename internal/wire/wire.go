@@ -380,6 +380,8 @@ type OpenBlock struct {
 	ID       string `json:"id"`
 	Severity string `json:"severity"`
 	State    string `json:"state"`
+	Evidence string `json:"evidence,omitempty"`
+	Remedy   string `json:"remedy,omitempty"`
 }
 
 type BudgetRecord struct {

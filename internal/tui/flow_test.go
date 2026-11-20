@@ -564,7 +564,7 @@ func TestAnswerTabOpenTurnNoDraft(t *testing.T) {
 	}
 	cc := NewContentCache()
 
-	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1")
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1", nil)
 	if !strings.Contains(output, "turn in progress") {
 		t.Fatalf("open turn should show 'turn in progress': %s", output)
 	}
@@ -594,7 +594,7 @@ func TestAnswerTabApprovedWithHash(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "the approved text", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1")
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1", nil)
 	if !strings.Contains(output, "approved by") {
 		t.Fatalf("should show approved by: %s", output)
 	}
@@ -632,7 +632,10 @@ func TestAnswerTabBlockShownWithSeverity(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "incomplete answer", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1")
+	openBlocks := []wire.OpenBlock{
+		{ID: "v1:b1", Severity: "major", State: "open"},
+	}
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1", openBlocks)
 	if !strings.Contains(output, "block:b1") {
 		t.Fatalf("should show terminal reason: %s", output)
 	}
@@ -656,7 +659,7 @@ func TestAnswerTabCancelledBeforeCandidateNotAfter(t *testing.T) {
 	}
 	cc := NewContentCache()
 
-	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1")
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1", nil)
 	if !strings.Contains(output, "cancelled before candidate") {
 		t.Fatalf("should show 'cancelled before candidate': %s", output)
 	}
@@ -691,7 +694,7 @@ func TestAnswerTabLongContentScrolls(t *testing.T) {
 	cc.Store("candidate:t1", longText.String(), nil)
 
 	// Render the answer (scrolling is applied by View, not renderAnswer)
-	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1")
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1", "t1", nil)
 
 	// Should contain the long text and approved by line
 	if !strings.Contains(output, "line 0") {

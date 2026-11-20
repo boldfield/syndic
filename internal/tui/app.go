@@ -52,7 +52,8 @@ type App struct {
 	draftsEnabledSet  bool // tracks if /drafts command was used
 	answerScrollRow   int  // current scroll offset for answer tab
 	candidateIDByTurn map[string]string
-	lastTerminalTurn  string // last terminal turn for display when CurrentTurn is empty
+	lastTerminalTurn  string                      // last terminal turn for display when CurrentTurn is empty
+	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
 }
 
 // Option configures an App.
@@ -77,6 +78,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		now:               time.Now,
 		content:           NewContentCache(),
 		candidateIDByTurn: make(map[string]string),
+		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -359,6 +361,11 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
 	}
 
+	// Store open blocks for rendering with evidence/remedy
+	if msg.turn != nil && msg.turn.OpenBlocks != nil {
+		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
+	}
+
 	// Track the last terminal turn for display when CurrentTurn is empty
 	if msg.turn != nil && isTerminalState(msg.turn.State) {
 		a.lastTerminalTurn = msg.id
@@ -482,7 +489,8 @@ func (a *App) View() string {
 			turnID = a.lastTerminalTurn
 		}
 		candidateID := a.candidateIDByTurn[turnID]
-		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID, turnID)
+		openBlocks := a.openBlocksByTurn[turnID]
+		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID, turnID, openBlocks)
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:

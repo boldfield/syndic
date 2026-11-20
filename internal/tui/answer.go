@@ -3,10 +3,12 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 // renderAnswer returns the answer tab.
-func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string, turnID string) string {
+func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string, turnID string, openBlocks []wire.OpenBlock) string {
 	if turnID == "" {
 		return ""
 	}
@@ -25,7 +27,7 @@ func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bo
 		return "turn in progress"
 
 	case "author_failed":
-		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID)
+		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID, openBlocks)
 
 	case "candidate_frozen", "reviewers_dispatched":
 		// Show draft if enabled, otherwise empty with hint
@@ -41,13 +43,13 @@ func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bo
 		return renderSoloComplete(s, ti, cc, width, height, turnID)
 
 	case "incomplete":
-		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID)
+		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID, openBlocks)
 
 	case "overridden":
 		return renderOverridden(s, ti, cc, width, height, turnID, candidateID)
 
 	case "cancelled":
-		return renderCancelled(s, ti, cc, width, height, turnID, candidateID)
+		return renderCancelled(s, ti, cc, width, height, turnID, candidateID, openBlocks)
 
 	default:
 		return ""
@@ -131,7 +133,7 @@ func renderSoloComplete(s State, ti TurnInfo, cc *ContentCache, width, height in
 	return strings.Join(lines, "\n")
 }
 
-func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
+func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string, openBlocks []wire.OpenBlock) string {
 	var lines []string
 
 	// Add terminal reason
@@ -139,10 +141,17 @@ func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int,
 		lines = append(lines, *ti.TerminalReason)
 	}
 
-	// Add open blocks with severity
-	for _, blockID := range getBlocksForTurn(s, turnID) {
-		if bi, ok := s.Blocks[blockID]; ok && bi.State == "open" {
-			lines = append(lines, fmt.Sprintf("[%s] %s", bi.Severity, blockID))
+	// Add open blocks with severity, evidence and remedy
+	for _, b := range openBlocks {
+		if b.State == "open" {
+			blockLine := fmt.Sprintf("[%s] %s", b.Severity, b.ID)
+			if b.Evidence != "" {
+				blockLine += "\n  evidence: " + b.Evidence
+			}
+			if b.Remedy != "" {
+				blockLine += "\n  remedy: " + b.Remedy
+			}
+			lines = append(lines, blockLine)
 		}
 	}
 
@@ -192,7 +201,7 @@ func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int,
 	return strings.Join(lines, "\n")
 }
 
-func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
+func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string, openBlocks []wire.OpenBlock) string {
 	var lines []string
 
 	// Check if cancelled before candidate was frozen
@@ -201,10 +210,17 @@ func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int, 
 	} else {
 		lines = append(lines, "CANCELLED, not approved")
 
-		// Add any gathered blocks
-		for _, blockID := range getBlocksForTurn(s, turnID) {
-			if bi, ok := s.Blocks[blockID]; ok && bi.State == "open" {
-				lines = append(lines, fmt.Sprintf("[%s] %s", bi.Severity, blockID))
+		// Add any gathered blocks with severity, evidence and remedy
+		for _, b := range openBlocks {
+			if b.State == "open" {
+				blockLine := fmt.Sprintf("[%s] %s", b.Severity, b.ID)
+				if b.Evidence != "" {
+					blockLine += "\n  evidence: " + b.Evidence
+				}
+				if b.Remedy != "" {
+					blockLine += "\n  remedy: " + b.Remedy
+				}
+				lines = append(lines, blockLine)
 			}
 		}
 
@@ -251,27 +267,4 @@ func renderDraft(s State, ti TurnInfo, cc *ContentCache, width, height int, turn
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// getBlocksForTurn returns all unique block IDs associated with the given turn.
-func getBlocksForTurn(s State, turnID string) []string {
-	seen := make(map[string]bool)
-	var blockIDs []string
-
-	// Find all attempts for this turn that have verdicts with blocks
-	for _, verdict := range s.Verdicts {
-		if attempt, ok := s.Attempts[verdict.AttemptID]; ok && attempt.TurnID == turnID {
-			// Look for blocks that start with this verdict ID
-			verdictID := verdict.ID
-			for blockID := range s.Blocks {
-				// Block IDs are formatted as "<verdict_id>:<reviewer_block_id>"
-				if strings.HasPrefix(blockID, verdictID+":") && !seen[blockID] {
-					seen[blockID] = true
-					blockIDs = append(blockIDs, blockID)
-				}
-			}
-		}
-	}
-
-	return blockIDs
 }

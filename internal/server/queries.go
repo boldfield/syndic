@@ -219,6 +219,8 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			ID:       b.ID,
 			Severity: b.Severity,
 			State:    b.State,
+			Evidence: b.Evidence,
+			Remedy:   b.Remedy,
 		}
 		reply.OpenBlocks = append(reply.OpenBlocks, blockRecord)
 	}
