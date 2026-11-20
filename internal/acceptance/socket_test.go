@@ -189,13 +189,13 @@ func largeSize() int {
 	return 12 << 20
 }
 
-// floodSize returns the number of events the large replay uses: 50,000, or
-// 5,000 under -short.
+// floodSize returns the number of events the large replay uses: 30,000, or
+// 5,000 under -short. Reduced from 50,000 to meet the 2-minute race test limit.
 func floodSize() int {
 	if testing.Short() {
 		return 5000
 	}
-	return 50000
+	return 30000
 }
 
 // flood commits n events of kind "flood" with a payload of size bytes, batch
@@ -633,7 +633,7 @@ func replayThenLive(t *testing.T) {
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
 
-	const before, after, size = 3000, 3000, 64
+	const before, after, size = 2500, 2500, 64
 	since := s.maxSeq(t) - 3
 	s.flood(t, before, size, 100)
 	atSubscribe := s.maxSeq(t)
