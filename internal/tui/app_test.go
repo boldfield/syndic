@@ -179,6 +179,15 @@ func (r *rig) waitFor(t *testing.T, want string) {
 		teatest.WithDuration(10*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
+// waitConnected waits for the App to be connected to the engine, so a line
+// typed afterwards is not refused with "not connected".
+func (r *rig) waitConnected(t *testing.T) {
+	t.Helper()
+	r.until(t, "the TUI to connect", func(a *App) (string, bool) {
+		return "", a.state.ConnState == ConnStateConnected
+	})
+}
+
 // waitCaughtUp waits for the App to be connected and to have applied every
 // event in the journal, and returns the last seq.
 func (r *rig) waitCaughtUp(t *testing.T) int64 {
@@ -281,7 +290,7 @@ func TestRegionsAndTabs(t *testing.T) {
 func TestSubmitBusyAndEventOrder(t *testing.T) {
 	r := newRig(t)
 	release := r.h.Hold("author")
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 
 	r.typeLine("what is the answer? héllo")
 	turn := r.waitTurn(t) // the submit reply has cleared the input
@@ -339,7 +348,7 @@ func assertContiguous(t *testing.T, seqs []int64, max int64) {
 
 func TestRestartReplaysEveryMissedEventOnce(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 
 	if err := r.h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -379,15 +388,18 @@ func TestRestartReplaysEveryMissedEventOnce(t *testing.T) {
 
 func TestResumeReconnectsOnce(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("/resume")
-	r.until(t, "one reconnect to complete", func(a *App) (string, bool) {
-		return "", a.gen == 1 && a.state.ConnState == ConnStateConnected
+	var max int64
+	r.until(t, "one reconnect to complete and the journal to be replayed", func(a *App) (string, bool) {
+		m, err := r.h.Store.MaxSeq()
+		if err != nil {
+			t.Error(err)
+			return "", true
+		}
+		max = m
+		return "", a.gen == 1 && a.state.ConnState == ConnStateConnected && a.state.LastSeq == m
 	})
-	max, err := r.h.Store.MaxSeq()
-	if err != nil {
-		t.Fatal(err)
-	}
 	app := r.final(t)
 	assertContiguous(t, r.seen.snapshot(), max)
 	if app.gen != 1 || app.state.ConnState != ConnStateConnected {
@@ -398,7 +410,7 @@ func TestResumeReconnectsOnce(t *testing.T) {
 func TestQuitLeavesTurnOpen(t *testing.T) {
 	r := newRig(t)
 	r.h.Hold("author")
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("long question")
 	turn := r.waitTurn(t)
 	r.typeLine("/quit")
@@ -425,11 +437,13 @@ func TestReattachFindsOpenTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := NewApp(context.Background(), paths.Socket)
-	tm := teatest.NewTestModel(t, app, teatest.WithInitialTermSize(80, 24))
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return bytes.Contains(b, []byte("answer (placeholder)")) },
-		teatest.WithDuration(10*time.Second))
-	_ = tm.Quit()
-	got := tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
+	r := &rig{h: h, paths: paths}
+	r.tm = teatest.NewTestModel(t, &probe{app: app}, teatest.WithInitialTermSize(80, 24))
+	t.Cleanup(func() { _ = r.tm.Quit() })
+	r.until(t, "the open turn to be reattached", func(a *App) (string, bool) {
+		return "", a.state.ConnState == ConnStateConnected && a.CurrentTurn() == reply.TurnID
+	})
+	got := r.final(t)
 	if got.CurrentTurn() != reply.TurnID {
 		t.Errorf("CurrentTurn = %q, want %q", got.CurrentTurn(), reply.TurnID)
 	}
@@ -437,7 +451,7 @@ func TestReattachFindsOpenTurn(t *testing.T) {
 
 func TestUnknownCommandSendsNothing(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	before, err := r.h.Store.MaxSeq()
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +487,7 @@ func TestFormatRefusal(t *testing.T) {
 // and it is submitted exactly as typed.
 func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("  /quit now  ")
 	// The turn is not held, so it may already be over: wait for it to be approved.
 	turn := r.until(t, "the turn to be approved", func(a *App) (string, bool) {
