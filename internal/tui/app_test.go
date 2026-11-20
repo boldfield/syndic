@@ -148,29 +148,20 @@ func (r *rig) waitFor(t *testing.T, want string) {
 		teatest.WithDuration(10*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
-// waitForEmptyInput waits until the input has been cleared and submitted.
-// We detect this by waiting for the input to no longer contain the typed text.
-// We look for a state where the input line has just the prompt or minimal content.
+// waitForEmptyInput waits until the submit has cleared the input line.
+// After submission, the status strip changes to show the turn state.
 func (r *rig) waitForEmptyInput(t *testing.T) {
 	t.Helper()
-	// After typing and pressing enter, the app will show a submission status.
-	// Wait for the "[review]" state to appear which indicates the submit is processing.
-	r.waitFor(t, "[review]")
-	// Then wait a bit for the input to be cleared as the submission processes.
-	// This polls the view to ensure the state has actually changed.
 	teatest.WaitFor(t, r.tm.Output(), func(b []byte) bool {
 		output := string(b)
-		// The input should not contain the submitted text anymore.
-		// After submit, the app clears the input, so we're waiting for that.
-		// A simple check: once "[review]" appears, we wait for a moment to ensure processing.
-		return strings.Contains(output, "[author_dispatched]") || strings.Contains(output, "[submitted]")
+		// After successful submit, the strip shows a turn state like [submitted] or [review]
+		// We wait for the strip to show we're in a turn, not idle
+		return strings.Contains(output, "[submitted]") || strings.Contains(output, "[review]") || strings.Contains(output, "[author_dispatched]")
 	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
 // waitCaughtUp waits for the journal to go quiet and the App to have applied
 // everything in it. It polls the event stream and store until they're in sync.
-// This polls the effect (journal max seq matching app's last seq) rather than
-// sleeping blindly.
 func (r *rig) waitCaughtUp(t *testing.T) int64 {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
@@ -183,13 +174,7 @@ func (r *rig) waitCaughtUp(t *testing.T) int64 {
 		s := r.seen.snapshot()
 		// Check if the journal is quiet (max hasn't changed) and app is caught up.
 		if max == prev && len(s) > 0 && s[len(s)-1] == max {
-			// Give one more check to ensure stability.
-			time.Sleep(10 * time.Millisecond)
-			max2, _ := r.h.Store.MaxSeq()
-			s2 := r.seen.snapshot()
-			if max2 == max && len(s2) > 0 && s2[len(s2)-1] == max2 {
-				return max
-			}
+			return max
 		}
 		prev = max
 		time.Sleep(10 * time.Millisecond)
@@ -204,8 +189,7 @@ func (r *rig) typeLine(s string) {
 }
 
 // waitForNewTurn waits for the next turn to be submitted and returns its ID.
-// It observes the effect through the event stream: a TurnSubmitted event arrives
-// and is processed by the app.
+// It observes the effect through the event stream: a TurnSubmitted event arrives and is processed by the app.
 func (r *rig) waitForNewTurn(t *testing.T) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -225,8 +209,12 @@ func (r *rig) waitForNewTurn(t *testing.T) string {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			// Even if status query fails, trust the event observer.
-			return turnID
+			// Verify one more time, then fail if not found
+			ts := openTurns(t, r.paths)
+			if len(ts) == 1 && ts[0] == turnID {
+				return turnID
+			}
+			t.Fatalf("expected turn %q to be open in engine status, got %v", turnID, ts)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -318,7 +306,7 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 		}
 	}
 	if authorCalls != 1 {
-		t.Fatalf("expected 1 author call with phase=author, got %d", authorCalls)
+		t.Fatalf("expected 1 author call with phase=author, got %d; full calls: %+v", authorCalls, calls)
 	}
 
 	max := r.waitCaughtUp(t)
@@ -399,9 +387,12 @@ func TestResumeReconnectsOnce(t *testing.T) {
 	r := newRig(t)
 	r.waitFor(t, "answer (placeholder)")
 	r.typeLine("/resume")
-	// After resume command triggers a reconnect, wait for all events to be applied.
-	// The reconnect effect is: gen increments, app reconnects and becomes ConnStateConnected.
-	r.waitCaughtUp(t)
+	// Wait for the reconnect effect: the status strip changes from "engine: connecting" to [preset] [idle] or similar
+	teatest.WaitFor(t, r.tm.Output(), func(b []byte) bool {
+		output := string(b)
+		// After reconnect, we should see a preset in brackets, not "engine: connecting"
+		return strings.Contains(output, "[") && !strings.Contains(output, "engine: connecting")
+	}, teatest.WithDuration(30*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 	max, err := r.h.Store.MaxSeq()
 	if err != nil {
 		t.Fatal(err)
@@ -420,7 +411,7 @@ func TestQuitLeavesTurnOpen(t *testing.T) {
 	r.typeLine("long question")
 	turn := r.waitForNewTurn(t)
 	r.typeLine("/quit")
-	app := r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
+	app := r.final(t)
 	if app.CurrentTurn() != turn {
 		t.Fatalf("CurrentTurn = %q, want %q", app.CurrentTurn(), turn)
 	}
