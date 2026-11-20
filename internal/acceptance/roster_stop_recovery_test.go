@@ -796,18 +796,13 @@ func TestRosterStop_SubmitDuringGrace(t *testing.T) {
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTurnState(turnID, engine.StateReviewersDispatched)
 
-	// Start graceful stop without waiting for it to complete.
-	// Use a goroutine to call StopGracefully so it runs asynchronously.
-	stopDone := make(chan struct{})
-	go func() {
-		defer close(stopDone)
-		s.StopGracefully()
-	}()
+	// Start graceful stop and advance the clock before it completes.
+	s.StopGracefully()
 
 	// Give the engine a moment to start stopping, but not complete.
 	s.Clock.Advance(500 * time.Millisecond)
 
-	// Submit while engine is in grace period.
+	// Submit while engine is in grace period (call after stop has begun).
 	c2 := s.Dial(t)
 	defer func() { _ = c2.Close() }()
 
@@ -821,8 +816,7 @@ func TestRosterStop_SubmitDuringGrace(t *testing.T) {
 		t.Fatalf("submit error should mention stopping, got: %v", submitErr)
 	}
 
-	// Wait for stop to complete.
-	<-stopDone
+	// Wait for turn to end.
 	s.WaitTerminal(turnID)
 }
 
@@ -846,7 +840,7 @@ func TestRosterStop_SecondSIGTERM(t *testing.T) {
 	}
 
 	// First SIGTERM.
-	go s.StopGracefully()
+	s.StopGracefully()
 
 	// Advance clock to stay in grace period.
 	s.Clock.Advance(2 * time.Second)
@@ -855,9 +849,7 @@ func TestRosterStop_SecondSIGTERM(t *testing.T) {
 	// In production this would exit, but in test we simulate the behavior.
 	// The engine should exit, so we stop it immediately.
 	if s.Engine != nil {
-		if err := s.Engine.Stop(s.ctx()); err != nil {
-			// Stop may fail if already stopping, that's ok.
-		}
+		_ = s.Engine.Stop(s.ctx())
 	}
 
 	// Wait for turn to end.
@@ -990,10 +982,7 @@ func TestRosterStop_ProbeAgainstRunningEngine(t *testing.T) {
 
 	// Output should name the PID that holds the lock.
 	output := out.String()
-	pidFound := false
-	if strings.Contains(output, "PID") || strings.Contains(output, "process") {
-		pidFound = true
-	}
+	pidFound := strings.Contains(output, "PID") || strings.Contains(output, "process")
 	if !pidFound {
 		t.Fatalf("syndic probe output should name the PID, got: %s", output)
 	}
@@ -1010,7 +999,6 @@ func TestRecovery_KillMidReview(t *testing.T) {
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTurnState(turnID, engine.StateReviewersDispatched)
-
 
 	// Crash the engine without graceful stop.
 	s.stopServer()
