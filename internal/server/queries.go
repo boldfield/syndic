@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -195,12 +196,14 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		}
 	}
 
-	// Build verdict records
+	// Build verdict records. A verdict parsed unless it was malformed: an
+	// approve-with-changes parses but stores no decision, so the stored
+	// decision cannot tell.
 	for _, v := range verdicts {
 		verdictRecord := wire.VerdictRecord{
 			ID:               v.ID,
 			AttemptID:        v.AttemptID,
-			Parsed:           v.Parsed == "approve" || v.Parsed == "block",
+			Parsed:           v.ValidationStatus != string(verdict.Malformed),
 			ValidationStatus: v.ValidationStatus,
 		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)

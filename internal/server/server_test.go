@@ -598,19 +598,7 @@ func TestContentPagingAndFrameBound(t *testing.T) {
 	// 12 MiB of the bytes that cost the most to JSON-escape.
 	pattern := []byte("\"\\\x01\x1f\t\n\r\"\\ab")
 	body := bytes.Repeat(pattern, (12<<20)/len(pattern)+1)[:12<<20]
-	runID := h.Engine.Hello().RunID
-	turnID, err := h.Store.CreateTurn(runID, "solo", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attemptID, err := h.Store.BeginAttempt(turnID, "author", "author", 0, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.DB.Conn().Exec(`UPDATE attempts SET raw_output = ? WHERE id = ?`, string(body), attemptID); err != nil {
-		t.Fatal(err)
-	}
-	ref := "attempt:" + attemptID
+	ref := seedOutput(t, h, body)
 
 	s.resetFrames()
 	got, err := c.Content(ctx, ref)
@@ -1148,6 +1136,39 @@ func TestBlockedReviewTurnRecord(t *testing.T) {
 	}
 }
 
+// TestApproveWithChangesTurnRecord has the reviewer approve with changes. The
+// verdict parsed, though it records no decision, so turn reports it parsed
+// with the revision_request status.
+func TestApproveWithChangesTurnRecord(t *testing.T) {
+	changes := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictApproveWithChanges(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText)},
+		"reviewer": {changes},
+	})
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	reply, err := c.Submit(ctx, reviewReq("changes-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTerminal(t, h, reply.TurnID)
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.State != engine.StateIncomplete {
+		t.Fatalf("state = %q, want %q", turn.State, engine.StateIncomplete)
+	}
+	if len(turn.Verdicts) != 1 || !turn.Verdicts[0].Parsed || turn.Verdicts[0].ValidationStatus != "revision_request" {
+		t.Fatalf("verdicts = %+v, want one parsed revision_request", turn.Verdicts)
+	}
+}
+
 // TestNoEventAfterUnsubscribeReply floods events while the subscription is
 // ended and replaced, and requires that nothing of the old subscription
 // follows the reply that ended it.
@@ -1478,51 +1499,98 @@ func TestLongReplayIsPacedByTheReader(t *testing.T) {
 	}
 }
 
-// TestLaggingKeepsQueuedReplies has a subscriber that stops reading send a
-// request: its reply was queued before the subscriber lagged, so it still
-// goes out ahead of the lagging notice.
-func TestLaggingKeepsQueuedReplies(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	slow := s.raw()
-	slow.hello()
-	start, err := h.Store.MaxSeq()
+// TestLaggingWithQueuedReplies has a subscriber that stops reading send
+// requests whose replies queue behind its events: one small reply, many
+// small ones, and several content pages. Whatever replies fit go ahead of
+// the lagging notice; the rest are dropped, never written into the room kept
+// for the notice, so on Linux the notice arrives in every case.
+func TestLaggingWithQueuedReplies(t *testing.T) {
+	cases := []struct {
+		name string
+		send func(r *rawConn, ref string) map[string]bool
+	}{
+		{"one status", func(r *rawConn, _ string) map[string]bool {
+			r.send("st", wire.RequestStatus, struct{}{})
+			return map[string]bool{"st": true}
+		}},
+		{"many statuses", func(r *rawConn, _ string) map[string]bool {
+			ids := map[string]bool{}
+			for i := 0; i < 200; i++ {
+				id := fmt.Sprintf("st%d", i)
+				r.send(id, wire.RequestStatus, struct{}{})
+				ids[id] = true
+			}
+			return ids
+		}},
+		{"content pages", func(r *rawConn, ref string) map[string]bool {
+			ids := map[string]bool{}
+			for i := 0; i < 4; i++ {
+				id := fmt.Sprintf("c%d", i)
+				r.send(id, wire.RequestContent, wire.ContentRequest{Ref: ref, Offset: int64(i) * wire.MaxContentPageBytes, Limit: wire.MaxContentPageBytes})
+				ids[id] = true
+			}
+			return ids
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			s := serve(t, h.Engine, h.Store, h.Hub)
+			ref := seedOutput(t, h, bytes.Repeat([]byte("\"\\\x01a"), (1<<20)/4))
+			slow := s.raw()
+			slow.hello()
+			start, err := h.Store.MaxSeq()
+			if err != nil {
+				t.Fatal(err)
+			}
+			slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
+			if f := slow.read(); f.Type != "reply" {
+				t.Fatalf("subscribe reply = %+v", f)
+			}
+			// Enough to fill the socket, raised to hold a frame of the
+			// largest size, so the replies queue behind events.
+			emitBatches(t, h.Hub, 160, 24<<10, 160)
+			ids := tc.send(slow, ref)
+
+			waitPeerClosed(t, slow)
+			var lastEvent int64
+			e := slow.readToLagging(func(f wire.Frame) {
+				switch {
+				case f.Type == "event":
+					lastEvent = f.Seq
+				case f.Type == "reply" && ids[f.ID]:
+					delete(ids, f.ID)
+				default:
+					t.Fatalf("frame = %s %q %s, want an event or a reply", f.Type, f.ID, f.Body)
+				}
+			})
+			if e == nil {
+				// Closed without the notice where it is not guaranteed.
+				return
+			}
+			if *e.LastSeq != lastEvent {
+				t.Fatalf("last_seq = %d, want %d", *e.LastSeq, lastEvent)
+			}
+		})
+	}
+}
+
+// seedOutput stores body as the raw output of a new attempt and returns its
+// content ref.
+func seedOutput(t *testing.T, h *enginetest.Harness, body []byte) string {
+	t.Helper()
+	turnID, err := h.Store.CreateTurn(h.Engine.Hello().RunID, "solo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	slow.send("s", wire.RequestSubscribe, wire.SubscribeRequest{SinceSeq: start})
-	if f := slow.read(); f.Type != "reply" {
-		t.Fatalf("subscribe reply = %+v", f)
+	attemptID, err := h.Store.BeginAttempt(turnID, "author", "author", 0, nil, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Enough to fill the socket, raised to hold a frame of the largest size,
-	// so the reply queues behind events.
-	emitBatches(t, h.Hub, 160, 24<<10, 160)
-	slow.send("st", wire.RequestStatus, struct{}{})
-
-	waitPeerClosed(t, slow)
-	var lastEvent int64
-	var replied bool
-	e := slow.readToLagging(func(f wire.Frame) {
-		switch f.Type {
-		case "event":
-			lastEvent = f.Seq
-		case "reply":
-			replied = replied || f.ID == "st"
-		default:
-			t.Fatalf("frame = %s %q %s, want an event or reply", f.Type, f.ID, f.Body)
-		}
-	})
-	if e == nil {
-		// Closed without the notice where it is not guaranteed; the reply
-		// may then have been cut off with it.
-		return
+	if _, err := h.DB.Conn().Exec(`UPDATE attempts SET raw_output = ? WHERE id = ?`, string(body), attemptID); err != nil {
+		t.Fatal(err)
 	}
-	if *e.LastSeq != lastEvent {
-		t.Fatalf("last_seq = %d, want %d", *e.LastSeq, lastEvent)
-	}
-	if !replied {
-		t.Fatal("the status reply queued before lagging was dropped")
-	}
+	return "attempt:" + attemptID
 }
 
 // waitPeerClosed waits, without reading, for the server to close r: a write

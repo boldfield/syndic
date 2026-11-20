@@ -18,10 +18,10 @@ const roomReserve = 16 << 10
 // peer has not read count against the send buffer, with overhead, so twice n
 // is asked for. The send buffer is first raised, as far as the kernel allows,
 // to hold a frame of the largest size and the reserve. A frame that still
-// does not fit is let through once the peer has read everything; it may then
-// block partway if the peer stops reading. It returns nil when conn cannot be
-// asked.
-func socketRoom(conn net.Conn) func(n int) bool {
+// does not fit is let through once the peer has read everything, unless
+// strict; it may then block partway if the peer stops reading. It returns nil
+// when conn cannot be asked.
+func socketRoom(conn net.Conn) func(n int, strict bool) bool {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return nil
@@ -42,16 +42,16 @@ func socketRoom(conn net.Conn) func(n int) bool {
 			return nil
 		}
 	}
-	return func(n int) bool {
+	return func(n int, strict bool) bool {
 		var queued int32
 		var errno syscall.Errno
 		if err := rc.Control(func(fd uintptr) {
 			// TIOCOUTQ is SIOCOUTQ: the bytes the peer has yet to read.
 			_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TIOCOUTQ, uintptr(unsafe.Pointer(&queued)))
 		}); err != nil || errno != 0 {
-			return true
+			return !strict
 		}
-		return queued == 0 || int(queued)+2*n+roomReserve <= sndbuf
+		return (queued == 0 && !strict) || int(queued)+2*n+roomReserve <= sndbuf
 	}
 }
 

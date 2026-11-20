@@ -9,7 +9,9 @@
 //
 // On Linux the server raises the socket's send buffer and holds every frame
 // until the socket has room for it and for the notice besides, so a
-// subscriber that stops reading is sent the notice before it is closed. A
+// subscriber that stops reading is sent the notice before it is closed.
+// Replies still queued when it lags go ahead of the notice only if they fit
+// in the room left beside it; the rest are dropped. A
 // frame larger than the buffer the kernel allows (net.core.wmem_max) cannot
 // be held back that way; a subscriber that stops reading partway through one
 // is closed without the notice. On other platforms the server cannot tell how
@@ -275,8 +277,9 @@ type connection struct {
 	reader *wire.Reader
 	writer *wire.Writer
 	// room reports whether n more bytes fit in the socket while leaving
-	// room for a final notice; nil when the platform cannot tell.
-	room func(n int) bool
+	// room for a final notice; nil when the platform cannot tell. strict
+	// refuses a frame that fits only by blocking until the peer reads.
+	room func(n int, strict bool) bool
 
 	// gate and gateSub describe the frame being written; gateSub is the
 	// subscription of an event. Only the sender touches them.
@@ -393,7 +396,8 @@ func (c *connection) stalled() {
 }
 
 // lagLocked drops the queued events and makes lagging, with the last event
-// the client was written, the last frame. Queued replies still go first. A
+// the client was written, the last frame. Queued replies still go first if
+// they fit beside it, and are dropped if they do not (gateWriter). A
 // frame already partly written is finished first, so whatever the client
 // reads ends with the notice; all of it must be written within lagGrace, or
 // the connection is closed without the notice.
@@ -599,28 +603,29 @@ func (c *connection) write(item outFrame) error {
 // socket has room for it and a final notice besides, so a subscriber that
 // stops reading can still be told it is lagging. A held event is dropped if
 // the connection gives up on its queue meanwhile; a held reply is dropped
-// only when everything queued is, and once lagging it goes at once, as it
-// comes before the notice either way.
+// when everything queued is. Once lagging, a reply goes only if it fits in
+// the room left beside the notice, and is dropped otherwise: the peer is not
+// reading, so waiting would only spend the time the notice has.
 type gateWriter struct{ c *connection }
 
 func (g gateWriter) Write(p []byte) (int, error) {
 	c := g.c
 	if c.gate != gateNone && c.room != nil {
-		for !c.room(len(p)) {
+		for {
 			c.mu.Lock()
-			drop := c.shut
 			lagging := c.final != nil && c.final.lagging
+			c.mu.Unlock()
+			if c.room(len(p), lagging) {
+				break
+			}
+			c.mu.Lock()
+			drop := c.shut || c.droppingLocked()
 			if c.gate == gateEvent {
-				drop = drop || c.sub != c.gateSub || c.droppingLocked()
-			} else if !lagging {
-				drop = drop || c.droppingLocked()
+				drop = drop || c.sub != c.gateSub
 			}
 			c.mu.Unlock()
 			if drop {
 				return 0, errDropped
-			}
-			if lagging && c.gate == gateReply {
-				break
 			}
 			select {
 			case <-c.wake:
