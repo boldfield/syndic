@@ -6,7 +6,16 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// State holds what the UI knows about the engine and current turn.
+// ConnectionState is where the socket connection stands.
+type ConnectionState string
+
+const (
+	ConnStateConnecting   ConnectionState = "connecting"
+	ConnStateConnected    ConnectionState = "connected"
+	ConnStateReconnecting ConnectionState = "reconnecting"
+)
+
+// State holds what the UI knows about the engine.
 type State struct {
 	Hello       wire.HelloReply
 	Status      wire.StatusReply
@@ -16,43 +25,45 @@ type State struct {
 	TurnState   map[string]string
 }
 
-type ConnectionState string
-
-const (
-	ConnStateConnecting   ConnectionState = "connecting"
-	ConnStateReconnecting ConnectionState = "reconnecting"
-	ConnStateConnected    ConnectionState = "connected"
-	ConnStateClosed       ConnectionState = "closed"
-)
-
-// Apply processes an event and returns an updated state.
-func Apply(s State, event wire.Frame) State {
-	if event.Seq > 0 {
-		s.LastSeq = event.Seq
+// apply folds one event frame into the state and returns the result. Later
+// tasks extend it.
+func apply(s State, f wire.Frame) State {
+	if f.Seq > s.LastSeq {
+		s.LastSeq = f.Seq
 	}
-
-	if s.TurnState == nil {
-		s.TurnState = make(map[string]string)
-	}
-
-	switch event.Kind {
-	case "turn_submitted":
-		// Turn submitted - CurrentTurn is set by handleSubmitResult
-	case "turn_state":
-		var body wire.EvTurnState
-		if err := json.Unmarshal(event.Body, &body); err == nil {
-			s.TurnState[body.TurnID] = body.State
-			if isTerminalState(body.State) && s.CurrentTurn == body.TurnID {
-				s.CurrentTurn = ""
-			}
+	switch f.Kind {
+	case wire.EventKindTurnSubmitted:
+		var body wire.EvTurnSubmitted
+		if json.Unmarshal(f.Body, &body) == nil {
+			s = setTurnState(s, body.TurnID, "submitted")
+			s.CurrentTurn = body.TurnID
 		}
-	case "engine_stopping":
-		s.ConnState = ConnStateReconnecting
+	case wire.EventKindTurnState:
+		var body wire.EvTurnState
+		if json.Unmarshal(f.Body, &body) == nil {
+			s = setTurnState(s, body.TurnID, body.State)
+		}
 	}
+	return s
+}
 
+func setTurnState(s State, turnID, state string) State {
+	ts := make(map[string]string, len(s.TurnState)+1)
+	for k, v := range s.TurnState {
+		ts[k] = v
+	}
+	ts[turnID] = state
+	s.TurnState = ts
+	if isTerminalState(state) && s.CurrentTurn == turnID {
+		s.CurrentTurn = ""
+	}
 	return s
 }
 
 func isTerminalState(state string) bool {
-	return state == "approved" || state == "solo_complete" || state == "incomplete" || state == "cancelled" || state == "overridden"
+	switch state {
+	case "approved", "solo_complete", "incomplete", "cancelled", "overridden":
+		return true
+	}
+	return false
 }

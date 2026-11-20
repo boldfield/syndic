@@ -1,9 +1,12 @@
 package tui
 
 // renderStrip returns the status strip line.
-func renderStrip(state State, width int) string {
-	if state.ConnState == ConnStateReconnecting {
+func renderStrip(s State, width, height int) string {
+	switch s.ConnState {
+	case ConnStateReconnecting:
 		return "engine: reconnecting"
+	case ConnStateConnecting:
+		return "engine: connecting"
 	}
-	return "Status strip"
+	return "strip"
 }

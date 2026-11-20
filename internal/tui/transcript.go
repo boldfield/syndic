@@ -1,6 +1,6 @@
 package tui
 
-// renderTranscript returns a placeholder for the transcript tab.
-func renderTranscript(state State, width, height int) string {
-	return "Transcript tab"
+// renderTranscript returns the transcript tab.
+func renderTranscript(s State, width, height int) string {
+	return "transcript (placeholder)"
 }

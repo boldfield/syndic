@@ -45,10 +45,9 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
-	// Print exit message if there's an open turn
 	if tuiApp, ok := finalModel.(*tui.App); ok {
-		if tuiApp.CurrentTurn() != "" {
-			fmt.Printf("Turn %s is still running and will continue\n", tuiApp.CurrentTurn())
+		if msg := tui.ExitMessage(tuiApp); msg != "" {
+			fmt.Println(msg)
 		}
 	}
 

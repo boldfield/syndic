@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/boldfield/syndic/internal/client"
@@ -12,216 +11,93 @@ import (
 	"github.com/google/uuid"
 )
 
-// Message types for the event loop.
-type ConnStateMsg struct {
-	State ConnectionState
-	Err   error
+const (
+	minBackoff = 100 * time.Millisecond
+	maxBackoff = 2 * time.Second
+)
+
+// connectedMsg reports a finished connect, hello, status and subscribe. gen
+// says which connection attempt it belongs to; Update drops stale ones.
+type connectedMsg struct {
+	gen    int
+	cl     *client.Client
+	status wire.StatusReply
 }
 
-type EventMsg struct {
-	Frame wire.Frame
-	Err   error
+// eventMsg carries the next frame of a connection's event stream, or the
+// error that ended it.
+type eventMsg struct {
+	gen   int
+	frame wire.Frame
+	err   error
 }
 
-type HelloMsg struct {
-	Hello wire.HelloReply
-	Err   error
+// submitMsg is the outcome of a submit.
+type submitMsg struct {
+	turnID  string
+	refusal string
 }
 
-type StatusMsg struct {
-	Status wire.StatusReply
-	Err    error
-}
-
-type SubmitResultMsg struct {
-	TurnID        string
-	Err           error
-	RefusalDetail string
-}
-
-// connector manages the socket connection and event stream.
-type connector struct {
-	socketPath  string
-	client      *client.Client
-	lastSeq     int64
-	runFirstSeq int64
-}
-
-func newConnector(socketPath string) *connector {
-	return &connector{
-		socketPath:  socketPath,
-		lastSeq:     0,
-		runFirstSeq: 0,
-	}
-}
-
-// listenCmd starts the connection with backoff retry.
-func (c *connector) listenCmd(ctx context.Context, handleMsg func(tea.Msg) tea.Msg) tea.Cmd {
+// connectCmd dials until it succeeds, then fetches status and subscribes after
+// sinceSeq. It touches no shared state; everything it learns travels in the
+// returned message.
+func connectCmd(ctx context.Context, gen int, socket string, sinceSeq int64) tea.Cmd {
 	return func() tea.Msg {
-		backoff := 100 * time.Millisecond
-		maxBackoff := 10 * time.Second
-
+		backoff := minBackoff
 		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
+			if cl, status, err := connectOnce(ctx, socket, sinceSeq); err == nil {
+				return connectedMsg{gen: gen, cl: cl, status: status}
 			}
-
-			cl, err := client.Dial(ctx, c.socketPath, "syndic-tui", "1.0")
-			if err != nil {
-				select {
-				case <-time.After(backoff):
-					if backoff < maxBackoff {
-						backoff = backoff * 2
-						if backoff > maxBackoff {
-							backoff = maxBackoff
-						}
-					}
-					continue
-				case <-ctx.Done():
-					return nil
-				}
-			}
-
-			c.client = cl
-			return ConnStateMsg{State: ConnStateConnected}
-		}
-	}
-}
-
-// helloCmd sends hello, subscribes from the appropriate offset, and starts streaming events.
-func (c *connector) helloCmd(ctx context.Context) tea.Cmd {
-	return func() tea.Msg {
-		if c.client == nil {
-			return HelloMsg{Err: fmt.Errorf("not connected")}
-		}
-
-		hello := c.client.Hello()
-		c.runFirstSeq = hello.RunFirstSeq
-
-		subscribeSeq := int64(0)
-		if c.lastSeq > 0 {
-			subscribeSeq = c.lastSeq
-		}
-
-		_, err := c.client.Subscribe(ctx, subscribeSeq)
-		if err != nil {
-			return HelloMsg{Err: err}
-		}
-
-		return HelloMsg{Hello: hello}
-	}
-}
-
-// streamEventsCmd reads the next event from the stream and returns a command to read the next one.
-func (c *connector) streamEventsCmd(ctx context.Context) tea.Cmd {
-	return func() tea.Msg {
-		if c.client == nil {
-			return EventMsg{Err: fmt.Errorf("not connected")}
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
-		frame, err := c.client.NextEvent(ctx)
-		if err != nil {
-			return EventMsg{Err: err}
-		}
-
-		if frame.Seq > 0 {
-			c.lastSeq = frame.Seq
-		}
-
-		return EventMsg{Frame: frame, Err: nil}
-	}
-}
-
-// fetchStatusCmd fetches the current status.
-func (c *connector) fetchStatusCmd(ctx context.Context) tea.Cmd {
-	return func() tea.Msg {
-		if c.client == nil {
-			return StatusMsg{Err: fmt.Errorf("not connected")}
-		}
-
-		status, err := c.client.Status(ctx)
-		if err != nil {
-			return StatusMsg{Err: err}
-		}
-
-		return StatusMsg{Status: status}
-	}
-}
-
-// submitCmd submits text input.
-func (c *connector) submitCmd(ctx context.Context, input string) tea.Cmd {
-	return func() tea.Msg {
-		if c.client == nil {
-			return SubmitResultMsg{Err: fmt.Errorf("not connected")}
-		}
-
-		submissionID := generateUUID()
-		req := wire.SubmitRequest{
-			SubmissionID: submissionID,
-			Input:        input,
-		}
-		result, err := c.client.Submit(ctx, req)
-
-		if err != nil {
-			detail := formatRefusal(err)
-			return SubmitResultMsg{Err: err, RefusalDetail: detail}
-		}
-
-		return SubmitResultMsg{TurnID: result.TurnID}
-	}
-}
-
-// reconnectCmd reconnects with backoff.
-func (c *connector) reconnectCmd(ctx context.Context) tea.Cmd {
-	return func() tea.Msg {
-		if c.client != nil {
-			_ = c.client.Close()
-			c.client = nil
-		}
-
-		backoff := 100 * time.Millisecond
-		maxBackoff := 10 * time.Second
-
-		for {
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-time.After(backoff):
-				cl, err := client.Dial(ctx, c.socketPath, "syndic-tui", "1.0")
-				if err != nil {
-					if backoff < maxBackoff {
-						backoff = backoff * 2
-						if backoff > maxBackoff {
-							backoff = maxBackoff
-						}
-					}
-					continue
-				}
-
-				c.client = cl
-				return ConnStateMsg{State: ConnStateConnected}
 			}
+			backoff = min(backoff*2, maxBackoff)
 		}
 	}
 }
 
-func generateUUID() string {
-	u := uuid.New()
-	return u.String()
+func connectOnce(ctx context.Context, socket string, sinceSeq int64) (*client.Client, wire.StatusReply, error) {
+	cl, err := client.Dial(ctx, socket, "syndic-tui", "0")
+	if err != nil {
+		return nil, wire.StatusReply{}, err
+	}
+	status, err := cl.Status(ctx)
+	if err == nil {
+		_, err = cl.Subscribe(ctx, sinceSeq)
+	}
+	if err != nil {
+		_ = cl.Close()
+		return nil, wire.StatusReply{}, err
+	}
+	return cl, status, nil
 }
 
+// readCmd waits for the connection's next event.
+func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
+	return func() tea.Msg {
+		f, err := cl.NextEvent(ctx)
+		return eventMsg{gen: gen, frame: f, err: err}
+	}
+}
+
+// submitCmd submits input with a fresh submission id and no preset.
+func submitCmd(ctx context.Context, cl *client.Client, input string) tea.Cmd {
+	return func() tea.Msg {
+		reply, err := cl.Submit(ctx, wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input})
+		if err != nil {
+			return submitMsg{refusal: formatRefusal(err)}
+		}
+		return submitMsg{turnID: reply.TurnID}
+	}
+}
+
+// formatRefusal renders a refusal as its code and detail on one line.
 func formatRefusal(err error) string {
 	var we *wire.Error
 	if errors.As(err, &we) {
-		if we.Detail != nil {
+		if we.Detail != nil && *we.Detail != "" {
 			return we.Code + ": " + *we.Detail
 		}
 		return we.Code

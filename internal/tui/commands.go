@@ -1,53 +1,39 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// CommandHandler handles a command and returns a tea.Cmd and an optional error message.
-type CommandHandler func(a *App, args []string) (tea.Cmd, string)
+// commandHandler runs a command. It reports a problem by setting a.refusal.
+type commandHandler func(a *App, args []string) tea.Cmd
 
-// CommandTable maps command names to their handlers.
-var CommandTable = map[string]CommandHandler{
-	"/quit":   handleQuit,
-	"/resume": handleResume,
+var commands = map[string]commandHandler{
+	"quit":   cmdQuit,
+	"resume": cmdResume,
 }
 
-// dispatchCommand routes a command to its handler.
-func dispatchCommand(a *App, input string) tea.Cmd {
-	parts := strings.Fields(input)
-	if len(parts) == 0 {
+// isCommand reports whether the input line is a command rather than a prompt.
+func isCommand(line string) bool { return strings.HasPrefix(line, "/") }
+
+// dispatch runs the command named by line, which starts with "/".
+func dispatch(a *App, line string) tea.Cmd {
+	fields := strings.Fields(line)
+	name := "/"
+	if len(fields) > 0 {
+		name = fields[0]
+		fields = fields[1:]
+	}
+	h, ok := commands[strings.TrimPrefix(name, "/")]
+	if !ok {
+		a.refusal = "unknown command: " + name
 		return nil
 	}
-
-	cmdName := parts[0]
-	handler, exists := CommandTable[cmdName]
-	if !exists {
-		a.refusal = fmt.Sprintf("unknown command: %s", cmdName)
-		a.inputLine = ""
-		return nil
-	}
-
-	args := parts[1:]
-	cmd, errMsg := handler(a, args)
-	if errMsg != "" {
-		a.refusal = errMsg
-		a.inputLine = ""
-	}
-	return cmd
+	return h(a, fields)
 }
 
-// handleQuit handles the /quit command.
-func handleQuit(a *App, args []string) (tea.Cmd, string) {
-	a.inputLine = ""
-	return tea.Quit, ""
-}
+func cmdQuit(a *App, _ []string) tea.Cmd { return a.quit() }
 
-// handleResume handles the /resume command - forces reconnect from last seq.
-func handleResume(a *App, args []string) (tea.Cmd, string) {
-	a.inputLine = ""
-	return a.connector.reconnectCmd(a.ctx), ""
-}
+// cmdResume forces the same reconnect a lost connection gets.
+func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }

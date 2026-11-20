@@ -1,6 +1,6 @@
 package tui
 
-// renderAnswer returns a placeholder for the answer tab.
-func renderAnswer(state State, width, height int) string {
-	return "Answer tab"
+// renderAnswer returns the answer tab.
+func renderAnswer(s State, width, height int) string {
+	return "answer (placeholder)"
 }
