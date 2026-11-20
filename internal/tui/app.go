@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/wire"
@@ -39,7 +41,11 @@ type App struct {
 	input         textinput.Model
 	refusal       string
 
-	onEvent func(wire.Frame)
+	statusRefreshPending bool
+	statusDirty          bool // a trigger arrived while a refresh was in flight
+	now                  func() time.Time
+	tickRunning          bool
+	onEvent              func(wire.Frame)
 }
 
 // Option configures an App.
@@ -60,6 +66,8 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		input:  newInput(),
 		width:  80,
 		height: 24,
+		state:  NewState(),
+		now:    time.Now,
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -89,8 +97,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		return a.onFrame(msg)
 	case submitMsg:
-		a.onSubmit(msg)
-		return a, nil
+		return a, a.onSubmit(msg)
+	case statusMsg:
+		return a.onStatusRefresh(msg)
+	case turnMsg:
+		return a.onTurn(msg)
+	case tickMsg:
+		// The message itself re-renders; keep the one tick chain going while a turn is open.
+		a.tickRunning = false
+		return a, a.ensureTick()
 	}
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
@@ -134,15 +149,45 @@ func (a *App) enter() tea.Cmd {
 	return submitCmd(a.ctx, a.cl, line)
 }
 
-func (a *App) onSubmit(msg submitMsg) {
-	if msg.refusal != "" {
-		a.refusal = msg.refusal
+// ensureTick starts the one-second tick chain if a turn is open and none runs.
+func (a *App) ensureTick() tea.Cmd {
+	if a.state.CurrentTurn == "" || a.tickRunning {
+		return nil
+	}
+	a.tickRunning = true
+	return tickCmd()
+}
+
+// ensureTurnInfo makes sure the open turn has a TurnInfo for the strip to show.
+func (a *App) ensureTurnInfo() {
+	id := a.state.CurrentTurn
+	if id == "" {
 		return
 	}
-	a.input.SetValue("")
-	if !isTerminalState(a.state.TurnState[msg.turnID]) {
-		a.state.CurrentTurn = msg.turnID
+	if _, ok := a.state.Turns[id]; ok {
+		return
 	}
+	turns := copyMap(a.state.Turns)
+	state := a.state.TurnState[id]
+	if state == "" {
+		state = "submitted"
+	}
+	turns[id] = TurnInfo{ID: id, State: state, Preset: a.state.Run.DefaultPreset, ReviewerStates: map[string]string{}}
+	a.state.Turns = turns
+}
+
+func (a *App) onSubmit(msg submitMsg) tea.Cmd {
+	if msg.refusal != "" {
+		a.refusal = msg.refusal
+		return nil
+	}
+	a.input.SetValue("")
+	if isTerminalState(a.state.TurnState[msg.turnID]) {
+		return nil
+	}
+	a.state.CurrentTurn = msg.turnID
+	a.ensureTurnInfo()
+	return a.ensureTick()
 }
 
 func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
@@ -152,12 +197,18 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	a.cl = msg.cl
 	a.state.Hello = msg.cl.Hello()
-	a.state.Status = msg.status
+	a.state = MergeStatus(a.state, &msg.status)
 	a.state.ConnState = ConnStateConnected
+	a.statusRefreshPending, a.statusDirty = false, false
+	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
 	if len(msg.status.TurnsOpen) > 0 {
 		a.state.CurrentTurn = msg.status.TurnsOpen[0]
+		a.ensureTurnInfo()
+		// The limit and deadline of a turn that is already open come from its record.
+		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
 	}
-	return a, readCmd(a.ctx, a.gen, a.cl)
+	cmds = append(cmds, a.ensureTick())
+	return a, tea.Batch(cmds...)
 }
 
 // onFrame applies a frame. Any stream error, including the engine's stopping
@@ -176,7 +227,71 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	if msg.frame.Kind == wire.EventKindEngineStopping {
 		return a, a.reconnect()
 	}
-	return a, readCmd(a.ctx, a.gen, a.cl)
+
+	// The next read is always armed here, and only here, so there is exactly
+	// one outstanding read; status and turn replies never re-arm it.
+	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
+	switch msg.frame.Kind {
+	case wire.EventKindEngineStarted, wire.EventKindParticipantState, wire.EventKindCapacity:
+		cmds = append(cmds, a.requestStatus())
+	case wire.EventKindTurnSubmitted:
+		var body wire.EvTurnSubmitted
+		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			// The record carries the configured turn deadline and token limit.
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
+		}
+	case wire.EventKindTurnState:
+		var body wire.EvTurnState
+		if json.Unmarshal(msg.frame.Body, &body) == nil && isTerminalState(body.State) {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
+		}
+	}
+	cmds = append(cmds, a.ensureTick())
+	return a, tea.Batch(cmds...)
+}
+
+// requestStatus asks for a fresh status, coalescing a burst: while one request
+// is in flight a trigger only marks it dirty, and the reply sends one more.
+func (a *App) requestStatus() tea.Cmd {
+	if a.statusRefreshPending {
+		a.statusDirty = true
+		return nil
+	}
+	a.statusRefreshPending = true
+	return statusCmd(a.ctx, a.gen, a.cl)
+}
+
+// onStatusRefresh applies a status reply. It never re-arms the event read.
+func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	a.statusRefreshPending = false
+	if msg.err != nil {
+		a.refusal = "status: " + formatRefusal(msg.err)
+		a.statusDirty = false
+		return a, nil
+	}
+	a.state = MergeStatus(a.state, &msg.status)
+	a.ensureTurnInfo()
+	if a.statusDirty {
+		a.statusDirty = false
+		return a, a.requestStatus()
+	}
+	return a, nil
+}
+
+// onTurn merges a turn reply. It never re-arms the event read.
+func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		a.refusal = "turn: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
+	return a, nil
 }
 
 // reconnect drops the current connection and starts a new one that resumes
@@ -190,6 +305,7 @@ func (a *App) reconnect() tea.Cmd {
 		a.cl = nil
 	}
 	a.state.ConnState = ConnStateReconnecting
+	a.statusRefreshPending, a.statusDirty = false, false
 	return connectCmd(a.ctx, a.gen, a.socket, a.state.LastSeq)
 }
 
@@ -204,25 +320,40 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// View lays out the strip, the active tab and the input line.
+// View lays out banners, strip, the active tab and the input line.
 func (a *App) View() string {
 	w, h := a.width, a.height
-	body := max(h-1-inputHeight, 0)
+
+	// Get banners and strip.
+	banners := renderBanners(a.state)
+	strip := renderStrip(a.state, w, a.now())
+	numBanners := len(banners)
+
+	// Calculate available space for body and input.
+	bodyHeight := max(h-numBanners-1-inputHeight, 0)
+
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		tabView = renderAnswer(a.state, w, body)
+		tabView = renderAnswer(a.state, w, bodyHeight)
 	case tabTranscript:
-		tabView = renderTranscript(a.state, w, body)
+		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
-		tabView = renderParticipants(a.state, w, body)
+		tabView = renderParticipants(a.state, w, bodyHeight)
 	}
 	lines := strings.Split(tabView, "\n")
-	for len(lines) < body {
+	for len(lines) < bodyHeight {
 		lines = append(lines, "")
 	}
-	lines = lines[:body]
-	return renderStrip(a.state, w, 1) + "\n" + strings.Join(lines, "\n") + "\n" + renderInput(a.input, a.refusal, w)
+	lines = lines[:bodyHeight]
+
+	// Build output: banners, strip, body, input.
+	var output []string
+	output = append(output, banners...)
+	output = append(output, strip)
+	output = append(output, lines...)
+	output = append(output, renderInput(a.input, a.refusal, w))
+	return strings.Join(output, "\n")
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps
