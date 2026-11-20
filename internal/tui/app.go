@@ -443,7 +443,9 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	return submitCmd(a.ctx, a.cl, line)
+	preset := a.state.NextPreset
+	a.state.NextPreset = ""
+	return submitCmd(a.ctx, a.cl, line, preset)
 }
 
 // releaseEnter handles release prompt input. First confirm the overlap warning, then get the reason.

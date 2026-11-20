@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -33,7 +36,6 @@ var commands = map[string]commandHandler{
 	"override":     cmdOverride,
 	"release":      cmdRelease,
 	"drafts":       cmdDrafts,
-	"quick":        cmdQuick,
 	"help":         cmdHelp,
 }
 
@@ -96,7 +98,7 @@ func cmdCancel(a *App, _ []string) tea.Cmd {
 }
 
 func cmdWhy(a *App, _ []string) tea.Cmd {
-	turnID := a.state.CurrentTurn
+	turnID := a.state.MostRecentTurn
 	if turnID == "" {
 		a.refusal = "no turn"
 		return nil
@@ -119,9 +121,22 @@ func cmdWhy(a *App, _ []string) tea.Cmd {
 	if strings.HasPrefix(reason, "budget:") {
 		if a.state.LastBudgetNotice != nil {
 			bn := a.state.LastBudgetNotice
-			if bn.Estimated != nil && bn.Admitted != nil {
-				msg = fmt.Sprintf("%s (admission: %d, estimated: %d, limit: %d)", msg, *bn.Admitted, *bn.Estimated, bn.Limit)
+			parts := []string{msg}
+			if bn.Participant != nil {
+				parts = append(parts, fmt.Sprintf("participant: %s", *bn.Participant))
 			}
+			if bn.Admitted != nil {
+				parts = append(parts, fmt.Sprintf("admission: %d", *bn.Admitted))
+			}
+			if bn.Estimated != nil {
+				parts = append(parts, fmt.Sprintf("estimated: %d", *bn.Estimated))
+			}
+			if bn.Reported != nil {
+				parts = append(parts, fmt.Sprintf("reported: %d", *bn.Reported))
+			}
+			parts = append(parts, fmt.Sprintf("reserved: %d", bn.Charged))
+			parts = append(parts, fmt.Sprintf("limit: %d", bn.Limit))
+			msg = strings.Join(parts, " / ")
 		}
 	} else if strings.HasPrefix(reason, "gate:") {
 		for _, aid := range attemptIDsForTurn(a.state, turnID) {
@@ -131,6 +146,17 @@ func cmdWhy(a *App, _ []string) tea.Cmd {
 				break
 			}
 		}
+	} else if strings.HasPrefix(reason, "block:") {
+		blockID := strings.TrimPrefix(reason, "block:")
+		if bi, ok := a.state.Blocks[blockID]; ok {
+			msg = fmt.Sprintf("%s (severity: %s)", msg, bi.Severity)
+		}
+	} else if strings.HasPrefix(reason, "revision_request:") {
+		participant := strings.TrimPrefix(reason, "revision_request:")
+		msg = fmt.Sprintf("%s: %s requested revisions", msg, participant)
+	} else if strings.HasPrefix(reason, "malformed_twice:") {
+		participant := strings.TrimPrefix(reason, "malformed_twice:")
+		msg = fmt.Sprintf("%s: %s malformed twice", msg, participant)
 	}
 
 	a.refusal = msg
@@ -143,25 +169,9 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 		return nil
 	}
 
-	turnID := a.state.CurrentTurn
+	turnID := a.state.MostRecentTurn
 	if turnID == "" {
-		a.refusal = "no open turn"
-		return nil
-	}
-
-	ti, ok := a.state.Turns[turnID]
-	if !ok {
-		a.refusal = "turn not found"
-		return nil
-	}
-
-	if ti.State != "incomplete" {
-		a.refusal = fmt.Sprintf("cannot override: turn is %s, not incomplete", ti.State)
-		return nil
-	}
-
-	if ti.CandidateHash == nil {
-		a.refusal = "cannot override: no candidate frozen"
+		a.refusal = "no turn"
 		return nil
 	}
 
@@ -215,49 +225,37 @@ func cmdDrafts(a *App, args []string) tea.Cmd {
 	return nil
 }
 
-func cmdQuick(a *App, args []string) tea.Cmd {
-	if len(args) != 1 {
-		a.refusal = "usage: /quick <name>|off"
-		return nil
-	}
-
-	name := args[0]
-	if name == "off" {
-		a.state.SelectedQuickProfile = nil
-	} else {
-		if _, ok := a.state.QuickProfiles[name]; !ok {
-			a.refusal = fmt.Sprintf("quick profile %q not found", name)
-			return nil
-		}
-		a.state.SelectedQuickProfile = &name
-	}
-	return nil
-}
-
 func cmdHelp(a *App, _ []string) tea.Cmd {
-	a.refusal = "commands: /mode <preset> /participants /cancel /why /override <reason> /release <pool> [attempt_id] /drafts on|off /quick <name>|off /help /quit /resume"
+	a.refusal = "commands: /mode <preset> /participants /cancel /why /override <reason> /release <pool> [attempt_id] /drafts on|off /help /quit /resume"
 	return nil
 }
 
 func (a *App) validatePreset(preset string) error {
-	if a.state.Run.DefaultPreset == "" {
-		return fmt.Errorf("no default preset configured")
+	if a.state.Status == nil {
+		return fmt.Errorf("no status available")
 	}
-	if a.state.Status != nil {
-		presets := make(map[string]bool)
-		for _, p := range a.state.Status.Participants {
-			for _, role := range p.EligibleRoles {
-				if role == "author" {
-					presets[preset] = true
-					break
+	for _, p := range a.state.Status.Participants {
+		for _, role := range p.EligibleRoles {
+			if role == "author" {
+				if preset == p.ID {
+					return nil
 				}
 			}
 		}
-		if !presets[preset] && preset != "solo" && preset != "review" {
-			return fmt.Errorf("unknown preset: %s", preset)
+	}
+	if preset == "solo" || preset == "review" {
+		return nil
+	}
+	var presets []string
+	for _, p := range a.state.Status.Participants {
+		for _, role := range p.EligibleRoles {
+			if role == "author" {
+				presets = append(presets, p.ID)
+			}
 		}
 	}
-	return nil
+	presets = append(presets, "solo", "review")
+	return fmt.Errorf("unknown preset %q; valid presets: %s", preset, strings.Join(presets, ", "))
 }
 
 func attemptIDsForTurn(state State, turnID string) []string {
@@ -268,4 +266,27 @@ func attemptIDsForTurn(state State, turnID string) []string {
 		}
 	}
 	return aids
+}
+
+// handleReleaseRefusal formats release errors to show ambiguous attempt IDs.
+func handleReleaseRefusal(err error) string {
+	var we *wire.Error
+	if !errors.As(err, &we) {
+		return formatRefusal(err)
+	}
+	msg := we.Code
+	if we.Detail != nil && *we.Detail != "" {
+		msg = msg + ": " + *we.Detail
+	}
+	if we.Code == "ambiguous" && len(we.Holds) > 0 {
+		var holds []wire.Hold
+		if err := json.Unmarshal(we.Holds, &holds); err == nil && len(holds) > 0 {
+			var ids []string
+			for _, h := range holds {
+				ids = append(ids, h.AttemptID)
+			}
+			msg = fmt.Sprintf("%s (attempt ids: %s)", msg, strings.Join(ids, ", "))
+		}
+	}
+	return msg
 }

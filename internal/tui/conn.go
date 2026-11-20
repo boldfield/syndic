@@ -85,10 +85,14 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
-// submitCmd submits input with a fresh submission id and no preset.
-func submitCmd(ctx context.Context, cl *client.Client, input string) tea.Cmd {
+// submitCmd submits input with a fresh submission id and optional preset.
+func submitCmd(ctx context.Context, cl *client.Client, input, preset string) tea.Cmd {
 	return func() tea.Msg {
-		reply, err := cl.Submit(ctx, wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input})
+		req := wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input}
+		if preset != "" {
+			req.Preset = &preset
+		}
+		reply, err := cl.Submit(ctx, req)
 		if err != nil {
 			return submitMsg{refusal: formatRefusal(err)}
 		}
@@ -194,7 +198,7 @@ func releaseCmd(ctx context.Context, cl *client.Client, pool string, attemptID *
 		req := wire.ReleaseRequest{Pool: pool, AttemptID: attemptID, Reason: reason}
 		_, err := cl.Release(ctx, req)
 		if err != nil {
-			return releaseMsg{refusal: formatRefusal(err)}
+			return releaseMsg{refusal: handleReleaseRefusal(err)}
 		}
 		return releaseMsg{}
 	}

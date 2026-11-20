@@ -132,6 +132,7 @@ type State struct {
 	Hello                wire.HelloReply
 	Status               *wire.StatusReply
 	CurrentTurn          string
+	MostRecentTurn       string
 	LastSeq              int64
 	ConnState            ConnectionState
 	TurnState            map[string]string
@@ -483,6 +484,7 @@ func setTurnState(s State, turnID, state string) State {
 	ts := copyMap(s.TurnState)
 	ts[turnID] = state
 	s.TurnState = ts
+	s.MostRecentTurn = turnID
 	if isTerminalState(state) && s.CurrentTurn == turnID {
 		s.CurrentTurn = ""
 	}
