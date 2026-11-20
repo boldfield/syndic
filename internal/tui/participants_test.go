@@ -569,14 +569,28 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
 	send(r, resizeMsg(80, 14))
-	untilPartsView(t, r, "more lines")
+	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilPartsView(t, r, "/release rpool "+m[1])
 	if n := len(strings.Split(v, "\n")); n > 14 {
 		t.Errorf("view is %d lines at 14 rows", n)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
-	untilPartsView(t, r, "more lines")
+	untilPartsView(t, r, "more lines (PgDn)")
+
+	// Paged to the bottom, a refresh that shortens the content keeps the body
+	// filled from the last full page, not from the stale offset.
+	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
+	untilPartsView(t, r, "/release rpool "+m[1])
+	if _, err := h.Engine.Release(wire.ReleaseRequest{Pool: "rpool", AttemptID: &m[1], Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	r.until(t, "a filled view after the release", func(a *App) (string, bool) {
+		v := a.View()
+		full := strings.Split(a.participantsFull(a.width), "\n")
+		page := strings.Join(full[max(len(full)-a.bodyHeight(), 0):], "\n")
+		return v, !strings.Contains(v, "orphaned holds:") && strings.Contains(v, page)
+	})
 }
 
 func writeFile(path, text string) error { return os.WriteFile(path, []byte(text), 0o600) }

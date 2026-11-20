@@ -92,8 +92,8 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 	}
 	pools = poolLines(s, now)
 
-	// Fit the height: the table scrolls around the selection first, then the
-	// head's blank line goes, and the pools are cut last.
+	// Fit the height: the table scrolls around the selection first, and the
+	// pools are cut last, leaving a marker that PgDn reaches the rest.
 	if height > 0 {
 		avail := func() int { return height - len(head) - 1 - len(detail) - len(pools) }
 		if len(ids) > 0 {
@@ -107,7 +107,7 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 		}
 		if over := len(head) + len(table) + len(detail) + len(pools) - height; over > 0 && len(pools) > 0 {
 			cut := min(over+1, len(pools))
-			pools = append(pools[:len(pools)-cut], fmt.Sprintf("… %d more lines", cut))
+			pools = append(pools[:len(pools)-cut], fmt.Sprintf("… %d more lines (PgDn)", cut))
 		}
 	}
 	lines := append(append(append(head, table...), detail...), pools...)

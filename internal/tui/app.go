@@ -375,7 +375,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !a.pScrolled {
 				a.pScrolled, a.pScroll = true, 0
 			}
-			a.pScroll = min(max(a.pScroll+page, 0), a.participantsMaxScroll())
+			last := a.participantsMaxScroll()
+			a.pScroll = min(max(min(a.pScroll, last)+page, 0), last)
 			if a.pScroll == 0 && page < 0 {
 				a.pScrolled = false
 			}
@@ -719,8 +720,10 @@ func (a *App) View() string {
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
 		if a.pScrolled {
+			// A refresh can shorten the content under the offset, so the
+			// start is kept within the last full page as it is now.
 			full := strings.Split(a.participantsFull(w), "\n")
-			tabView = strings.Join(full[min(a.pScroll, len(full)-1):], "\n")
+			tabView = strings.Join(full[min(a.pScroll, max(len(full)-bodyHeight, 0)):], "\n")
 		} else {
 			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
 		}
