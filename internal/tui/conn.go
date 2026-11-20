@@ -149,6 +149,57 @@ func formatRefusal(err error) string {
 	return err.Error()
 }
 
+// cancelMsg carries the result of a cancel request or the error that occurred.
+type cancelMsg struct {
+	turnID  string
+	refusal string
+}
+
+// cancelCmd sends a cancel request to the engine.
+func cancelCmd(ctx context.Context, cl *client.Client, turnID string) tea.Cmd {
+	return func() tea.Msg {
+		err := cl.Cancel(ctx, turnID)
+		if err != nil {
+			return cancelMsg{turnID: turnID, refusal: formatRefusal(err)}
+		}
+		return cancelMsg{turnID: turnID}
+	}
+}
+
+// overrideMsg carries the result of an override request or the error that occurred.
+type overrideMsg struct {
+	turnID  string
+	refusal string
+}
+
+// overrideCmd sends an override request to the engine.
+func overrideCmd(ctx context.Context, cl *client.Client, turnID, reason string) tea.Cmd {
+	return func() tea.Msg {
+		err := cl.Override(ctx, turnID, reason)
+		if err != nil {
+			return overrideMsg{turnID: turnID, refusal: formatRefusal(err)}
+		}
+		return overrideMsg{turnID: turnID}
+	}
+}
+
+// releaseMsg carries the result of a release request or the error that occurred.
+type releaseMsg struct {
+	refusal string
+}
+
+// releaseCmd sends a release request to the engine.
+func releaseCmd(ctx context.Context, cl *client.Client, pool string, attemptID *string, reason string) tea.Cmd {
+	return func() tea.Msg {
+		req := wire.ReleaseRequest{Pool: pool, AttemptID: attemptID, Reason: reason}
+		_, err := cl.Release(ctx, req)
+		if err != nil {
+			return releaseMsg{refusal: formatRefusal(err)}
+		}
+		return releaseMsg{}
+	}
+}
+
 // transcriptPageSize is the page size asked of the engine, its maximum.
 const transcriptPageSize = 200
 

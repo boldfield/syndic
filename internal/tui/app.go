@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -71,6 +72,9 @@ type App struct {
 	pSelected   int                       // index of the selected row of the participants tab, in id order
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
+
+	releasePrompt *releasePromptState
+	releaseInput  textinput.Model
 }
 
 // Option configures an App.
@@ -89,6 +93,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		cancel:            cancel,
 		socket:            socketPath,
 		input:             newInput(),
+		releaseInput:      newInput(),
 		width:             80,
 		height:            24,
 		state:             NewState(),
@@ -304,17 +309,50 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onContent(msg)
 	case transcriptMsg:
 		return a.onTranscript(msg)
+	case cancelMsg:
+		if msg.refusal != "" {
+			a.refusal = msg.refusal
+		}
+		return a, nil
+	case overrideMsg:
+		if msg.refusal != "" {
+			a.refusal = msg.refusal
+		}
+		return a, nil
+	case releaseMsg:
+		if msg.refusal != "" {
+			a.refusal = msg.refusal
+		}
+		return a, nil
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
 		return a, a.ensureTick()
 	}
 	var cmd tea.Cmd
-	a.input, cmd = a.input.Update(msg)
+	if a.releasePrompt != nil {
+		a.releaseInput, cmd = a.releaseInput.Update(msg)
+	} else {
+		a.input, cmd = a.input.Update(msg)
+	}
 	return a, cmd
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.releasePrompt != nil {
+		switch msg.String() {
+		case "enter":
+			return a, a.releaseEnter()
+		case "esc":
+			a.releasePrompt = nil
+			a.input.Focus()
+			return a, nil
+		}
+		var cmd tea.Cmd
+		a.releaseInput, cmd = a.releaseInput.Update(msg)
+		return a, cmd
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		return a, a.quit()
@@ -406,6 +444,27 @@ func (a *App) enter() tea.Cmd {
 		return nil
 	}
 	return submitCmd(a.ctx, a.cl, line)
+}
+
+// releaseEnter handles release prompt input. First confirm the overlap warning, then get the reason.
+func (a *App) releaseEnter() tea.Cmd {
+	if a.releasePrompt == nil {
+		return nil
+	}
+
+	reason := a.releaseInput.Value()
+	pool := a.releasePrompt.pool
+	attemptID := a.releasePrompt.attemptID
+
+	a.releasePrompt = nil
+	a.releaseInput.SetValue("")
+	a.input.Focus()
+
+	if reason == "" {
+		return nil
+	}
+
+	return releaseCmd(a.ctx, a.cl, pool, attemptID, reason)
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -744,7 +803,15 @@ func (a *App) View() string {
 	output = append(output, banners...)
 	output = append(output, strip)
 	output = append(output, lines...)
-	output = append(output, renderInput(a.input, a.refusal, w))
+
+	var inputView string
+	if a.releasePrompt != nil {
+		msg := fmt.Sprintf("Release held capacity on pool %q: server may still be computing; next dispatch may overlap. Reason (or empty to cancel):", a.releasePrompt.pool)
+		inputView = renderInput(a.releaseInput, msg, w)
+	} else {
+		inputView = renderInput(a.input, a.refusal, w)
+	}
+	output = append(output, inputView)
 	return strings.Join(output, "\n")
 }
 

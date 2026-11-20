@@ -129,26 +129,28 @@ type BudgetNotice struct {
 
 // State holds what the UI knows about the engine.
 type State struct {
-	Hello               wire.HelloReply
-	Status              *wire.StatusReply
-	CurrentTurn         string
-	LastSeq             int64
-	ConnState           ConnectionState
-	TurnState           map[string]string
-	Run                 RunInfo
-	Participants        map[string]ParticipantInfo
-	Pools               map[string]wire.Pool
-	OrphanedHolds       []wire.Hold
-	QuickProfiles       map[string]wire.QuickProfile
-	Turns               map[string]TurnInfo
-	Attempts            map[string]AttemptInfo
-	Blocks              map[string]BlockInfo
-	Verdicts            map[string]VerdictInfo
-	Messages            map[string]MessageInfo
-	LastBudgetNotice    *BudgetNotice
-	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
-	LastBudgetExhausted *struct{ Charged, Limit int64 }
-	UnapprovedProfile   *string
+	Hello                wire.HelloReply
+	Status               *wire.StatusReply
+	CurrentTurn          string
+	LastSeq              int64
+	ConnState            ConnectionState
+	TurnState            map[string]string
+	Run                  RunInfo
+	Participants         map[string]ParticipantInfo
+	Pools                map[string]wire.Pool
+	OrphanedHolds        []wire.Hold
+	QuickProfiles        map[string]wire.QuickProfile
+	Turns                map[string]TurnInfo
+	Attempts             map[string]AttemptInfo
+	Blocks               map[string]BlockInfo
+	Verdicts             map[string]VerdictInfo
+	Messages             map[string]MessageInfo
+	LastBudgetNotice     *BudgetNotice
+	LastBudgetExceeded   *struct{ Estimated, Reported int64 }
+	LastBudgetExhausted  *struct{ Charged, Limit int64 }
+	UnapprovedProfile    *string
+	NextPreset           string
+	SelectedQuickProfile *string
 }
 
 // NewState returns a fresh State.
