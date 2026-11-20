@@ -50,9 +50,11 @@ type App struct {
 	content           *ContentCache
 	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
 	answerScrollRow   int   // first visible line of the answer tab
+	transcriptRow     int   // first visible line of the transcript tab
 	candidateIDByTurn map[string]string
-	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
-	overrideReasons   map[string]string           // the reason of each override event
+	transcriptsByTurn map[string][]wire.TranscriptItem // transcript items from turn replies
+	openBlocksByTurn  map[string][]wire.OpenBlock      // open blocks from turn replies
+	overrideReasons   map[string]string                // the reason of each override event
 }
 
 // Option configures an App.
@@ -77,6 +79,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		now:               time.Now,
 		content:           NewContentCache(),
 		candidateIDByTurn: make(map[string]string),
+		transcriptsByTurn: make(map[string][]wire.TranscriptItem),
 		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
 		overrideReasons:   make(map[string]string),
 	}
@@ -113,6 +116,14 @@ func (a *App) answerIn(turnID string) answerInput {
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
+	}
+}
+
+// transcriptIn gathers what the transcript tab needs for the turn.
+func (a *App) transcriptIn(turnID string) transcriptInput {
+	return transcriptInput{
+		content: a.content,
+		items:   a.transcriptsByTurn[turnID],
 	}
 }
 
@@ -155,6 +166,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStatusRefresh(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case transcriptMsg:
+		return a.onTranscript(msg)
 	case contentMsg:
 		return a.onContent(msg)
 	case tickMsg:
@@ -174,10 +187,12 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow = 0
+		a.transcriptRow = 0
 		return a, nil
 	case "shift+tab":
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow = 0
+		a.transcriptRow = 0
 		return a, nil
 	case "enter":
 		return a, a.enter()
@@ -197,6 +212,30 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "pgdown":
 			a.scrollAnswer(page)
+			return a, nil
+		}
+	}
+
+	if a.tab == tabTranscript {
+		page := max(a.bodyHeight()-1, 1)
+		switch msg.String() {
+		case "up":
+			a.scrollTranscript(-1)
+			return a, nil
+		case "down":
+			a.scrollTranscript(1)
+			return a, nil
+		case "pgup":
+			a.scrollTranscript(-page)
+			return a, nil
+		case "pgdown":
+			a.scrollTranscript(page)
+			return a, nil
+		case "home":
+			a.transcriptRow = 0
+			return a, nil
+		case "end":
+			a.scrollTranscriptEnd()
 			return a, nil
 		}
 	}
@@ -401,6 +440,19 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
+	// Fetch transcript items for the turn
+	cmd := transcriptCmd(a.ctx, a.gen, a.cl, msg.id)
+	return a, cmd
+}
+
+// onTranscript stores fetched transcript items.
+func (a *App) onTranscript(msg transcriptMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err == nil {
+		a.transcriptsByTurn[msg.id] = msg.items
+	}
 	return a, nil
 }
 
@@ -453,6 +505,24 @@ func (a *App) scrollAnswer(delta int) {
 	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
 }
 
+// transcriptLineCount is the length of the unclipped transcript tab.
+func (a *App) transcriptLineCount() int {
+	turnID := transcriptTurn(a.state)
+	return len(strings.Split(renderTranscript(a.state, a.width, a.bodyHeight(), a.transcriptIn(turnID)), "\n"))
+}
+
+// scrollTranscript moves the transcript tab by delta lines, staying within the text.
+func (a *App) scrollTranscript(delta int) {
+	maxStart := max(a.transcriptLineCount()-a.bodyHeight(), 0)
+	a.transcriptRow = min(max(a.transcriptRow+delta, 0), maxStart)
+}
+
+// scrollTranscriptEnd scrolls to the end of the transcript.
+func (a *App) scrollTranscriptEnd() {
+	maxStart := max(a.transcriptLineCount()-a.bodyHeight(), 0)
+	a.transcriptRow = maxStart
+}
+
 // View lays out banners, strip, the active tab and the input line.
 func (a *App) View() string {
 	w := a.width
@@ -469,14 +539,23 @@ func (a *App) View() string {
 		turnID := answerTurn(a.state)
 		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
 	case tabTranscript:
-		tabView = renderTranscript(a.state, w, bodyHeight)
+		turnID := transcriptTurn(a.state)
+		tabView = renderTranscript(a.state, w, bodyHeight, a.transcriptIn(turnID))
 	case tabParticipants:
 		tabView = renderParticipants(a.state, w, bodyHeight)
 	}
 	lines := strings.Split(tabView, "\n")
 
-	if a.tab == tabAnswer {
-		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
+	var scrollRow int
+	switch a.tab {
+	case tabAnswer:
+		scrollRow = a.answerScrollRow
+	case tabTranscript:
+		scrollRow = a.transcriptRow
+	}
+
+	if a.tab == tabAnswer || a.tab == tabTranscript {
+		start := min(scrollRow, max(len(lines)-bodyHeight, 0))
 		lines = lines[start:]
 	}
 	for len(lines) < bodyHeight {

@@ -8,6 +8,7 @@ import (
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 )
 
@@ -30,8 +31,8 @@ func TestTranscriptReviewTurn(t *testing.T) {
 		return "", false
 	})
 
-	// Switch to transcript tab
-	r.app.tab = tabTranscript
+	// Switch to transcript tab by sending Tab key
+	send(r, tea.KeyMsg{Type: tea.KeyTab})
 
 	// View should contain the turn ID and show transcript items
 	v := view(t, r)
@@ -63,7 +64,7 @@ func TestTranscriptWithBlocks(t *testing.T) {
 	})
 
 	// Switch to transcript and verify it shows
-	r.app.tab = tabTranscript
+	send(r, tea.KeyMsg{Type: tea.KeyTab})
 	v := view(t, r)
 
 	if !strings.Contains(v, "Turn:") {
@@ -82,13 +83,13 @@ func TestTranscriptWithLargeOutput(t *testing.T) {
 
 	// Wait for approval
 	r.until(t, "approved turn", func(a *App) (string, bool) {
-		if ti, ok := r.app.state.Turns[turnID]; ok && ti.State == "approved" {
+		if ti, ok := a.state.Turns[turnID]; ok && ti.State == "approved" {
 			return turnID, true
 		}
 		return "", false
 	})
 
-	r.app.tab = tabTranscript
+	send(r, tea.KeyMsg{Type: tea.KeyTab})
 	v := view(t, r)
 
 	if !strings.Contains(v, "Turn:") {

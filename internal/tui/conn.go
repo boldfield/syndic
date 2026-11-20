@@ -130,6 +130,25 @@ func turnCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea
 	}
 }
 
+// transcriptMsg carries fetched transcript items or the error that occurred.
+type transcriptMsg struct {
+	gen   int
+	id    string
+	items []wire.TranscriptItem
+	err   error
+}
+
+// transcriptCmd fetches transcript items for a turn.
+func transcriptCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea.Cmd {
+	return func() tea.Msg {
+		reply, err := cl.Transcript(ctx, turnID, "", 200)
+		if err != nil {
+			return transcriptMsg{gen: gen, id: turnID, err: err}
+		}
+		return transcriptMsg{gen: gen, id: turnID, items: reply.Items}
+	}
+}
+
 // tickCmd sends a tick message every second.
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg {

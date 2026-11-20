@@ -2,13 +2,18 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/boldfield/syndic/internal/wire"
 )
 
+// transcriptInput is everything the transcript tab needs beyond the State.
+type transcriptInput struct {
+	content *ContentCache
+	items   []wire.TranscriptItem
+}
+
+// transcriptTurn picks the turn the transcript tab is about.
 func transcriptTurn(s State) string {
 	if s.CurrentTurn != "" {
 		return s.CurrentTurn
@@ -27,22 +32,25 @@ func transcriptTurn(s State) string {
 	return best
 }
 
-func itemHeader(s State, turnID string, item wire.TranscriptItem) string {
-	// Determine if this is a message or attempt
+// itemHeader formats the header line for a transcript item.
+func itemHeader(item wire.TranscriptItem, s State) string {
+	parts := []string{}
+
+	// Determine if message or attempt and get info
 	if strings.HasPrefix(item.Ref, "msg:") {
 		msgID := strings.TrimPrefix(item.Ref, "msg:")
 		if msg, ok := s.Messages[msgID]; ok {
-			return fmt.Sprintf("[%s] %s: %s", msg.Phase, msg.Sender, item.Ref)
+			parts = append(parts, fmt.Sprintf("[%s]", msg.Phase))
+			parts = append(parts, msg.Sender)
+			return strings.Join(parts, " ")
 		}
 	}
 
 	if strings.HasPrefix(item.Ref, "attempt:") {
 		attID := strings.TrimPrefix(item.Ref, "attempt:")
 		if att, ok := s.Attempts[attID]; ok {
-			parts := []string{
-				fmt.Sprintf("[%s]", att.Phase),
-				att.Participant,
-			}
+			parts = append(parts, fmt.Sprintf("[%s]", att.Phase))
+			parts = append(parts, att.Participant)
 
 			// Add attempt status
 			if att.Status != "" {
@@ -59,14 +67,14 @@ func itemHeader(s State, turnID string, item wire.TranscriptItem) string {
 				parts = append(parts, fmt.Sprintf("scrub:%d", att.ScrubCount))
 			}
 
-			// Add estimated tokens
+			// Add estimated tokens with 'est.' label
 			if att.EstimatedTokens > 0 {
-				parts = append(parts, fmt.Sprintf("est:%d", att.EstimatedTokens))
+				parts = append(parts, fmt.Sprintf("est. %d", att.EstimatedTokens))
 			}
 
 			// Add reported tokens
 			if att.ReportedPrompt != nil && att.ReportedCompletion != nil {
-				parts = append(parts, fmt.Sprintf("reported:%d+%d", *att.ReportedPrompt, *att.ReportedCompletion))
+				parts = append(parts, fmt.Sprintf("reported %d+%d", *att.ReportedPrompt, *att.ReportedCompletion))
 			}
 
 			// Add verdict classification for review attempts
@@ -74,7 +82,7 @@ func itemHeader(s State, turnID string, item wire.TranscriptItem) string {
 				parts = append(parts, att.VerdictClass)
 			}
 
-			// Add attempt ID
+			// Add attempt ID suffix
 			parts = append(parts, attID[:min(8, len(attID))])
 
 			// Add repair marker if applicable
@@ -89,69 +97,26 @@ func itemHeader(s State, turnID string, item wire.TranscriptItem) string {
 	return item.Ref
 }
 
-func renderTranscriptItems(s State, turnID string, cc *ContentCache) []string {
+// renderTranscriptItems renders all transcript items with their bodies.
+func renderTranscriptItems(s State, cc *ContentCache, items []wire.TranscriptItem) []string {
 	var lines []string
 
-	// Collect and sort all items for this turn
-	type item struct {
-		ref   string
-		time  time.Time
-		order int // 0 for messages, 1 for attempts, to maintain order
-		id    string
-	}
-
-	var items []item
-
-	// Add messages
-	for _, msg := range s.Messages {
-		if msg.TurnID == turnID {
-			items = append(items, item{
-				ref:   "msg:" + msg.ID,
-				order: 0,
-				id:    msg.ID,
-			})
-		}
-	}
-
-	// Add attempts
-	for _, att := range s.Attempts {
-		if att.TurnID == turnID {
-			items = append(items, item{
-				ref:   "attempt:" + att.ID,
-				order: 1,
-				time:  att.Deadline,
-				id:    att.ID,
-			})
-		}
-	}
-
-	// Sort by order (messages first), then by ID as tiebreaker
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].order != items[j].order {
-			return items[i].order < items[j].order
-		}
-		return items[i].id < items[j].id
-	})
-
-	// Render each item
 	for _, item := range items {
-		// Get metadata via wire.TranscriptItem
-		wireItem := wire.TranscriptItem{
-			ID:  item.id,
-			Ref: item.ref,
-		}
-
 		// Header
-		header := itemHeader(s, turnID, wireItem)
+		header := itemHeader(item, s)
 		lines = append(lines, header)
 
 		// Body - fetch the content
-		bodyText := body(cc, item.ref)
-		for _, line := range strings.Split(bodyText, "\n") {
-			if line == "" && len(lines) > 0 && lines[len(lines)-1] == "" {
-				continue // Avoid double blank lines
+		bodyText := body(cc, item.Ref)
+		if bodyText == "" {
+			lines = append(lines, "(no output)")
+		} else {
+			for _, line := range strings.Split(bodyText, "\n") {
+				if line == "" && len(lines) > 0 && lines[len(lines)-1] == "" {
+					continue // Avoid double blank lines
+				}
+				lines = append(lines, line)
 			}
-			lines = append(lines, line)
 		}
 
 		// Add blank line between items for readability
@@ -162,7 +127,7 @@ func renderTranscriptItems(s State, turnID string, cc *ContentCache) []string {
 }
 
 // renderTranscript returns the transcript tab unclipped; the App scrolls it.
-func renderTranscript(s State, width, height int) string {
+func renderTranscript(s State, w, h int, in transcriptInput) string {
 	turnID := transcriptTurn(s)
 	if turnID == "" {
 		return "no turn"
@@ -184,11 +149,8 @@ func renderTranscript(s State, width, height int) string {
 
 	lines = append(lines, "")
 
-	// Create a mock content cache for this turn
-	cc := NewContentCache()
-
 	// Add all transcript items
-	lines = append(lines, renderTranscriptItems(s, turnID, cc)...)
+	lines = append(lines, renderTranscriptItems(s, in.content, in.items)...)
 
 	return strings.Join(lines, "\n")
 }
