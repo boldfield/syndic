@@ -20,7 +20,7 @@ Check with `shasum -a 256 docs/design/*.md`. The design is the hashed text.
 
 ## Development
 
-- `make check` runs formatting checks, linting, and tests. The linter (`make lint`) runs golangci-lint at the pinned version via `go run`; the first run downloads and builds the linter.
+- `make check` runs formatting checks, build, linting, vet, and tests. The linter (`make lint`) runs golangci-lint at the pinned version via `go run`; the first run downloads and builds the linter.
 - `make lint` runs golangci-lint alone and can be used to check only linting.
 
 ## Status
