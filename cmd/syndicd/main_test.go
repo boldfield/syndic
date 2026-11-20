@@ -38,7 +38,9 @@ func TestNormalStart(t *testing.T) {
 	rosterPath := filepath.Join(dir, "roster.toml")
 	journalPath := filepath.Join(dir, "journal.db")
 	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(rosterPath, []byte(enginetest.RosterTOML), 0o600); err != nil {
 		t.Fatal(err)
@@ -53,14 +55,18 @@ func TestNormalStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	store := journal.NewStore(db)
 
 	// Seed probe records
 	seedProbeRecords(t, store, roster)
 
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Start syndicd in a goroutine
 	sigChan := make(chan os.Signal, 2)
@@ -71,9 +77,15 @@ func TestNormalStart(t *testing.T) {
 		sigChan <- os.Interrupt
 	}()
 
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_DATA_HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
 
 	exitCode := run(
 		[]string{
@@ -114,7 +126,9 @@ func TestSecondRun(t *testing.T) {
 	rosterPath := filepath.Join(dir, "roster.toml")
 	journalPath := filepath.Join(dir, "journal.db")
 	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(rosterPath, []byte(enginetest.RosterTOML), 0o600); err != nil {
 		t.Fatal(err)
@@ -129,18 +143,28 @@ func TestSecondRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	store := journal.NewStore(db)
 
 	// Seed probe records
 	seedProbeRecords(t, store, roster)
 
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_DATA_HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
 
 	// Start first instance
 	sigChan1 := make(chan os.Signal, 2)
@@ -202,7 +226,9 @@ func TestBadRoster(t *testing.T) {
 	rosterPath := filepath.Join(dir, "roster.toml")
 	journalPath := filepath.Join(dir, "journal.db")
 	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	// Write an invalid roster (bad default_preset)
 	badRoster := strings.Replace(
@@ -216,9 +242,15 @@ func TestBadRoster(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_DATA_HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
 
 	sigChan := make(chan os.Signal)
 	defer close(sigChan)
@@ -250,7 +282,9 @@ func TestBadRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	var runs int
 	if err := db.Conn().QueryRow(`SELECT COUNT(*) FROM runs WHERE kind = 'engine'`).Scan(&runs); err != nil {
@@ -267,7 +301,9 @@ func TestCliParticipantFails(t *testing.T) {
 	rosterPath := filepath.Join(dir, "roster.toml")
 	journalPath := filepath.Join(dir, "journal.db")
 	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a roster with a CLI participant that has a binary field
 	cliRoster := strings.Replace(
@@ -289,9 +325,15 @@ binary = "/usr/bin/cli"`,
 		t.Fatal(err)
 	}
 
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_DATA_HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
 
 	sigChan := make(chan os.Signal)
 	defer close(sigChan)
@@ -324,7 +366,9 @@ func TestStaleSocket(t *testing.T) {
 	rosterPath := filepath.Join(dir, "roster.toml")
 	journalPath := filepath.Join(dir, "journal.db")
 	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(rosterPath, []byte(enginetest.RosterTOML), 0o600); err != nil {
 		t.Fatal(err)
@@ -339,23 +383,35 @@ func TestStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	store := journal.NewStore(db)
 	seedProbeRecords(t, store, roster)
-	db.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a stale socket file
 	syndirPath := filepath.Join(runtimeDir, "syndic")
-	os.MkdirAll(syndirPath, 0700)
+	if err := os.MkdirAll(syndirPath, 0700); err != nil {
+		t.Fatal(err)
+	}
 	staleSocket := filepath.Join(syndirPath, "engine.sock")
 	if err := os.WriteFile(staleSocket, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_DATA_HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", dir); err != nil {
+		t.Fatal(err)
+	}
 
 	sigChan := make(chan os.Signal, 2)
 	var stdout, stderr bytes.Buffer

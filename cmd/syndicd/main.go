@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -50,27 +49,20 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		return 0
 	}
 
-	// Resolve runtime paths
-	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	xdgStateHome := os.Getenv("XDG_STATE_HOME")
-	xdgConfigHome := os.Getenv("XDG_CONFIG_HOME")
-	xdgDataHome := os.Getenv("XDG_DATA_HOME")
-
-	homeDir := ""
-	if u, err := user.Current(); err == nil {
-		homeDir = u.HomeDir
-	}
-
 	// Set defaults for paths
 	if *rosterPath == "" {
-		*rosterPath = resolveRosterPath("", xdgConfigHome, homeDir)
+		*rosterPath = resolveRosterPath(*rosterPath)
 	}
 	if *journalPath == "" {
-		*journalPath = resolveJournalPath("", xdgDataHome, homeDir)
+		*journalPath = resolveJournalPath(*journalPath)
 	}
 	if *secretsDir == "" {
-		*secretsDir = resolveSecretsDir("", xdgConfigHome, homeDir)
+		*secretsDir = resolveSecretsDir(*secretsDir)
 	}
+
+	// Get XDG dirs for lockfile resolution
+	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	xdgStateHome := os.Getenv("XDG_STATE_HOME")
 
 	// Convert to absolute path for the roster (required for manifest)
 	rosterAbs, err := filepath.Abs(*rosterPath)
@@ -89,7 +81,7 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		default:
 			return ""
 		}
-	}, homeDir)
+	}, os.Getenv("HOME"))
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
@@ -106,7 +98,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		fmt.Fprintf(stderr, "acquire lock: %v\n", err)
 		return 1
 	}
-	defer lock.Release()
+	defer func() {
+		_ = lock.Release()
+	}()
 
 	// Create journal directory if it doesn't exist
 	journalDir := filepath.Dir(*journalPath)
@@ -121,20 +115,17 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		fmt.Fprintf(stderr, "open journal: %v\n", err)
 		return 1
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	store := journal.NewStore(db)
 
-	// Load and validate the roster
+	// Load the roster (validation will happen in engine.Start)
 	roster, err := config.Load(rosterAbs)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
-	}
-
-	if err := roster.Validate(); err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
-		return 2
 	}
 
 	// Create the hub
@@ -143,7 +134,7 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	// NewAdapter creates adapters for the engine
 	newAdapterFunc := func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 		if p.Route != "api" {
-			return nil, "", fmt.Errorf("unsupported route: %s", p.Route)
+			return nil, "", fmt.Errorf("participant %s: unsupported route: %s", p.ID, p.Route)
 		}
 		resolver := config.NewEnvFileResolver(*secretsDir)
 		return openai.New(ep, resolver), openai.AdapterVersion, nil
@@ -183,89 +174,110 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 
 	if err := srv.Listen(); err != nil {
 		fmt.Fprintf(stderr, "server listen: %v\n", err)
-		eng.Stop(context.Background())
+		_ = eng.Stop(context.Background())
 		return 1
 	}
 
 	// Start server in a goroutine
 	serveDone := make(chan error, 1)
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
 	go func() {
-		serveDone <- srv.Serve(context.Background())
+		serveDone <- srv.Serve(serveCtx)
 	}()
 
 	// Print startup info
 	hello := eng.Hello()
 	fmt.Fprintf(stdout, "%s %s %s\n", paths.Socket, hello.RunID, rosterAbs)
 
+	// Get stop_grace from roster (default 5s)
+	stopGrace := 5 * time.Second
+	if roster.Engine.StopGrace != nil {
+		stopGrace = roster.Engine.StopGrace.Duration
+	}
+
+	// Channel to track if we're stopping
+	stopping := false
+	var stopCtx context.Context
+	var cancelStop context.CancelFunc
+
 	// Wait for signals and handle graceful shutdown
 	for {
 		select {
-		case sig := <-signals:
-			if sig == syscall.SIGINT || sig == syscall.SIGTERM {
+		case <-signals:
+			if !stopping {
 				// First signal: graceful stop
-				ctx := context.Background()
-				if err := eng.Stop(ctx); err != nil {
-					fmt.Fprintf(stderr, "stop engine: %v\n", err)
-					return 1
+				stopping = true
+				stopCtx, cancelStop = context.WithTimeout(context.Background(), stopGrace)
+				defer cancelStop()
+				go func() {
+					_ = eng.Stop(stopCtx)
+					// After engine stops, close the server
+					cancelServe()
+				}()
+			} else {
+				// Second signal: immediate stop
+				if cancelStop != nil {
+					cancelStop()
 				}
-				return 0
+				return 130
 			}
 
 		case err := <-serveDone:
+			if stopping {
+				// We're already stopping, just exit
+				if cancelStop != nil {
+					cancelStop()
+				}
+				return 0
+			}
+			// Server stopped on its own, do graceful stop
 			if err != nil {
 				fmt.Fprintf(stderr, "serve: %v\n", err)
-				eng.Stop(context.Background())
+				_ = eng.Stop(context.Background())
 				return 1
 			}
+			// Server returned successfully with no signal
+			stopCtx, cancelStop = context.WithTimeout(context.Background(), stopGrace)
+			defer cancelStop()
+			_ = eng.Stop(stopCtx)
 			return 0
 		}
 	}
 }
 
-func resolveRosterPath(custom, xdgConfigHome, homeDir string) string {
+func resolveRosterPath(custom string) string {
 	if custom != "" {
 		return custom
 	}
-
-	if xdgConfigHome != "" {
-		return filepath.Join(xdgConfigHome, "syndic", "syndic.toml")
+	if _, err := os.Stat("./syndic.toml"); err == nil {
+		return "./syndic.toml"
 	}
-
-	if homeDir != "" {
-		return filepath.Join(homeDir, ".config", "syndic", "syndic.toml")
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(os.Getenv("HOME"), ".config")
 	}
-
-	return "./syndic.toml"
+	return filepath.Join(xdgConfig, "syndic", "syndic.toml")
 }
 
-func resolveJournalPath(custom, xdgDataHome, homeDir string) string {
+func resolveJournalPath(custom string) string {
 	if custom != "" {
 		return custom
 	}
-
-	if xdgDataHome != "" {
-		return filepath.Join(xdgDataHome, "syndic", "journal.sqlite")
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		xdgData = filepath.Join(os.Getenv("HOME"), ".local", "share")
 	}
-
-	if homeDir != "" {
-		return filepath.Join(homeDir, ".local", "share", "syndic", "journal.sqlite")
-	}
-
-	return "./journal.sqlite"
+	return filepath.Join(xdgData, "syndic", "journal.sqlite")
 }
 
-func resolveSecretsDir(custom, xdgConfigHome, homeDir string) string {
+func resolveSecretsDir(custom string) string {
 	if custom != "" {
 		return custom
 	}
-
-	if xdgConfigHome != "" {
-		return filepath.Join(xdgConfigHome, "syndic", "secrets")
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(os.Getenv("HOME"), ".config")
 	}
-
-	if homeDir != "" {
-		return filepath.Join(homeDir, ".config", "syndic", "secrets")
-	}
-
-	return "./secrets"
+	return filepath.Join(xdgConfig, "syndic", "secrets")
 }
