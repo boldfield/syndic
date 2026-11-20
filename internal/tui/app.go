@@ -46,6 +46,13 @@ type App struct {
 	now                  func() time.Time
 	tickRunning          bool
 	onEvent              func(wire.Frame)
+
+	content           *ContentCache
+	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
+	answerScrollRow   int   // first visible line of the answer tab
+	candidateIDByTurn map[string]string
+	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons   map[string]string           // the reason of each override event
 }
 
 // Option configures an App.
@@ -60,14 +67,18 @@ func WithEventObserver(f func(wire.Frame)) Option {
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
 	a := &App{
-		ctx:    ctx,
-		cancel: cancel,
-		socket: socketPath,
-		input:  newInput(),
-		width:  80,
-		height: 24,
-		state:  NewState(),
-		now:    time.Now,
+		ctx:               ctx,
+		cancel:            cancel,
+		socket:            socketPath,
+		input:             newInput(),
+		width:             80,
+		height:            24,
+		state:             NewState(),
+		now:               time.Now,
+		content:           NewContentCache(),
+		candidateIDByTurn: make(map[string]string),
+		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
+		overrideReasons:   make(map[string]string),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -79,13 +90,55 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 // CurrentTurn is the open turn the UI knows of, or "".
 func (a *App) CurrentTurn() string { return a.state.CurrentTurn }
 
+// SetDraftsEnabled sets the drafts toggle.
+func (a *App) SetDraftsEnabled(enabled bool) { a.drafts = &enabled }
+
+// draftsOn reports whether the author's unreviewed output is shown for the
+// turn: the user's toggle if set, else the turn's quick profile.
+func (a *App) draftsOn(turnID string) bool {
+	if a.drafts != nil {
+		return *a.drafts
+	}
+	if ti, ok := a.state.Turns[turnID]; ok && ti.QuickProfile != nil {
+		return a.state.QuickProfiles[*ti.QuickProfile].Drafts
+	}
+	return false
+}
+
+// answerIn gathers what the answer tab needs for the turn.
+func (a *App) answerIn(turnID string) answerInput {
+	return answerInput{
+		content:        a.content,
+		drafts:         a.draftsOn(turnID),
+		candidateID:    a.candidateIDByTurn[turnID],
+		openBlocks:     a.openBlocksByTurn[turnID],
+		overrideReason: a.overrideReasons[turnID],
+	}
+}
+
+// fetchAnswerContent starts the fetches the answer tab is waiting on.
+func (a *App) fetchAnswerContent() tea.Cmd {
+	turnID := answerTurn(a.state)
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
+}
+
 // Init starts the first connection, from the beginning of the journal.
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
 }
 
-// Update handles one message.
+// Update handles one message, then starts any content fetch the answer tab
+// now needs. A content reply itself starts none, so a failing fetch is retried
+// on the next event or tick, not in a loop.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := a.update(msg)
+	if _, ok := msg.(contentMsg); !ok {
+		cmd = tea.Batch(cmd, a.fetchAnswerContent())
+	}
+	return a, cmd
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -102,6 +155,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStatusRefresh(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case contentMsg:
+		return a.onContent(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -118,13 +173,34 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.quit()
 	case "tab":
 		a.tab = (a.tab + 1) % numTabs
+		a.answerScrollRow = 0
 		return a, nil
 	case "shift+tab":
 		a.tab = (a.tab + numTabs - 1) % numTabs
+		a.answerScrollRow = 0
 		return a, nil
 	case "enter":
 		return a, a.enter()
 	}
+
+	if a.tab == tabAnswer {
+		page := max(a.bodyHeight()-1, 1)
+		switch msg.String() {
+		case "up":
+			a.scrollAnswer(-1)
+			return a, nil
+		case "down":
+			a.scrollAnswer(1)
+			return a, nil
+		case "pgup":
+			a.scrollAnswer(-page)
+			return a, nil
+		case "pgdown":
+			a.scrollAnswer(page)
+			return a, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
 	return a, cmd
@@ -185,7 +261,11 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
 	}
+	oldTurn := a.state.CurrentTurn
 	a.state.CurrentTurn = msg.turnID
+	if oldTurn != msg.turnID {
+		a.answerScrollRow = 0
+	}
 	a.ensureTurnInfo()
 	return a.ensureTick()
 }
@@ -202,7 +282,11 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.statusRefreshPending, a.statusDirty = false, false
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
 	if len(msg.status.TurnsOpen) > 0 {
+		oldTurn := a.state.CurrentTurn
 		a.state.CurrentTurn = msg.status.TurnsOpen[0]
+		if oldTurn != a.state.CurrentTurn {
+			a.answerScrollRow = 0
+		}
 		a.ensureTurnInfo()
 		// The limit and deadline of a turn that is already open come from its record.
 		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
@@ -221,6 +305,14 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		return a, a.reconnect()
 	}
 	a.state = apply(a.state, msg.frame)
+	if msg.frame.Kind == wire.EventKindTurnState {
+		// The override's reason travels on the turn_state event; the turn record
+		// that follows keeps only the literal "override".
+		var body wire.EvTurnState
+		if json.Unmarshal(msg.frame.Body, &body) == nil && body.State == "overridden" && body.Reason != nil {
+			a.overrideReasons[body.TurnID] = *body.Reason
+		}
+	}
 	if a.onEvent != nil {
 		a.onEvent(msg.frame)
 	}
@@ -290,7 +382,31 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		a.refusal = "turn: " + formatRefusal(msg.err)
 		return a, nil
 	}
+	prevHash := a.state.Turns[msg.id].CandidateHash
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
+	// A reply read before the candidate was frozen can arrive after a newer one;
+	// a candidate once seen is never forgotten.
+	if ti, ok := a.state.Turns[msg.id]; ok && ti.CandidateHash == nil && prevHash != nil {
+		turns := copyMap(a.state.Turns)
+		ti.CandidateHash = prevHash
+		turns[msg.id] = ti
+		a.state.Turns = turns
+	}
+	if msg.turn.CandidateID != nil {
+		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
+	}
+	// A stale reply (read before the blocks were raised) carries an empty list
+	// and can arrive after the terminal one, even claiming a terminal state; known
+	// blocks are never wiped by it.
+	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
+		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
+	}
+	return a, nil
+}
+
+// onContent stores a fetched body.
+func (a *App) onContent(msg contentMsg) (tea.Model, tea.Cmd) {
+	a.content.Store(msg.ref, msg.data, msg.err)
 	return a, nil
 }
 
@@ -320,28 +436,49 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
+// bodyHeight is the number of lines left for the active tab.
+func (a *App) bodyHeight() int {
+	return max(a.height-len(renderBanners(a.state))-1-inputHeight, 0)
+}
+
+// answerLineCount is the length of the unclipped answer tab.
+func (a *App) answerLineCount() int {
+	turnID := answerTurn(a.state)
+	return len(strings.Split(renderAnswer(a.state, turnID, a.answerIn(turnID)), "\n"))
+}
+
+// scrollAnswer moves the answer tab by delta lines, staying within the text.
+func (a *App) scrollAnswer(delta int) {
+	maxStart := max(a.answerLineCount()-a.bodyHeight(), 0)
+	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
+}
+
 // View lays out banners, strip, the active tab and the input line.
 func (a *App) View() string {
-	w, h := a.width, a.height
+	w := a.width
 
 	// Get banners and strip.
 	banners := renderBanners(a.state)
 	strip := renderStrip(a.state, w, a.now())
-	numBanners := len(banners)
 
-	// Calculate available space for body and input.
-	bodyHeight := max(h-numBanners-1-inputHeight, 0)
+	bodyHeight := a.bodyHeight()
 
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		tabView = renderAnswer(a.state, w, bodyHeight)
+		turnID := answerTurn(a.state)
+		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
 		tabView = renderParticipants(a.state, w, bodyHeight)
 	}
 	lines := strings.Split(tabView, "\n")
+
+	if a.tab == tabAnswer {
+		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
+		lines = lines[start:]
+	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
 	}

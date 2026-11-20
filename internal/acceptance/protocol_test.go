@@ -310,8 +310,15 @@ func TestProtocol_BlockEndsIncomplete(t *testing.T) {
 	}
 	blockID := rows[0].ID + ":b7"
 	wantTurn(t, turn, engine.StateIncomplete, "block:"+blockID)
-	if len(turn.OpenBlocks) != 1 || turn.OpenBlocks[0] != (wire.OpenBlock{ID: blockID, Severity: "medium", State: "open"}) {
-		t.Fatalf("open blocks = %+v, want %s open at medium", turn.OpenBlocks, blockID)
+	if len(turn.OpenBlocks) != 1 {
+		t.Fatalf("open blocks count = %d, want 1", len(turn.OpenBlocks))
+	}
+	block := turn.OpenBlocks[0]
+	if block.ID != blockID || block.Severity != "medium" || block.State != "open" {
+		t.Fatalf("open block = %+v, want id=%s severity=medium state=open", block, blockID)
+	}
+	if block.Evidence == "" || block.Remedy == "" {
+		t.Fatalf("open block missing evidence or remedy: evidence=%q remedy=%q", block.Evidence, block.Remedy)
 	}
 	if turn.State == engine.StateApproved {
 		t.Fatal("a blocked turn was approved")

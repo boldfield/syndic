@@ -91,6 +91,12 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		if err != nil {
 			return nil, err
 		}
+		// Read the turn row again, after the state, so a turn that ended in
+		// between is not reported with a terminal state but no candidate.
+		turn, err = store.GetTurn(turnID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	reply := &wire.TurnReply{
@@ -112,6 +118,7 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			return nil, fmt.Errorf("candidate %s: %w", turn.CandidateID, err)
 		}
 		reply.CandidateHash = &candidate.ContentHash
+		reply.CandidateID = &turn.CandidateID
 	}
 
 	if turn.TerminalReason != "" {
@@ -218,6 +225,8 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			ID:       b.ID,
 			Severity: b.Severity,
 			State:    b.State,
+			Evidence: b.Evidence,
+			Remedy:   b.Remedy,
 		}
 		reply.OpenBlocks = append(reply.OpenBlocks, blockRecord)
 	}
