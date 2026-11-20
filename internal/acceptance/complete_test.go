@@ -35,7 +35,7 @@ func TestCoverage_ParagraphCounts(t *testing.T) {
 	const (
 		protocolCount       = 10
 		dispatchCount       = 9
-		runsManifestCount   = 13
+		runsManifestCount   = 13 // 12 semicolon-separated clauses; last clause split into 2 items (usage vs no_usage)
 		rosterStopCount     = 10
 		nAndRolesCount      = 5
 		budgetsCount        = 20

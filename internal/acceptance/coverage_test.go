@@ -109,7 +109,8 @@ func namedTestProblems(reg []entry, own []srcFile, external func(dir string) ([]
 		if paragraph == "Quick profile" && strings.HasPrefix(item, "(TUI)") {
 			return true
 		}
-		if paragraph == "Socket" && strings.HasPrefix(item, "(TUI)") {
+		// Socket milestone C is only the answer-tab half of the detach/reattach item
+		if paragraph == "Socket" && item == "(TUI) detach with a turn open, reattach, turn finished meanwhile, answer tab shows the result" {
 			return true
 		}
 		return false
@@ -311,16 +312,31 @@ func TestProto_Forgotten(t *testing.T) {}
 		t.Errorf("a complete registry reported %v", got)
 	}
 
-	// Test milestone C handling
-	mcBadReg := []entry{
-		{"TUI", "a TUI item", "milestone C"},                  // allowed
-		{"Quick profile", "(TUI) a TUI item", "milestone C"},  // allowed
-		{"Socket", "(TUI) an answer tab item", "milestone C"}, // allowed
-		{"Budgets", "an item", "milestone C"},                 // not allowed
+	// Test milestone C handling: allowed cases produce zero problems
+	mcAllowedReg := []entry{
+		{"TUI", "a TUI item", "milestone C"},
+		{"Quick profile", "(TUI) a TUI item", "milestone C"},
+		{"Socket", "(TUI) detach with a turn open, reattach, turn finished meanwhile, answer tab shows the result", "milestone C"},
 	}
-	mcProblems := strings.Join(namedTestProblems(mcBadReg, parse("package p"), none), "\n")
-	if !strings.Contains(mcProblems, "milestone C is not allowed") {
-		t.Errorf("milestone C check failed to catch disallowed use: %s", mcProblems)
+	if got := namedTestProblems(mcAllowedReg, parse("package p"), none); len(got) != 0 {
+		t.Errorf("allowed milestone C entries reported problems: %v", got)
+	}
+
+	// Test milestone C handling: forbidden cases produce rejections
+	mcForbiddenCases := []struct {
+		name  string
+		entry entry
+	}{
+		{"non-TUI paragraph", entry{"Budgets", "an item", "milestone C"}},
+		{"non-(TUI) Quick profile", entry{"Quick profile", "a regular item", "milestone C"}},
+		{"Socket non-answer-tab item", entry{"Socket", "(TUI) a different item", "milestone C"}},
+	}
+	for _, tc := range mcForbiddenCases {
+		mcReg := []entry{tc.entry}
+		mcProblems := strings.Join(namedTestProblems(mcReg, parse("package p"), none), "\n")
+		if !strings.Contains(mcProblems, "milestone C is not allowed") {
+			t.Errorf("milestone C check failed for %s: %s", tc.name, mcProblems)
+		}
 	}
 
 	skips := parse(`package p

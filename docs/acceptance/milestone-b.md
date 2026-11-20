@@ -6,25 +6,24 @@ This document summarizes the acceptance testing for milestone B of the delta eng
 
 The acceptance test suite covers section 8 of `docs/design/v4-delta-engine-tui.md` clause by clause. The table below shows the coverage per design paragraph.
 
-| Paragraph | Clauses | Tests passing | Status |
-|-----------|---------|----------------|--------|
-| Protocol | 10 | 10 | complete |
-| Dispatch failures | 9 | 9 | complete |
-| Runs and manifest | 13 | 13 | complete |
-| Roster and stop | 10 | 10 | complete |
-| N and roles | 5 | 4 | 1 gap |
-| Budgets | 20 | 20 | complete |
-| Quick profile | 11 | 4 | 7 milestone C |
-| Deadlines and pools | 7 | 7 | complete |
-| Cancellation and epochs | 4 | 4 | complete |
-| Recovery | 3 | 3 | complete |
-| Socket | 18 | 17 | 1 milestone C |
-| Journal and races | 6 | 6 | complete |
-| Capacity | 9 | 9 | complete |
-| Repair and delivery | 7 | 7 | complete |
-| TUI | 10 | 0 | 10 milestone C |
-
-**Total:** 142 clauses registered, 123 milestone B tests passing, 1 milestone B gap, 18 milestone C items.
+| Paragraph | Items | Tests Passing | Gaps | Milestone C |
+|-----------|-------|----------------|------|-------------|
+| Protocol | 10 | 10 | 0 | 0 |
+| Dispatch failures | 9 | 9 | 0 | 0 |
+| Runs and manifest | 13 | 13 | 0 | 0 |
+| Roster and stop | 10 | 10 | 0 | 0 |
+| N and roles | 5 | 4 | 1 | 0 |
+| Budgets | 20 | 20 | 0 | 0 |
+| Quick profile | 11 | 4 | 0 | 7 |
+| Deadlines and pools | 7 | 7 | 0 | 0 |
+| Cancellation and epochs | 4 | 4 | 0 | 0 |
+| Recovery | 3 | 3 | 0 | 0 |
+| Socket | 18 | 17 | 0 | 1 |
+| Journal and races | 6 | 6 | 0 | 0 |
+| Capacity | 9 | 9 | 0 | 0 |
+| Repair and delivery | 7 | 7 | 0 | 0 |
+| TUI | 10 | 0 | 0 | 10 |
+| **Total** | **142** | **123** | **1** | **18** |
 
 ## Gaps
 
