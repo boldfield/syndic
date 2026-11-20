@@ -18,6 +18,11 @@ A local chat and coding TUI where every turn is reviewed by independent AI parti
 
 Check with `shasum -a 256 docs/design/*.md`. The design is the hashed text.
 
+## Development
+
+- `make check` runs formatting checks, linting, and tests. The linter (`make lint`) runs golangci-lint at the pinned version via `go run`; the first run downloads and builds the linter.
+- `make lint` runs golangci-lint alone and can be used to check only linting.
+
 ## Status
 
 Milestone A (foundations) is complete. See [`docs/evidence/README.md`](docs/evidence/README.md) for redacted endpoint probe exports.
