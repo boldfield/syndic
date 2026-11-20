@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,6 +349,215 @@ func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
 	}
 }
 
+// TestMergeStatusPopulatesParticipants verifies that MergeStatus fills participants
+// from the status reply.
+func TestMergeStatusPopulatesParticipants(t *testing.T) {
+	s := NewState()
+	status := &wire.StatusReply{
+		RunID:                "run-1",
+		RosterHash:           "hash123",
+		RosterFileChanged:    true,
+		DeadlinesProvisional: true,
+		DefaultPreset:        "review",
+		Participants: []wire.Participant{
+			{
+				ID:                  "author",
+				Model:               "model1",
+				ReportedModel:       "reported-model1",
+				Identity:            "unknown",
+				State:               "idle",
+				Pool:                "pool1",
+				EligibleRoles:       []string{"author", "reviewer"},
+				BytesPerTokenSource: "probe",
+				ContextSource:       "probe",
+			},
+		},
+	}
+
+	s = MergeStatus(s, status)
+
+	if _, ok := s.Participants["author"]; !ok {
+		t.Fatal("author not in participants")
+	}
+	p := s.Participants["author"]
+	if p.State != "idle" || p.ReportedModel != "reported-model1" {
+		t.Errorf("participant data mismatch: state=%s, reported=%s", p.State, p.ReportedModel)
+	}
+	if s.Run.RosterHash != "hash123" {
+		t.Errorf("run info not merged: hash=%s", s.Run.RosterHash)
+	}
+}
+
+// TestMergeTurnPopulatesAuthorAndReviewers verifies that MergeTurn fills author
+// and reviewers from attempt records.
+func TestMergeTurnPopulatesAuthorAndReviewers(t *testing.T) {
+	s := NewState()
+	s.Participants["author"] = ParticipantInfo{ID: "author", State: "running"}
+	s.Participants["reviewer1"] = ParticipantInfo{ID: "reviewer1", State: "queued"}
+
+	turn := &wire.TurnReply{
+		State:  "approved",
+		Preset: "review",
+		Attempts: []wire.AttemptRecord{
+			{ID: "a1", Participant: "author", Phase: "author_dispatch", Status: "complete", TransportStatus: "ok"},
+			{ID: "a2", Participant: "reviewer1", Phase: "reviewer_dispatch", Status: "complete", TransportStatus: "ok"},
+		},
+	}
+
+	s = MergeTurn(s, "turn-1", turn)
+
+	ti := s.Turns["turn-1"]
+	if ti.Author != "author" {
+		t.Errorf("author = %q, want author", ti.Author)
+	}
+	if len(ti.Reviewers) != 1 || ti.Reviewers[0] != "reviewer1" {
+		t.Errorf("reviewers = %v, want [reviewer1]", ti.Reviewers)
+	}
+	if ti.ReviewerStates["reviewer1"] != "queued" {
+		t.Errorf("reviewer state = %s, want queued", ti.ReviewerStates["reviewer1"])
+	}
+}
+
+// TestApplyPureOnParticipantState verifies apply doesn't mutate input maps.
+func TestApplyPureOnParticipantState(t *testing.T) {
+	s := NewState()
+	s.Participants["p1"] = ParticipantInfo{ID: "p1", State: "idle"}
+	s.CurrentTurn = "turn-1"
+	s.Turns["turn-1"] = TurnInfo{ID: "turn-1", Author: "p1", ReviewerStates: make(map[string]string)}
+
+	body := wire.EvParticipantState{Participant: "p1", State: "running"}
+	bodyBytes, _ := json.Marshal(body)
+	f := wire.Frame{Seq: 1, Kind: wire.EventKindParticipantState, Body: bodyBytes}
+
+	s1 := apply(s, f)
+
+	// Original should be unchanged (no mutations)
+	if s.Participants["p1"].State != "idle" {
+		t.Error("original state was mutated")
+	}
+	if s1.Participants["p1"].State != "running" {
+		t.Error("new state not updated")
+	}
+	// Check that the author state was updated in the turn
+	if s1.Turns["turn-1"].AuthorState != "running" {
+		t.Error("author state not updated in turn")
+	}
+}
+
+// TestRenderStripWithReviewersInOrder verifies reviewers are shown in order,
+// not random map iteration.
+func TestRenderStripWithReviewersInOrder(t *testing.T) {
+	s := NewState()
+	s.Status = &wire.StatusReply{DefaultPreset: "review"}
+	s.CurrentTurn = "turn-1"
+	s.Turns["turn-1"] = TurnInfo{
+		ID:          "turn-1",
+		State:       "submitted",
+		Preset:      "review",
+		Author:      "author",
+		AuthorState: "running",
+		Reviewers:   []string{"r1", "r2", "r3"},
+		ReviewerStates: map[string]string{
+			"r1": "queued",
+			"r2": "running",
+			"r3": "idle",
+		},
+	}
+
+	strip := renderStrip(s, 200)
+	if !contains(strip, "r1 queued") || !contains(strip, "r2 running") || !contains(strip, "r3 idle") {
+		t.Errorf("strip = %s", strip)
+	}
+	// Verify order: r1 should come before r2 should come before r3
+	idx1 := indexOf(strip, "r1")
+	idx2 := indexOf(strip, "r2")
+	idx3 := indexOf(strip, "r3")
+	if idx1 < 0 || idx2 < 0 || idx3 < 0 || idx1 >= idx2 || idx2 >= idx3 {
+		t.Errorf("reviewers not in order: r1@%d, r2@%d, r3@%d", idx1, idx2, idx3)
+	}
+}
+
+// TestRenderStripTruncatesWithEllipsis verifies the strip truncates at terminal
+// display width with ellipsis.
+func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
+	s := NewState()
+	s.Status = &wire.StatusReply{DefaultPreset: "review"}
+	s.CurrentTurn = "turn-1"
+	s.Turns["turn-1"] = TurnInfo{
+		ID:        "turn-1",
+		State:     "submitted",
+		Preset:    "review",
+		Author:    "author",
+		Reviewers: []string{"r1", "r2", "r3", "r4", "r5"},
+		ReviewerStates: map[string]string{
+			"r1": "running", "r2": "running", "r3": "running", "r4": "running", "r5": "running",
+		},
+	}
+
+	strip := renderStrip(s, 80)
+	if len(strip) > 80 {
+		t.Errorf("strip width = %d, want <= 80", len(strip))
+	}
+	if !strings.HasSuffix(strip, "…") {
+		t.Errorf("strip should end with ellipsis: %s", strip)
+	}
+}
+
+// TestRenderBannersShowsReconnecting verifies the reconnecting banner appears.
+func TestRenderBannersShowsReconnecting(t *testing.T) {
+	s := NewState()
+	s.Status = &wire.StatusReply{DeadlinesProvisional: true}
+	s.ConnState = ConnStateReconnecting
+
+	banners := renderBanners(s)
+	if len(banners) < 2 {
+		t.Fatalf("expected at least 2 banners, got %d: %v", len(banners), banners)
+	}
+	hasProvisional := false
+	hasReconnecting := false
+	for _, b := range banners {
+		if b == "deadlines: provisional" {
+			hasProvisional = true
+		}
+		if b == "engine: reconnecting" {
+			hasReconnecting = true
+		}
+	}
+	if !hasProvisional {
+		t.Error("provisional banner missing")
+	}
+	if !hasReconnecting {
+		t.Error("reconnecting banner missing")
+	}
+}
+
+// TestRenderBannersShowsRosterChanged verifies the roster changed banner.
+func TestRenderBannersShowsRosterChanged(t *testing.T) {
+	s := NewState()
+	s.Status = &wire.StatusReply{RosterFileChanged: true}
+	s.ConnState = ConnStateConnected
+
+	banners := renderBanners(s)
+	found := false
+	for _, b := range banners {
+		if strings.Contains(b, "roster file changed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("roster changed banner not found in %v", banners)
+	}
+}
+
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
+}
+
+func indexOf(s, substr string) int {
+	return strings.Index(s, substr)
 }
