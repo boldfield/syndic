@@ -270,9 +270,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 						_, _ = fmt.Fprintf(stderr, "stop engine: %v\n", err)
 					}
 					if sigCount > 0 {
-						// Return 130 if we got a signal
+						// serveDone was already consumed; do not wait on it.
 						_ = srv.Close()
-						waitServe(serveDone)
 						return 130
 					}
 					// Serve errored, return 1 if Serve had an error, otherwise 0
@@ -291,7 +290,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 // closed, so the journal is not closed under it.
 func waitServe(serveDone <-chan error) {
 	select {
-	case <-serveDone:
+	case err := <-serveDone:
+		_ = err
 	case <-time.After(3 * time.Second):
 	}
 }
