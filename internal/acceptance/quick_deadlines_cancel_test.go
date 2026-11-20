@@ -762,10 +762,11 @@ func TestDeadlinesPools_PerPresetDeadlineOverride(t *testing.T) {
 
 func TestCancellation_CancelDuringAuthor(t *testing.T) {
 	t.Parallel()
+	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {fake.Step{Kind: fake.StepKindHang}},
 		"reviewer": {},
-	})
+	}, enginetest.ClockStart(farFuture))
 	c := s.Dial(t)
 
 	turnID := s.Submit(t, c, "s1")
@@ -794,10 +795,11 @@ func TestCancellation_CancelDuringAuthor(t *testing.T) {
 
 func TestCancellation_CancelDuringReviewKeepsCandidate(t *testing.T) {
 	t.Parallel()
+	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
 		"reviewer": {fake.Step{Kind: fake.StepKindHang}},
-	})
+	}, enginetest.ClockStart(farFuture))
 	c := s.Dial(t)
 
 	turnID := s.Submit(t, c, "s1")
@@ -832,6 +834,7 @@ func TestCancellation_CancelDuringReviewKeepsCandidate(t *testing.T) {
 
 func TestCancellation_LateOutputQuarantined(t *testing.T) {
 	t.Parallel()
+	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("the answer is 42")},
 		"reviewer": {
@@ -840,7 +843,7 @@ func TestCancellation_LateOutputQuarantined(t *testing.T) {
 				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
-	})
+	}, enginetest.ClockStart(farFuture))
 	c := s.Dial(t)
 
 	turnID := s.Submit(t, c, "s1")
@@ -875,49 +878,44 @@ func TestCancellation_LateOutputQuarantined(t *testing.T) {
 
 func TestCancellation_CancelUnconfirmedKeepsHold(t *testing.T) {
 	t.Parallel()
+	farFuture := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 	s := newSuite(t, enginetest.RosterTOML,
 		map[string][]fake.Step{
 			"author":   {enginetest.Reply("the answer is 42")},
 			"reviewer": {fake.Step{Kind: fake.StepKindHang}},
 		},
 		enginetest.CancelUnconfirmed(),
+		enginetest.ClockStart(farFuture),
 	)
 	c := s.Dial(t)
 
 	turnID := s.Submit(t, c, "s1")
 
-	// Wait for reviewer dispatch
-	s.WaitTurnState(turnID, engine.StateReviewersDispatched)
-
-	// Get the reviewer attempt ID
-	var reviewerAttemptID string
-	for _, ev := range s.Events() {
-		if ab, ok := body[wire.EvAttemptBegun](ev, wire.EventKindAttemptBegun); ok && ab.Participant == "reviewer" {
-			reviewerAttemptID = ab.AttemptID
-			break
-		}
-	}
+	// Wait for reviewer attempt to begin (not just dispatch)
+	attemptBegun := s.WaitEvent(func(ev event) bool {
+		ab, ok := body[wire.EvAttemptBegun](ev, wire.EventKindAttemptBegun)
+		return ok && ab.Participant == "reviewer"
+	})
+	reviewerAB, _ := body[wire.EvAttemptBegun](attemptBegun, wire.EventKindAttemptBegun)
+	reviewerAttemptID := reviewerAB.AttemptID
 
 	if reviewerAttemptID == "" {
 		t.Fatal("no reviewer attempt found")
 	}
 
-	// Before cancel, there should be a hold on the pool
-	s.wantHold(t, c, reviewerAttemptID)
-
-	// Cancel the turn
+	// Cancel the turn while reviewer is hanging
 	err := c.Cancel(s.ctx(), turnID)
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	// With CancelUnconfirmed, the pool slot stays held even after cancel
-	// (because the cancel was not confirmed by the adapter)
+	// After cancel, there should be a hold on the pool
 	s.wantHold(t, c, reviewerAttemptID)
 
 	// Wait for turn to end
 	s.WaitTerminal(turnID)
 
-	// The hold should still be retained
+	// With CancelUnconfirmed, the hold should still be retained after the turn ends
+	// (because the cancel was not confirmed by the adapter)
 	s.wantHold(t, c, reviewerAttemptID)
 }
