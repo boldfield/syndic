@@ -47,6 +47,11 @@ func TestDispatch_UnreachableRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-unreachable-retry",
 		Input:        "input",
@@ -57,13 +62,14 @@ func TestDispatch_UnreachableRetry(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	// Advance clock until reviewer has been called twice (once unreachable, once retry)
-	h.AdvanceClock(t, "reviewer", 2)
+	h.WaitTurnState(t, c, reply.TurnID, "approved")
 
-	h.WaitTurnState(t, reply.TurnID, "approved")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "approved" {
-		t.Fatalf("expected approved state, got %v", states)
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "approved" {
+		t.Fatalf("expected state approved, got %s", turn.State)
 	}
 }
 
@@ -94,6 +100,11 @@ func TestDispatch_TwoUnreachable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-two-unreachable",
 		Input:        "input",
@@ -104,13 +115,14 @@ func TestDispatch_TwoUnreachable(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	// Advance clock until reviewer has been called twice (first unreachable, retry also unreachable)
-	h.AdvanceClock(t, "reviewer", 2)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -135,6 +147,11 @@ func TestDispatch_Unauthorized(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-unauthorized",
 		Input:        "input",
@@ -145,10 +162,14 @@ func TestDispatch_Unauthorized(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -173,6 +194,11 @@ func TestDispatch_ResetWithHold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-reset-hold",
 		Input:        "input",
@@ -183,10 +209,14 @@ func TestDispatch_ResetWithHold(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -211,6 +241,11 @@ func TestDispatch_MalformedBody(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-malformed-body",
 		Input:        "input",
@@ -221,10 +256,14 @@ func TestDispatch_MalformedBody(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -247,6 +286,11 @@ func TestDispatch_ErrNotSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-not-sent",
 		Input:        "input",
@@ -257,10 +301,14 @@ func TestDispatch_ErrNotSent(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -283,6 +331,11 @@ func TestDispatch_PlainGoError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-plain-error",
 		Input:        "input",
@@ -293,10 +346,14 @@ func TestDispatch_PlainGoError(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -324,7 +381,11 @@ func TestDispatch_RetryAfterFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
-	// Submit with unreachable response followed by successful retry
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-retry",
 		Input:        "input",
@@ -335,7 +396,13 @@ func TestDispatch_RetryAfterFailure(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	// Advance clock until reviewer has been called twice (once unreachable, once retry)
-	h.AdvanceClock(t, "reviewer", 2)
-	h.WaitTurnState(t, reply.TurnID, "approved")
+	h.WaitTurnState(t, c, reply.TurnID, "approved")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "approved" {
+		t.Fatalf("expected state approved, got %s", turn.State)
+	}
 }

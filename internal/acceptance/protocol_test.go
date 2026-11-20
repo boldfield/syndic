@@ -23,17 +23,21 @@ func init() {
 	cover("Protocol", "solo with status refused is incomplete, not solo_complete", "TestProtocol_SoloRefused")
 }
 
+func ptrString(s string) *string { return &s }
+
 // TestProtocol_ApproveWithHash tests that an approve verdict reaches the approved
 // state with the candidate hash in the answer.
 func TestProtocol_ApproveWithHash(t *testing.T) {
+	var capturedCandidateHash, capturedAttemptID string
 	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author": {
 			enginetest.Reply("author answer"),
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				// Verdict approve with the actual candidate hash and attempt ID from the request
-				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+				capturedCandidateHash = req.Envelope.CandidateHash
+				capturedAttemptID = req.Envelope.AttemptID
+				return fake.VerdictApprove(capturedCandidateHash, capturedAttemptID)
 			}),
 		},
 	})
@@ -41,6 +45,12 @@ func TestProtocol_ApproveWithHash(t *testing.T) {
 	c := h.Dial(t)
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
+
+	// Subscribe to events before submit
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	req := wire.SubmitRequest{
 		SubmissionID: "test-submit-1",
@@ -52,14 +62,20 @@ func TestProtocol_ApproveWithHash(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "approved")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "approved" {
-		t.Fatalf("expected approved state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "approved")
+
+	// Fetch the turn record to verify the candidate hash is in the answer
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "approved" {
+		t.Fatalf("expected state approved, got %s", turn.State)
+	}
+	if turn.CandidateHash == nil || *turn.CandidateHash == "" {
+		t.Fatalf("candidate hash is empty, expected %s", capturedCandidateHash)
 	}
 }
-
-func ptrString(s string) *string { return &s }
 
 // TestProtocol_ProseApproveTwice tests that a prose approve yields repair
 // and then a second malformed verdict yields incomplete malformed_twice.
@@ -84,6 +100,11 @@ func TestProtocol_ProseApproveTwice(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-prose-twice",
 		Input:        "input",
@@ -94,10 +115,14 @@ func TestProtocol_ProseApproveTwice(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -110,7 +135,6 @@ func TestProtocol_WrongHash(t *testing.T) {
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				// Return a verdict with a different candidate hash
 				return fake.VerdictWrongHash(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
@@ -119,6 +143,11 @@ func TestProtocol_WrongHash(t *testing.T) {
 	c := h.Dial(t)
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
+
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
 
 	req := wire.SubmitRequest{
 		SubmissionID: "test-wrong-hash",
@@ -130,10 +159,14 @@ func TestProtocol_WrongHash(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -155,6 +188,11 @@ func TestProtocol_ApproveWithChanges(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-changes",
 		Input:        "input",
@@ -165,10 +203,14 @@ func TestProtocol_ApproveWithChanges(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -189,6 +231,11 @@ func TestProtocol_TwoEnvelopes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-two-envelopes",
 		Input:        "input",
@@ -199,10 +246,14 @@ func TestProtocol_TwoEnvelopes(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -224,6 +275,11 @@ func TestProtocol_BlockWithEndMarker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-block-end-marker",
 		Input:        "input",
@@ -234,10 +290,14 @@ func TestProtocol_BlockWithEndMarker(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -259,6 +319,11 @@ func TestProtocol_BlockOpensIncomplete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-block-opens",
 		Input:        "input",
@@ -269,10 +334,14 @@ func TestProtocol_BlockOpensIncomplete(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -295,6 +364,11 @@ func TestProtocol_AuthorTruncated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-truncated",
 		Input:        "input",
@@ -305,10 +379,14 @@ func TestProtocol_AuthorTruncated(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -338,6 +416,11 @@ func TestProtocol_ReviewerModelMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-model-mismatch",
 		Input:        "input",
@@ -348,10 +431,14 @@ func TestProtocol_ReviewerModelMismatch(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }
 
@@ -373,6 +460,11 @@ func TestProtocol_SoloRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
+	_, err := c.Subscribe(ctx, 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
 	req := wire.SubmitRequest{
 		SubmissionID: "test-solo-refused",
 		Input:        "input",
@@ -383,9 +475,13 @@ func TestProtocol_SoloRefused(t *testing.T) {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	h.WaitTurnState(t, reply.TurnID, "incomplete")
-	states := h.engine.TurnStates(reply.TurnID)
-	if len(states) == 0 || states[len(states)-1] != "incomplete" {
-		t.Fatalf("expected incomplete state, got %v", states)
+	h.WaitTurnState(t, c, reply.TurnID, "incomplete")
+
+	turn, err := c.Turn(ctx, reply.TurnID)
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if turn.State != "incomplete" {
+		t.Fatalf("expected state incomplete, got %s", turn.State)
 	}
 }

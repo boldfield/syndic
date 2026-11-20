@@ -2,6 +2,7 @@ package acceptance
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,21 +15,17 @@ import (
 	"github.com/boldfield/syndic/internal/lockfile"
 	"github.com/boldfield/syndic/internal/server"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 // gap marks a test as skipped with a message explaining why it's incomplete.
 // The spec requires that the message describe an exact observed engine behavior,
 // not "not yet implemented". A complete test that fails because the engine
 // does something other than the design says calls gap as its first statement.
+// nolint:unused
 func gap(t *testing.T, reason string) {
 	t.Helper()
 	t.Skipf("gap: %s", reason)
-}
-
-// gapTest is a test that verifies gap works correctly.
-// It's minimal to allow the gap function to be recognized as used.
-func TestGap(t *testing.T) {
-	gap(t, "this test validates that gap works")
 }
 
 const (
@@ -94,13 +91,18 @@ func (h *Suite) startServer() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	h.t.Cleanup(cancel)
-
+	serveErr := make(chan error, 1)
 	go func() {
 		if err := h.server.Serve(ctx); err != nil && err != net.ErrClosed {
-			h.t.Errorf("server.Serve: %v", err)
+			serveErr <- err
 		}
+		close(serveErr)
 	}()
+	h.t.Cleanup(func() {
+		cancel()
+		//nolint:errcheck
+		<-serveErr
+	})
 }
 
 func (h *Suite) maxFrameSize() {
@@ -144,26 +146,45 @@ func (h *Suite) RawConn(t *testing.T) net.Conn {
 	return conn
 }
 
-// WaitTurnState waits for a turn to reach a given state via the event stream.
-func (h *Suite) WaitTurnState(t *testing.T, turnID string, state string) {
+// WaitTurnState waits for a turn to reach a given state via the client subscription.
+func (h *Suite) WaitTurnState(t *testing.T, c *client.Client, turnID string, state string) {
 	t.Helper()
-	h.engine.WaitTurnState(turnID, state)
-}
-
-// WaitEvent waits for an event matching a predicate to appear in the stream.
-// Tests should prefer WaitTurnState for turn state events; this is for specific event kinds.
-func (h *Suite) WaitEvent(t *testing.T, match func(*enginetest.Event) bool) {
-	t.Helper()
-	deadline := time.Now().Add(waitTimeout)
-	for time.Now().Before(deadline) {
-		for _, ev := range h.engine.Events() {
-			if match(&ev) {
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+	for {
+		frame, err := c.NextEvent(ctx)
+		if err != nil {
+			t.Fatalf("NextEvent: %v", err)
+		}
+		if frame.Type == "turn_state" {
+			var ev struct {
+				TurnID string `json:"turn_id"`
+				State  string `json:"state"`
+			}
+			if err := json.Unmarshal(frame.Body, &ev); err != nil {
+				t.Fatalf("unmarshal turn_state: %v", err)
+			}
+			if ev.TurnID == turnID && ev.State == state {
 				return
 			}
 		}
-		h.engine.Clock.Advance(time.Millisecond)
 	}
-	t.Fatal("event did not arrive before deadline")
+}
+
+// WaitEvent waits for an event matching a predicate via the client subscription.
+func (h *Suite) WaitEvent(t *testing.T, c *client.Client, match func(frame wire.Frame) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+	for {
+		frame, err := c.NextEvent(ctx)
+		if err != nil {
+			t.Fatalf("NextEvent: %v", err)
+		}
+		if match(frame) {
+			return
+		}
+	}
 }
 
 // Restart closes the server and engine without graceful stop (simulating a crash)
@@ -172,11 +193,8 @@ func (h *Suite) WaitEvent(t *testing.T, match func(*enginetest.Event) bool) {
 func (h *Suite) Restart(t *testing.T, newRosterTOML string) {
 	t.Helper()
 
-	// Close server.
+	// Close server without gracefully stopping (crash simulation).
 	_ = h.server.Close()
-
-	// Stop the old engine (crash simulation - don't gracefully stop).
-	_ = h.engine.Engine.Stop(context.Background())
 
 	if newRosterTOML != "" {
 		if err := os.WriteFile(h.engine.RosterPath, []byte(newRosterTOML), 0o600); err != nil {
@@ -193,9 +211,8 @@ func (h *Suite) Restart(t *testing.T, newRosterTOML string) {
 		return string(b)
 	}()
 
-	// Create new engine on same DB, store, hub, and clock
-	oldEngine := h.engine
-	newEng, err := enginetest.NewOnExisting(t, oldEngine, rosterTOML)
+	// Create new engine on same DB, store, hub, and clock (reuse the same state directory)
+	newEng, err := enginetest.NewOnExisting(t, h.engine, rosterTOML)
 	if err != nil {
 		t.Fatalf("restart engine: %v", err)
 	}
