@@ -265,11 +265,11 @@ func TestRegionsAndTabs(t *testing.T) {
 	r := newRig(t)
 	r.waitConnected(t)
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	r.waitFor(t, "transcript (placeholder)")
+	r.waitFor(t, "no turn")
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	r.waitFor(t, "participants (placeholder)")
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyShiftTab})
-	r.waitFor(t, "transcript (placeholder)")
+	r.waitFor(t, "no turn")
 
 	app := r.final(t)
 	lines := strings.Split(app.View(), "\n")
@@ -279,7 +279,7 @@ func TestRegionsAndTabs(t *testing.T) {
 	if !strings.Contains(lines[0], "idle") || !strings.HasPrefix(lines[0], "[") {
 		t.Errorf("strip region = %q, want [<preset>] [idle] ...", lines[0])
 	}
-	if !strings.Contains(lines[1], "transcript (placeholder)") {
+	if !strings.Contains(lines[1], "no turn") {
 		t.Errorf("tab region = %q", lines[1])
 	}
 	if !strings.HasPrefix(lines[23], "> ") {
