@@ -54,7 +54,8 @@ type TurnInfo struct {
 	Preset          string
 	QuickProfile    *string
 	SubmittedAt     time.Time
-	TurnDeadline    *time.Time
+	TurnDeadline    *time.Time    // submit time plus DeadlineDur
+	DeadlineDur     time.Duration // the configured turn deadline
 	EstimatedTokens int64
 	LimitTokens     int64
 	Author          string
@@ -83,6 +84,17 @@ type AttemptInfo struct {
 	ReportedPrompt      *int64
 	ReportedCompletion  *int64
 	ScrubCount          int
+	VerdictClass        string // validation status of the verdict recorded for it
+	VerdictParsed       bool
+}
+
+// VerdictInfo is one recorded verdict: its classification and whether its
+// value parsed.
+type VerdictInfo struct {
+	ID        string
+	AttemptID string
+	Parsed    bool
+	Class     string
 }
 
 // BlockInfo holds information about a block.
@@ -124,12 +136,13 @@ type State struct {
 	TurnState           map[string]string
 	Run                 RunInfo
 	Participants        map[string]ParticipantInfo
-	Pools               map[string][]wire.PoolHold
+	Pools               map[string]wire.Pool
 	OrphanedHolds       []wire.Hold
 	QuickProfiles       map[string]wire.QuickProfile
 	Turns               map[string]TurnInfo
 	Attempts            map[string]AttemptInfo
 	Blocks              map[string]BlockInfo
+	Verdicts            map[string]VerdictInfo
 	Messages            map[string]MessageInfo
 	LastBudgetNotice    *BudgetNotice
 	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
@@ -142,11 +155,12 @@ func NewState() State {
 	return State{
 		TurnState:     make(map[string]string),
 		Participants:  make(map[string]ParticipantInfo),
-		Pools:         make(map[string][]wire.PoolHold),
+		Pools:         make(map[string]wire.Pool),
 		QuickProfiles: make(map[string]wire.QuickProfile),
 		Turns:         make(map[string]TurnInfo),
 		Attempts:      make(map[string]AttemptInfo),
 		Blocks:        make(map[string]BlockInfo),
+		Verdicts:      make(map[string]VerdictInfo),
 		Messages:      make(map[string]MessageInfo),
 	}
 }
@@ -225,7 +239,7 @@ func apply(s State, f wire.Frame) State {
 					if ti.Author == body.Participant {
 						ti.AuthorState = body.State
 					}
-					if ti.ReviewerStates[body.Participant] != "" {
+					if _, ok := ti.ReviewerStates[body.Participant]; ok {
 						ti.ReviewerStates = copyMap(ti.ReviewerStates)
 						ti.ReviewerStates[body.Participant] = body.State
 					}
@@ -242,6 +256,7 @@ func apply(s State, f wire.Frame) State {
 			attempts := copyMap(s.Attempts)
 			attempts[body.AttemptID] = AttemptInfo{
 				ID:              body.AttemptID,
+				TurnID:          s.CurrentTurn,
 				Participant:     body.Participant,
 				Phase:           body.Phase,
 				Epoch:           body.Epoch,
@@ -263,8 +278,8 @@ func apply(s State, f wire.Frame) State {
 							ti.AuthorState = pi.State
 						}
 					} else if body.Phase == "review" {
-						if ti.ReviewerStates[body.Participant] == "" {
-							ti.Reviewers = append(ti.Reviewers, body.Participant)
+						if _, seen := ti.ReviewerStates[body.Participant]; !seen {
+							ti.Reviewers = append(append([]string(nil), ti.Reviewers...), body.Participant)
 							reviewerStates := copyMap(ti.ReviewerStates)
 							if pi, ok := s.Participants[body.Participant]; ok {
 								reviewerStates[body.Participant] = pi.State
@@ -368,6 +383,12 @@ func apply(s State, f wire.Frame) State {
 				Estimated:   body.Estimated,
 				Limit:       body.Limit,
 			}
+			if ti, ok := s.Turns[body.TurnID]; ok && body.Limit > 0 {
+				turns := copyMap(s.Turns)
+				ti.LimitTokens = body.Limit
+				turns[body.TurnID] = ti
+				s.Turns = turns
+			}
 		}
 
 	case wire.EventKindBudgetEstimateExceeded:
@@ -410,14 +431,36 @@ func apply(s State, f wire.Frame) State {
 				if ti, ok := turns[body.TurnID]; ok {
 					deadline := frameTime.Add(time.Duration(body.RemainingMs) * time.Millisecond)
 					ti.TurnDeadline = &deadline
+					if !ti.SubmittedAt.IsZero() {
+						ti.DeadlineDur = deadline.Sub(ti.SubmittedAt)
+					}
 					turns[body.TurnID] = ti
 					s.Turns = turns
 				}
 			}
 		}
 
-	case wire.EventKindCapacity, wire.EventKindVerdictRecorded,
-		wire.EventKindVerdictsDelivered:
+	case wire.EventKindVerdictRecorded:
+		var body wire.EvVerdictRecorded
+		if json.Unmarshal(f.Body, &body) == nil {
+			verdicts := copyMap(s.Verdicts)
+			verdicts[body.VerdictID] = VerdictInfo{
+				ID:        body.VerdictID,
+				AttemptID: body.AttemptID,
+				Parsed:    body.Parsed,
+				Class:     body.ValidationStatus,
+			}
+			s.Verdicts = verdicts
+			attempts := copyMap(s.Attempts)
+			if ai, ok := attempts[body.AttemptID]; ok {
+				ai.VerdictClass = body.ValidationStatus
+				ai.VerdictParsed = body.Parsed
+				attempts[body.AttemptID] = ai
+			}
+			s.Attempts = attempts
+		}
+
+	case wire.EventKindCapacity, wire.EventKindVerdictsDelivered:
 		// These events don't directly update state; they're informational.
 	}
 
@@ -490,10 +533,27 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 	}
 	s.Participants = participants
 
+	// The open turn's roles show their participant's state as of this reply.
+	if ti, ok := s.Turns[s.CurrentTurn]; ok {
+		turns := copyMap(s.Turns)
+		if p, ok := participants[ti.Author]; ok && ti.Author != "" {
+			ti.AuthorState = p.State
+		}
+		states := copyMap(ti.ReviewerStates)
+		for id := range states {
+			if p, ok := participants[id]; ok {
+				states[id] = p.State
+			}
+		}
+		ti.ReviewerStates = states
+		turns[s.CurrentTurn] = ti
+		s.Turns = turns
+	}
+
 	// Populate pools from status
-	pools := make(map[string][]wire.PoolHold)
+	pools := make(map[string]wire.Pool)
 	for _, pool := range status.Pools {
-		pools[pool.Name] = pool.Holds
+		pools[pool.Name] = pool
 	}
 	s.Pools = pools
 
@@ -520,45 +580,53 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		ti = TurnInfo{ID: turnID}
 	}
 
-	ti.State = turn.State
+	// A reply fetched while the turn was open may land after the terminal
+	// event; never step back from a terminal state.
+	if !isTerminalState(ti.State) || isTerminalState(turn.State) {
+		ti.State = turn.State
+	}
 	ti.Preset = turn.Preset
 	ti.QuickProfile = turn.QuickProfile
 	ti.TerminalReason = turn.TerminalReason
 	ti.CandidateHash = turn.CandidateHash
-	ti.EstimatedTokens = turn.EstimatedPromptTokens
+	// The reply's figure sums the attempts so far; before any exists keep the
+	// estimate the submit reported.
+	if turn.EstimatedPromptTokens > 0 {
+		ti.EstimatedTokens = turn.EstimatedPromptTokens
+	}
 
 	if turn.Budget.Limit != nil {
 		ti.LimitTokens = *turn.Budget.Limit
 	}
 
-	if turn.Deadlines.Turn > 0 && !ti.SubmittedAt.IsZero() {
-		deadline := ti.SubmittedAt.Add(time.Duration(turn.Deadlines.Turn) * time.Millisecond)
-		ti.TurnDeadline = &deadline
+	if turn.Deadlines.Turn > 0 {
+		ti.DeadlineDur = time.Duration(turn.Deadlines.Turn) * time.Millisecond
+		if !ti.SubmittedAt.IsZero() {
+			deadline := ti.SubmittedAt.Add(ti.DeadlineDur)
+			ti.TurnDeadline = &deadline
+		}
 	}
 
-	// Populate author and reviewers from attempts
-	reviewerMap := make(map[string]string)
-	var reviewerOrder []string
-	seenReviewers := make(map[string]bool)
+	// Author and reviewers come from the attempts; what events already
+	// established stays, and the reply only adds to it.
+	reviewers := append([]string(nil), ti.Reviewers...)
+	states := copyMap(ti.ReviewerStates)
 	for _, ar := range turn.Attempts {
-		if ar.Phase == "author" && ti.Author == "" {
-			ti.Author = ar.Participant
-			// Get author state from participants
-			if pi, ok := s.Participants[ar.Participant]; ok {
-				ti.AuthorState = pi.State
+		switch ar.Phase {
+		case "author":
+			if ti.Author == "" {
+				ti.Author = ar.Participant
+				ti.AuthorState = s.Participants[ar.Participant].State
 			}
-		} else if ar.Phase == "review" {
-			if !seenReviewers[ar.Participant] {
-				seenReviewers[ar.Participant] = true
-				reviewerOrder = append(reviewerOrder, ar.Participant)
-			}
-			if pi, ok := s.Participants[ar.Participant]; ok {
-				reviewerMap[ar.Participant] = pi.State
+		case "review":
+			if _, seen := states[ar.Participant]; !seen {
+				reviewers = append(reviewers, ar.Participant)
+				states[ar.Participant] = s.Participants[ar.Participant].State
 			}
 		}
 	}
-	ti.Reviewers = reviewerOrder
-	ti.ReviewerStates = reviewerMap
+	ti.Reviewers = reviewers
+	ti.ReviewerStates = states
 
 	turns[turnID] = ti
 	s.Turns = turns
@@ -588,6 +656,17 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		attempts[ar.ID] = ai
 	}
 	s.Attempts = attempts
+
+	verdicts := copyMap(s.Verdicts)
+	for _, v := range turn.Verdicts {
+		verdicts[v.ID] = VerdictInfo{ID: v.ID, AttemptID: v.AttemptID, Parsed: v.Parsed, Class: v.ValidationStatus}
+		if ai, ok := attempts[v.AttemptID]; ok {
+			ai.VerdictClass = v.ValidationStatus
+			ai.VerdictParsed = v.Parsed
+			attempts[v.AttemptID] = ai
+		}
+	}
+	s.Verdicts = verdicts
 
 	// Merge blocks from turn reply
 	blocks := copyMap(s.Blocks)

@@ -13,7 +13,7 @@ import (
 // [est. tokens / limit] author:<id> <state> reviewers: <id> <state> … identity: unknown(name-matched)
 // At 80 columns with five reviewers the strip is at most 80 cells wide and ends with …
 // when needed, dropping segments from the right in whole segments. Uses terminal display width.
-func renderStrip(s State, width int) string {
+func renderStrip(s State, width int, now time.Time) string {
 	switch s.ConnState {
 	case ConnStateConnecting:
 		return "engine: connecting"
@@ -50,20 +50,23 @@ func renderStrip(s State, width int) string {
 
 	// [elapsed / turn deadline]
 	if !ti.SubmittedAt.IsZero() {
-		elapsed := time.Since(ti.SubmittedAt)
-		elapsedStr := formatDuration(elapsed)
-		if ti.TurnDeadline != nil && !ti.TurnDeadline.IsZero() {
-			remaining := time.Until(*ti.TurnDeadline)
-			remainingStr := formatDuration(remaining)
-			segments = append(segments, fmt.Sprintf("[%s / %s]", elapsedStr, remainingStr))
-		} else {
-			segments = append(segments, fmt.Sprintf("[%s]", elapsedStr))
+		elapsed := formatDuration(max(now.Sub(ti.SubmittedAt), 0))
+		switch {
+		case ti.DeadlineDur > 0:
+			segments = append(segments, fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.DeadlineDur)))
+		case ti.TurnDeadline != nil:
+			segments = append(segments, fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.TurnDeadline.Sub(ti.SubmittedAt))))
+		default:
+			segments = append(segments, fmt.Sprintf("[%s]", elapsed))
 		}
 	}
 
 	// [est. tokens / limit]
-	if ti.EstimatedTokens > 0 || ti.LimitTokens > 0 {
+	switch {
+	case ti.LimitTokens > 0:
 		segments = append(segments, fmt.Sprintf("[est. %d / %d]", ti.EstimatedTokens, ti.LimitTokens))
+	case ti.EstimatedTokens > 0:
+		segments = append(segments, fmt.Sprintf("[est. %d]", ti.EstimatedTokens))
 	}
 
 	// author:<id> <state>

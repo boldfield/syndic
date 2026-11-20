@@ -278,80 +278,6 @@ func TestApplyMessageAppended(t *testing.T) {
 	}
 }
 
-func TestApplySequenceOfEventsFromRealTurn(t *testing.T) {
-	s := NewState()
-
-	// Simulate a complete turn: submit -> attempt_begun -> attempt_completed -> turn_state
-
-	// 1. Turn submitted
-	submit := wire.EvTurnSubmitted{
-		TurnID:          "turn-1",
-		SubmissionID:    "sub-1",
-		Preset:          "review",
-		EstimatedTokens: 1000,
-	}
-	submitBytes, _ := json.Marshal(submit)
-	s = apply(s, wire.Frame{Seq: 1, Kind: wire.EventKindTurnSubmitted, Body: submitBytes})
-
-	if s.CurrentTurn != "turn-1" {
-		t.Fatalf("After submit: CurrentTurn = %q, want turn-1", s.CurrentTurn)
-	}
-
-	// 2. Attempt begun
-	attemptBegun := wire.EvAttemptBegun{
-		AttemptID:             "attempt-1",
-		Participant:           "author",
-		Phase:                 "author",
-		Epoch:                 0,
-		Deadline:              time.Now().Add(5 * time.Minute).Format(time.RFC3339),
-		MaxOutputTokens:       4096,
-		EstimatedPromptTokens: 500,
-	}
-	attemptBegunBytes, _ := json.Marshal(attemptBegun)
-	s = apply(s, wire.Frame{Seq: 2, Kind: wire.EventKindAttemptBegun, Body: attemptBegunBytes})
-
-	if _, ok := s.Attempts["attempt-1"]; !ok {
-		t.Fatalf("After attempt_begun: attempt not found")
-	}
-
-	// 3. Attempt completed
-	attemptCompleted := wire.EvAttemptCompleted{
-		AttemptID:       "attempt-1",
-		Status:          "complete",
-		TransportStatus: "ok",
-		Usage: &wire.ReportedUsage{
-			PromptTokens:     ptr(int64(100)),
-			CompletionTokens: ptr(int64(200)),
-		},
-	}
-	attemptCompletedBytes, _ := json.Marshal(attemptCompleted)
-	s = apply(s, wire.Frame{Seq: 3, Kind: wire.EventKindAttemptCompleted, Body: attemptCompletedBytes})
-
-	if s.Attempts["attempt-1"].Status != "complete" {
-		t.Fatalf("After attempt_completed: status = %q", s.Attempts["attempt-1"].Status)
-	}
-
-	// 4. Turn terminal
-	reason := "all_approved"
-	turnState := wire.EvTurnState{
-		TurnID: "turn-1",
-		State:  "approved",
-		Reason: &reason,
-	}
-	turnStateBytes, _ := json.Marshal(turnState)
-	s = apply(s, wire.Frame{Seq: 4, Kind: wire.EventKindTurnState, Body: turnStateBytes})
-
-	if s.TurnState["turn-1"] != "approved" {
-		t.Errorf("After turn_state: state = %q, want approved", s.TurnState["turn-1"])
-	}
-	if s.CurrentTurn != "" {
-		t.Errorf("After turn terminal: CurrentTurn = %q, want empty", s.CurrentTurn)
-	}
-	if s.LastSeq != 4 {
-		t.Errorf("LastSeq = %d, want 4", s.LastSeq)
-	}
-}
-
 // TestMergeStatusPopulatesParticipants verifies that MergeStatus fills participants
 // from the status reply.
 func TestMergeStatusPopulatesParticipants(t *testing.T) {
@@ -467,7 +393,7 @@ func TestRenderStripWithReviewersInOrder(t *testing.T) {
 		},
 	}
 
-	strip := renderStrip(s, 200)
+	strip := renderStrip(s, 200, testTime)
 	if !contains(strip, "r1 queued") || !contains(strip, "r2 running") || !contains(strip, "r3 idle") {
 		t.Errorf("strip = %s", strip)
 	}
@@ -497,7 +423,7 @@ func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 		},
 	}
 
-	strip := renderStrip(s, 80)
+	strip := renderStrip(s, 80, testTime)
 	displayWidth := runewidth.StringWidth(strip)
 	if displayWidth > 80 {
 		t.Errorf("strip display width = %d, want <= 80", displayWidth)

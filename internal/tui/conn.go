@@ -98,30 +98,35 @@ func submitCmd(ctx context.Context, cl *client.Client, input string) tea.Cmd {
 
 // statusMsg carries a refreshed status reply or the error that occurred.
 type statusMsg struct {
+	gen    int
 	status wire.StatusReply
 	err    error
 }
 
 // statusCmd requests an updated status from the engine.
-func statusCmd(ctx context.Context, cl *client.Client) tea.Cmd {
+func statusCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	return func() tea.Msg {
 		status, err := cl.Status(ctx)
-		return statusMsg{status: status, err: err}
+		return statusMsg{gen: gen, status: status, err: err}
 	}
 }
 
 // turnMsg carries a fetched turn reply or the error that occurred.
 type turnMsg struct {
+	gen  int
 	turn *wire.TurnReply
 	id   string
 	err  error
 }
 
 // turnCmd requests the full turn record from the engine.
-func turnCmd(ctx context.Context, cl *client.Client, turnID string) tea.Cmd {
+func turnCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea.Cmd {
 	return func() tea.Msg {
 		turn, err := cl.Turn(ctx, turnID)
-		return turnMsg{turn: &turn, id: turnID, err: err}
+		if err != nil {
+			return turnMsg{gen: gen, id: turnID, err: err}
+		}
+		return turnMsg{gen: gen, turn: &turn, id: turnID}
 	}
 }
 
