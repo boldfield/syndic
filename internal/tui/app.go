@@ -69,6 +69,8 @@ type App struct {
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
 	pSelected   int                       // index of the selected row of the participants tab, in id order
+	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
+	pScroll     int                       // first line shown while pScrolled
 }
 
 // Option configures an App.
@@ -357,9 +359,26 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "up":
 			a.pSelected = max(a.selectedParticipant()-1, 0)
+			a.pScrolled = false
 			return a, nil
 		case "down":
 			a.pSelected = a.selectedParticipant() + 1
+			a.pScrolled = false
+			return a, nil
+		case "pgup", "pgdown":
+			// Page through the full content, which the fitted view cuts: the
+			// pools and orphaned holds below the detail.
+			page := max(a.bodyHeight()-1, 1)
+			if msg.String() == "pgup" {
+				page = -page
+			}
+			if !a.pScrolled {
+				a.pScrolled, a.pScroll = true, 0
+			}
+			a.pScroll = min(max(a.pScroll+page, 0), a.participantsMaxScroll())
+			if a.pScroll == 0 && page < 0 {
+				a.pScrolled = false
+			}
 			return a, nil
 		}
 	}
@@ -699,12 +718,12 @@ func (a *App) View() string {
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
-		ids := participantIDs(a.state)
-		selected := ""
-		if len(ids) > 0 {
-			selected = ids[a.selectedParticipant()]
+		if a.pScrolled {
+			full := strings.Split(a.participantsFull(w), "\n")
+			tabView = strings.Join(full[min(a.pScroll, len(full)-1):], "\n")
+		} else {
+			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
 		}
-		tabView = renderParticipants(a.state, w, bodyHeight, selected, a.now())
 	}
 	lines := strings.Split(tabView, "\n")
 
@@ -724,6 +743,26 @@ func (a *App) View() string {
 	output = append(output, lines...)
 	output = append(output, renderInput(a.input, a.refusal, w))
 	return strings.Join(output, "\n")
+}
+
+// selectedParticipantID is the id of the selected participants row, or "".
+func (a *App) selectedParticipantID() string {
+	ids := participantIDs(a.state)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[a.selectedParticipant()]
+}
+
+// participantsFull is the participants tab at full length, not fitted to the body.
+func (a *App) participantsFull(w int) string {
+	return renderParticipants(a.state, w, 0, a.selectedParticipantID(), a.now())
+}
+
+// participantsMaxScroll is the last first-line that still fills the body.
+func (a *App) participantsMaxScroll() int {
+	n := len(strings.Split(a.participantsFull(max(a.width, 1)), "\n"))
+	return max(n-a.bodyHeight(), 0)
 }
 
 // selectedParticipant is the index of the selected participants row, kept

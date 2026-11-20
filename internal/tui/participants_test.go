@@ -566,6 +566,17 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 	if strings.Contains(v, "rpool: concurrency") {
 		t.Errorf("the old pool is listed as a live pool:\n%s", v)
 	}
+
+	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
+	send(r, resizeMsg(80, 14))
+	untilPartsView(t, r, "more lines")
+	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
+	v = untilPartsView(t, r, "/release rpool "+m[1])
+	if n := len(strings.Split(v, "\n")); n > 14 {
+		t.Errorf("view is %d lines at 14 rows", n)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
+	untilPartsView(t, r, "more lines")
 }
 
 func writeFile(path, text string) error { return os.WriteFile(path, []byte(text), 0o600) }
