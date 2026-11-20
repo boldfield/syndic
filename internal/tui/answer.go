@@ -6,19 +6,7 @@ import (
 )
 
 // renderAnswer returns the answer tab.
-func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string) string {
-	turnID := s.CurrentTurn
-
-	// If CurrentTurn is empty but we have turns, use the last turn (terminal answer display)
-	if turnID == "" && len(s.Turns) > 0 {
-		for id, ti := range s.Turns {
-			if isTerminalState(ti.State) {
-				turnID = id
-				break
-			}
-		}
-	}
-
+func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string, turnID string) string {
 	if turnID == "" {
 		return ""
 	}

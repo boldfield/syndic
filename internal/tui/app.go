@@ -52,6 +52,7 @@ type App struct {
 	draftsEnabledSet  bool // tracks if /drafts command was used
 	answerScrollRow   int  // current scroll offset for answer tab
 	candidateIDByTurn map[string]string
+	lastTerminalTurn  string // last terminal turn for display when CurrentTurn is empty
 }
 
 // Option configures an App.
@@ -154,6 +155,10 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "down":
 			a.answerScrollRow++
+			// Prevent unbounded growth; View() will clamp properly for rendering
+			if a.answerScrollRow < 0 {
+				a.answerScrollRow = 0
+			}
 			return a, nil
 		case "pgup":
 			a.answerScrollRow -= 10
@@ -163,6 +168,10 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "pgdn":
 			a.answerScrollRow += 10
+			// Prevent unbounded growth
+			if a.answerScrollRow < 0 {
+				a.answerScrollRow = 0
+			}
 			return a, nil
 		}
 	}
@@ -350,6 +359,11 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
 	}
 
+	// Track the last terminal turn for display when CurrentTurn is empty
+	if msg.turn != nil && isTerminalState(msg.turn.State) {
+		a.lastTerminalTurn = msg.id
+	}
+
 	// Fetch content for the turn if it's terminal or if drafts are enabled
 	contentCmds := a.fetchContentForTurn(msg.id)
 	if len(contentCmds) > 0 {
@@ -462,8 +476,13 @@ func (a *App) View() string {
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		candidateID := a.candidateIDByTurn[a.state.CurrentTurn]
-		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID)
+		// Use CurrentTurn if available, otherwise use the last terminal turn
+		turnID := a.state.CurrentTurn
+		if turnID == "" {
+			turnID = a.lastTerminalTurn
+		}
+		candidateID := a.candidateIDByTurn[turnID]
+		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID, turnID)
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
