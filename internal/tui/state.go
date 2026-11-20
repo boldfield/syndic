@@ -24,9 +24,17 @@ const (
 
 // Apply processes an event and returns an updated state.
 func Apply(s State, event wire.Frame) State {
-	// Events are processed in seq order and state records the last seq.
 	if event.Seq > 0 {
 		s.LastSeq = event.Seq
 	}
+
+	// Handle different event types
+	switch event.Kind {
+	case "turn_submitted":
+		// Turn submitted event - will track current turn
+	case "engine_stopping":
+		s.ConnState = ConnStateClosed
+	}
+
 	return s
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -17,11 +16,6 @@ const (
 	TabParticipants TabName = "participants"
 )
 
-// StatusUpdateMsg carries a status update from the engine.
-type StatusUpdateMsg struct {
-	Status wire.StatusReply
-}
-
 // App is the root Bubble Tea model for the TUI.
 type App struct {
 	ctx    context.Context
@@ -30,34 +24,35 @@ type App struct {
 	width  int
 	height int
 
-	state     State
-	connector *connector
-	activeTab TabName
-
-	inputLine string
-	refusal   string
-
-	// Message channel from the last command
-	connMsgs chan ConnMsg
+	state          State
+	connector      *connector
+	activeTab      TabName
+	inputLine      string
+	refusal        string
+	lastOpenTurnID string
 }
 
 // NewApp creates a new App instance.
 func NewApp(ctx context.Context, socketPath string) *App {
 	childCtx, cancel := context.WithCancel(ctx)
+	conn := newConnector(socketPath)
 	app := &App{
 		ctx:       childCtx,
 		cancel:    cancel,
 		activeTab: TabAnswer,
-		connector: &connector{socketPath: socketPath, lastSeq: 0},
-		connMsgs:  make(chan ConnMsg, 1),
+		connector: conn,
 	}
-
 	return app
 }
 
 // Init returns initial commands to run.
 func (a *App) Init() tea.Cmd {
-	return a.connectCmd()
+	return a.connector.listenCmd(a.ctx, a.handleConnectorMsg)
+}
+
+// handleConnectorMsg processes messages from the connector.
+func (a *App) handleConnectorMsg(msg tea.Msg) tea.Msg {
+	return msg
 }
 
 // Update handles messages and updates state.
@@ -65,7 +60,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return a, a.quitCmd()
 		case "tab":
 			a.activeTab = a.nextTab()
@@ -75,8 +70,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "enter":
 			if a.inputLine != "" {
-				cmd := a.submitCmd()
-				a.inputLine = ""
+				cmd := a.processInputCmd()
 				return a, cmd
 			}
 		case "backspace":
@@ -95,29 +89,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		return a, nil
 
-	case ConnMsg:
-		if msg.Err != nil {
-			a.state.ConnState = ConnStateClosed
-			// Reconnect with backoff
-			return a, tea.Batch(a.showReconnectingCmd(), a.reconnectCmd())
-		}
-		if msg.State == ConnStateConnected {
-			a.state.ConnState = ConnStateConnected
-			return a, a.fetchStatusCmd()
-		}
-		return a, nil
+	case ConnStateMsg:
+		return a.handleConnState(msg)
 
 	case EventMsg:
-		if msg.Err != nil {
-			a.state.ConnState = ConnStateClosed
-			return a, tea.Batch(a.showReconnectingCmd(), a.reconnectCmd())
-		}
-		a.state = Apply(a.state, msg.Frame)
-		return a, nil
+		return a.handleEvent(msg)
 
-	case StatusUpdateMsg:
+	case HelloMsg:
+		a.state.Hello = msg.Hello
+		a.state.ConnState = ConnStateConnected
+		return a, a.connector.fetchStatusCmd(a.ctx)
+
+	case StatusMsg:
 		a.state.Status = msg.Status
 		return a, nil
+
+	case SubmitResultMsg:
+		return a.handleSubmitResult(msg)
 
 	case tea.QuitMsg:
 		return a, tea.Quit
@@ -126,12 +114,77 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *App) handleConnState(msg ConnStateMsg) (tea.Model, tea.Cmd) {
+	switch msg.State {
+	case ConnStateConnected:
+		a.state.ConnState = ConnStateConnected
+		return a, a.connector.helloCmd(a.ctx)
+	case ConnStateReconnecting:
+		a.state.ConnState = ConnStateReconnecting
+		return a, nil
+	default:
+		a.state.ConnState = ConnStateClosed
+		return a, nil
+	}
+}
+
+func (a *App) handleEvent(msg EventMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		a.state.ConnState = ConnStateClosed
+		return a, a.connector.reconnectCmd(a.ctx)
+	}
+	a.state = Apply(a.state, msg.Frame)
+	return a, a.connector.streamEventsCmd(a.ctx)
+}
+
+func (a *App) handleSubmitResult(msg SubmitResultMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		if msg.RefusalDetail != "" {
+			a.refusal = msg.RefusalDetail
+		}
+		return a, nil
+	}
+	a.refusal = ""
+	a.lastOpenTurnID = msg.TurnID
+	a.inputLine = ""
+	return a, nil
+}
+
+// processInputCmd processes the input line.
+func (a *App) processInputCmd() tea.Cmd {
+	input := a.inputLine
+	if strings.HasPrefix(input, "/") {
+		parts := strings.Fields(input)
+		if len(parts) == 0 {
+			return nil
+		}
+		cmd := parts[0]
+		switch cmd {
+		case "/quit":
+			msg := "Goodbye"
+			if a.lastOpenTurnID != "" {
+				msg = fmt.Sprintf("Turn %s is still running and will continue", a.lastOpenTurnID)
+			}
+			fmt.Println(msg)
+			return func() tea.Msg { return tea.Quit() }
+		case "/resume":
+			return nil
+		default:
+			a.refusal = fmt.Sprintf("unknown command: %s", cmd)
+			a.inputLine = ""
+			return nil
+		}
+	}
+	return a.submitTextCmd(input)
+}
+
+// submitTextCmd submits the text as input.
+func (a *App) submitTextCmd(input string) tea.Cmd {
+	return a.connector.submitCmd(a.ctx, input)
+}
+
 // View renders the UI.
 func (a *App) View() string {
-	if a.state.ConnState != ConnStateConnected {
-		return "Connecting to engine...\n"
-	}
-
 	if a.width == 0 || a.height == 0 {
 		return ""
 	}
@@ -145,6 +198,11 @@ func (a *App) View() string {
 	}
 
 	var out strings.Builder
+
+	// Show reconnecting banner if needed
+	if a.state.ConnState == ConnStateReconnecting {
+		out.WriteString("engine: reconnecting\n")
+	}
 
 	// Status strip (top)
 	out.WriteString(a.renderStrip(a.width))
@@ -208,55 +266,13 @@ func (a *App) prevTab() TabName {
 	return TabAnswer
 }
 
-// Commands for async operations
-
-func (a *App) connectCmd() tea.Cmd {
-	return func() tea.Msg {
-		connMsgs := a.connector.connect(a.ctx)
-		for msg := range connMsgs {
-			return msg
-		}
-		return ConnMsg{State: ConnStateClosed, Err: fmt.Errorf("connection closed")}
-	}
-}
-
-func (a *App) reconnectCmd() tea.Cmd {
-	return func() tea.Msg {
-		// Give backoff a chance to work
-		connMsgs := a.connector.reconnectWithBackoff(a.ctx)
-		for msg := range connMsgs {
-			return msg
-		}
-		return ConnMsg{State: ConnStateClosed, Err: fmt.Errorf("reconnection failed")}
-	}
-}
-
-func (a *App) showReconnectingCmd() tea.Cmd {
-	return func() tea.Msg {
-		a.state.ConnState = ConnStateReconnecting
-		return nil
-	}
-}
-
-func (a *App) fetchStatusCmd() tea.Cmd {
-	return func() tea.Msg {
-		status, err := a.connector.fetchStatus(a.ctx)
-		if err != nil {
-			return ConnMsg{State: ConnStateClosed, Err: err}
-		}
-		return StatusUpdateMsg{Status: status}
-	}
-}
-
-func (a *App) submitCmd() tea.Cmd {
-	return func() tea.Msg {
-		// Submit will be implemented later
-		return nil
-	}
-}
-
 func (a *App) quitCmd() tea.Cmd {
 	return func() tea.Msg {
+		msg := "Goodbye"
+		if a.lastOpenTurnID != "" {
+			msg = fmt.Sprintf("Turn %s is still running and will continue", a.lastOpenTurnID)
+		}
+		fmt.Println(msg)
 		return tea.Quit()
 	}
 }
