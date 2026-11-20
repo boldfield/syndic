@@ -46,6 +46,9 @@ type App struct {
 	now                  func() time.Time
 	tickRunning          bool
 	onEvent              func(wire.Frame)
+
+	content       *ContentCache
+	draftsEnabled bool
 }
 
 // Option configures an App.
@@ -60,14 +63,15 @@ func WithEventObserver(f func(wire.Frame)) Option {
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
 	a := &App{
-		ctx:    ctx,
-		cancel: cancel,
-		socket: socketPath,
-		input:  newInput(),
-		width:  80,
-		height: 24,
-		state:  NewState(),
-		now:    time.Now,
+		ctx:     ctx,
+		cancel:  cancel,
+		socket:  socketPath,
+		input:   newInput(),
+		width:   80,
+		height:  24,
+		state:   NewState(),
+		now:     time.Now,
+		content: NewContentCache(),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -102,6 +106,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStatusRefresh(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case contentMsg:
+		return a.onContent(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -291,7 +297,52 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
+
+	// Fetch content for the turn if it's terminal or if drafts are enabled
+	contentCmds := a.fetchContentForTurn(msg.id)
+	if len(contentCmds) > 0 {
+		return a, tea.Batch(contentCmds...)
+	}
 	return a, nil
+}
+
+// onContent stores fetched content in the cache.
+func (a *App) onContent(msg contentMsg) (tea.Model, tea.Cmd) {
+	a.content.Store(msg.ref, msg.data, msg.err)
+	return a, nil
+}
+
+// fetchContentForTurn returns commands to fetch content refs for a turn.
+func (a *App) fetchContentForTurn(turnID string) []tea.Cmd {
+	var cmds []tea.Cmd
+	if a.cl == nil {
+		return cmds
+	}
+
+	ti, ok := a.state.Turns[turnID]
+	if !ok {
+		return cmds
+	}
+
+	// Fetch candidate if available and not already cached
+	if ti.CandidateHash != nil {
+		ref := "candidate:" + turnID
+		if !a.content.Get(ref).Ready {
+			cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
+		}
+	}
+
+	// Fetch attempt outputs if drafts are enabled or for display
+	for attemptID, ai := range a.state.Attempts {
+		if ai.TurnID == turnID && (ai.Phase == "author" || ai.Phase == "review") {
+			ref := "attempt:" + attemptID
+			if !a.content.Get(ref).Ready {
+				cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
+			}
+		}
+	}
+
+	return cmds
 }
 
 // reconnect drops the current connection and starts a new one that resumes
@@ -335,7 +386,7 @@ func (a *App) View() string {
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		tabView = renderAnswer(a.state, w, bodyHeight)
+		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled)
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:

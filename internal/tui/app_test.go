@@ -263,7 +263,7 @@ func authorCalls(r *rig) []fake.CompleteCall {
 
 func TestRegionsAndTabs(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	r.waitFor(t, "transcript (placeholder)")
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
