@@ -569,3 +569,45 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 }
 
 func writeFile(path, text string) error { return os.WriteFile(path, []byte(text), 0o600) }
+
+func TestMarkedSameFamilyOnlyForReviewers(t *testing.T) {
+	s := NewState()
+	for id, model := range map[string]string{"a": "llama3.2:8b", "rev": "llama3.1:70b", "spare": "llama3:8b", "other": "qwen2.5"} {
+		s.Participants[id] = ParticipantInfo{ID: id, ReportedModel: model}
+	}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "a", Reviewers: []string{"rev", "other"}}
+	s.CurrentTurn = "t1"
+	for id, want := range map[string]bool{"a": false, "rev": true, "spare": false, "other": false} {
+		if got := markedSameFamily(s, s.Participants[id]); got != want {
+			t.Errorf("markedSameFamily(%s) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+func TestRenderParticipantsFitsHeight(t *testing.T) {
+	s := NewState()
+	for i := range 30 {
+		id := fmt.Sprintf("p%02d", i)
+		s.Participants[id] = ParticipantInfo{ID: id, State: "idle", Pool: "pool", ReportedModel: "m", EligibleRoles: []string{"reviewer"}}
+	}
+	s.Pools["pool"] = wire.Pool{Name: "pool", Concurrency: 1, Holds: []wire.PoolHold{{AttemptID: "att1", HeldSince: "2026-11-18T12:00:00Z"}}}
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	for _, sel := range []string{"p00", "p17", "p29"} {
+		out := renderParticipants(s, 80, 21, sel, now)
+		if n := len(strings.Split(out, "\n")); n > 21 {
+			t.Fatalf("selected %s: %d lines for a height of 21", sel, n)
+		}
+		wantParts(t, "view of "+sel, out, "> "+sel, "detail: "+sel, "hold att1")
+	}
+}
+
+func TestParticipantsFitsBodyAt80x24(t *testing.T) {
+	r := startPartsRig(t, rosterHarness(t))
+	untilPartsView(t, r, "unprobed:no_record")
+	send(r, downs(5)...)
+	v := untilPartsView(t, r, "detail: r2")
+	wantParts(t, "r2 view", v, "> r2", "pools:", "default: concurrency 1", "p2: concurrency 1", "spare: concurrency 1")
+	if n := len(strings.Split(v, "\n")); n > 24 {
+		t.Errorf("view is %d lines at 24 rows", n)
+	}
+}

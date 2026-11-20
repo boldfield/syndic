@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -59,7 +60,7 @@ func currentAuthor(s State) (ParticipantInfo, bool) {
 // reported model is in the author's family.
 func markedSameFamily(s State, p ParticipantInfo) bool {
 	author, ok := currentAuthor(s)
-	if !ok || p.ID == author.ID {
+	if !ok || p.ID == author.ID || !slices.Contains(s.Turns[s.CurrentTurn].Reviewers, p.ID) {
 		return false
 	}
 	return sameFamily(p.ReportedModel, author.ReportedModel)
@@ -70,21 +71,46 @@ func markedSameFamily(s State, p ParticipantInfo) bool {
 // Every line is at most width cells wide.
 func renderParticipants(s State, width, height int, selectedID string, now time.Time) string {
 	width = max(width, 1)
-	var lines []string
+	var head, table, detail, pools []string
 	if author, ok := currentAuthor(s); ok {
-		lines = append(lines, fmt.Sprintf("author: %s (%s)", author.ID, orDash(author.ReportedModel)), "")
+		head = []string{fmt.Sprintf("author: %s (%s)", author.ID, orDash(author.ReportedModel))}
 	}
 	ids := participantIDs(s)
+	selIdx := 0
 	if len(ids) == 0 {
-		lines = append(lines, "no participants")
+		table = []string{"no participants"}
 	} else {
-		lines = append(lines, participantTable(s, ids, selectedID, width, now)...)
+		table = participantTable(s, ids, selectedID, width, now)
+		for i, id := range ids {
+			if id == selectedID {
+				selIdx = i
+			}
+		}
 		if p, ok := s.Participants[selectedID]; ok {
-			lines = append(lines, "")
-			lines = append(lines, participantDetail(s, p, now)...)
+			detail = participantDetail(s, p, now)
 		}
 	}
-	lines = append(lines, poolLines(s, now)...)
+	pools = poolLines(s, now)
+
+	// Fit the height: the table scrolls around the selection first, then the
+	// head's blank line goes, and the pools are cut last.
+	if height > 0 {
+		avail := func() int { return height - len(head) - 1 - len(detail) - len(pools) }
+		if len(ids) > 0 {
+			rows := table[1:]
+			keep := max(avail(), 1)
+			if keep < len(rows) {
+				start := min(max(selIdx-keep/2, 0), len(rows)-keep)
+				rows = rows[start : start+keep]
+			}
+			table = append([]string{table[0]}, rows...)
+		}
+		if over := len(head) + len(table) + len(detail) + len(pools) - height; over > 0 && len(pools) > 0 {
+			cut := min(over+1, len(pools))
+			pools = append(pools[:len(pools)-cut], fmt.Sprintf("… %d more lines", cut))
+		}
+	}
+	lines := append(append(append(head, table...), detail...), pools...)
 	out := make([]string, len(lines))
 	for i, l := range lines {
 		out[i] = clipCells(l, width)
@@ -210,17 +236,16 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 	} else {
 		lines = append(lines, "  probe observed_at: none")
 	}
-	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource))
 	// The design takes the output bound from the probe record alone.
-	lines = append(lines, "  output bound: "+bound(p.OutputBound, "probe"))
+	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource)+"  output bound: "+bound(p.OutputBound, "probe"))
 	bpt := "-"
 	if p.BytesPerToken != nil {
 		bpt = fmt.Sprintf("%.2f (%s)", *p.BytesPerToken, orDash(plain(p.BytesPerTokenSource)))
 	}
-	lines = append(lines, "  bytes per token: "+bpt)
 	if p.Estimate == "exceeded" {
-		lines = append(lines, "  estimate: exceeded")
+		bpt += "  estimate: exceeded"
 	}
+	lines = append(lines, "  bytes per token: "+bpt)
 	if p.EligibleRequiredReviewer == "unknown" && hasRole(p, "reviewer") {
 		lines = append(lines, "  truncation: unknown")
 	}
@@ -254,7 +279,7 @@ func poolLines(s State, now time.Time) []string {
 	}
 	sort.Strings(names)
 	if len(names) > 0 {
-		lines = append(lines, "", "pools:")
+		lines = append(lines, "pools:")
 	}
 	for _, name := range names {
 		pool := s.Pools[name]
@@ -264,7 +289,7 @@ func poolLines(s State, now time.Time) []string {
 		}
 	}
 	if len(s.OrphanedHolds) > 0 {
-		lines = append(lines, "", "orphaned holds:")
+		lines = append(lines, "orphaned holds:")
 		for _, h := range s.OrphanedHolds {
 			lines = append(lines, fmt.Sprintf("  pool %s, attempt %s%s", plain(h.Pool), plain(h.AttemptID), groupSuffix(h.Group)),
 				fmt.Sprintf("    /release %s %s", plain(h.Pool), plain(h.AttemptID)))
