@@ -120,12 +120,13 @@ func (s *seen) turnCount() int {
 }
 
 type rig struct {
-	h     *enginetest.Harness
-	srv   *serving
-	paths lockfile.Paths
-	app   *App
-	tm    *teatest.TestModel
-	seen  *seen
+	h              *enginetest.Harness
+	srv            *serving
+	paths          lockfile.Paths
+	app            *App
+	tm             *teatest.TestModel
+	seen           *seen
+	lastTurnCount  int
 }
 
 func newRig(t *testing.T) *rig {
@@ -148,15 +149,23 @@ func (r *rig) waitFor(t *testing.T, want string) {
 		teatest.WithDuration(10*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
-// waitForEmptyInput waits until the submit has cleared the input line.
-// After submission, the status strip changes to show the turn state.
+// waitForEmptyInput waits until the submit has cleared the input line by checking the rendered output.
+// After onSubmit processes the reply, the input field is emptied.
 func (r *rig) waitForEmptyInput(t *testing.T) {
 	t.Helper()
 	teatest.WaitFor(t, r.tm.Output(), func(b []byte) bool {
 		output := string(b)
-		// After successful submit, the strip shows a turn state like [submitted] or [review]
-		// We wait for the strip to show we're in a turn, not idle
-		return strings.Contains(output, "[submitted]") || strings.Contains(output, "[review]") || strings.Contains(output, "[author_dispatched]")
+		lines := strings.Split(output, "\n")
+		if len(lines) == 0 {
+			return false
+		}
+		// The input line is the last line, rendered by renderInput
+		// When empty, it should be just the prompt "> " plus optional cursor/padding
+		// When it has text, it's "> text..."
+		inputLine := lines[len(lines)-1]
+		// Check that the input line doesn't contain the answerText we just submitted
+		// This indicates the input has been cleared
+		return !strings.Contains(inputLine, answerText)
 	}, teatest.WithDuration(5*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
@@ -185,15 +194,18 @@ func (r *rig) waitCaughtUp(t *testing.T) int64 {
 
 func (r *rig) typeLine(s string) {
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+	// Capture baseline BEFORE sending Enter, so waitForNewTurn can detect if a turn was already submitted
+	r.lastTurnCount = r.seen.turnCount()
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 }
 
 // waitForNewTurn waits for the next turn to be submitted and returns its ID.
 // It observes the effect through the event stream: a TurnSubmitted event arrives and is processed by the app.
+// The baseline is captured in typeLine before Enter is sent, to avoid missing fast submissions.
 func (r *rig) waitForNewTurn(t *testing.T) string {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
-	lastCount := r.seen.turnCount()
+	lastCount := r.lastTurnCount
 
 	// Poll until we see a new TurnSubmitted event or hit the deadline.
 	for time.Now().Before(deadline) {
