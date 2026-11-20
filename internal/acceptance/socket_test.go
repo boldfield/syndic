@@ -1,12 +1,12 @@
 package acceptance
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -39,24 +39,24 @@ func init() {
 
 func TestSocket_SecondEngineRefuses(t *testing.T) {
 	t.Parallel()
-	// This test is about daemon-level behavior (cmd/syndicd) refusing to start
-	// when another instance holds the lock. It is tested at the daemon level,
-	// not in the socket protocol harness, since the harness doesn't use the
-	// actual cmd/syndicd binary and doesn't acquire locks.
-	gap(t, "second engine lock test requires cmd/syndicd daemon-level testing")
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("the answer is 42")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
+	_ = s
+	gap(t, "second engine lock test: either register cmd/syndicd TestSecondRun external test or take engine.lock twice through internal/lockfile and check PID")
 }
 
 func TestSocket_Protocol2Refused(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	conn := s.RawConn(t)
 	defer func() { _ = conn.Close() }()
 
-	// Send hello with protocol: 2
 	hello := wire.Frame{
 		V:    1,
 		ID:   "test-hello",
@@ -71,7 +71,6 @@ func TestSocket_Protocol2Refused(t *testing.T) {
 		t.Fatalf("write hello: %v", err)
 	}
 
-	// Should receive error{code: "protocol"}
 	buf := make([]byte, 1024)
 	n, err := conn.Read(buf)
 	if err != nil {
@@ -84,7 +83,7 @@ func TestSocket_Protocol2Refused(t *testing.T) {
 	}
 
 	if resp.Type != "error" {
-		t.Fatalf("expected error, got %s", resp.Type)
+		t.Fatalf("expected error frame, got type %s", resp.Type)
 	}
 
 	var errBody wire.Error
@@ -101,13 +100,12 @@ func TestSocket_LargeClientFrameRefused(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	conn := s.RawConn(t)
 	defer func() { _ = conn.Close() }()
 
-	// First, complete handshake
 	hello := wire.Frame{
 		V:    1,
 		ID:   "test-hello",
@@ -122,16 +120,13 @@ func TestSocket_LargeClientFrameRefused(t *testing.T) {
 		t.Fatalf("write hello: %v", err)
 	}
 
-	// Read hello response
 	buf := make([]byte, 2048)
 	_, err = conn.Read(buf)
 	if err != nil {
 		t.Fatalf("read hello response: %v", err)
 	}
 
-	// Now try to send a 2 MiB frame
-	// Create a Frame with large Body
-	largeBody := make([]byte, 2*1024*1024) // 2 MiB
+	largeBody := make([]byte, 2*1024*1024)
 	for i := range largeBody {
 		largeBody[i] = 'x'
 	}
@@ -144,90 +139,85 @@ func TestSocket_LargeClientFrameRefused(t *testing.T) {
 	}
 	data, _ = json.Marshal(largeFr)
 	if _, err := conn.Write(append(data, '\n')); err != nil {
-		if strings.Contains(err.Error(), "message too large") {
-			return // Connection closed due to frame size, which is acceptable
-		}
-		t.Logf("write error (may indicate frame rejected): %v", err)
+		t.Logf("write error: %v", err)
 	}
 
-	// Try to read error response or connection close
 	buf = make([]byte, 1024)
 	n, err := conn.Read(buf)
 	if err != nil {
-		if err == io.EOF {
-			return // Connection closed, which is acceptable
-		}
-		return // Connection closed or refused, acceptable
+		t.Fatalf("expected error response, got read error: %v", err)
 	}
 
-	if n > 0 {
-		var resp wire.Frame
-		if err := json.Unmarshal(buf[:n], &resp); err == nil {
-			if resp.Type == "error" {
-				var errBody wire.Error
-				_ = json.Unmarshal(resp.Body, &errBody)
-				if errBody.Code == "frame" {
-					return // Got the expected frame error
-				}
-			}
-		}
+	var resp wire.Frame
+	if err := json.Unmarshal(buf[:n], &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if resp.Type != "error" {
+		t.Fatalf("expected error frame, got type %s", resp.Type)
+	}
+
+	var errBody wire.Error
+	if err := json.Unmarshal(resp.Body, &errBody); err != nil {
+		t.Fatalf("unmarshal error body: %v", err)
+	}
+
+	if errBody.Code != "frame" {
+		t.Fatalf("expected frame error, got %s", errBody.Code)
 	}
 }
 
 func TestSocket_EngineFramesUnder1MiB(t *testing.T) {
 	t.Parallel()
-	// This is verified by the harness's largestFrame check in suite cleanup.
-	// Just verify the check is active by running a basic turn.
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
-	// If this completes without the test failing in cleanup, the frame size check passed.
 }
 
 func TestSocket_LargeContentFetched(t *testing.T) {
 	t.Parallel()
-	// Create a 12 MiB response with many JSON-escape characters
-	largeOutput := largeOutput(12 * 1024 * 1024)
+	largeOutput := socketLargeOutput(12 * 1024 * 1024)
 
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply(largeOutput)},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
 
-	// Fetch the message through content
 	msgEvent := s.WaitEvent(func(ev event) bool {
 		msg, ok := body[wire.EvMessageAppended](ev, wire.EventKindMessageAppended)
 		return ok && msg.Phase == "author"
 	})
 
 	msg, _ := body[wire.EvMessageAppended](msgEvent, wire.EventKindMessageAppended)
-
-	// Fetch content by constructing ref from MsgID
 	contentRef := "msg:" + msg.MsgID
 
-	// Use the client's Content method which handles pagination internally
-	allData, err := c.Content(s.ctx(), contentRef)
+	fetched, err := c.Content(s.ctx(), contentRef)
 	if err != nil {
 		t.Fatalf("content fetch: %v", err)
 	}
 
-	// Verify size
-	if int64(len(allData)) != msg.ByteLen {
-		t.Fatalf("fetched %d bytes, message says %d", len(allData), msg.ByteLen)
+	computedHash := sha256.Sum256(fetched)
+	computedHashStr := fmt.Sprintf("%x", computedHash)
+
+	if computedHashStr != msg.SHA256 {
+		t.Fatalf("content SHA-256 mismatch: got %s, want %s", computedHashStr, msg.SHA256)
+	}
+
+	if int64(len(fetched)) != msg.ByteLen {
+		t.Fatalf("fetched %d bytes, message says %d", len(fetched), msg.ByteLen)
 	}
 }
 
-func largeOutput(sizeBytes int) string {
-	// Create output with characters that JSON-escape (quotes, backslashes, control chars)
+func socketLargeOutput(sizeBytes int) string {
 	chars := []rune{'"', '\\', '\n', '\r', '\t', 'x'}
 	out := make([]rune, 0, sizeBytes)
 	for len(out) < sizeBytes {
@@ -238,11 +228,11 @@ func largeOutput(sizeBytes int) string {
 
 func TestSocket_ContentLimitClamped(t *testing.T) {
 	t.Parallel()
-	largeOutput := largeOutput(1024 * 1024) // 1 MiB
+	largeOutput := socketLargeOutput(1024 * 1024)
 
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply(largeOutput)},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
@@ -255,18 +245,15 @@ func TestSocket_ContentLimitClamped(t *testing.T) {
 	})
 
 	msg, _ := body[wire.EvMessageAppended](msgEvent, wire.EventKindMessageAppended)
-
-	// The client Content method handles pagination internally.
-	// Here we just test that large requests are handled.
 	contentRef := "msg:" + msg.MsgID
-	allData, err := c.Content(s.ctx(), contentRef)
+
+	fetched, err := c.Content(s.ctx(), contentRef)
 	if err != nil {
 		t.Fatalf("content fetch: %v", err)
 	}
 
-	// Verify we got the content
-	if int64(len(allData)) != msg.ByteLen {
-		t.Fatalf("fetched %d bytes, message says %d", len(allData), msg.ByteLen)
+	if int64(len(fetched)) != msg.ByteLen {
+		t.Fatalf("fetched %d bytes, message says %d", len(fetched), msg.ByteLen)
 	}
 }
 
@@ -274,12 +261,11 @@ func TestSocket_DeduplicationSameContent(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 
-	// Submit with submission_id "s1"
 	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "what is the answer?",
@@ -288,37 +274,38 @@ func TestSocket_DeduplicationSameContent(t *testing.T) {
 		t.Fatalf("first submit: %v", err)
 	}
 
-	// Wait for turn to complete
-	s.WaitTerminal(reply1.TurnID)
-
-	// Submit again with the same submission_id and content
 	reply2, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "what is the answer?",
 	})
 	if err != nil {
-		t.Fatalf("second submit: %v", err)
+		t.Fatalf("second submit while turn open: %v", err)
 	}
 
-	// Should get the same turn ID and reply
 	if reply2.TurnID != reply1.TurnID {
 		t.Fatalf("second submit returned different turn ID: %s vs %s", reply2.TurnID, reply1.TurnID)
 	}
+
+	if reply2.Preset != reply1.Preset {
+		t.Fatalf("second reply has different preset: %s vs %s", reply2.Preset, reply1.Preset)
+	}
+
 	if reply2.EstimatedTokens != reply1.EstimatedTokens {
 		t.Fatalf("second reply has different estimated tokens: %d vs %d", reply2.EstimatedTokens, reply1.EstimatedTokens)
 	}
+
+	s.WaitTerminal(reply1.TurnID)
 }
 
 func TestSocket_DeduplicationConflict(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 
-	// Submit with submission_id "s1" and content A
 	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "what is the answer?",
@@ -327,19 +314,22 @@ func TestSocket_DeduplicationConflict(t *testing.T) {
 		t.Fatalf("first submit: %v", err)
 	}
 
-	// Try to submit with same submission_id but different content
 	_, err = c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "different question?",
 	})
 
 	if err == nil {
-		t.Fatal("expected submission_conflict error")
+		t.Fatal("expected submission_conflict error, got no error")
 	}
 
-	// Check the error is submission_conflict with the original turn ID
-	if !strings.Contains(err.Error(), "submission_conflict") && !strings.Contains(err.Error(), reply1.TurnID) {
-		t.Logf("got error: %v (may contain turn ID in body)", err)
+	errStr := err.Error()
+	if !strings.Contains(errStr, "submission_conflict") {
+		t.Fatalf("expected submission_conflict error, got: %s", errStr)
+	}
+
+	if !strings.Contains(errStr, reply1.TurnID) {
+		t.Fatalf("submission_conflict error should name turn ID %s, got: %s", reply1.TurnID, errStr)
 	}
 }
 
@@ -347,22 +337,20 @@ func TestSocket_ReuseRefusedSubmissionID(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
 
-	// Submit with invalid preset (will be refused)
 	_, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "refused-s1",
 		Input:        "what is the answer?",
 		Preset:       ptrStr("nonexistent"),
 	})
 	if err == nil {
-		t.Fatal("expected preset error")
+		t.Fatal("expected preset error for nonexistent preset")
 	}
 
-	// Now reuse the same submission_id with valid content
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "refused-s1",
 		Input:        "what is the answer?",
@@ -374,59 +362,86 @@ func TestSocket_ReuseRefusedSubmissionID(t *testing.T) {
 	if reply.TurnID == "" {
 		t.Fatal("got empty turn ID")
 	}
+
+	s.WaitTerminal(reply.TurnID)
+}
+
+func ptrStr(s string) *string {
+	return &s
 }
 
 func TestSocket_ReplayLiveDispatchLatency(t *testing.T) {
 	t.Parallel()
-	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
-	})
-
-	// Generate many events by submitting turns
-	for i := 0; i < 50; i++ {
-		c := s.Dial(t)
-		turnID := s.Submit(t, c, fmt.Sprintf("s%d", i))
-		s.WaitTerminal(turnID)
+	if testing.Short() {
+		t.Skip("replay test with 50,000 events is slow")
 	}
 
-	// Now test replay with concurrent dispatch
-	replayDone := make(chan time.Time)
-	dispatchDone := make(chan time.Time)
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("the answer is 42")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	})
 
-	// Start replay on new connection
+	targetEventCount := 50000
+	eventCount := len(s.Events())
+	for eventCount < targetEventCount {
+		c := s.Dial(t)
+		turnID := s.Submit(t, c, fmt.Sprintf("gen-%d", eventCount))
+		s.WaitTerminal(turnID)
+		eventCount = len(s.Events())
+	}
+
+	seqsSeen := map[int64]bool{}
+	seqsLock := sync.Mutex{}
+	replayDone := make(chan struct{})
+	dispatchCompleted := make(chan struct{})
+
 	go func() {
+		defer close(replayDone)
 		replayC := s.Dial(t)
 		if _, err := replayC.Subscribe(s.ctx(), 0); err != nil {
 			t.Errorf("subscribe: %v", err)
 			return
 		}
-		// Drain all events
+
 		for {
-			_, err := replayC.NextEvent(s.ctx())
+			frame, err := replayC.NextEvent(s.ctx())
 			if err != nil {
-				break
+				return
+			}
+
+			seqsLock.Lock()
+			if seqsSeen[frame.Seq] {
+				t.Errorf("duplicate seq %d", frame.Seq)
+			}
+			seqsSeen[frame.Seq] = true
+			seqsLock.Unlock()
+
+			select {
+			case <-dispatchCompleted:
+				return
+			default:
 			}
 		}
-		replayDone <- time.Now()
 	}()
 
-	// Give replay time to start
-	time.Sleep(10 * time.Millisecond)
-
-	// Dispatch a turn while replay is happening
-	start := time.Now()
 	c := s.Dial(t)
 	dispatchID := s.Submit(t, c, "dispatch-during-replay")
 	s.WaitTerminal(dispatchID)
-	dispatchDone <- time.Now()
+	close(dispatchCompleted)
 
-	dispatchTime := <-dispatchDone
-	dispatch := dispatchTime.Sub(start)
+	<-replayDone
 
-	// Dispatch should complete reasonably fast (not blocked by replay)
-	if dispatch > 10*time.Second {
-		t.Logf("dispatch took %v (may indicate replay blocked it, but could also be slow test)", dispatch)
+	seqsLock.Lock()
+	defer seqsLock.Unlock()
+
+	if len(seqsSeen) == 0 {
+		t.Fatal("no events replayed")
+	}
+
+	for i := int64(1); i <= int64(len(seqsSeen)); i++ {
+		if !seqsSeen[i] {
+			t.Fatalf("missing seq %d in replay", i)
+		}
 	}
 }
 
@@ -434,7 +449,7 @@ func TestSocket_LaggingSubscriber(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
@@ -442,37 +457,41 @@ func TestSocket_LaggingSubscriber(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// Don't read events, let them queue up
-	// The harness defaults to 1024 event queue per subscriber
-	// Let's submit many turns to overflow
-	done := make(chan struct{})
+	laggingErr := make(chan error, 1)
+
 	go func() {
 		for i := 0; i < 2000; i++ {
 			cc := s.Dial(t)
-			s.Submit(t, cc, fmt.Sprintf("turn-%d", i))
+			s.Submit(t, cc, fmt.Sprintf("lag-%d", i))
 		}
-		close(done)
 	}()
 
-	// Wait a bit for submits
-	time.Sleep(100 * time.Millisecond)
-
-	// Try to read from the lagging client - should get lagging error
 	_, err := c.NextEvent(s.ctx())
 	if err != nil {
 		if strings.Contains(err.Error(), "lagging") {
-			return // Expected
+			laggingErr <- err
+		} else {
+			laggingErr <- fmt.Errorf("got error but not lagging: %v", err)
 		}
+	} else {
+		laggingErr <- fmt.Errorf("expected lagging error, got no error")
 	}
 
-	<-done
+	err = <-laggingErr
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c2 := s.Dial(t)
+	turnID := s.Submit(t, c2, "dispatch-after-lagging")
+	s.WaitTerminal(turnID)
 }
 
 func TestSocket_StatusNoSecrets(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
@@ -481,18 +500,19 @@ func TestSocket_StatusNoSecrets(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
-	// Verify no secret values in the status JSON
 	statusJSON, _ := json.Marshal(status)
 	statusStr := string(statusJSON)
 
-	// Check for common secret patterns (this is a basic check)
-	forbiddenPatterns := []string{"secret", "password", "key:", "auth_ref"}
-	for _, pattern := range forbiddenPatterns {
-		if strings.Contains(strings.ToLower(statusStr), pattern) {
-			// Allow secret references by name, but not values
-			if !strings.Contains(statusStr, "secret:") {
-				t.Logf("warning: status may contain %s", pattern)
-			}
+	forbiddenValues := []string{
+		"password",
+		"secret",
+		"authorization",
+		"bearer",
+	}
+
+	for _, val := range forbiddenValues {
+		if strings.Contains(strings.ToLower(statusStr), val) {
+			t.Fatalf("status contains secret value or pattern: %s", val)
 		}
 	}
 }
@@ -501,29 +521,47 @@ func TestSocket_DetachReattachTurnFinished(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
-	turnID := s.Submit(t, c, "s1")
-
-	// Close the client while turn is in progress
-	lastSeq := int64(0)
-	if len(s.Events()) > 0 {
-		lastSeq = s.Events()[len(s.Events())-1].Seq
-	}
-	_ = c.Close()
-
-	// Wait for the turn to finish
-	newC := s.Dial(t)
-	s.WaitTerminal(turnID)
-
-	// Subscribe from last known seq to get missed events
-	if _, err := newC.Subscribe(s.ctx(), lastSeq); err != nil {
+	if _, err := c.Subscribe(s.ctx(), 0); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// Fetch the turn - should have the result
+	turnID := s.Submit(t, c, "s1")
+
+	var lastSeq int64
+	for lastSeq == 0 || len(s.Events()) == 0 {
+		if len(s.Events()) > 0 {
+			lastSeq = s.Events()[len(s.Events())-1].Seq
+		}
+	}
+
+	_ = c.Close()
+
+	newC := s.Dial(t)
+	s.WaitTerminal(turnID)
+
+	if _, err := newC.Subscribe(s.ctx(), lastSeq); err != nil {
+		t.Fatalf("subscribe from %d: %v", lastSeq, err)
+	}
+
+	missedEvents := 0
+	for {
+		frame, err := newC.NextEvent(s.ctx())
+		if err != nil {
+			break
+		}
+		if frame.Seq > lastSeq {
+			missedEvents++
+		}
+	}
+
+	if missedEvents == 0 {
+		t.Fatal("expected to replay missed events, got none")
+	}
+
 	turn, err := newC.Turn(s.ctx(), turnID)
 	if err != nil {
 		t.Fatalf("turn: %v", err)
@@ -536,18 +574,15 @@ func TestSocket_DetachReattachTurnFinished(t *testing.T) {
 
 func TestSocket_ReleaseNoAttemptID(t *testing.T) {
 	t.Parallel()
-	// This test requires a turn with a capacity hold.
-	// We need to trigger a timeout or reset to create a hold.
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {fake.Step{Kind: fake.StepKindReply, TransportStatus: "timeout", Status: transport.StatusInterrupted}}, // Creates hold
+		"reviewer": {fake.Step{Kind: fake.StepKindReply, TransportStatus: "reset", Status: transport.StatusInterrupted}},
 	})
 
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
 
-	// Check if there's a hold
 	status, err := c.Status(s.ctx())
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -555,10 +590,9 @@ func TestSocket_ReleaseNoAttemptID(t *testing.T) {
 
 	for _, pool := range status.Pools {
 		if len(pool.Holds) > 0 {
-			// Try to release without attempt_id
 			reply, err := c.Release(s.ctx(), wire.ReleaseRequest{
 				Pool:   pool.Name,
-				Reason: "operator released",
+				Reason: "test release",
 			})
 			if err != nil {
 				t.Fatalf("release: %v", err)
@@ -567,31 +601,51 @@ func TestSocket_ReleaseNoAttemptID(t *testing.T) {
 			if len(reply.Released) == 0 {
 				t.Fatal("no attempts released")
 			}
+
+			releaseEvent := s.WaitEvent(func(ev event) bool {
+				cap, ok := body[wire.EvCapacity](ev, wire.EventKindCapacity)
+				return ok && cap.State == "released"
+			})
+
+			capEv, _ := body[wire.EvCapacity](releaseEvent, wire.EventKindCapacity)
+			if capEv.How == nil || *capEv.How != "operator" {
+				got := "<nil>"
+				if capEv.How != nil {
+					got = *capEv.How
+				}
+				t.Fatalf("release how=%s, want operator", got)
+			}
+			if capEv.Reason == nil || *capEv.Reason == "" {
+				t.Fatal("release reason is empty")
+			}
 			return
 		}
 	}
 
-	gap(t, "no holds created by timeout")
+	gap(t, "no holds created by reset")
 }
 
 func TestSocket_ReleaseAmbiguous(t *testing.T) {
 	t.Parallel()
-	// Need two turns with holds in the same pool
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply("the answer is 42"), enginetest.Reply("the answer is 42")},
-		"reviewer": {fake.Step{Kind: fake.StepKindReply, TransportStatus: "timeout", Status: transport.StatusInterrupted}, fake.Step{Kind: fake.StepKindReply, TransportStatus: "timeout", Status: transport.StatusInterrupted}},
+		"author": {
+			enginetest.Reply("the answer is 42"),
+			enginetest.Reply("the answer is 42"),
+		},
+		"reviewer": {
+			fake.Step{Kind: fake.StepKindReply, TransportStatus: "reset", Status: transport.StatusInterrupted},
+			fake.Step{Kind: fake.StepKindReply, TransportStatus: "reset", Status: transport.StatusInterrupted},
+		},
 	})
 
 	c := s.Dial(t)
 
-	// Submit two turns to create two holds
 	turnID1 := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID1)
 
 	turnID2 := s.Submit(t, c, "s2")
 	s.WaitTerminal(turnID2)
 
-	// Check if we have two holds
 	status, err := c.Status(s.ctx())
 	if err != nil {
 		t.Fatalf("status: %v", err)
@@ -599,31 +653,35 @@ func TestSocket_ReleaseAmbiguous(t *testing.T) {
 
 	for _, pool := range status.Pools {
 		if len(pool.Holds) >= 2 {
-			// Try to release without attempt_id - should fail with ambiguous
 			_, err := c.Release(s.ctx(), wire.ReleaseRequest{
 				Pool:   pool.Name,
 				Reason: "test",
 			})
 
 			if err == nil {
-				t.Fatal("expected ambiguous error")
+				t.Fatal("expected ambiguous error, got no error")
 			}
 
-			if !strings.Contains(err.Error(), "ambiguous") {
-				t.Logf("got error: %v (expected to mention ambiguous)", err)
+			errStr := err.Error()
+			if !strings.Contains(errStr, "ambiguous") {
+				t.Fatalf("expected ambiguous error, got: %s", errStr)
+			}
+
+			if !strings.Contains(errStr, turnID1) && !strings.Contains(errStr, turnID2) {
+				t.Fatalf("ambiguous error should name both attempt IDs, got: %s", errStr)
 			}
 			return
 		}
 	}
 
-	gap(t, "couldn't create two holds")
+	gap(t, "couldn't create two holds for ambiguous test")
 }
 
 func TestSocket_ReleaseNoHold(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
@@ -635,7 +693,6 @@ func TestSocket_ReleaseNoHold(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
-	// Try to release a pool that has no holds
 	var poolName string
 	if len(status.Pools) > 0 {
 		poolName = status.Pools[0].Name
@@ -649,11 +706,12 @@ func TestSocket_ReleaseNoHold(t *testing.T) {
 	})
 
 	if err == nil {
-		t.Fatal("expected no_hold error")
+		t.Fatal("expected no_hold error, got no error")
 	}
 
-	if !strings.Contains(err.Error(), "no_hold") {
-		t.Logf("got error: %v (expected to mention no_hold)", err)
+	errStr := err.Error()
+	if !strings.Contains(errStr, "no_hold") {
+		t.Fatalf("expected no_hold error, got: %s", errStr)
 	}
 }
 
@@ -661,26 +719,34 @@ func TestSocket_ReleaseEmptyReason(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("the answer is 42")},
-		"reviewer": {enginetest.Reply(fake.VerdictApprove("hash", "id"))},
+		"reviewer": {verdict(fake.VerdictApprove)},
 	})
 
 	c := s.Dial(t)
+	turnID := s.Submit(t, c, "s1")
+	s.WaitTerminal(turnID)
 
-	// Try release with empty reason
-	_, err := c.Release(s.ctx(), wire.ReleaseRequest{
-		Pool:   "default",
+	status, err := c.Status(s.ctx())
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	var poolName string
+	if len(status.Pools) > 0 {
+		poolName = status.Pools[0].Name
+	}
+
+	_, err = c.Release(s.ctx(), wire.ReleaseRequest{
+		Pool:   poolName,
 		Reason: "",
 	})
 
 	if err == nil {
-		t.Fatal("expected reason_required error")
+		t.Fatal("expected reason_required error, got no error")
 	}
 
-	if !strings.Contains(err.Error(), "reason_required") && !strings.Contains(err.Error(), "reason") {
-		t.Logf("got error: %v (expected to mention reason)", err)
+	errStr := err.Error()
+	if !strings.Contains(errStr, "reason") {
+		t.Fatalf("expected reason_required error, got: %s", errStr)
 	}
-}
-
-func ptrStr(s string) *string {
-	return &s
 }
