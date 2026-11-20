@@ -10,17 +10,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Release prompt steps
-const (
-	releaseStepConfirm = iota
-	releaseStepReason
-)
-
 // releasePromptState tracks the state of a /release command prompt
 type releasePromptState struct {
 	pool      string
 	attemptID *string
-	step      int
 }
 
 // commandHandler runs a command. It reports a problem by setting a.refusal.
@@ -115,52 +108,12 @@ func cmdWhy(a *App, _ []string) tea.Cmd {
 		return nil
 	}
 
-	reason := *ti.TerminalReason
-	msg := fmt.Sprintf("terminal reason: %s", reason)
-
-	if strings.HasPrefix(reason, "budget:") {
-		if a.state.LastBudgetNotice != nil {
-			bn := a.state.LastBudgetNotice
-			parts := []string{msg}
-			if bn.Participant != nil {
-				parts = append(parts, fmt.Sprintf("participant: %s", *bn.Participant))
-			}
-			if bn.Admitted != nil {
-				parts = append(parts, fmt.Sprintf("admission: %d", *bn.Admitted))
-			}
-			if bn.Estimated != nil {
-				parts = append(parts, fmt.Sprintf("estimated: %d", *bn.Estimated))
-			}
-			if bn.Reported != nil {
-				parts = append(parts, fmt.Sprintf("reported: %d", *bn.Reported))
-			}
-			parts = append(parts, fmt.Sprintf("reserved: %d", bn.Charged))
-			parts = append(parts, fmt.Sprintf("limit: %d", bn.Limit))
-			msg = strings.Join(parts, " / ")
-		}
-	} else if strings.HasPrefix(reason, "gate:") {
-		for _, aid := range attemptIDsForTurn(a.state, turnID) {
-			ai := a.state.Attempts[aid]
-			if ai.TransportStatus != "" && ai.TransportStatus != "ok" {
-				msg = fmt.Sprintf("%s: %s", msg, ai.TransportStatus)
-				break
-			}
-		}
-	} else if strings.HasPrefix(reason, "block:") {
-		blockID := strings.TrimPrefix(reason, "block:")
-		if bi, ok := a.state.Blocks[blockID]; ok {
-			msg = fmt.Sprintf("%s (severity: %s)", msg, bi.Severity)
-		}
-	} else if strings.HasPrefix(reason, "revision_request:") {
-		participant := strings.TrimPrefix(reason, "revision_request:")
-		msg = fmt.Sprintf("%s: %s requested revisions", msg, participant)
-	} else if strings.HasPrefix(reason, "malformed_twice:") {
-		participant := strings.TrimPrefix(reason, "malformed_twice:")
-		msg = fmt.Sprintf("%s: %s malformed twice", msg, participant)
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
 	}
 
-	a.refusal = msg
-	return nil
+	return whyCmd(a.ctx, a.cl, turnID, *ti.TerminalReason)
 }
 
 func cmdOverride(a *App, args []string) tea.Cmd {
@@ -198,7 +151,6 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 	a.releasePrompt = &releasePromptState{
 		pool:      args[0],
 		attemptID: nil,
-		step:      releaseStepConfirm,
 	}
 	if len(args) == 2 {
 		a.releasePrompt.attemptID = &args[1]
@@ -234,38 +186,22 @@ func (a *App) validatePreset(preset string) error {
 	if a.state.Status == nil {
 		return fmt.Errorf("no status available")
 	}
-	for _, p := range a.state.Status.Participants {
-		for _, role := range p.EligibleRoles {
-			if role == "author" {
-				if preset == p.ID {
-					return nil
-				}
-			}
-		}
-	}
-	if preset == "solo" || preset == "review" {
-		return nil
-	}
 	var presets []string
-	for _, p := range a.state.Status.Participants {
-		for _, role := range p.EligibleRoles {
-			if role == "author" {
-				presets = append(presets, p.ID)
-			}
+	if a.state.Status.DefaultPreset != "" {
+		presets = append(presets, a.state.Status.DefaultPreset)
+	}
+	for _, qp := range a.state.Status.QuickProfiles {
+		presets = append(presets, qp.Preset)
+	}
+	for _, p := range presets {
+		if preset == p {
+			return nil
 		}
 	}
-	presets = append(presets, "solo", "review")
+	if len(presets) == 0 {
+		return fmt.Errorf("no presets available")
+	}
 	return fmt.Errorf("unknown preset %q; valid presets: %s", preset, strings.Join(presets, ", "))
-}
-
-func attemptIDsForTurn(state State, turnID string) []string {
-	var aids []string
-	for aid, ai := range state.Attempts {
-		if ai.TurnID == turnID {
-			aids = append(aids, aid)
-		}
-	}
-	return aids
 }
 
 // handleReleaseRefusal formats release errors to show ambiguous attempt IDs.
@@ -288,5 +224,50 @@ func handleReleaseRefusal(err error) string {
 			msg = fmt.Sprintf("%s (attempt ids: %s)", msg, strings.Join(ids, ", "))
 		}
 	}
+	return msg
+}
+
+// formatWhy formats the why output given a turn reply and terminal reason.
+func formatWhy(turn *wire.TurnReply, reason string) string {
+	msg := fmt.Sprintf("terminal reason: %s", reason)
+
+	if strings.HasPrefix(reason, "budget:") {
+		if turn.Budget.Reserved != nil && turn.Budget.Charged != nil && turn.Budget.Limit != nil {
+			parts := []string{msg}
+			if strings.Contains(reason, "context:") {
+				participant := strings.TrimPrefix(reason, "budget:context:")
+				parts = append(parts, fmt.Sprintf("participant: %s", participant))
+			}
+			parts = append(parts, fmt.Sprintf("reserved: %d", *turn.Budget.Reserved))
+			parts = append(parts, fmt.Sprintf("charged: %d", *turn.Budget.Charged))
+			parts = append(parts, fmt.Sprintf("limit: %d", *turn.Budget.Limit))
+			msg = strings.Join(parts, " / ")
+		}
+	} else if strings.HasPrefix(reason, "gate:") {
+		for _, ai := range turn.Attempts {
+			if ai.TransportStatus != "" && ai.TransportStatus != "ok" {
+				msg = fmt.Sprintf("%s: %s", msg, ai.TransportStatus)
+				break
+			}
+		}
+	} else if strings.HasPrefix(reason, "block:") {
+		blockID := strings.TrimPrefix(reason, "block:")
+		for _, b := range turn.OpenBlocks {
+			if b.ID == blockID {
+				msg = fmt.Sprintf("%s (severity: %s)", msg, b.Severity)
+				if b.Remedy != "" {
+					msg = fmt.Sprintf("%s, remedy: %s", msg, b.Remedy)
+				}
+				break
+			}
+		}
+	} else if strings.HasPrefix(reason, "revision_request:") {
+		participant := strings.TrimPrefix(reason, "revision_request:")
+		msg = fmt.Sprintf("%s: %s requested revisions", msg, participant)
+	} else if strings.HasPrefix(reason, "malformed_twice:") {
+		participant := strings.TrimPrefix(reason, "malformed_twice:")
+		msg = fmt.Sprintf("%s: %s malformed twice", msg, participant)
+	}
+
 	return msg
 }

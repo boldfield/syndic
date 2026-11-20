@@ -324,6 +324,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.refusal = msg.refusal
 		}
 		return a, nil
+	case whyMsg:
+		a.refusal = msg.reason
+		return a, nil
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false

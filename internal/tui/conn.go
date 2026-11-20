@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/client"
@@ -123,6 +125,11 @@ type turnMsg struct {
 	err  error
 }
 
+// whyMsg carries the formatted why output.
+type whyMsg struct {
+	reason string
+}
+
 // turnCmd requests the full turn record from the engine.
 func turnCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea.Cmd {
 	return func() tea.Msg {
@@ -134,6 +141,17 @@ func turnCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea
 	}
 }
 
+// whyCmd requests the full turn record and formats the why output.
+func whyCmd(ctx context.Context, cl *client.Client, turnID, reason string) tea.Cmd {
+	return func() tea.Msg {
+		turn, err := cl.Turn(ctx, turnID)
+		if err != nil {
+			return whyMsg{reason: "why: " + formatRefusal(err)}
+		}
+		return whyMsg{reason: formatWhy(&turn, reason)}
+	}
+}
+
 // tickCmd sends a tick message every second.
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg {
@@ -141,16 +159,49 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// formatRefusal renders a refusal as its code and detail on one line.
+// formatRefusal renders a refusal with all its members on one line.
 func formatRefusal(err error) string {
 	var we *wire.Error
-	if errors.As(err, &we) {
-		if we.Detail != nil && *we.Detail != "" {
-			return we.Code + ": " + *we.Detail
-		}
-		return we.Code
+	if !errors.As(err, &we) {
+		return err.Error()
 	}
-	return err.Error()
+
+	parts := []string{we.Code}
+	if we.Detail != nil && *we.Detail != "" {
+		parts = append(parts, *we.Detail)
+	}
+	if we.Participant != nil && *we.Participant != "" {
+		parts = append(parts, fmt.Sprintf("participant: %s", *we.Participant))
+	}
+	if we.TurnID != nil && *we.TurnID != "" {
+		parts = append(parts, fmt.Sprintf("turn_id: %s", *we.TurnID))
+	}
+	if we.Budget != nil && *we.Budget != "" {
+		parts = append(parts, fmt.Sprintf("budget: %s", *we.Budget))
+	}
+	if we.Admission != nil {
+		parts = append(parts, fmt.Sprintf("admission: %d", *we.Admission))
+	}
+	if we.Estimated != nil {
+		parts = append(parts, fmt.Sprintf("estimated: %d", *we.Estimated))
+	}
+	if we.Limit != nil {
+		parts = append(parts, fmt.Sprintf("limit: %d", *we.Limit))
+	}
+	if we.Pool != nil && *we.Pool != "" {
+		parts = append(parts, fmt.Sprintf("pool: %s", *we.Pool))
+	}
+	if we.AttemptID != nil && *we.AttemptID != "" {
+		parts = append(parts, fmt.Sprintf("attempt_id: %s", *we.AttemptID))
+	}
+
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	if len(parts) == 2 {
+		return strings.Join(parts, ": ")
+	}
+	return strings.Join(parts, " / ")
 }
 
 // cancelMsg carries the result of a cancel request or the error that occurred.
@@ -166,7 +217,7 @@ func cancelCmd(ctx context.Context, cl *client.Client, turnID string) tea.Cmd {
 		if err != nil {
 			return cancelMsg{turnID: turnID, refusal: formatRefusal(err)}
 		}
-		return cancelMsg{turnID: turnID}
+		return cancelMsg{turnID: turnID, refusal: "cancelled"}
 	}
 }
 
@@ -183,7 +234,7 @@ func overrideCmd(ctx context.Context, cl *client.Client, turnID, reason string) 
 		if err != nil {
 			return overrideMsg{turnID: turnID, refusal: formatRefusal(err)}
 		}
-		return overrideMsg{turnID: turnID}
+		return overrideMsg{turnID: turnID, refusal: "overridden"}
 	}
 }
 
@@ -196,11 +247,12 @@ type releaseMsg struct {
 func releaseCmd(ctx context.Context, cl *client.Client, pool string, attemptID *string, reason string) tea.Cmd {
 	return func() tea.Msg {
 		req := wire.ReleaseRequest{Pool: pool, AttemptID: attemptID, Reason: reason}
-		_, err := cl.Release(ctx, req)
+		resp, err := cl.Release(ctx, req)
 		if err != nil {
 			return releaseMsg{refusal: handleReleaseRefusal(err)}
 		}
-		return releaseMsg{}
+		msg := fmt.Sprintf("released %d hold(s)", len(resp.Released))
+		return releaseMsg{refusal: msg}
 	}
 }
 
