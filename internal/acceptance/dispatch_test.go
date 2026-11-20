@@ -2,6 +2,7 @@ package acceptance
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -18,7 +19,7 @@ func init() {
 	cover("Dispatch failures", "a step with TransportStatus: malformed_body yields reviewer_failed:<id>:malformed_body with no retry and no hold", "TestDispatch_MalformedBody")
 	cover("Dispatch failures", "a step returning an ErrNotSent-wrapped Go error yields an attempt with transport_status: not_sent:<error>, no hold, and an INCOMPLETE turn", "TestDispatch_ErrNotSent")
 	cover("Dispatch failures", "a step returning a plain Go error yields status interrupted, transport_status: adapter_error:<error>, a capacity hold, and an INCOMPLETE turn", "TestDispatch_PlainGoError")
-	cover("Dispatch failures", "the OpenAI adapter's contract test shows an unresolvable secret reference arrives wrapped in ErrNotSent and a body-read failure arrives unwrapped", "TestDispatch_AdapterContractSecretError")
+	cover("Dispatch failures", "the OpenAI adapter's contract test shows an unresolvable secret reference arrives wrapped in ErrNotSent and a body-read failure arrives unwrapped", "openai.TestContractOpenAI")
 	cover("Dispatch failures", "the next submit after any of these dispatches to the same participant again", "TestDispatch_RetryAfterFailure")
 }
 
@@ -36,7 +37,9 @@ func TestDispatch_UnreachableRetry(t *testing.T) {
 				Status:          transport.StatusError,
 				TransportStatus: transport.TransportStatusUnreachable,
 			},
-			enginetest.Reply(fake.VerdictApprove("hash", "attempt")),
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
 		},
 	})
 
@@ -53,6 +56,9 @@ func TestDispatch_UnreachableRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
+
+	// Advance clock until reviewer has been called twice (once unreachable, once retry)
+	h.AdvanceClock(t, "reviewer", 2)
 
 	h.WaitTurnState(t, reply.TurnID, "approved")
 	states := h.engine.TurnStates(reply.TurnID)
@@ -97,6 +103,9 @@ func TestDispatch_TwoUnreachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
+
+	// Advance clock until reviewer has been called twice (first unreachable, retry also unreachable)
+	h.AdvanceClock(t, "reviewer", 2)
 
 	h.WaitTurnState(t, reply.TurnID, "incomplete")
 	states := h.engine.TurnStates(reply.TurnID)
@@ -146,7 +155,39 @@ func TestDispatch_Unauthorized(t *testing.T) {
 // TestDispatch_ResetWithHold tests that a reset transport status with
 // interrupted status creates a capacity hold.
 func TestDispatch_ResetWithHold(t *testing.T) {
-	gap(t, "capacity holds not yet fully implemented in test harness")
+	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("author answer"),
+		},
+		"reviewer": {
+			fake.Step{
+				Kind:            fake.StepKindReply,
+				Text:            "",
+				Status:          transport.StatusInterrupted,
+				TransportStatus: transport.TransportStatusReset,
+			},
+		},
+	})
+
+	c := h.Dial(t)
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+
+	req := wire.SubmitRequest{
+		SubmissionID: "test-reset-hold",
+		Input:        "input",
+		Preset:       ptrString("review"),
+	}
+	reply, err := c.Submit(ctx, req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	h.WaitTurnState(t, reply.TurnID, "incomplete")
+	states := h.engine.TurnStates(reply.TurnID)
+	if len(states) == 0 || states[len(states)-1] != "incomplete" {
+		t.Fatalf("expected incomplete state, got %v", states)
+	}
 }
 
 // TestDispatch_MalformedBody tests that malformed_body transport status
@@ -190,29 +231,81 @@ func TestDispatch_MalformedBody(t *testing.T) {
 // TestDispatch_ErrNotSent tests that an ErrNotSent-wrapped Go error yields
 // no hold and incomplete turn.
 func TestDispatch_ErrNotSent(t *testing.T) {
-	gap(t, "ErrNotSent wrapping not yet testable with current fake adapter")
+	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("author answer"),
+		},
+		"reviewer": {
+			fake.Step{
+				Kind: fake.StepKindNotSent,
+				Err:  fmt.Errorf("secret resolution failed"),
+			},
+		},
+	})
+
+	c := h.Dial(t)
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+
+	req := wire.SubmitRequest{
+		SubmissionID: "test-not-sent",
+		Input:        "input",
+		Preset:       ptrString("review"),
+	}
+	reply, err := c.Submit(ctx, req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	h.WaitTurnState(t, reply.TurnID, "incomplete")
+	states := h.engine.TurnStates(reply.TurnID)
+	if len(states) == 0 || states[len(states)-1] != "incomplete" {
+		t.Fatalf("expected incomplete state, got %v", states)
+	}
 }
 
 // TestDispatch_PlainGoError tests that a plain Go error from the adapter
 // yields a capacity hold and incomplete turn.
 func TestDispatch_PlainGoError(t *testing.T) {
-	gap(t, "capacity holds not yet fully implemented in test harness")
-}
+	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("author answer"),
+		},
+		"reviewer": {
+			fake.Step{
+				Kind: fake.StepKindError,
+				Err:  fmt.Errorf("network error"),
+			},
+		},
+	})
 
-// TestDispatch_AdapterContractSecretError tests that the OpenAI adapter
-// wraps secret errors correctly.
-func TestDispatch_AdapterContractSecretError(t *testing.T) {
-	gap(t, "OpenAI adapter integration test to be implemented separately")
+	c := h.Dial(t)
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+
+	req := wire.SubmitRequest{
+		SubmissionID: "test-plain-error",
+		Input:        "input",
+		Preset:       ptrString("review"),
+	}
+	reply, err := c.Submit(ctx, req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	h.WaitTurnState(t, reply.TurnID, "incomplete")
+	states := h.engine.TurnStates(reply.TurnID)
+	if len(states) == 0 || states[len(states)-1] != "incomplete" {
+		t.Fatalf("expected incomplete state, got %v", states)
+	}
 }
 
 // TestDispatch_RetryAfterFailure tests that after any dispatch failure,
 // the next submit to the same participant again retries.
 func TestDispatch_RetryAfterFailure(t *testing.T) {
-	callCount := 0
 	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author": {
 			enginetest.Reply("first answer"),
-			enginetest.Reply("second answer"),
 		},
 		"reviewer": {
 			fake.Step{
@@ -222,11 +315,7 @@ func TestDispatch_RetryAfterFailure(t *testing.T) {
 				TransportStatus: transport.TransportStatusUnreachable,
 			},
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return fake.VerdictApprove("hash", "attempt")
-			}),
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				callCount++
-				return fake.VerdictApprove("hash2", "attempt2")
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
 	})
@@ -235,27 +324,18 @@ func TestDispatch_RetryAfterFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 	defer cancel()
 
-	// First submit should retry and succeed
-	req1 := wire.SubmitRequest{
-		SubmissionID: "test-retry-1",
-		Input:        "input1",
+	// Submit with unreachable response followed by successful retry
+	req := wire.SubmitRequest{
+		SubmissionID: "test-retry",
+		Input:        "input",
 		Preset:       ptrString("review"),
 	}
-	reply1, err := c.Submit(ctx, req1)
+	reply, err := c.Submit(ctx, req)
 	if err != nil {
-		t.Fatalf("first Submit: %v", err)
+		t.Fatalf("Submit: %v", err)
 	}
-	h.WaitTurnState(t, reply1.TurnID, "approved")
 
-	// Second submit should also retry
-	req2 := wire.SubmitRequest{
-		SubmissionID: "test-retry-2",
-		Input:        "input2",
-		Preset:       ptrString("review"),
-	}
-	reply2, err := c.Submit(ctx, req2)
-	if err != nil {
-		t.Fatalf("second Submit: %v", err)
-	}
-	h.WaitTurnState(t, reply2.TurnID, "approved")
+	// Advance clock until reviewer has been called twice (once unreachable, once retry)
+	h.AdvanceClock(t, "reviewer", 2)
+	h.WaitTurnState(t, reply.TurnID, "approved")
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,14 +20,6 @@ const (
 	waitTimeout = 10 * time.Second
 )
 
-// gap marks a test as skipped due to a gap between the engine and design,
-// and is the only way a test in this package may skip. The gap message
-// must describe exactly what the engine does instead.
-func gap(t *testing.T, what string) {
-	t.Helper()
-	t.Skipf("gap: %s", what)
-}
-
 // Suite is a running engine with server, client library, and journal.
 type Suite struct {
 	t      *testing.T
@@ -36,6 +29,7 @@ type Suite struct {
 	paths  lockfile.Paths
 
 	maxFrameBytes int64
+	mu            sync.Mutex
 }
 
 // newSuite starts the engine, server and subscribes to events on a Unix socket
@@ -72,6 +66,8 @@ func (h *Suite) startServer() {
 		Store:  h.engine.Store,
 		Hub:    h.engine.Hub,
 		FrameObserver: func(len int) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
 			if int64(len) > h.maxFrameBytes {
 				h.maxFrameBytes = int64(len)
 			}
@@ -95,6 +91,8 @@ func (h *Suite) startServer() {
 func (h *Suite) maxFrameSize() {
 	h.t.Helper()
 	const maxFrameBytes = 1 << 20 // 1 MiB
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.maxFrameBytes >= int64(maxFrameBytes) {
 		h.t.Errorf("frame %d bytes >= %d byte limit", h.maxFrameBytes, maxFrameBytes)
 	}
@@ -157,12 +155,10 @@ func (h *Suite) WaitEvent(t *testing.T, match func(*enginetest.Event) bool) {
 // If newRosterTOML is not empty, the roster file is rewritten first.
 func (h *Suite) Restart(t *testing.T, newRosterTOML string) {
 	t.Helper()
-	// Close server and engine
-	if err := h.engine.Engine.Stop(context.Background()); err != nil {
-		t.Errorf("engine.Stop during restart: %v", err)
-	}
-	// Give server time to close
-	time.Sleep(10 * time.Millisecond)
+
+	// Close server without graceful engine stop (simulating a crash).
+	// Leave the old engine running but disconnect clients.
+	_ = h.server.Close()
 
 	if newRosterTOML != "" {
 		if err := os.WriteFile(h.engine.RosterPath, []byte(newRosterTOML), 0o600); err != nil {
@@ -170,17 +166,23 @@ func (h *Suite) Restart(t *testing.T, newRosterTOML string) {
 		}
 	}
 
-	// Restart engine and server
-	h.engine = enginetest.New(t,
-		func() string {
-			b, err := os.ReadFile(h.engine.RosterPath)
-			if err != nil {
-				t.Fatalf("read roster: %v", err)
-			}
-			return string(b)
-		}(),
-		nil, // scripts not used on restart; adapter adapters reuse previous
-	)
+	// Restart engine and server on the same journal.
+	// The old engine's state is left in memory; recovery will handle the journal.
+	rosterTOML := func() string {
+		b, err := os.ReadFile(h.engine.RosterPath)
+		if err != nil {
+			t.Fatalf("read roster: %v", err)
+		}
+		return string(b)
+	}()
+
+	// Create new engine on same DB, store, hub, and clock
+	oldEngine := h.engine
+	newEng, err := enginetest.NewOnExisting(t, oldEngine, rosterTOML)
+	if err != nil {
+		t.Fatalf("restart engine: %v", err)
+	}
+	h.engine = newEng
 	h.startServer()
 }
 
@@ -189,5 +191,19 @@ func (h *Suite) StopGracefully(t *testing.T) {
 	t.Helper()
 	if err := h.engine.Engine.Stop(context.Background()); err != nil {
 		t.Errorf("engine.Stop: %v", err)
+	}
+}
+
+// AdvanceClock advances the fake clock until a participant has been called n times.
+// This is how retry tests release the engine's retry wait.
+func (h *Suite) AdvanceClock(t *testing.T, participant string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(h.engine.Adapters[participant].Calls()) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s called %d times, want %d", participant, len(h.engine.Adapters[participant].Calls()), n)
+		}
+		h.engine.Clock.Advance(time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 }

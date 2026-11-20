@@ -465,3 +465,57 @@ func (h *Harness) ReleaseBlockingCancel() {
 		a.ReleaseBlockingCancel()
 	}
 }
+
+// NewOnExisting creates a new engine on the same journal, store, hub, and clock
+// as an existing harness, for simulating a restart. It reuses the adapters
+// from the previous harness and starts the new engine.
+func NewOnExisting(t *testing.T, existing *Harness, rosterTOML string) (*Harness, error) {
+	t.Helper()
+
+	rosterPath := filepath.Join(t.TempDir(), "roster.toml")
+	if err := os.WriteFile(rosterPath, []byte(rosterTOML), 0o600); err != nil {
+		return nil, err
+	}
+
+	hn := &Harness{
+		T:          t,
+		Store:      existing.Store,
+		DB:         existing.DB,
+		Hub:        existing.Hub,
+		Clock:      existing.Clock,
+		RosterPath: rosterPath,
+		Adapters:   existing.Adapters,
+		gated:      existing.gated,
+		done:       make(chan struct{}),
+	}
+
+	eng, err := engine.New(engine.Options{
+		Store:         existing.Store,
+		Hub:           existing.Hub,
+		RosterPath:    rosterPath,
+		EngineVersion: EngineVersion,
+		Clock:         existing.Clock,
+		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+			a, ok := hn.gated[p.ID]
+			if !ok {
+				return nil, "", errors.New("enginetest: no adapter for participant " + p.ID)
+			}
+			return a, AdapterVersion, nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	hn.Engine = eng
+
+	if err := eng.Start(); err != nil {
+		return nil, err
+	}
+	hn.subscribe()
+	t.Cleanup(func() {
+		if err := eng.Stop(context.Background()); err != nil {
+			t.Errorf("engine.Stop on restart: %v", err)
+		}
+	})
+	return hn, nil
+}

@@ -32,8 +32,8 @@ func TestProtocol_ApproveWithHash(t *testing.T) {
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				// Verdict approve with the candidate hash
-				return fake.VerdictApprove("test-hash", "test-attempt")
+				// Verdict approve with the actual candidate hash and attempt ID from the request
+				return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
 	})
@@ -110,7 +110,8 @@ func TestProtocol_WrongHash(t *testing.T) {
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return fake.VerdictWrongHash("correct-hash", "attempt-id")
+				// Return a verdict with a different candidate hash
+				return fake.VerdictWrongHash(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
 	})
@@ -145,7 +146,7 @@ func TestProtocol_ApproveWithChanges(t *testing.T) {
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return fake.VerdictApproveWithChanges("hash", "attempt-id")
+				return fake.VerdictApproveWithChanges(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
 	})
@@ -179,7 +180,7 @@ func TestProtocol_TwoEnvelopes(t *testing.T) {
 		},
 		"reviewer": {
 			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return fake.VerdictTwoEnvelopes("hash", "attempt-id")
+				return fake.VerdictTwoEnvelopes(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 			}),
 		},
 	})
@@ -208,13 +209,71 @@ func TestProtocol_TwoEnvelopes(t *testing.T) {
 // TestProtocol_BlockWithEndMarker tests that a block with an end marker
 // parses to the first delimiter and opens a block.
 func TestProtocol_BlockWithEndMarker(t *testing.T) {
-	gap(t, "block parsing and opening not yet implemented")
+	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("author answer"),
+		},
+		"reviewer": {
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				return fake.VerdictBlockWithEndMarker(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			}),
+		},
+	})
+
+	c := h.Dial(t)
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+
+	req := wire.SubmitRequest{
+		SubmissionID: "test-block-end-marker",
+		Input:        "input",
+		Preset:       ptrString("review"),
+	}
+	reply, err := c.Submit(ctx, req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	h.WaitTurnState(t, reply.TurnID, "incomplete")
+	states := h.engine.TurnStates(reply.TurnID)
+	if len(states) == 0 || states[len(states)-1] != "incomplete" {
+		t.Fatalf("expected incomplete state, got %v", states)
+	}
 }
 
 // TestProtocol_BlockOpensIncomplete tests that a block ends a turn incomplete
 // with the block still open.
 func TestProtocol_BlockOpensIncomplete(t *testing.T) {
-	gap(t, "block state machine not yet implemented")
+	h := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("author answer"),
+		},
+		"reviewer": {
+			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+				return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "test", "fix it", "blocked")
+			}),
+		},
+	})
+
+	c := h.Dial(t)
+	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+	defer cancel()
+
+	req := wire.SubmitRequest{
+		SubmissionID: "test-block-opens",
+		Input:        "input",
+		Preset:       ptrString("review"),
+	}
+	reply, err := c.Submit(ctx, req)
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	h.WaitTurnState(t, reply.TurnID, "incomplete")
+	states := h.engine.TurnStates(reply.TurnID)
+	if len(states) == 0 || states[len(states)-1] != "incomplete" {
+		t.Fatalf("expected incomplete state, got %v", states)
+	}
 }
 
 // TestProtocol_AuthorTruncated tests that a truncated author result yields
