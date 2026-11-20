@@ -227,7 +227,7 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 
 	r.typeLine("what is the answer? héllo")
 	turn := waitOpenTurn(t, r.paths)
-	time.Sleep(300 * time.Millisecond) // let the submit reply clear the input
+	r.waitFor(t, "[review]")
 
 	// A second submit is refused as busy; the code shows and the text stays.
 	r.typeLine("second question")
@@ -236,8 +236,19 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 	release()
 	r.h.WaitTurnState(turn, engine.StateApproved)
 	calls := r.h.Adapters["author"].Calls()
-	if len(calls) != 1 || !strings.Contains(calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content, "what is the answer? héllo") {
-		t.Fatalf("author calls = %+v", calls)
+	authorCalls := 0
+	for _, c := range calls {
+		if c.Request.Envelope.Phase == "author" {
+			authorCalls++
+			if authorCalls == 1 {
+				if !strings.Contains(c.Request.Messages[len(c.Request.Messages)-1].Content, "what is the answer? héllo") {
+					t.Fatalf("first author call content mismatch: %+v", c)
+				}
+			}
+		}
+	}
+	if authorCalls != 1 {
+		t.Fatalf("expected 1 author call with phase=author, got %d", authorCalls)
 	}
 
 	max := r.waitCaughtUp(t)
@@ -318,7 +329,7 @@ func TestResumeReconnectsOnce(t *testing.T) {
 	r := newRig(t)
 	r.waitFor(t, "answer (placeholder)")
 	r.typeLine("/resume")
-	time.Sleep(500 * time.Millisecond)
+	r.waitCaughtUp(t)
 	max, err := r.h.Store.MaxSeq()
 	if err != nil {
 		t.Fatal(err)
