@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/wire"
@@ -40,7 +41,9 @@ type App struct {
 	input         textinput.Model
 	refusal       string
 
-	onEvent func(wire.Frame)
+	statusRefreshPending bool
+	tickRunning          bool
+	onEvent              func(wire.Frame)
 }
 
 // Option configures an App.
@@ -97,6 +100,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStatusRefresh(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case tickMsg:
+		// Tick message: trigger re-render by returning with no command change
+		// (elapsed time will be re-calculated in View based on current time)
+		return a, nil
 	}
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
@@ -148,6 +155,10 @@ func (a *App) onSubmit(msg submitMsg) {
 	a.input.SetValue("")
 	if !isTerminalState(a.state.TurnState[msg.turnID]) {
 		a.state.CurrentTurn = msg.turnID
+		// Start tick when turn becomes open
+		if !a.tickRunning {
+			a.tickRunning = true
+		}
 	}
 }
 
@@ -175,7 +186,7 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return a, a.reconnect()
 	}
-	a.state = apply(a.state, msg.frame)
+	a.state = apply(a.state, msg.frame, time.Now())
 	if a.onEvent != nil {
 		a.onEvent(msg.frame)
 	}
@@ -184,7 +195,6 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Trigger status refresh after certain events (coalesced by not requesting until the next read).
-	var cmd tea.Cmd
 	needsStatusRefresh := false
 	requestTurnID := ""
 	switch msg.frame.Kind {
@@ -199,18 +209,33 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if needsStatusRefresh && a.cl != nil {
-		cmd = statusCmd(a.ctx, a.cl)
-	} else if requestTurnID != "" && a.cl != nil {
-		cmd = turnCmd(a.ctx, a.cl, requestTurnID)
-	} else {
-		cmd = readCmd(a.ctx, a.gen, a.cl)
+	// Always continue reading events, batch status/turn requests in parallel.
+	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
+	if needsStatusRefresh && a.cl != nil && !a.statusRefreshPending {
+		a.statusRefreshPending = true
+		cmds = append(cmds, statusCmd(a.ctx, a.cl))
 	}
-	return a, cmd
+	if requestTurnID != "" && a.cl != nil {
+		cmds = append(cmds, turnCmd(a.ctx, a.cl, requestTurnID))
+	}
+
+	// Manage tick based on turn state
+	if a.state.CurrentTurn == "" && a.tickRunning {
+		a.tickRunning = false
+	}
+	if a.state.CurrentTurn != "" && !a.tickRunning {
+		a.tickRunning = true
+		cmds = append(cmds, tickCmd())
+	} else if a.tickRunning {
+		cmds = append(cmds, tickCmd())
+	}
+
+	return a, tea.Batch(cmds...)
 }
 
 // onStatusRefresh applies a status update and continues reading events.
 func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
+	a.statusRefreshPending = false
 	if msg.err == nil {
 		a.state = MergeStatus(a.state, &msg.status)
 	}
@@ -223,7 +248,7 @@ func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
 // onTurn applies a turn reply and continues reading events.
 func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil && msg.turn != nil {
-		a.state = MergeTurn(a.state, msg.id, msg.turn)
+		a.state = MergeTurn(a.state, msg.id, msg.turn, time.Now())
 	}
 	if a.cl != nil {
 		return a, readCmd(a.ctx, a.gen, a.cl)

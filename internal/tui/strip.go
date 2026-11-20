@@ -136,10 +136,9 @@ func renderBanners(s State) []string {
 		banners = append(banners, "engine: reconnecting")
 	}
 
-	// Quick profile unapproved slot: will be filled by later task
-	// if unapproved {
-	//   banners = append(banners, "quick: unapproved <name>")
-	// }
+	if s.UnapprovedProfile != nil && *s.UnapprovedProfile != "" {
+		banners = append(banners, fmt.Sprintf("quick: unapproved %s", *s.UnapprovedProfile))
+	}
 
 	return banners
 }

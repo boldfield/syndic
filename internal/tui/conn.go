@@ -38,6 +38,9 @@ type submitMsg struct {
 	refusal string
 }
 
+// tickMsg is sent every second for elapsed time updates.
+type tickMsg struct{}
+
 // connectCmd dials until it succeeds, then fetches status and subscribes after
 // sinceSeq. It touches no shared state; everything it learns travels in the
 // returned message.
@@ -120,6 +123,13 @@ func turnCmd(ctx context.Context, cl *client.Client, turnID string) tea.Cmd {
 		turn, err := cl.Turn(ctx, turnID)
 		return turnMsg{turn: &turn, id: turnID, err: err}
 	}
+}
+
+// tickCmd sends a tick message every second.
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return tickMsg{}
+	})
 }
 
 // formatRefusal renders a refusal as its code and detail on one line.

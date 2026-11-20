@@ -133,6 +133,7 @@ type State struct {
 	LastBudgetNotice    *BudgetNotice
 	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
+	UnapprovedProfile   *string
 }
 
 // NewState returns a fresh State.
@@ -151,8 +152,9 @@ func NewState() State {
 
 // apply folds one event frame into the state and returns the result. It is a
 // pure function that tolerates unknown event kinds and unknown members. It does
-// not call time.Now() and does not mutate shared input maps.
-func apply(s State, f wire.Frame) State {
+// not call time.Now() and does not mutate shared input maps. The now parameter
+// is used for SubmittedAt; pass time.Now() when called from Update.
+func apply(s State, f wire.Frame, now time.Time) State {
 	if f.Seq > s.LastSeq {
 		s.LastSeq = f.Seq
 	}
@@ -179,7 +181,7 @@ func apply(s State, f wire.Frame) State {
 				State:           "submitted",
 				Preset:          body.Preset,
 				QuickProfile:    body.QuickProfile,
-				SubmittedAt:     time.Now(),
+				SubmittedAt:     now,
 				EstimatedTokens: body.EstimatedTokens,
 				ReviewerStates:  make(map[string]string),
 			}
@@ -248,6 +250,32 @@ func apply(s State, f wire.Frame) State {
 				RepairOf:        body.RepairOf,
 			}
 			s.Attempts = attempts
+
+			// Update turn author/reviewers based on attempt phase
+			if s.CurrentTurn != "" {
+				turns := copyMap(s.Turns)
+				if ti, ok := turns[s.CurrentTurn]; ok {
+					if body.Phase == "author_dispatch" && ti.Author == "" {
+						ti.Author = body.Participant
+						if pi, ok := s.Participants[body.Participant]; ok {
+							ti.AuthorState = pi.State
+						}
+					} else if body.Phase == "reviewer_dispatch" || body.Phase == "reviewer_repair" {
+						if ti.ReviewerStates[body.Participant] == "" {
+							ti.Reviewers = append(ti.Reviewers, body.Participant)
+							reviewerStates := copyMap(ti.ReviewerStates)
+							if pi, ok := s.Participants[body.Participant]; ok {
+								reviewerStates[body.Participant] = pi.State
+							} else {
+								reviewerStates[body.Participant] = ""
+							}
+							ti.ReviewerStates = reviewerStates
+						}
+					}
+					turns[s.CurrentTurn] = ti
+				}
+				s.Turns = turns
+			}
 		}
 
 	case wire.EventKindAttemptCompleted:
@@ -370,7 +398,22 @@ func apply(s State, f wire.Frame) State {
 			s.Turns = turns
 		}
 
-	case wire.EventKindDeadline, wire.EventKindCapacity, wire.EventKindVerdictRecorded,
+	case wire.EventKindDeadline:
+		var body wire.EvDeadline
+		if json.Unmarshal(f.Body, &body) == nil && body.Kind == "turn" && body.TurnID != "" {
+			// Update turn deadline from the remaining milliseconds
+			if s.CurrentTurn == body.TurnID {
+				turns := copyMap(s.Turns)
+				if ti, ok := turns[body.TurnID]; ok {
+					deadline := now.Add(time.Duration(body.RemainingMs) * time.Millisecond)
+					ti.TurnDeadline = &deadline
+					turns[body.TurnID] = ti
+					s.Turns = turns
+				}
+			}
+		}
+
+	case wire.EventKindCapacity, wire.EventKindVerdictRecorded,
 		wire.EventKindVerdictsDelivered:
 		// These events don't directly update state; they're informational.
 	}
@@ -466,7 +509,8 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 
 // MergeTurn merges a turn reply into the state and returns the result.
 // This is a pure function. It also populates author and reviewers from attempts.
-func MergeTurn(s State, turnID string, turn *wire.TurnReply) State {
+// The now parameter is used to calculate absolute deadlines from relative values.
+func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) State {
 	turns := copyMap(s.Turns)
 	ti, ok := turns[turnID]
 	if !ok {
@@ -485,8 +529,8 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply) State {
 	}
 
 	if turn.Deadlines.Turn > 0 {
-		tm := time.Unix(0, turn.Deadlines.Turn*int64(time.Millisecond))
-		ti.TurnDeadline = &tm
+		deadline := now.Add(time.Duration(turn.Deadlines.Turn) * time.Millisecond)
+		ti.TurnDeadline = &deadline
 	}
 
 	// Populate author and reviewers from attempts

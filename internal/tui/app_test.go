@@ -239,7 +239,7 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 	calls := r.h.Adapters["author"].Calls()
 	// Author should be called exactly once for the author dispatch
 	// (terminal delivery is not sent on approved with solo, but here we have reviewers)
-	if len(calls) < 1 || !strings.Contains(calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content, "what is the answer? héllo") {
+	if len(calls) != 1 || !strings.Contains(calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content, "what is the answer? héllo") {
 		t.Fatalf("author calls = %+v", calls)
 	}
 
