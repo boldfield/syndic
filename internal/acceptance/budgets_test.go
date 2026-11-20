@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/budget"
@@ -1013,8 +1014,60 @@ func budgetsRacingTurn(t *testing.T, s *suite, c *client.Client, id, preset stri
 	return reply.TurnID, s.Turn(t, c, reply.TurnID)
 }
 
+// budgetsGate holds a turn's terminal deliveries inside the fake's Complete
+// call until the test lets them go. entered receives once for each delivery
+// held.
+type budgetsGate struct {
+	entered chan string
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *budgetsGate) open() { g.once.Do(func() { close(g.release) }) }
+
+// budgetsGates are the delivery gates of a suite, one per turn, created by
+// whichever side asks first.
+type budgetsGates struct {
+	mu sync.Mutex
+	m  map[string]*budgetsGate
+}
+
+func (gs *budgetsGates) of(turnID string) *budgetsGate {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	g := gs.m[turnID]
+	if g == nil {
+		g = &budgetsGate{entered: make(chan string, 8), release: make(chan struct{})}
+		gs.m[turnID] = g
+	}
+	return g
+}
+
+func (gs *budgetsGates) openAll() {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	for _, g := range gs.m {
+		g.open()
+	}
+}
+
+// budgetsGatedStep approves a review and answers a terminal delivery only
+// once the delivery's turn gate is open.
+func budgetsGatedStep(gs *budgetsGates) fake.Step {
+	return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		switch req.Envelope.Phase {
+		case "review":
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		case "terminal_delivery":
+			g := gs.of(req.Envelope.TurnID)
+			g.entered <- req.Envelope.Participant
+			<-g.release
+		}
+		return budgetsReplyText
+	})
+}
+
 func TestBudgets_RacingReservations(t *testing.T) {
-	gap(t, "the engine never runs two reviewers' BeginAttempt transactions at once, so no test can make them race: runReviewers holds Engine.mu while it schedules every required reviewer, startReviewer runs beginReviewer synchronously under that lock, and Engine.tx goes through hub.Tx, which holds hub.mu for the whole journal transaction. The second reviewer's reservation is read only after the first has committed, so the engine serializes in memory, not in the journal as section 4a describes, and it has no hook at which a test could hold one transaction open while the other begins. Forcing the race needs a production test hook; the body below runs the scenario in both serial orders, and passes")
 	t.Parallel()
 	// Measure the reservations of a roster with room: the attempts of a
 	// two-reviewer turn, and its projection.
@@ -1027,67 +1080,118 @@ func TestBudgets_RacingReservations(t *testing.T) {
 		return a.EstimatedPromptTokens + a.MaxOutputTokens
 	}
 	limit := *measured.Budget.Projected
-	// The limit is the projection, so the submit passes. The author reports
-	// the usage that makes the two reviewers' reservations, on top of it,
-	// exceed the limit by exactly one token: the total at the second
-	// reservation is limit + 1.
+	// The limit is the projection, so every submit passes. In a racing turn
+	// the author reports the usage that makes the two reviewers'
+	// reservations, on top of it, exceed the limit by exactly one token: the
+	// total at the second reservation is limit + 1.
 	authorCharge := limit + 1 - res("reviewer") - res("reviewer2")
 	if authorCharge <= 0 || authorCharge > limit {
 		t.Fatalf("premise: the author's charge %d does not lie within the limit %d", authorCharge, limit)
 	}
 
-	const turns = 24
+	// How the race is forced. Each round runs two turns. The first, a plain
+	// turn, is approved and sends its terminal deliveries; the fake holds the
+	// two reviewers' deliveries inside Complete, so each keeps its
+	// reviewer's pool (pr and pr2, concurrency 1) occupied. The second, the
+	// racing turn, is submitted then: its author runs in its own pool, and
+	// its two reviewers find their pools full and queue. Only then does the
+	// test open the gate, letting both held deliveries return at once. Each
+	// returns on its own goroutine, frees its pool and, from that goroutine,
+	// starts the reviewer queued there, whose BeginAttempt transaction makes
+	// the reservation. So the two reservations are made by two goroutines
+	// released together, and either may go first; nothing in the test orders
+	// them. The engine's locks decide the order and the second must see the
+	// first's reservation. Run under -race, 24 rounds give the detector both
+	// goroutines touching the turn's budget each time.
+	const rounds = 24
+	gates := &budgetsGates{m: map[string]*budgetsGate{}}
+	t.Cleanup(gates.openAll)
 	roster := budgetsRoster(budgetsCfg{tpbm: "1.0", second: true, budgets: fmt.Sprintf("turn_max_estimated_tokens = %d", limit)})
-	// The author's script alternates its work of a turn, which reports the
-	// charge, with the terminal delivery of that turn, which fits the budget
-	// and is sent.
-	var author []fake.Step
-	for i := 0; i < turns; i++ {
-		author = append(author, budgetsStep(budgetsReplyText, "", &transport.Usage{Prompt: int(authorCharge)}), budgetsPlain())
+	// The author's calls are serial in its pool: the plain turn's work and
+	// delivery, then the racing turn's work, which reports the charge, and
+	// its delivery, which fits the budget and is sent.
+	var author, reviewers []fake.Step
+	for i := 0; i < rounds; i++ {
+		author = append(author, budgetsPlain(), budgetsPlain(),
+			budgetsStep(budgetsReplyText, "", &transport.Usage{Prompt: int(authorCharge)}), budgetsPlain())
+	}
+	for i := 0; i < 4*rounds; i++ {
+		reviewers = append(reviewers, budgetsGatedStep(gates))
 	}
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author":    author,
-		"reviewer":  budgetsScript(turns),
-		"reviewer2": budgetsScript(turns),
+		"reviewer":  reviewers,
+		"reviewer2": append([]fake.Step(nil), reviewers...),
 	})
 	c := s.Dial(t)
 
-	// The reviewers are in pools of their own, so neither waits for the
-	// other's slot, and both become runnable on the one event that freezes
-	// the candidate. The order flips every turn (review2 and review2r name
-	// the reviewers the other way round), 24 turns run under -race, and the
-	// limit leaves room for one reservation and not two, so the second
-	// reservation must see the first and be refused. The engine hands the
-	// reviewers out one at a time under Engine.mu, so this is the most a
-	// black-box test can force; the gap above says why.
-	for i := 0; i < turns; i++ {
-		preset, first := "review2", "reviewer"
-		if i%2 == 1 {
-			preset, first = "review2r", "reviewer2"
+	won := map[string]int{}
+	for i := 0; i < rounds; i++ {
+		// The plain turn: approved, its reviewers' deliveries held.
+		plain := s.budgetsSubmit(t, c, fmt.Sprintf("p%d", i), budgetsInput, "review2", "")
+		if st := s.WaitTerminal(plain.TurnID); st.State != engine.StateApproved {
+			t.Fatalf("round %d: the plain turn ended %+v, want approved", i, st)
 		}
-		turnID, turn := budgetsRacingTurn(t, s, c, fmt.Sprintf("r%d", i), preset)
+		held := gates.of(plain.TurnID)
+		got := map[string]bool{<-held.entered: true}
+		got[<-held.entered] = true
+		if len(got) != 2 || !got["reviewer"] || !got["reviewer2"] {
+			t.Fatalf("round %d: deliveries held for %v, want reviewer and reviewer2", i, got)
+		}
+
+		// The racing turn: both reviewers queue behind the held deliveries.
+		turnID := s.budgetsSubmit(t, c, fmt.Sprintf("r%d", i), budgetsInput, "review2", "").TurnID
+		gates.of(turnID).open()
+		submitted := s.WaitEvent(func(ev event) bool {
+			b, ok := body[wire.EvTurnSubmitted](ev, wire.EventKindTurnSubmitted)
+			return ok && b.TurnID == turnID
+		})
+		for _, id := range []string{"reviewer", "reviewer2"} {
+			s.WaitEvent(func(ev event) bool {
+				p, ok := body[wire.EvParticipantState](ev, wire.EventKindParticipantState)
+				return ok && ev.Seq > submitted.Seq && p.Participant == id && p.State == engine.ParticipantQueued
+			})
+		}
+		for _, ev := range s.Events() {
+			if b, ok := body[wire.EvAttemptBegun](ev, wire.EventKindAttemptBegun); ok && ev.Seq > submitted.Seq && b.Phase == "review" {
+				t.Fatalf("round %d: premise: %s's review began before the pools were freed", i, b.Participant)
+			}
+		}
+		held.open()
+
+		s.WaitTerminal(turnID)
+		turn := s.Turn(t, c, turnID)
 		wantTurn(t, turn, engine.StateIncomplete, "budget:turn")
 		// A dispatch is an attempt begun; the request itself may or may not
 		// have left before the turn ended, so the adapters' calls are not
-		// counted, but there can be no more of them than attempts.
-		rows := len(budgetsAttempts(turn, "reviewer", "review")) + len(budgetsAttempts(turn, "reviewer2", "review"))
-		if rows != 1 || len(budgetsAttempts(turn, first, "review")) != 1 {
-			t.Fatalf("turn %d (%s): %d review attempts begun, want exactly one, by %s: %+v", i, preset, rows, first, turn.Attempts)
-		}
+		// counted, but the loser was sent nothing.
+		var winners []string
 		for _, id := range []string{"reviewer", "reviewer2"} {
-			if n := len(s.budgetsCalls(id, turnID, "review")); n > 1 || (id != first && n != 0) {
-				t.Fatalf("turn %d (%s): %s was sent %d review requests", i, preset, id, n)
+			if n := len(budgetsAttempts(turn, id, "review")); n > 0 {
+				winners = append(winners, id)
+			}
+		}
+		if len(winners) != 1 || len(budgetsAttempts(turn, winners[0], "review")) != 1 {
+			t.Fatalf("round %d: review attempts begun by %v, want exactly one: %+v", i, winners, turn.Attempts)
+		}
+		won[winners[0]]++
+		for _, id := range []string{"reviewer", "reviewer2"} {
+			if n := len(s.budgetsCalls(id, turnID, "review")); n > 1 || (id != winners[0] && n != 0) {
+				t.Fatalf("round %d: %s was sent %d review requests", i, id, n)
 			}
 		}
 		refused := budgetsEventsOf(s, wire.EventKindBudget, func(b wire.EvBudget) bool { return b.TurnID == turnID })
 		if len(refused) != 1 || refused[0].Budget != "turn_max_estimated_tokens" || refused[0].Limit != limit ||
 			refused[0].Estimated == nil || *refused[0].Estimated != limit+1 {
-			t.Fatalf("turn %d: budget events %+v, want one turn refusal at %d over the limit %d", i, refused, limit+1, limit)
+			t.Fatalf("round %d: budget events %+v, want one turn refusal at %d over the limit %d", i, refused, limit+1, limit)
 		}
 		if turn.Budget.Charged == nil || *turn.Budget.Charged > limit || turn.Budget.Exhausted {
-			t.Fatalf("turn %d: budget %+v, want a charge within the limit %d", i, turn.Budget, limit)
+			t.Fatalf("round %d: budget %+v, want a charge within the limit %d", i, turn.Budget, limit)
 		}
+		// Let the racing turn's deliveries settle before the next round.
+		s.budgetsSettled(t, c, turnID)
 	}
+	t.Logf("first reservation won by: %v", won)
 }
 
 func TestBudgets_AuthorContextBoundExceeded(t *testing.T) {
