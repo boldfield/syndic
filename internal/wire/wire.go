@@ -397,6 +397,7 @@ type TurnReply struct {
 	QuickProfile          *string         `json:"quick_profile,omitempty"`
 	Deadlines             TurnDeadlines   `json:"deadlines"`
 	CandidateHash         *string         `json:"candidate_hash,omitempty"`
+	CandidateID           *string         `json:"candidate_id,omitempty"`
 	Attempts              []AttemptRecord `json:"attempts"`
 	ScrubCount            int             `json:"scrub_count"`
 	EstimatedPromptTokens int64           `json:"estimated_prompt_tokens"`

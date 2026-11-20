@@ -9,7 +9,7 @@ import (
 func TestRenderAnswerEmptyWhenNoTurn(t *testing.T) {
 	s := NewState()
 	cc := NewContentCache()
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if output != "" {
 		t.Fatalf("renderAnswer with no turn: got %q, want empty", output)
 	}
@@ -27,11 +27,19 @@ func TestRenderAnswerApproved(t *testing.T) {
 			CandidateHash: &hash,
 		},
 	}
+	s.Attempts = map[string]AttemptInfo{
+		"a1": {ID: "a1", TurnID: "t1", Phase: "review", Participant: "r1", Status: "complete"},
+		"a2": {ID: "a2", TurnID: "t1", Phase: "review", Participant: "r2", Status: "complete"},
+	}
+	s.Verdicts = map[string]VerdictInfo{
+		"v1": {ID: "v1", AttemptID: "a1", Parsed: true, Class: "valid"},
+		"v2": {ID: "v2", AttemptID: "a2", Parsed: true, Class: "valid"},
+	}
 
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "the answer is 42", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "the answer is 42") {
 		t.Fatalf("renderAnswer approved: candidate text not found: %s", output)
 	}
@@ -71,7 +79,7 @@ func TestRenderAnswerSoloComplete(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("attempt:a1", "solo result", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "UNREVIEWED (solo)") {
 		t.Fatalf("renderAnswer solo_complete: banner not found: %s", output)
 	}
@@ -97,7 +105,7 @@ func TestRenderAnswerIncomplete(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "incomplete result", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, reason) {
 		t.Fatalf("renderAnswer incomplete: reason not found: %s", output)
 	}
@@ -126,7 +134,7 @@ func TestRenderAnswerOverridden(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "overridden result", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "HUMAN OVERRIDE") {
 		t.Fatalf("renderAnswer overridden: banner not found: %s", output)
 	}
@@ -149,7 +157,7 @@ func TestRenderAnswerCancelledBeforeCandidate(t *testing.T) {
 	}
 
 	cc := NewContentCache()
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "cancelled before candidate") {
 		t.Fatalf("renderAnswer cancelled before candidate: message not found: %s", output)
 	}
@@ -170,7 +178,7 @@ func TestRenderAnswerCancelledAfterCandidate(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "cancelled result", nil)
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "CANCELLED, not approved") {
 		t.Fatalf("renderAnswer cancelled after candidate: banner not found: %s", output)
 	}
@@ -195,7 +203,7 @@ func TestRenderAnswerLoadingContent(t *testing.T) {
 	cc := NewContentCache()
 	// Don't store content, should show "loading…"
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "loading…") {
 		t.Fatalf("renderAnswer loading: loading message not found: %s", output)
 	}
@@ -217,7 +225,7 @@ func TestRenderAnswerContentError(t *testing.T) {
 	cc := NewContentCache()
 	cc.Store("candidate:t1", "", errors.New("fetch failed")) // Store with error
 
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "error") {
 		t.Fatalf("renderAnswer error: error message not found: %s", output)
 	}
@@ -234,7 +242,7 @@ func TestRenderAnswerOpenTurn(t *testing.T) {
 	}
 
 	cc := NewContentCache()
-	output := renderAnswer(s, 80, 24, cc, false, 0)
+	output := renderAnswer(s, 80, 24, cc, false, 0, "t1")
 	if !strings.Contains(output, "turn in progress") {
 		t.Fatalf("renderAnswer open turn: in progress message not found: %s", output)
 	}

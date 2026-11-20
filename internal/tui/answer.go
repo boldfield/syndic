@@ -6,12 +6,24 @@ import (
 )
 
 // renderAnswer returns the answer tab.
-func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int) string {
-	if s.CurrentTurn == "" {
+func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string) string {
+	turnID := s.CurrentTurn
+
+	// If CurrentTurn is empty but we have turns, use the last turn (terminal answer display)
+	if turnID == "" && len(s.Turns) > 0 {
+		for id, ti := range s.Turns {
+			if isTerminalState(ti.State) {
+				turnID = id
+				break
+			}
+		}
+	}
+
+	if turnID == "" {
 		return ""
 	}
 
-	ti, ok := s.Turns[s.CurrentTurn]
+	ti, ok := s.Turns[turnID]
 	if !ok {
 		return ""
 	}
@@ -20,46 +32,46 @@ func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bo
 	case "submitted", "author_dispatched":
 		// Non-terminal states: show hint if drafts off, or draft if drafts on
 		if draftsEnabled && ti.Author != "" {
-			return renderDraft(s, ti, cc, width, height)
+			return renderDraft(s, ti, cc, width, height, turnID)
 		}
 		return "turn in progress"
 
 	case "author_failed":
-		return renderIncomplete(s, ti, cc, width, height)
+		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID)
 
 	case "candidate_frozen", "reviewers_dispatched":
 		// Show draft if enabled, otherwise empty with hint
 		if draftsEnabled {
-			return renderDraft(s, ti, cc, width, height)
+			return renderDraft(s, ti, cc, width, height, turnID)
 		}
 		return "turn in progress"
 
 	case "approved":
-		return renderApproved(s, ti, cc, width, height)
+		return renderApproved(s, ti, cc, width, height, turnID, candidateID)
 
 	case "solo_complete":
-		return renderSoloComplete(s, ti, cc, width, height)
+		return renderSoloComplete(s, ti, cc, width, height, turnID)
 
 	case "incomplete":
-		return renderIncomplete(s, ti, cc, width, height)
+		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID)
 
 	case "overridden":
-		return renderOverridden(s, ti, cc, width, height)
+		return renderOverridden(s, ti, cc, width, height, turnID, candidateID)
 
 	case "cancelled":
-		return renderCancelled(s, ti, cc, width, height)
+		return renderCancelled(s, ti, cc, width, height, turnID, candidateID)
 
 	default:
 		return ""
 	}
 }
 
-func renderApproved(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderApproved(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
 	var lines []string
 
 	// Fetch candidate if needed
-	if ti.CandidateHash != nil {
-		ref := "candidate:" + s.CurrentTurn
+	if ti.CandidateHash != nil && candidateID != "" {
+		ref := "candidate:" + candidateID
 		item := cc.Get(ref)
 		if item.Ready {
 			if item.Err != nil {
@@ -78,7 +90,7 @@ func renderApproved(s State, ti TurnInfo, cc *ContentCache, width, height int) s
 		if len(hashStr) > 12 {
 			hashStr = hashStr[:12]
 		}
-		approvers := getApprovers(s)
+		approvers := getApprovers(s, turnID)
 		if len(approvers) > 0 {
 			lines = append(lines, fmt.Sprintf("approved by %s against %s", strings.Join(approvers, ", "), hashStr))
 		}
@@ -87,14 +99,15 @@ func renderApproved(s State, ti TurnInfo, cc *ContentCache, width, height int) s
 	return strings.Join(lines, "\n")
 }
 
-// getApprovers returns reviewer IDs that approved in the current turn.
-func getApprovers(s State) []string {
+// getApprovers returns reviewer IDs that approved in the given turn.
+// Only returns reviewers with valid verdicts that actually approved.
+func getApprovers(s State, turnID string) []string {
 	var approvers []string
 	seenReviewers := make(map[string]bool)
 
 	// Look for verdicts with "valid" class from reviewers
 	for _, v := range s.Verdicts {
-		if attempt, ok := s.Attempts[v.AttemptID]; ok && attempt.TurnID == s.CurrentTurn && attempt.Phase == "review" {
+		if attempt, ok := s.Attempts[v.AttemptID]; ok && attempt.TurnID == turnID && attempt.Phase == "review" {
 			if v.Class == "valid" && !seenReviewers[attempt.Participant] {
 				approvers = append(approvers, attempt.Participant)
 				seenReviewers[attempt.Participant] = true
@@ -102,23 +115,16 @@ func getApprovers(s State) []string {
 		}
 	}
 
-	// If no verdicts found, fall back to all reviewers (backward compatibility with tests)
-	if len(approvers) == 0 {
-		if ti, ok := s.Turns[s.CurrentTurn]; ok {
-			approvers = ti.Reviewers
-		}
-	}
-
 	return approvers
 }
 
-func renderSoloComplete(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderSoloComplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string) string {
 	var lines []string
 	lines = append(lines, "UNREVIEWED (solo)")
 
 	// Find the author attempt and fetch its output
 	for attemptID, ai := range s.Attempts {
-		if ai.TurnID == s.CurrentTurn && ai.Phase == "author" && ai.Status == "complete" {
+		if ai.TurnID == turnID && ai.Phase == "author" && ai.Status == "complete" {
 			ref := "attempt:" + attemptID
 			item := cc.Get(ref)
 			if item.Ready {
@@ -137,7 +143,7 @@ func renderSoloComplete(s State, ti TurnInfo, cc *ContentCache, width, height in
 	return strings.Join(lines, "\n")
 }
 
-func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
 	var lines []string
 
 	// Add terminal reason
@@ -145,17 +151,17 @@ func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int)
 		lines = append(lines, *ti.TerminalReason)
 	}
 
-	// Add open blocks with severity (evidence and remedy would come from the turn reply via OpenBlock fields when available)
-	for _, blockID := range getBlocksForTurn(s, s.CurrentTurn) {
+	// Add open blocks with severity
+	for _, blockID := range getBlocksForTurn(s, turnID) {
 		if bi, ok := s.Blocks[blockID]; ok && bi.State == "open" {
 			lines = append(lines, fmt.Sprintf("[%s] %s", bi.Severity, blockID))
 		}
 	}
 
 	// Add candidate if frozen with banner
-	if ti.CandidateHash != nil {
+	if ti.CandidateHash != nil && candidateID != "" {
 		lines = append(lines, "INCOMPLETE, not approved")
-		ref := "candidate:" + s.CurrentTurn
+		ref := "candidate:" + candidateID
 		item := cc.Get(ref)
 		if item.Ready {
 			if item.Err != nil {
@@ -171,7 +177,7 @@ func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int)
 	return strings.Join(lines, "\n")
 }
 
-func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
 	var lines []string
 
 	if ti.TerminalReason != nil {
@@ -181,8 +187,8 @@ func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int)
 	}
 
 	// Add candidate
-	if ti.CandidateHash != nil {
-		ref := "candidate:" + s.CurrentTurn
+	if ti.CandidateHash != nil && candidateID != "" {
+		ref := "candidate:" + candidateID
 		item := cc.Get(ref)
 		if item.Ready {
 			if item.Err != nil {
@@ -198,7 +204,7 @@ func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int)
 	return strings.Join(lines, "\n")
 }
 
-func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
 	var lines []string
 
 	// Check if cancelled before candidate was frozen
@@ -208,37 +214,39 @@ func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int) 
 		lines = append(lines, "CANCELLED, not approved")
 
 		// Add any gathered blocks
-		for _, blockID := range getBlocksForTurn(s, s.CurrentTurn) {
+		for _, blockID := range getBlocksForTurn(s, turnID) {
 			if bi, ok := s.Blocks[blockID]; ok && bi.State == "open" {
 				lines = append(lines, fmt.Sprintf("[%s] %s", bi.Severity, blockID))
 			}
 		}
 
 		// Add candidate
-		ref := "candidate:" + s.CurrentTurn
-		item := cc.Get(ref)
-		if item.Ready {
-			if item.Err != nil {
-				lines = append(lines, fmt.Sprintf("error: %v", item.Err))
+		if candidateID != "" {
+			ref := "candidate:" + candidateID
+			item := cc.Get(ref)
+			if item.Ready {
+				if item.Err != nil {
+					lines = append(lines, fmt.Sprintf("error: %v", item.Err))
+				} else {
+					lines = append(lines, item.Data)
+				}
 			} else {
-				lines = append(lines, item.Data)
+				lines = append(lines, "loading…")
 			}
-		} else {
-			lines = append(lines, "loading…")
 		}
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-func renderDraft(s State, ti TurnInfo, cc *ContentCache, width, height int) string {
+func renderDraft(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string) string {
 	var lines []string
 	lines = append(lines, "UNREVIEWED DRAFT")
 
 	// Fetch author's draft (attempt output)
 	// Show if the author attempt exists and has completed or is in progress
 	for attemptID, ai := range s.Attempts {
-		if ai.TurnID == s.CurrentTurn && ai.Phase == "author" && (ai.Status == "in_progress" || ai.Status == "complete") {
+		if ai.TurnID == turnID && ai.Phase == "author" && (ai.Status == "in_progress" || ai.Status == "complete") {
 			ref := "attempt:" + attemptID
 			item := cc.Get(ref)
 			if item.Ready {

@@ -112,6 +112,7 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			return nil, fmt.Errorf("candidate %s: %w", turn.CandidateID, err)
 		}
 		reply.CandidateHash = &candidate.ContentHash
+		reply.CandidateID = &turn.CandidateID
 	}
 
 	if turn.TerminalReason != "" {

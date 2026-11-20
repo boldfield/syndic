@@ -47,10 +47,11 @@ type App struct {
 	tickRunning          bool
 	onEvent              func(wire.Frame)
 
-	content          *ContentCache
-	draftsEnabled    bool
-	draftsEnabledSet bool // tracks if /drafts command was used
-	answerScrollRow  int  // current scroll offset for answer tab
+	content           *ContentCache
+	draftsEnabled     bool
+	draftsEnabledSet  bool // tracks if /drafts command was used
+	answerScrollRow   int  // current scroll offset for answer tab
+	candidateIDByTurn map[string]string
 }
 
 // Option configures an App.
@@ -65,15 +66,16 @@ func WithEventObserver(f func(wire.Frame)) Option {
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
 	a := &App{
-		ctx:     ctx,
-		cancel:  cancel,
-		socket:  socketPath,
-		input:   newInput(),
-		width:   80,
-		height:  24,
-		state:   NewState(),
-		now:     time.Now,
-		content: NewContentCache(),
+		ctx:               ctx,
+		cancel:            cancel,
+		socket:            socketPath,
+		input:             newInput(),
+		width:             80,
+		height:            24,
+		state:             NewState(),
+		now:               time.Now,
+		content:           NewContentCache(),
+		candidateIDByTurn: make(map[string]string),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -142,7 +144,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.enter()
 	}
 
-	// Scrolling in answer tab
+	// Scrolling in answer tab is clamped in View to prevent panics
 	if a.tab == tabAnswer {
 		switch msg.String() {
 		case "up":
@@ -343,6 +345,11 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
 	a.applyQuickProfileDrafts(msg.id)
 
+	// Store candidateID for later use in content fetching
+	if msg.turn != nil && msg.turn.CandidateID != nil {
+		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
+	}
+
 	// Fetch content for the turn if it's terminal or if drafts are enabled
 	contentCmds := a.fetchContentForTurn(msg.id)
 	if len(contentCmds) > 0 {
@@ -392,9 +399,12 @@ func (a *App) fetchContentForTurn(turnID string) []tea.Cmd {
 
 	// Fetch candidate if available and not already cached
 	if ti.CandidateHash != nil {
-		ref := "candidate:" + turnID
-		if !a.content.Get(ref).Ready {
-			cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
+		candidateID, ok := a.candidateIDByTurn[turnID]
+		if ok && candidateID != "" {
+			ref := "candidate:" + candidateID
+			if !a.content.Get(ref).Ready {
+				cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
+			}
 		}
 	}
 
@@ -452,7 +462,8 @@ func (a *App) View() string {
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow)
+		candidateID := a.candidateIDByTurn[a.state.CurrentTurn]
+		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID)
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
@@ -463,8 +474,12 @@ func (a *App) View() string {
 	// Apply scrolling to answer tab
 	if a.tab == tabAnswer && len(lines) > bodyHeight {
 		start := a.answerScrollRow
-		if start >= len(lines) {
-			start = len(lines) - bodyHeight
+		maxStart := len(lines) - bodyHeight
+		if maxStart < 0 {
+			maxStart = 0
+		}
+		if start > maxStart {
+			start = maxStart
 		}
 		if start < 0 {
 			start = 0
