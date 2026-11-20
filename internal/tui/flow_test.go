@@ -503,3 +503,49 @@ func TestReconnectBannerShowsThenClears(t *testing.T) {
 		return d.app.state.ConnState == ConnStateConnected && !strings.Contains(v, "engine: reconnecting")
 	})
 }
+
+// A reply fetched while the turn was open can land after newer events; it must
+// not roll back what the events already established.
+func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	s := NewState()
+	s.CurrentTurn = "t1"
+	cand := "hash1"
+	s.Turns["t1"] = TurnInfo{ID: "t1", State: "candidate_frozen", Preset: "review", SubmittedAt: t0, CandidateHash: &cand}
+	s.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Status: "complete", ScrubCount: 2, VerdictClass: "valid", VerdictParsed: true}
+	s.Blocks["b1"] = BlockInfo{ID: "b1", Severity: "major", State: "resolved"}
+	s.Verdicts["v1"] = VerdictInfo{ID: "v1", AttemptID: "a1", Parsed: true, Class: "valid"}
+
+	s = MergeTurn(s, "t1", &wire.TurnReply{
+		State:      "author_dispatched",
+		Preset:     "review",
+		Attempts:   []wire.AttemptRecord{{ID: "a1", Status: "in_progress", Phase: "author"}, {ID: "a2", Status: "in_progress", Phase: "review", Participant: "r1"}},
+		Verdicts:   []wire.VerdictRecord{{ID: "v1", AttemptID: "a1", Parsed: false, ValidationStatus: "invalid"}},
+		OpenBlocks: []wire.OpenBlock{{ID: "b1", Severity: "major", State: "open"}},
+		Deadlines:  wire.TurnDeadlines{Turn: 900000},
+		Budget:     wire.BudgetRecord{Limit: ptr(int64(5000))},
+	}, t0)
+
+	ti := s.Turns["t1"]
+	if ti.State != "candidate_frozen" || ti.CandidateHash == nil || *ti.CandidateHash != "hash1" {
+		t.Errorf("turn rolled back: %+v", ti)
+	}
+	if a := s.Attempts["a1"]; a.Status != "complete" || a.ScrubCount != 2 || a.VerdictClass != "valid" || !a.VerdictParsed {
+		t.Errorf("attempt a1 rolled back: %+v", a)
+	}
+	if _, ok := s.Attempts["a2"]; !ok {
+		t.Errorf("unknown attempt a2 was not added")
+	}
+	if s.Blocks["b1"].State != "resolved" {
+		t.Errorf("block rolled back: %+v", s.Blocks["b1"])
+	}
+	if s.Verdicts["v1"].Class != "valid" {
+		t.Errorf("verdict rolled back: %+v", s.Verdicts["v1"])
+	}
+	if ti.LimitTokens != 5000 || ti.DeadlineDur != 15*time.Minute {
+		t.Errorf("limit/deadline not supplied: %d %v", ti.LimitTokens, ti.DeadlineDur)
+	}
+	if got := ti.Remaining(t0.Add(5 * time.Minute)); got != 10*time.Minute {
+		t.Errorf("Remaining = %v", got)
+	}
+}

@@ -580,15 +580,31 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		ti = TurnInfo{ID: turnID}
 	}
 
-	// A reply fetched while the turn was open may land after the terminal
-	// event; never step back from a terminal state.
-	if !isTerminalState(ti.State) || isTerminalState(turn.State) {
+	// A terminal reply is the authoritative final record. A reply fetched
+	// while the turn was open is a snapshot that events may already have
+	// outrun, so it only supplies what events do not carry (limit, deadline)
+	// and adds records the TUI does not know yet; it never overwrites.
+	final := isTerminalState(turn.State)
+	if final {
 		ti.State = turn.State
+		ti.Preset = turn.Preset
+		ti.QuickProfile = turn.QuickProfile
+		ti.TerminalReason = turn.TerminalReason
+		ti.CandidateHash = turn.CandidateHash
+	} else {
+		if ti.State == "" {
+			ti.State = turn.State
+		}
+		if ti.Preset == "" {
+			ti.Preset = turn.Preset
+		}
+		if ti.QuickProfile == nil {
+			ti.QuickProfile = turn.QuickProfile
+		}
+		if ti.CandidateHash == nil {
+			ti.CandidateHash = turn.CandidateHash
+		}
 	}
-	ti.Preset = turn.Preset
-	ti.QuickProfile = turn.QuickProfile
-	ti.TerminalReason = turn.TerminalReason
-	ti.CandidateHash = turn.CandidateHash
 	// The reply's figure sums the attempts so far; before any exists keep the
 	// estimate the submit reported.
 	if turn.EstimatedPromptTokens > 0 {
@@ -653,12 +669,18 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 			ai.ReportedPrompt = ar.Usage.PromptTokens
 			ai.ReportedCompletion = ar.Usage.CompletionTokens
 		}
+		if _, known := attempts[ar.ID]; known && !final {
+			continue
+		}
 		attempts[ar.ID] = ai
 	}
 	s.Attempts = attempts
 
 	verdicts := copyMap(s.Verdicts)
 	for _, v := range turn.Verdicts {
+		if _, known := verdicts[v.ID]; known && !final {
+			continue
+		}
 		verdicts[v.ID] = VerdictInfo{ID: v.ID, AttemptID: v.AttemptID, Parsed: v.Parsed, Class: v.ValidationStatus}
 		if ai, ok := attempts[v.AttemptID]; ok {
 			ai.VerdictClass = v.ValidationStatus
@@ -671,6 +693,9 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	// Merge blocks from turn reply
 	blocks := copyMap(s.Blocks)
 	for _, ob := range turn.OpenBlocks {
+		if _, known := blocks[ob.ID]; known && !final {
+			continue
+		}
 		blocks[ob.ID] = BlockInfo{
 			ID:       ob.ID,
 			Severity: ob.Severity,
@@ -680,6 +705,18 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	s.Blocks = blocks
 
 	return s
+}
+
+// Remaining is the time left to the turn deadline at now, or zero when no
+// deadline is known or it has passed.
+func (ti TurnInfo) Remaining(now time.Time) time.Duration {
+	if ti.TurnDeadline == nil {
+		return 0
+	}
+	if d := ti.TurnDeadline.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
 
 func getDetail(detail *string) string {

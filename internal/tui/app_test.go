@@ -209,9 +209,8 @@ func TestRegionsAndTabs(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("view has %d lines, want 24", len(lines))
 	}
-	// The strip line is now real content, containing at least the preset
-	if lines[0] == "" {
-		t.Errorf("strip region is empty")
+	if !strings.Contains(lines[0], "idle") || !strings.HasPrefix(lines[0], "[") {
+		t.Errorf("strip region = %q, want [<preset>] [idle] ...", lines[0])
 	}
 	if !strings.Contains(lines[1], "transcript (placeholder)") {
 		t.Errorf("tab region = %q", lines[1])
