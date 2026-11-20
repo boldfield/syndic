@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -189,6 +190,11 @@ func transcriptRefs(items []wire.TranscriptItem) []string {
 		}
 	}
 	return refs
+}
+
+// transcriptPending reports whether any body the items point at is still being fetched.
+func transcriptPending(items []wire.TranscriptItem, cc *ContentCache) bool {
+	return slices.ContainsFunc(transcriptRefs(items), func(ref string) bool { return !cc.Get(ref).Ready })
 }
 
 // repairPair draws an attempt beside its repair, or stacked when the width

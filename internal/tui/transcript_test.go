@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -590,5 +591,36 @@ func TestTranscriptOpenedFinishedTurnStartsAtTop(t *testing.T) {
 	}
 	if v := a.View(); !strings.Contains(v, "item0-line00") {
 		t.Fatalf("bodies arriving moved the view off the top:\n%s", v)
+	}
+}
+
+func TestTranscriptLiveTurnFollowsBodiesThatArriveLater(t *testing.T) {
+	a := transcriptApp(80, 24)
+	items := seedItems(a, 0, 3)
+	a.Update(transcriptMsg{turn: "t1", items: items})
+	for i := 0; i < 3; i++ {
+		ref := fmt.Sprintf("msg:new%d", i)
+		items = append(items, wire.TranscriptItem{ID: fmt.Sprintf("new%d", i), Ref: ref, ByteLen: 400})
+		a.Update(transcriptMsg{turn: "t1", items: slices.Clone(items)})
+		var lines []string
+		for j := 0; j < 30; j++ {
+			lines = append(lines, fmt.Sprintf("new%d-line%02d", i, j))
+		}
+		a.Update(contentMsg{ref: ref, data: strings.Join(lines, "\n")})
+	}
+	if v := a.View(); !strings.Contains(v, "new2-line29") {
+		t.Fatalf("a view at the bottom did not follow the live turn:\n%s", v)
+	}
+}
+
+func TestTranscriptLoadingTextInABodyIsNotLoading(t *testing.T) {
+	a := transcriptApp(80, 24)
+	body := "ordinary output mentioning (loading…)"
+	a.content.Store("msg:marker", body, nil)
+	marker := wire.TranscriptItem{ID: "marker", Ref: "msg:marker", ByteLen: int64(len(body))}
+	a.Update(transcriptMsg{turn: "t1", items: append([]wire.TranscriptItem{marker}, seedItems(a, 0, 3)...)})
+	a.Update(transcriptMsg{turn: "t1", items: append([]wire.TranscriptItem{marker}, seedItems(a, 0, 60)...)})
+	if v := a.View(); !strings.Contains(v, "body 059") {
+		t.Fatalf("a body mentioning loading stopped the view following:\n%s", v)
 	}
 }

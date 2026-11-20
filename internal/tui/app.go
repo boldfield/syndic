@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"time"
 
@@ -64,8 +63,8 @@ type App struct {
 	tStale      bool // tLines no longer matches what is known
 	tLines      []string
 	tRow        int  // first visible line
-	tFollow     bool // the user pressed End or paged to the bottom
-	tHad        bool // the lines last drawn included loaded items
+	tFollow     bool // the view stays at the bottom as lines arrive, until the user scrolls away
+	tHad        bool // the lines last drawn had items and every body loaded
 	tHome       bool // the user pressed Home, so the view stays at the top
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
@@ -214,13 +213,17 @@ func (a *App) refreshTranscript() {
 		return
 	}
 	a.tStale = false
-	// Already at the bottom of what was shown: stay there as lines arrive.
-	atBottom := a.tFollow || (!a.tHome && a.tHad && a.tRow >= a.maxTranscriptRow())
+	// Already at the bottom of what was shown: follow from here on, through
+	// the frames that wait on the new bodies, until the user scrolls away.
+	if !a.tHome && a.tHad && a.tRow >= a.maxTranscriptRow() {
+		a.tFollow = true
+	}
 	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
 	a.tRow = a.clampTranscriptRow(a.tRow)
-	// A frame still waiting on bodies is not a bottom the user chose.
-	a.tHad = len(a.tItems) > 0 && !slices.ContainsFunc(a.tLines, func(l string) bool { return strings.Contains(l, "(loading…)") })
-	if atBottom {
+	// A frame still waiting on bodies is not a bottom the user chose, so
+	// following never starts from one.
+	a.tHad = len(a.tItems) > 0 && !transcriptPending(a.tItems, a.content)
+	if a.tFollow {
 		a.tRow = a.maxTranscriptRow()
 	}
 }
