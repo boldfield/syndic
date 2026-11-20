@@ -19,13 +19,12 @@ import (
 // SocketHarness wraps an enginetest harness with a socket server and provides
 // a client for socket-based testing.
 type SocketHarness struct {
-	t        *testing.T
-	harness  *enginetest.Harness
-	srv      *server.Server
-	paths    lockfile.Paths
-	serveErr error
-	done     chan struct{}
-	cancel   context.CancelFunc
+	t       *testing.T
+	harness *enginetest.Harness
+	srv     *server.Server
+	paths   lockfile.Paths
+	done    chan struct{}
+	cancel  context.CancelFunc
 }
 
 // New creates a SocketHarness with an enginetest harness and runs a server
