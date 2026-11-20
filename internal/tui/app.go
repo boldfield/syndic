@@ -48,12 +48,11 @@ type App struct {
 	onEvent              func(wire.Frame)
 
 	content           *ContentCache
-	draftsEnabled     bool
-	draftsEnabledSet  bool // tracks if /drafts command was used
-	answerScrollRow   int  // current scroll offset for answer tab
+	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
+	answerScrollRow   int   // first visible line of the answer tab
 	candidateIDByTurn map[string]string
-	lastTerminalTurn  string                      // last terminal turn for display when CurrentTurn is empty
 	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons   map[string]string           // the reason of each override event
 }
 
 // Option configures an App.
@@ -79,6 +78,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		content:           NewContentCache(),
 		candidateIDByTurn: make(map[string]string),
 		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
+		overrideReasons:   make(map[string]string),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -91,9 +91,35 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 func (a *App) CurrentTurn() string { return a.state.CurrentTurn }
 
 // SetDraftsEnabled sets the drafts toggle.
-func (a *App) SetDraftsEnabled(enabled bool) {
-	a.draftsEnabled = enabled
-	a.draftsEnabledSet = true
+func (a *App) SetDraftsEnabled(enabled bool) { a.drafts = &enabled }
+
+// draftsOn reports whether the author's unreviewed output is shown for the
+// turn: the user's toggle if set, else the turn's quick profile.
+func (a *App) draftsOn(turnID string) bool {
+	if a.drafts != nil {
+		return *a.drafts
+	}
+	if ti, ok := a.state.Turns[turnID]; ok && ti.QuickProfile != nil {
+		return a.state.QuickProfiles[*ti.QuickProfile].Drafts
+	}
+	return false
+}
+
+// answerIn gathers what the answer tab needs for the turn.
+func (a *App) answerIn(turnID string) answerInput {
+	return answerInput{
+		content:        a.content,
+		drafts:         a.draftsOn(turnID),
+		candidateID:    a.candidateIDByTurn[turnID],
+		openBlocks:     a.openBlocksByTurn[turnID],
+		overrideReason: a.overrideReasons[turnID],
+	}
+}
+
+// fetchAnswerContent starts the fetches the answer tab is waiting on.
+func (a *App) fetchAnswerContent() tea.Cmd {
+	turnID := answerTurn(a.state)
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
 }
 
 // Init starts the first connection, from the beginning of the journal.
@@ -101,8 +127,18 @@ func (a *App) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
 }
 
-// Update handles one message.
+// Update handles one message, then starts any content fetch the answer tab
+// now needs. A content reply itself starts none, so a failing fetch is retried
+// on the next event or tick, not in a loop.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := a.update(msg)
+	if _, ok := msg.(contentMsg); !ok {
+		cmd = tea.Batch(cmd, a.fetchAnswerContent())
+	}
+	return a, cmd
+}
+
+func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -147,33 +183,20 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.enter()
 	}
 
-	// Scrolling in answer tab is clamped in View to prevent panics
 	if a.tab == tabAnswer {
+		page := max(a.bodyHeight()-1, 1)
 		switch msg.String() {
 		case "up":
-			if a.answerScrollRow > 0 {
-				a.answerScrollRow--
-			}
+			a.scrollAnswer(-1)
 			return a, nil
 		case "down":
-			a.answerScrollRow++
-			// Prevent unbounded growth; View() will clamp properly for rendering
-			if a.answerScrollRow < 0 {
-				a.answerScrollRow = 0
-			}
+			a.scrollAnswer(1)
 			return a, nil
 		case "pgup":
-			a.answerScrollRow -= 10
-			if a.answerScrollRow < 0 {
-				a.answerScrollRow = 0
-			}
+			a.scrollAnswer(-page)
 			return a, nil
-		case "pgdn":
-			a.answerScrollRow += 10
-			// Prevent unbounded growth
-			if a.answerScrollRow < 0 {
-				a.answerScrollRow = 0
-			}
+		case "pgdown":
+			a.scrollAnswer(page)
 			return a, nil
 		}
 	}
@@ -242,7 +265,6 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	a.state.CurrentTurn = msg.turnID
 	if oldTurn != msg.turnID {
 		a.answerScrollRow = 0
-		a.draftsEnabledSet = false // Reset user override when turn changes
 	}
 	a.ensureTurnInfo()
 	return a.ensureTick()
@@ -264,7 +286,6 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 		a.state.CurrentTurn = msg.status.TurnsOpen[0]
 		if oldTurn != a.state.CurrentTurn {
 			a.answerScrollRow = 0
-			a.draftsEnabledSet = false
 		}
 		a.ensureTurnInfo()
 		// The limit and deadline of a turn that is already open come from its record.
@@ -284,6 +305,14 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 		return a, a.reconnect()
 	}
 	a.state = apply(a.state, msg.frame)
+	if msg.frame.Kind == wire.EventKindTurnState {
+		// The override's reason travels on the turn_state event; the turn record
+		// that follows keeps only the literal "override".
+		var body wire.EvTurnState
+		if json.Unmarshal(msg.frame.Body, &body) == nil && body.State == "overridden" && body.Reason != nil {
+			a.overrideReasons[body.TurnID] = *body.Reason
+		}
+	}
 	if a.onEvent != nil {
 		a.onEvent(msg.frame)
 	}
@@ -354,92 +383,19 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.state = MergeTurn(a.state, msg.id, msg.turn, a.now())
-	a.applyQuickProfileDrafts(msg.id)
-
-	// Store candidateID for later use in content fetching
-	if msg.turn != nil && msg.turn.CandidateID != nil {
+	if msg.turn.CandidateID != nil {
 		a.candidateIDByTurn[msg.id] = *msg.turn.CandidateID
 	}
-
-	// Store open blocks for rendering with evidence/remedy
-	if msg.turn != nil && msg.turn.OpenBlocks != nil {
+	if msg.turn.OpenBlocks != nil {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
-	}
-
-	// Track the last terminal turn for display when CurrentTurn is empty
-	if msg.turn != nil && isTerminalState(msg.turn.State) {
-		a.lastTerminalTurn = msg.id
-	}
-
-	// Fetch content for the turn if it's terminal or if drafts are enabled
-	contentCmds := a.fetchContentForTurn(msg.id)
-	if len(contentCmds) > 0 {
-		return a, tea.Batch(contentCmds...)
 	}
 	return a, nil
 }
 
-// applyQuickProfileDrafts applies the quick profile's drafts setting unless
-// the user has explicitly set it with /drafts.
-func (a *App) applyQuickProfileDrafts(turnID string) {
-	if a.draftsEnabledSet {
-		// User has explicitly set drafts; don't override
-		return
-	}
-
-	ti, ok := a.state.Turns[turnID]
-	if !ok || ti.QuickProfile == nil {
-		return
-	}
-
-	qp, ok := a.state.QuickProfiles[*ti.QuickProfile]
-	if !ok {
-		return
-	}
-
-	a.draftsEnabled = qp.Drafts
-}
-
-// onContent stores fetched content in the cache.
+// onContent stores a fetched body.
 func (a *App) onContent(msg contentMsg) (tea.Model, tea.Cmd) {
 	a.content.Store(msg.ref, msg.data, msg.err)
 	return a, nil
-}
-
-// fetchContentForTurn returns commands to fetch content refs for a turn.
-func (a *App) fetchContentForTurn(turnID string) []tea.Cmd {
-	var cmds []tea.Cmd
-	if a.cl == nil {
-		return cmds
-	}
-
-	ti, ok := a.state.Turns[turnID]
-	if !ok {
-		return cmds
-	}
-
-	// Fetch candidate if available and not already cached
-	if ti.CandidateHash != nil {
-		candidateID, ok := a.candidateIDByTurn[turnID]
-		if ok && candidateID != "" {
-			ref := "candidate:" + candidateID
-			if !a.content.Get(ref).Ready {
-				cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
-			}
-		}
-	}
-
-	// Fetch attempt outputs if drafts are enabled or for display
-	for attemptID, ai := range a.state.Attempts {
-		if ai.TurnID == turnID && (ai.Phase == "author" || ai.Phase == "review") {
-			ref := "attempt:" + attemptID
-			if !a.content.Get(ref).Ready {
-				cmds = append(cmds, fetchContentCmd(a.ctx, a.cl, ref))
-			}
-		}
-	}
-
-	return cmds
 }
 
 // reconnect drops the current connection and starts a new one that resumes
@@ -468,29 +424,38 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
+// bodyHeight is the number of lines left for the active tab.
+func (a *App) bodyHeight() int {
+	return max(a.height-len(renderBanners(a.state))-1-inputHeight, 0)
+}
+
+// answerLineCount is the length of the unclipped answer tab.
+func (a *App) answerLineCount() int {
+	turnID := answerTurn(a.state)
+	return len(strings.Split(renderAnswer(a.state, turnID, a.answerIn(turnID)), "\n"))
+}
+
+// scrollAnswer moves the answer tab by delta lines, staying within the text.
+func (a *App) scrollAnswer(delta int) {
+	maxStart := max(a.answerLineCount()-a.bodyHeight(), 0)
+	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
+}
+
 // View lays out banners, strip, the active tab and the input line.
 func (a *App) View() string {
-	w, h := a.width, a.height
+	w := a.width
 
 	// Get banners and strip.
 	banners := renderBanners(a.state)
 	strip := renderStrip(a.state, w, a.now())
-	numBanners := len(banners)
 
-	// Calculate available space for body and input.
-	bodyHeight := max(h-numBanners-1-inputHeight, 0)
+	bodyHeight := a.bodyHeight()
 
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		// Use CurrentTurn if available, otherwise use the last terminal turn
-		turnID := a.state.CurrentTurn
-		if turnID == "" {
-			turnID = a.lastTerminalTurn
-		}
-		candidateID := a.candidateIDByTurn[turnID]
-		openBlocks := a.openBlocksByTurn[turnID]
-		tabView = renderAnswer(a.state, w, bodyHeight, a.content, a.draftsEnabled, a.answerScrollRow, candidateID, turnID, openBlocks)
+		turnID := answerTurn(a.state)
+		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
 	case tabTranscript:
 		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
@@ -498,28 +463,14 @@ func (a *App) View() string {
 	}
 	lines := strings.Split(tabView, "\n")
 
-	// Apply scrolling to answer tab
-	if a.tab == tabAnswer && len(lines) > bodyHeight {
-		start := a.answerScrollRow
-		maxStart := len(lines) - bodyHeight
-		if maxStart < 0 {
-			maxStart = 0
-		}
-		if start > maxStart {
-			start = maxStart
-		}
-		if start < 0 {
-			start = 0
-		}
-		lines = lines[start : start+bodyHeight]
+	if a.tab == tabAnswer {
+		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
+		lines = lines[start:]
 	}
-
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
 	}
-	if len(lines) > bodyHeight {
-		lines = lines[:bodyHeight]
-	}
+	lines = lines[:bodyHeight]
 
 	// Build output: banners, strip, body, input.
 	var output []string

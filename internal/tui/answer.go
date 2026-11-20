@@ -2,269 +2,199 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/wire"
+	"github.com/charmbracelet/lipgloss"
 )
 
-// renderAnswer returns the answer tab.
-func renderAnswer(s State, width, height int, cc *ContentCache, draftsEnabled bool, scrollRow int, candidateID string, turnID string, openBlocks []wire.OpenBlock) string {
-	if turnID == "" {
-		return ""
-	}
+// answerInput is everything the answer tab needs beyond the State.
+type answerInput struct {
+	content        *ContentCache
+	drafts         bool
+	candidateID    string
+	openBlocks     []wire.OpenBlock
+	overrideReason string // the reason the human gave; the turn record only says "override"
+}
 
+// answerTurn picks the turn the answer tab is about: the open turn, else the
+// most recently submitted one.
+func answerTurn(s State) string {
+	if s.CurrentTurn != "" {
+		return s.CurrentTurn
+	}
+	best := ""
+	for id, ti := range s.Turns {
+		if best == "" {
+			best = id
+			continue
+		}
+		b := s.Turns[best]
+		if ti.SubmittedAt.After(b.SubmittedAt) || (ti.SubmittedAt.Equal(b.SubmittedAt) && id > best) {
+			best = id
+		}
+	}
+	return best
+}
+
+// authorAttempt is the latest completed author attempt of a turn, or "".
+func authorAttempt(s State, turnID string) string {
+	best := ""
+	for id, ai := range s.Attempts {
+		if ai.TurnID != turnID || ai.Phase != "author" || ai.Status != "complete" {
+			continue
+		}
+		if best == "" || ai.Epoch > s.Attempts[best].Epoch || (ai.Epoch == s.Attempts[best].Epoch && id > best) {
+			best = id
+		}
+	}
+	return best
+}
+
+// answerRefs lists the content refs the answer tab needs for the turn.
+func answerRefs(s State, turnID string, in answerInput) []string {
+	ti, ok := s.Turns[turnID]
+	if !ok {
+		return nil
+	}
+	switch ti.State {
+	case "approved", "incomplete", "overridden", "cancelled":
+		if ti.CandidateHash != nil && in.candidateID != "" {
+			return []string{"candidate:" + in.candidateID}
+		}
+	case "solo_complete":
+		if id := authorAttempt(s, turnID); id != "" {
+			return []string{"attempt:" + id}
+		}
+	default:
+		if in.drafts {
+			if id := authorAttempt(s, turnID); id != "" {
+				return []string{"attempt:" + id}
+			}
+		}
+	}
+	return nil
+}
+
+// body renders the text behind a ref: loading, a one-line error, or the text.
+func body(cc *ContentCache, ref string) string {
+	item := cc.Get(ref)
+	switch {
+	case item.Err != nil:
+		return "error: " + firstLine(item.Err.Error())
+	case !item.Ready:
+		return "loading…"
+	}
+	return strings.TrimRight(item.Data, "\n")
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
+// renderAnswer returns the answer tab for a turn, unclipped; the App scrolls it.
+func renderAnswer(s State, turnID string, in answerInput) string {
 	ti, ok := s.Turns[turnID]
 	if !ok {
 		return ""
 	}
+	var lines []string
+	candidate := func() {
+		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
+			lines = append(lines, body(in.content, refs[0]))
+		} else if ti.CandidateHash != nil {
+			lines = append(lines, "loading…")
+		}
+	}
 
 	switch ti.State {
-	case "submitted", "author_dispatched":
-		// Non-terminal states: show hint if drafts off, or draft if drafts on
-		if draftsEnabled && ti.Author != "" {
-			return renderDraft(s, ti, cc, width, height, turnID)
-		}
-		return "turn in progress"
-
-	case "author_failed":
-		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID, openBlocks)
-
-	case "candidate_frozen", "reviewers_dispatched":
-		// Show draft if enabled, otherwise empty with hint
-		if draftsEnabled {
-			return renderDraft(s, ti, cc, width, height, turnID)
-		}
-		return "turn in progress"
-
 	case "approved":
-		return renderApproved(s, ti, cc, width, height, turnID, candidateID)
+		candidate()
+		if ti.CandidateHash != nil {
+			hash := *ti.CandidateHash
+			hash = hash[:min(12, len(hash))]
+			lines = append(lines, fmt.Sprintf("approved by %s against %s", strings.Join(approvers(s, turnID), ", "), hash))
+		}
 
 	case "solo_complete":
-		return renderSoloComplete(s, ti, cc, width, height, turnID)
+		lines = append(lines, "UNREVIEWED (solo)")
+		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
+			lines = append(lines, body(in.content, refs[0]))
+		} else {
+			lines = append(lines, "loading…")
+		}
 
 	case "incomplete":
-		return renderIncomplete(s, ti, cc, width, height, turnID, candidateID, openBlocks)
+		if ti.TerminalReason != nil {
+			lines = append(lines, *ti.TerminalReason)
+		}
+		lines = append(lines, blockLines(in.openBlocks)...)
+		if ti.CandidateHash != nil {
+			lines = append(lines, "INCOMPLETE, not approved")
+			candidate()
+		}
 
 	case "overridden":
-		return renderOverridden(s, ti, cc, width, height, turnID, candidateID)
+		reason := in.overrideReason
+		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
+			reason = *ti.TerminalReason
+		}
+		lines = append(lines, "HUMAN OVERRIDE: "+reason)
+		candidate()
 
 	case "cancelled":
-		return renderCancelled(s, ti, cc, width, height, turnID, candidateID, openBlocks)
+		if ti.CandidateHash == nil {
+			lines = append(lines, "cancelled before candidate")
+			break
+		}
+		lines = append(lines, "CANCELLED, not approved")
+		lines = append(lines, blockLines(in.openBlocks)...)
+		candidate()
 
 	default:
-		return ""
-	}
-}
-
-func renderApproved(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
-	var lines []string
-
-	// Fetch candidate if needed
-	if ti.CandidateHash != nil && candidateID != "" {
-		ref := "candidate:" + candidateID
-		item := cc.Get(ref)
-		if item.Ready {
-			if item.Err != nil {
-				lines = append(lines, fmt.Sprintf("error fetching candidate: %v", item.Err))
-			} else {
-				lines = append(lines, item.Data)
-			}
+		if refs := answerRefs(s, turnID, in); in.drafts && len(refs) > 0 {
+			lines = append(lines, draftBanner.Render("UNREVIEWED DRAFT"), body(in.content, refs[0]))
 		} else {
-			lines = append(lines, "loading…")
+			lines = append(lines, "turn in progress")
 		}
 	}
-
-	// Add approval line with hash prefix
-	if ti.CandidateHash != nil {
-		hashStr := *ti.CandidateHash
-		if len(hashStr) > 12 {
-			hashStr = hashStr[:12]
-		}
-		approvers := getApprovers(s, turnID)
-		if len(approvers) > 0 {
-			lines = append(lines, fmt.Sprintf("approved by %s against %s", strings.Join(approvers, ", "), hashStr))
-		}
-	}
-
 	return strings.Join(lines, "\n")
 }
 
-// getApprovers returns reviewer IDs that approved in the given turn.
-// Only returns reviewers with valid verdicts that actually approved.
-func getApprovers(s State, turnID string) []string {
-	var approvers []string
-	seenReviewers := make(map[string]bool)
+var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 
-	// Look for verdicts with "valid" class from reviewers
+// blockLines lists open blocks with severity, evidence and remedy.
+func blockLines(blocks []wire.OpenBlock) []string {
+	var lines []string
+	for _, b := range blocks {
+		if b.State != "open" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("[%s] %s", b.Severity, b.ID))
+		if b.Evidence != "" {
+			lines = append(lines, "  evidence: "+b.Evidence)
+		}
+		if b.Remedy != "" {
+			lines = append(lines, "  remedy: "+b.Remedy)
+		}
+	}
+	return lines
+}
+
+// approvers are the reviewers with a valid verdict on the turn.
+func approvers(s State, turnID string) []string {
+	seen := map[string]bool{}
+	var out []string
 	for _, v := range s.Verdicts {
-		if attempt, ok := s.Attempts[v.AttemptID]; ok && attempt.TurnID == turnID && attempt.Phase == "review" {
-			if v.Class == "valid" && !seenReviewers[attempt.Participant] {
-				approvers = append(approvers, attempt.Participant)
-				seenReviewers[attempt.Participant] = true
-			}
+		ai, ok := s.Attempts[v.AttemptID]
+		if !ok || ai.TurnID != turnID || ai.Phase != "review" || v.Class != "valid" || seen[ai.Participant] {
+			continue
 		}
+		seen[ai.Participant] = true
+		out = append(out, ai.Participant)
 	}
-
-	return approvers
-}
-
-func renderSoloComplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string) string {
-	var lines []string
-	lines = append(lines, "UNREVIEWED (solo)")
-
-	// Find the author attempt and fetch its output
-	for attemptID, ai := range s.Attempts {
-		if ai.TurnID == turnID && ai.Phase == "author" && ai.Status == "complete" {
-			ref := "attempt:" + attemptID
-			item := cc.Get(ref)
-			if item.Ready {
-				if item.Err != nil {
-					lines = append(lines, fmt.Sprintf("error: %v", item.Err))
-				} else {
-					lines = append(lines, item.Data)
-				}
-			} else {
-				lines = append(lines, "loading…")
-			}
-			break
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func renderIncomplete(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string, openBlocks []wire.OpenBlock) string {
-	var lines []string
-
-	// Add terminal reason
-	if ti.TerminalReason != nil {
-		lines = append(lines, *ti.TerminalReason)
-	}
-
-	// Add open blocks with severity, evidence and remedy
-	for _, b := range openBlocks {
-		if b.State == "open" {
-			blockLine := fmt.Sprintf("[%s] %s", b.Severity, b.ID)
-			if b.Evidence != "" {
-				blockLine += "\n  evidence: " + b.Evidence
-			}
-			if b.Remedy != "" {
-				blockLine += "\n  remedy: " + b.Remedy
-			}
-			lines = append(lines, blockLine)
-		}
-	}
-
-	// Add candidate if frozen with banner
-	if ti.CandidateHash != nil && candidateID != "" {
-		lines = append(lines, "INCOMPLETE, not approved")
-		ref := "candidate:" + candidateID
-		item := cc.Get(ref)
-		if item.Ready {
-			if item.Err != nil {
-				lines = append(lines, fmt.Sprintf("error: %v", item.Err))
-			} else {
-				lines = append(lines, item.Data)
-			}
-		} else {
-			lines = append(lines, "loading…")
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func renderOverridden(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string) string {
-	var lines []string
-
-	if ti.TerminalReason != nil {
-		lines = append(lines, fmt.Sprintf("HUMAN OVERRIDE: %s", *ti.TerminalReason))
-	} else {
-		lines = append(lines, "HUMAN OVERRIDE")
-	}
-
-	// Add candidate
-	if ti.CandidateHash != nil && candidateID != "" {
-		ref := "candidate:" + candidateID
-		item := cc.Get(ref)
-		if item.Ready {
-			if item.Err != nil {
-				lines = append(lines, fmt.Sprintf("error: %v", item.Err))
-			} else {
-				lines = append(lines, item.Data)
-			}
-		} else {
-			lines = append(lines, "loading…")
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func renderCancelled(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string, candidateID string, openBlocks []wire.OpenBlock) string {
-	var lines []string
-
-	// Check if cancelled before candidate was frozen
-	if ti.CandidateHash == nil {
-		lines = append(lines, "cancelled before candidate")
-	} else {
-		lines = append(lines, "CANCELLED, not approved")
-
-		// Add any gathered blocks with severity, evidence and remedy
-		for _, b := range openBlocks {
-			if b.State == "open" {
-				blockLine := fmt.Sprintf("[%s] %s", b.Severity, b.ID)
-				if b.Evidence != "" {
-					blockLine += "\n  evidence: " + b.Evidence
-				}
-				if b.Remedy != "" {
-					blockLine += "\n  remedy: " + b.Remedy
-				}
-				lines = append(lines, blockLine)
-			}
-		}
-
-		// Add candidate
-		if candidateID != "" {
-			ref := "candidate:" + candidateID
-			item := cc.Get(ref)
-			if item.Ready {
-				if item.Err != nil {
-					lines = append(lines, fmt.Sprintf("error: %v", item.Err))
-				} else {
-					lines = append(lines, item.Data)
-				}
-			} else {
-				lines = append(lines, "loading…")
-			}
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func renderDraft(s State, ti TurnInfo, cc *ContentCache, width, height int, turnID string) string {
-	var lines []string
-	lines = append(lines, "UNREVIEWED DRAFT")
-
-	// Fetch author's draft (attempt output)
-	// Show if the author attempt exists and has completed or is in progress
-	for attemptID, ai := range s.Attempts {
-		if ai.TurnID == turnID && ai.Phase == "author" && (ai.Status == "in_progress" || ai.Status == "complete") {
-			ref := "attempt:" + attemptID
-			item := cc.Get(ref)
-			if item.Ready {
-				if item.Err != nil {
-					lines = append(lines, fmt.Sprintf("error: %v", item.Err))
-				} else {
-					lines = append(lines, item.Data)
-				}
-			} else {
-				lines = append(lines, "loading…")
-			}
-			break
-		}
-	}
-
-	return strings.Join(lines, "\n")
+	sort.Strings(out)
+	return out
 }
