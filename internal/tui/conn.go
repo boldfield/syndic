@@ -93,6 +93,20 @@ func submitCmd(ctx context.Context, cl *client.Client, input string) tea.Cmd {
 	}
 }
 
+// statusMsg carries a refreshed status reply or the error that occurred.
+type statusMsg struct {
+	status wire.StatusReply
+	err    error
+}
+
+// statusCmd requests an updated status from the engine.
+func statusCmd(ctx context.Context, cl *client.Client) tea.Cmd {
+	return func() tea.Msg {
+		status, err := cl.Status(ctx)
+		return statusMsg{status: status, err: err}
+	}
+}
+
 // formatRefusal renders a refusal as its code and detail on one line.
 func formatRefusal(err error) string {
 	var we *wire.Error

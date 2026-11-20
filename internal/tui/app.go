@@ -60,6 +60,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		input:  newInput(),
 		width:  80,
 		height: 24,
+		state:  NewState(),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -91,6 +92,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case submitMsg:
 		a.onSubmit(msg)
 		return a, nil
+	case statusMsg:
+		return a.onStatusRefresh(msg)
 	}
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
@@ -152,7 +155,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	a.cl = msg.cl
 	a.state.Hello = msg.cl.Hello()
-	a.state.Status = msg.status
+	a.state.Status = &msg.status
 	a.state.ConnState = ConnStateConnected
 	if len(msg.status.TurnsOpen) > 0 {
 		a.state.CurrentTurn = msg.status.TurnsOpen[0]
@@ -176,7 +179,32 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	if msg.frame.Kind == wire.EventKindEngineStopping {
 		return a, a.reconnect()
 	}
-	return a, readCmd(a.ctx, a.gen, a.cl)
+
+	// Trigger status refresh after certain events (coalesced by not requesting until the next read).
+	var cmd tea.Cmd
+	needsStatusRefresh := false
+	switch msg.frame.Kind {
+	case wire.EventKindEngineStarted, wire.EventKindParticipantState, wire.EventKindCapacity:
+		needsStatusRefresh = true
+	}
+
+	if needsStatusRefresh && a.cl != nil {
+		cmd = statusCmd(a.ctx, a.cl)
+	} else {
+		cmd = readCmd(a.ctx, a.gen, a.cl)
+	}
+	return a, cmd
+}
+
+// onStatusRefresh applies a status update and continues reading events.
+func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
+	if msg.err == nil {
+		a.state.Status = &msg.status
+	}
+	if a.cl != nil {
+		return a, readCmd(a.ctx, a.gen, a.cl)
+	}
+	return a, nil
 }
 
 // reconnect drops the current connection and starts a new one that resumes
@@ -204,25 +232,40 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// View lays out the strip, the active tab and the input line.
+// View lays out banners, strip, the active tab and the input line.
 func (a *App) View() string {
 	w, h := a.width, a.height
-	body := max(h-1-inputHeight, 0)
+
+	// Get banners and strip.
+	banners := renderBanners(a.state)
+	strip := renderStrip(a.state, w)
+	numBanners := len(banners)
+
+	// Calculate available space for body and input.
+	bodyHeight := max(h-numBanners-1-inputHeight, 0)
+
 	var tabView string
 	switch a.tab {
 	case tabAnswer:
-		tabView = renderAnswer(a.state, w, body)
+		tabView = renderAnswer(a.state, w, bodyHeight)
 	case tabTranscript:
-		tabView = renderTranscript(a.state, w, body)
+		tabView = renderTranscript(a.state, w, bodyHeight)
 	case tabParticipants:
-		tabView = renderParticipants(a.state, w, body)
+		tabView = renderParticipants(a.state, w, bodyHeight)
 	}
 	lines := strings.Split(tabView, "\n")
-	for len(lines) < body {
+	for len(lines) < bodyHeight {
 		lines = append(lines, "")
 	}
-	lines = lines[:body]
-	return renderStrip(a.state, w, 1) + "\n" + strings.Join(lines, "\n") + "\n" + renderInput(a.input, a.refusal, w)
+	lines = lines[:bodyHeight]
+
+	// Build output: banners, strip, body, input.
+	var output []string
+	output = append(output, banners...)
+	output = append(output, strip)
+	output = append(output, lines...)
+	output = append(output, renderInput(a.input, a.refusal, w))
+	return strings.Join(output, "\n")
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps
