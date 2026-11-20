@@ -118,8 +118,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // enter runs a command or submits the line. A command clears the line; a
 // submit clears it only once the engine accepts it.
 func (a *App) enter() tea.Cmd {
-	line := strings.TrimSpace(a.input.Value())
-	if line == "" {
+	line := a.input.Value()
+	if strings.TrimSpace(line) == "" {
 		return nil
 	}
 	a.refusal = ""

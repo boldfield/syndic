@@ -403,3 +403,22 @@ func TestFormatRefusal(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// A line with leading whitespace is a prompt even if it then starts with "/",
+// and it is submitted exactly as typed.
+func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
+	r := newRig(t)
+	r.waitFor(t, "strip")
+	r.typeLine("  /quit now  ")
+	turn := waitOpenTurn(t, r.paths)
+	r.h.WaitTurnState(turn, engine.StateApproved)
+	calls := r.h.Adapters["author"].Calls()
+	if len(calls) == 0 {
+		t.Fatal("the line never reached the engine")
+	}
+	got := calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content
+	if !strings.Contains(got, "  /quit now  ") {
+		t.Errorf("submitted input = %q; want it exactly as typed", got)
+	}
+	r.final(t)
+}
