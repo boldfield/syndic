@@ -55,6 +55,7 @@ type suite struct {
 	served  chan struct{}
 	events  *eventStream
 	engines []*engine.Engine
+	h       *enginetest.Harness
 }
 
 // newSuite starts an engine on rosterTOML and scripts with enginetest.New,
@@ -65,6 +66,7 @@ func newSuite(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, o
 	h := enginetest.New(t, rosterTOML, scripts, opts...)
 	s := &suite{
 		t:          t,
+		h:          h,
 		Engine:     h.Engine,
 		Store:      h.Store,
 		DB:         h.DB,
@@ -284,12 +286,15 @@ func terminal(state string) bool {
 // Restart ends the server and builds a new engine on the same journal, hub,
 // clock and state directory, with fresh scripted adapters, as a restart after
 // a crash does: the old engine is not stopped, so it writes no engine_stopping
-// and ends no turn, and the new engine's recovery finds what was left. If
+// and ends no turn, and the new engine's recovery finds what was left. The old
+// engine is made inert (enginetest.Harness.Crash): its timers never fire and
+// its adapters never answer, so it cannot write after the new engine recovers. If
 // rosterTOML is not empty it is written over the roster file first. The
 // suite's own subscription is renewed, replaying from seq 0.
 func (s *suite) Restart(rosterTOML string, scripts map[string][]fake.Step) {
 	s.t.Helper()
 	s.stopServer()
+	s.h.Crash()
 	if rosterTOML != "" {
 		if err := os.WriteFile(s.RosterPath, []byte(rosterTOML), 0o600); err != nil {
 			s.t.Fatalf("write roster: %v", err)

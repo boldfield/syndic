@@ -3,6 +3,8 @@ package enginetest
 import (
 	"context"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
@@ -12,6 +14,7 @@ import (
 // call until released.
 type gatedAdapter struct {
 	inner *fake.Adapter
+	dead  *atomic.Bool // set by Harness.Crash
 
 	mu   sync.Mutex
 	gate chan struct{}
@@ -35,8 +38,14 @@ func (a *gatedAdapter) Complete(ctx context.Context, req transport.CompleteReque
 	gate := a.gate
 	a.gate = nil
 	a.mu.Unlock()
+	if a.dead.Load() {
+		return a.inert(ctx)
+	}
 	if gate != nil {
 		<-gate
+	}
+	if a.dead.Load() {
+		return a.inert(ctx)
 	}
 	return a.inner.Complete(ctx, req)
 }
@@ -47,4 +56,27 @@ func (a *gatedAdapter) Cancel(ctx context.Context, attemptID string) (transport.
 
 func (a *gatedAdapter) Usage(ctx context.Context) (*transport.Usage, error) {
 	return a.inner.Usage(ctx)
+}
+
+// inert is what a call on a crashed engine's adapter does: it never answers,
+// so the dead engine writes nothing, until its own context ends.
+func (a *gatedAdapter) inert(ctx context.Context) (transport.CompleteResult, error) {
+	<-ctx.Done()
+	return transport.CompleteResult{}, ctx.Err()
+}
+
+// crashClock wraps a clock so timers set by a crashed engine never fire.
+type crashClock struct {
+	inner *FakeClock
+	dead  *atomic.Bool
+}
+
+func (c crashClock) Now() time.Time { return c.inner.Now() }
+
+func (c crashClock) AfterFunc(d time.Duration, f func()) func() bool {
+	return c.inner.AfterFunc(d, func() {
+		if !c.dead.Load() {
+			f()
+		}
+	})
 }

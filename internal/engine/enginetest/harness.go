@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +180,7 @@ type Harness struct {
 	Adapters map[string]*fake.Adapter
 
 	gated map[string]*gatedAdapter
+	dead  atomic.Bool
 
 	mu     sync.Mutex
 	events []Event
@@ -261,7 +263,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 	for _, p := range roster.Participants {
 		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed, BlockingCancel: o.blockingCancel})
 		hn.Adapters[p.ID] = fa
-		hn.gated[p.ID] = &gatedAdapter{inner: fa}
+		hn.gated[p.ID] = &gatedAdapter{inner: fa, dead: &hn.dead}
 	}
 
 	eng, err := engine.New(engine.Options{
@@ -269,7 +271,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		Hub:           h,
 		RosterPath:    rosterPath,
 		EngineVersion: EngineVersion,
-		Clock:         hn.Clock,
+		Clock:         crashClock{inner: hn.Clock, dead: &hn.dead},
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {
@@ -464,4 +466,13 @@ func (h *Harness) ReleaseBlockingCancel() {
 	for _, a := range h.Adapters {
 		a.ReleaseBlockingCancel()
 	}
+}
+
+// Crash makes the engine inert as a killed process is: its timers never fire
+// and its adapters never answer again, so it writes nothing more to the
+// journal. Nothing is stopped and nothing is journalled; the engine's own
+// context still ends at cleanup. Use it before starting a second engine on the
+// same journal.
+func (h *Harness) Crash() {
+	h.dead.Store(true)
 }

@@ -77,3 +77,48 @@ func TestSuite_StopGracefully(t *testing.T) {
 	s.StopGracefully()
 	s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStopping })
 }
+
+// TestSuite_RestartWithAttemptInFlight proves a crashed engine stays dead: the
+// author's call is held when Restart runs, and when it is released afterwards
+// the old engine's adapter does not answer and the old engine writes nothing,
+// so the new engine's recovery is the only thing that ends the turn.
+func TestSuite_RestartWithAttemptInFlight(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
+	release := s.h.Hold("author")
+	c := s.Dial(t)
+	turnID := s.Submit(t, c, "s1")
+	s.WaitTurnState(turnID, engine.StateAuthorDispatched)
+	oldAuthor := s.Adapters["author"]
+
+	s.Restart(enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   repeat(2),
+		"reviewer": repeat(2),
+	})
+	release()
+
+	c2 := s.Dial(t)
+	st := s.WaitTerminal(turnID)
+	if st.State != engine.StateIncomplete {
+		t.Fatalf("recovered turn ended %q, want %q", st.State, engine.StateIncomplete)
+	}
+	if _, err := c2.Release(s.ctx(), wire.ReleaseRequest{Pool: "default", Reason: "restarted"}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	next := s.Submit(t, c2, "s2")
+	s.WaitTerminal(next)
+	wantTurn(t, s.Turn(t, c2, next), engine.StateApproved, "all_approved")
+
+	if n := len(oldAuthor.Calls()); n != 0 {
+		t.Fatalf("the crashed engine's author adapter answered %d calls after the crash, want 0", n)
+	}
+	terminals := 0
+	for _, ev := range s.Events() {
+		if e, ok := body[wire.EvTurnState](ev, wire.EventKindTurnState); ok && e.TurnID == turnID && terminal(e.State) {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("turn %s announced %d terminal states, want exactly 1", turnID, terminals)
+	}
+}
