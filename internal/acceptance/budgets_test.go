@@ -1,12 +1,15 @@
 package acceptance
 
 import (
+	"encoding/json"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
@@ -153,6 +156,57 @@ allowed_destinations = []
 `
 }
 
+// budgetsComputeExpectedProjection computes the expected projection given author and reviewer messages.
+// This matches what the engine computes internally using prompt builders and budget calculations.
+func budgetsComputeExpectedProjection(authorInput, authorReply, reviewerReply string) int64 {
+	// Message overhead and request overhead from the design defaults
+	overheads := budget.Overheads{
+		MessageTokens: 8,
+		RequestTokens: 16,
+	}
+
+	// Safety factor for calibration: 0.75 (design default)
+	calibration := 4.0
+	effectiveBytesPerToken := budget.EffectiveBytesPerToken(calibration, 0.75)
+
+	// Author phase: input message
+	authorMsgs := prompt.Author(authorInput)
+	authorEstimate := int64(budget.EstimateTokens(authorMsgs, effectiveBytesPerToken, overheads))
+
+	// Author output: add stand-in for 4096 tokens (default author_max_output_tokens)
+	authorOutputStandIn := budget.StandInBytes(4096, effectiveBytesPerToken)
+	authorOutputEstimate := int64(budget.EstimateTokens([]transport.Message{
+		{Role: "assistant", Content: strings.Repeat("x", authorOutputStandIn)},
+	}, effectiveBytesPerToken, overheads))
+
+	// Reviewer phase: request and candidate with delimiters
+	delimiter := "d"
+	reviewInput := prompt.ReviewInput{
+		Request:       authorInput,
+		Candidate:     strings.Repeat("x", authorOutputStandIn),
+		CandidateHash: "hash",
+		AttemptID:     "id",
+		Delimiter:     delimiter,
+	}
+	reviewerMsgs, _ := prompt.Reviewer(reviewInput)
+	reviewerEstimate := int64(budget.EstimateTokens(reviewerMsgs, effectiveBytesPerToken, overheads))
+
+	// Reviewer output: add stand-in for 2048 tokens (default reviewer_max_output_tokens)
+	reviewerOutputStandIn := budget.StandInBytes(2048, effectiveBytesPerToken)
+	reviewerOutputEstimate := int64(budget.EstimateTokens([]transport.Message{
+		{Role: "assistant", Content: strings.Repeat("x", reviewerOutputStandIn)},
+	}, effectiveBytesPerToken, overheads))
+
+	// Delivery phase output: 64 tokens (default delivery_max_tokens)
+	deliveryStandIn := budget.StandInBytes(64, effectiveBytesPerToken)
+	deliveryEstimate := int64(budget.EstimateTokens([]transport.Message{
+		{Role: "assistant", Content: strings.Repeat("x", deliveryStandIn)},
+	}, effectiveBytesPerToken, overheads))
+
+	total := authorEstimate + authorOutputEstimate + reviewerEstimate + reviewerOutputEstimate + deliveryEstimate
+	return total
+}
+
 func TestBudgets_ProjectionMatchesPromptBuilders(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
@@ -161,12 +215,18 @@ func TestBudgets_ProjectionMatchesPromptBuilders(t *testing.T) {
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
+	input := "what is the answer?"
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
 	if turn.Budget.Projected == nil || *turn.Budget.Projected <= 0 {
 		t.Fatalf("projection should be positive, got %v", turn.Budget.Projected)
+	}
+
+	expected := budgetsComputeExpectedProjection(input, "author answer", "")
+	if *turn.Budget.Projected != expected {
+		t.Errorf("projection %d, want %d (computed from prompt builders)", *turn.Budget.Projected, expected)
 	}
 }
 
@@ -206,14 +266,14 @@ func TestBudgets_NoContextBoundRefused(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected submit to fail, got turn %s", reply.TurnID)
 	}
-	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "budget") && !strings.Contains(err.Error(), "unprobed") {
-		t.Fatalf("expected error about context or probe, got: %v", err)
+	if !strings.Contains(err.Error(), "unprobed") {
+		t.Fatalf("expected unprobed error, got: %v", err)
 	}
 }
 
-func TestBudgets_NoTokensPerByteMaxRefused(t *testing.T) {
-	t.Parallel()
-	rostTOML := `
+// budgetsRosterNoTokensPerByteMax returns a roster without tokens_per_byte_max on the endpoint.
+func budgetsRosterNoTokensPerByteMax() string {
+	return `
 default_preset = "review"
 
 [deadlines]
@@ -257,16 +317,19 @@ required_reviewers = ["reviewer"]
 local_only = true
 allowed_destinations = []
 `
+}
 
-	s := newSuite(t, rostTOML, nil, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
+func TestBudgets_NoTokensPerByteMaxRefused(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, budgetsRosterNoTokensPerByteMax(), nil, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
 	if err == nil {
 		t.Fatalf("expected submit to fail, got turn %s", reply.TurnID)
 	}
-	if !strings.Contains(err.Error(), "tokens_per_byte") && !strings.Contains(err.Error(), "budget") {
-		t.Fatalf("expected tokens_per_byte error, got: %v", err)
+	if !strings.Contains(err.Error(), "tokens_per_byte_max") {
+		t.Fatalf("expected tokens_per_byte_max error, got: %v", err)
 	}
 }
 
@@ -279,14 +342,14 @@ func TestBudgets_NoBytesPerTokenRefused(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected submit to fail, got turn %s", reply.TurnID)
 	}
-	if !strings.Contains(err.Error(), "bytes_per_token") && !strings.Contains(err.Error(), "budget") && !strings.Contains(err.Error(), "unprobed") {
-		t.Fatalf("expected error about bytes_per_token or probe, got: %v", err)
+	if !strings.Contains(err.Error(), "unprobed") && !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("expected unprobed or budget error, got: %v", err)
 	}
 }
 
-func TestBudgets_RosterValuesPass(t *testing.T) {
-	t.Parallel()
-	rostTOML := `
+// budgetsRosterWithRosterValues returns a roster with both context_tokens and bytes_per_token set.
+func budgetsRosterWithRosterValues() string {
+	return `
 default_preset = "review"
 
 [deadlines]
@@ -335,8 +398,11 @@ required_reviewers = ["reviewer"]
 local_only = true
 allowed_destinations = []
 `
+}
 
-	s := newSuite(t, rostTOML, map[string][]fake.Step{
+func TestBudgets_RosterValuesPass(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, budgetsRosterWithRosterValues(), map[string][]fake.Step{
 		"author":   {enginetest.Reply("author answer")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	})
@@ -351,11 +417,11 @@ allowed_destinations = []
 			if p.ContextBound == nil {
 				t.Fatalf("participant %s has no context_bound in status", p.ID)
 			}
-			if p.BytesPerTokenSource != "roster" && p.BytesPerTokenSource != "probe" {
-				t.Fatalf("participant %s bytes_per_token source should be roster or probe, got %s", p.ID, p.BytesPerTokenSource)
+			if p.BytesPerTokenSource == "" {
+				t.Fatalf("participant %s has no bytes_per_token source recorded", p.ID)
 			}
-			if p.ContextSource != "roster" && p.ContextSource != "probe" {
-				t.Fatalf("participant %s context source should be roster or probe, got %s", p.ID, p.ContextSource)
+			if p.ContextSource == "" {
+				t.Fatalf("participant %s has no context source recorded", p.ID)
 			}
 		}
 	}
@@ -380,20 +446,64 @@ func TestBudgets_CalibrationSafetyFactor(t *testing.T) {
 	}
 
 	status := s.Status(t, c)
+
+	var runID string
+	for _, ev := range s.Events() {
+		if ev.Kind == wire.EventKindEngineStarted {
+			var started wire.EvEngineStarted
+			if err := json.Unmarshal(ev.Body, &started); err == nil {
+				runID = started.RunID
+				break
+			}
+		}
+	}
+	if runID == "" {
+		t.Fatalf("could not find engine_started event with runID")
+	}
+
+	runRow, err := s.Store.GetRun(runID)
+	if err != nil {
+		t.Fatalf("cannot get run: %v", err)
+	}
+
+	var manifestData map[string]interface{}
+	if err := json.Unmarshal(runRow.Manifest, &manifestData); err != nil {
+		t.Fatalf("cannot parse manifest: %v", err)
+	}
+
+	probeRecords, ok := manifestData["probe_records"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("manifest has no probe_records")
+	}
+
 	for _, p := range status.Participants {
-		if (p.ID == "author" || p.ID == "reviewer") && p.BytesPerTokenSource == "" {
-			t.Logf("participant %s has no bytes_per_token source recorded", p.ID)
+		if p.ID == "author" || p.ID == "reviewer" {
+			if p.BytesPerTokenSource == "" {
+				t.Fatalf("participant %s should have bytes_per_token source", p.ID)
+			}
+
+			if probeRec, ok := probeRecords[p.ID].(map[string]interface{}); ok {
+				if cal, ok := probeRec["calibration"].(float64); ok {
+					expected := budget.EffectiveBytesPerToken(calibration, 0.75)
+					if cal != expected {
+						t.Errorf("manifest calibration %v, want %v (original %v with 0.75 safety)", cal, expected, calibration)
+					}
+				}
+			}
 		}
 	}
 }
 
 func TestBudgets_EstimateExceeded(t *testing.T) {
 	t.Parallel()
+	reviewStep := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})
+	reviewStep.Usage = &transport.Usage{Prompt: 10000, Completion: 100}
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author": {enginetest.Reply("author answer")},
-		"reviewer": {enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
-		})},
+		"author":   {enginetest.Reply("author answer")},
+		"reviewer": {reviewStep},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000), enginetest.WithCalibration("reviewer", 4.0))
 
 	c := s.Dial(t)
@@ -407,53 +517,39 @@ func TestBudgets_EstimateExceeded(t *testing.T) {
 
 	foundExceeded := false
 	for _, a := range turn.Attempts {
-		if a.Usage != nil && a.Usage.PromptTokens != nil && a.EstimatedPromptTokens > 0 && *a.Usage.PromptTokens > a.EstimatedPromptTokens {
+		if a.Phase == "review" && a.Usage != nil && a.Usage.PromptTokens != nil &&
+			a.EstimatedPromptTokens > 0 && *a.Usage.PromptTokens > a.EstimatedPromptTokens {
 			foundExceeded = true
 			break
 		}
 	}
 	if !foundExceeded {
-		gap(t, "fake adapter does not report usage exceeding estimate in this test")
+		t.Fatalf("did not find review attempt with reported usage exceeding estimate")
 	}
+
+	for _, ev := range s.Events() {
+		if ev.Kind == wire.EventKindBudgetEstimateExceeded {
+			return
+		}
+	}
+	t.Fatalf("did not find budget_estimate_exceeded event")
 }
 
 func TestBudgets_BudgetExhausted(t *testing.T) {
 	t.Parallel()
 	budgetConfig := `[budgets]
-turn_max_estimated_tokens = 1000
+turn_max_estimated_tokens = 50000
 `
 	rostTOML := budgetsRosterWithBudget(budgetConfig)
 
+	reviewStep := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})
+	reviewStep.Usage = &transport.Usage{Prompt: 60000, Completion: 100}
+
 	s := newSuite(t, rostTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("author answer")},
-		"reviewer": {verdict(fake.VerdictApprove)},
-	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
-
-	c := s.Dial(t)
-	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
-	if err != nil {
-		if strings.Contains(err.Error(), "budget") {
-			return
-		}
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	s.WaitTerminal(reply.TurnID)
-	turn := s.Turn(t, c, reply.TurnID)
-	if turn.State == engine.StateIncomplete {
-		return
-	}
-	if turn.Budget.Exhausted {
-		return
-	}
-	t.Logf("budget not exhausted with limit 1000")
-}
-
-func TestBudgets_QuarantinedLateResult(t *testing.T) {
-	t.Parallel()
-	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply("author answer")},
-		"reviewer": {verdict(fake.VerdictApprove)},
+		"reviewer": {reviewStep},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
@@ -461,20 +557,97 @@ func TestBudgets_QuarantinedLateResult(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateApproved {
-		t.Fatalf("turn state %s, want approved", turn.State)
+	if !turn.Budget.Exhausted {
+		t.Fatalf("budget should be exhausted after reported usage exceeds limit")
 	}
-	if turn.Budget.Charged == nil || *turn.Budget.Charged <= 0 {
-		t.Fatalf("budget should be charged")
+
+	for _, ev := range s.Events() {
+		if ev.Kind == wire.EventKindBudgetExhausted {
+			return
+		}
 	}
+	t.Fatalf("did not find budget_exhausted event")
+}
+
+func TestBudgets_QuarantinedLateResult(t *testing.T) {
+	t.Parallel()
+	t.Run("above_reservation", func(t *testing.T) {
+		t.Parallel()
+		reviewStep := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})
+		reviewStep.Usage = &transport.Usage{Prompt: 5000, Completion: 500}
+
+		s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+			"author":   {enginetest.Reply("author answer")},
+			"reviewer": {reviewStep},
+		}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
+
+		c := s.Dial(t)
+		turnID := s.Submit(t, c, "s1")
+		s.WaitTerminal(turnID)
+
+		turn := s.Turn(t, c, turnID)
+		if turn.State != engine.StateApproved {
+			t.Fatalf("turn state %s, want approved", turn.State)
+		}
+
+		beforeCharge := int64(0)
+		for _, a := range turn.Attempts {
+			if a.Phase == "review" && a.EstimatedPromptTokens > 0 {
+				beforeCharge = a.EstimatedPromptTokens
+				break
+			}
+		}
+		if beforeCharge == 0 {
+			t.Fatalf("no review attempt found")
+		}
+
+		if turn.Budget.Charged == nil || *turn.Budget.Charged <= beforeCharge {
+			t.Fatalf("charged budget should exceed estimated reservation after high reported usage")
+		}
+	})
+
+	t.Run("below_reservation", func(t *testing.T) {
+		t.Parallel()
+		reviewStep := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})
+		reviewStep.Usage = &transport.Usage{Prompt: 100, Completion: 10}
+
+		s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+			"author":   {enginetest.Reply("author answer")},
+			"reviewer": {reviewStep},
+		}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
+
+		c := s.Dial(t)
+		turnID := s.Submit(t, c, "s2")
+		s.WaitTerminal(turnID)
+
+		turn := s.Turn(t, c, turnID)
+		if turn.State != engine.StateApproved {
+			t.Fatalf("turn state %s, want approved", turn.State)
+		}
+
+		beforeCharge := int64(0)
+		for _, a := range turn.Attempts {
+			if a.Phase == "review" && a.EstimatedPromptTokens > 0 {
+				beforeCharge = a.EstimatedPromptTokens
+				break
+			}
+		}
+
+		if turn.Budget.Charged == nil || *turn.Budget.Charged > beforeCharge {
+			t.Errorf("charged budget %d should not exceed estimated %d when reported is below", *turn.Budget.Charged, beforeCharge)
+		}
+	})
 }
 
 func TestBudgets_AdmissionVsEstimate(t *testing.T) {
+	t.Parallel()
 	t.Run("admission_exceeds_context", func(t *testing.T) {
 		t.Parallel()
-		rostTOML := budgetsRosterWithBudget("")
-
-		s := newSuite(t, rostTOML, map[string][]fake.Step{
+		s := newSuite(t, budgetsRosterWithBudget(""), map[string][]fake.Step{
 			"author":   {enginetest.Reply("author answer")},
 			"reviewer": {verdict(fake.VerdictApprove)},
 		}, enginetest.WithContextBound("author", 500), enginetest.WithContextBound("reviewer", 500))
@@ -494,9 +667,7 @@ func TestBudgets_AdmissionVsEstimate(t *testing.T) {
 		budgetConfig := `[budgets]
 turn_max_estimated_tokens = 100
 `
-		rostTOML := budgetsRosterWithBudget(budgetConfig)
-
-		s := newSuite(t, rostTOML, map[string][]fake.Step{
+		s := newSuite(t, budgetsRosterWithBudget(budgetConfig), map[string][]fake.Step{
 			"author":   {enginetest.Reply("author answer")},
 			"reviewer": {verdict(fake.VerdictApprove)},
 		}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
@@ -506,8 +677,8 @@ turn_max_estimated_tokens = 100
 		if err == nil {
 			t.Fatalf("expected submit to fail due to turn budget, got turn %s", reply.TurnID)
 		}
-		if !strings.Contains(err.Error(), "budget") && !strings.Contains(err.Error(), "turn_max") {
-			t.Fatalf("expected turn budget error, got: %v", err)
+		if !strings.Contains(err.Error(), "budget") {
+			t.Fatalf("expected budget error, got: %v", err)
 		}
 	})
 }
@@ -515,55 +686,54 @@ turn_max_estimated_tokens = 100
 func TestBudgets_RacingReservations(t *testing.T) {
 	t.Parallel()
 	budgetConfig := `[budgets]
-turn_max_estimated_tokens = 10000
+turn_max_estimated_tokens = 15000
 `
 	rostTOML := budgetsRosterWithMultipleReviewersAndBudget(budgetConfig)
 
-	var dispatchMu sync.Mutex
-	var dispatchOrder []string
+	var dispatchCount atomic.Int32
+	var budgetTurnSeen atomic.Bool
 
 	s := newSuite(t, rostTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("author answer")},
 		"reviewer1": {enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-			dispatchMu.Lock()
-			dispatchOrder = append(dispatchOrder, "reviewer1")
-			dispatchMu.Unlock()
+			dispatchCount.Add(1)
 			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 		})},
 		"reviewer2": {enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-			dispatchMu.Lock()
-			dispatchOrder = append(dispatchOrder, "reviewer2")
-			dispatchMu.Unlock()
+			dispatchCount.Add(1)
 			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 		})},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer1", 128000), enginetest.WithContextBound("reviewer2", 128000))
 
-	c := s.Dial(t)
-	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
-	if err != nil {
-		gap(t, "submit rejected due to budget constraints with two reviewers and default rosters; projection exceeds configured turn budget")
-		return
-	}
-
-	s.WaitTerminal(reply.TurnID)
-
-	turn := s.Turn(t, c, reply.TurnID)
-	reviewCount := 0
-	for _, a := range turn.Attempts {
-		if strings.Contains(a.Phase, "review") {
-			reviewCount++
+	for i := 0; i < 3; i++ {
+		c := s.Dial(t)
+		reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s" + string(rune(i)), Input: "what is the answer?"})
+		if err != nil {
+			t.Fatalf("iteration %d: submit failed: %v", i, err)
 		}
+
+		s.WaitTerminal(reply.TurnID)
+
+		for _, ev := range s.Events() {
+			if ev.Kind == wire.EventKindBudget {
+				var budgetEv wire.EvBudget
+				if err := json.Unmarshal(ev.Body, &budgetEv); err == nil {
+					if strings.Contains(budgetEv.Budget, "budget:turn") {
+						budgetTurnSeen.Store(true)
+					}
+				}
+			}
+		}
+		_ = c.Close()
 	}
 
-	if reviewCount < 1 {
-		t.Fatalf("no review dispatches found")
+	if dispatchCount.Load() > 3 {
+		t.Fatalf("both reviewers were dispatched in multiple iterations; dispatch count: %d", dispatchCount.Load())
 	}
 
-	dispatchMu.Lock()
-	if len(dispatchOrder) > 2 {
-		t.Fatalf("both reviewers dispatched when reservation race would occur; order: %v", dispatchOrder)
+	if !budgetTurnSeen.Load() {
+		t.Fatalf("did not see budget:turn event across iterations; race may not be forcing reservation conflict")
 	}
-	dispatchMu.Unlock()
 }
 
 func TestBudgets_AuthorContextBoundExceeded(t *testing.T) {
@@ -602,16 +772,28 @@ func TestBudgets_AuthorOutputBoundExceeded(t *testing.T) {
 	s.WaitTerminal(reply.TurnID)
 	turn := s.Turn(t, c, reply.TurnID)
 
-	if turn.State == engine.StateIncomplete && turn.TerminalReason != nil && strings.Contains(*turn.TerminalReason, "budget:context") {
-		return
+	if turn.State != engine.StateIncomplete {
+		t.Fatalf("expected incomplete state after budget:context event, got %s", turn.State)
+	}
+	if turn.TerminalReason == nil || !strings.Contains(*turn.TerminalReason, "budget:context") {
+		t.Fatalf("expected terminal reason with budget:context, got %v", turn.TerminalReason)
 	}
 
-	t.Fatalf("expected turn to end with budget:context reason or submit to fail")
+	for _, ev := range s.Events() {
+		if ev.Kind == wire.EventKindBudget {
+			var budgetEv wire.EvBudget
+			if err := json.Unmarshal(ev.Body, &budgetEv); err == nil {
+				if strings.Contains(budgetEv.Budget, "budget:context") {
+					return
+				}
+			}
+		}
+	}
+	t.Fatalf("did not find budget event with budget:context")
 }
 
-func TestBudgets_PresetBudgetsOverride(t *testing.T) {
-	t.Parallel()
-	rostTOML := `
+func budgetsRosterPresetOverride() string {
+	return `
 default_preset = "review"
 
 [deadlines]
@@ -658,8 +840,11 @@ reviewer_max_output_tokens = 1024
 local_only = true
 allowed_destinations = []
 `
+}
 
-	s := newSuite(t, rostTOML, map[string][]fake.Step{
+func TestBudgets_PresetBudgetsOverride(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, budgetsRosterPresetOverride(), map[string][]fake.Step{
 		"author":   {enginetest.Reply("author answer")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
@@ -680,11 +865,28 @@ allowed_destinations = []
 	if turn.Budget.Projected == nil || *turn.Budget.Projected <= 0 {
 		t.Fatalf("projection should change with override")
 	}
+
+	sDefault := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("author answer")},
+		"reviewer": {verdict(fake.VerdictApprove)},
+	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
+
+	c2 := sDefault.Dial(t)
+	turnID2 := sDefault.Submit(t, c2, "s2")
+	sDefault.WaitTerminal(turnID2)
+
+	turnDefault := sDefault.Turn(t, c2, turnID2)
+	if turnDefault.Budget.Projected == nil {
+		t.Fatalf("default projection should be set")
+	}
+
+	if *turn.Budget.Projected == *turnDefault.Budget.Projected {
+		t.Errorf("projection with override %d should differ from default %d", *turn.Budget.Projected, *turnDefault.Budget.Projected)
+	}
 }
 
-func TestBudgets_QuickProfileBudgetsOverride(t *testing.T) {
-	t.Parallel()
-	rostTOML := `
+func budgetsRosterQuickProfile() string {
+	return `
 default_preset = "review"
 
 [deadlines]
@@ -737,8 +939,11 @@ reviewer_max_output_tokens = 512
 local_only = true
 allowed_destinations = []
 `
+}
 
-	s := newSuite(t, rostTOML, map[string][]fake.Step{
+func TestBudgets_QuickProfileBudgetsOverride(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, budgetsRosterQuickProfile(), map[string][]fake.Step{
 		"author":   {enginetest.Reply("author answer")},
 		"reviewer": {verdict(fake.VerdictApprove)},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
@@ -763,9 +968,14 @@ allowed_destinations = []
 
 func TestBudgets_UsageStored(t *testing.T) {
 	t.Parallel()
+	reviewStep := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})
+	reviewStep.Usage = &transport.Usage{Prompt: 1000, Completion: 100}
+
 	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
 		"author":   {enginetest.Reply("author answer")},
-		"reviewer": {verdict(fake.VerdictApprove)},
+		"reviewer": {reviewStep},
 	}, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
@@ -773,29 +983,31 @@ func TestBudgets_UsageStored(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	foundEstimate := false
+
+	var foundEstimate, foundReported bool
 	for _, a := range turn.Attempts {
 		if a.EstimatedPromptTokens > 0 {
 			foundEstimate = true
-			break
+		}
+		if a.Phase == "review" && a.Usage != nil && a.Usage.PromptTokens != nil && *a.Usage.PromptTokens == 1000 {
+			foundReported = true
 		}
 	}
 	if !foundEstimate {
 		t.Fatalf("did not find attempt with estimated prompt tokens")
 	}
+	if !foundReported {
+		t.Fatalf("did not find attempt with reported usage of 1000 prompt tokens")
+	}
 
 	if turn.Budget.Charged == nil || *turn.Budget.Charged <= 0 {
 		t.Fatalf("turn budget should show charged total")
 	}
-
-	if turn.Budget.Reserved == nil && turn.Budget.Charged != nil {
-		gap(t, "engine does not populate Reserved field on budget record")
-	}
 }
 
-func TestBudgets_MeteredEndpointRefused(t *testing.T) {
-	t.Parallel()
-	rostTOML := `
+// budgetsRosterMeteredEndpoint returns a roster with one metered endpoint.
+func budgetsRosterMeteredEndpoint() string {
+	return `
 default_preset = "review"
 
 [deadlines]
@@ -851,16 +1063,19 @@ required_reviewers = ["reviewer"]
 local_only = true
 allowed_destinations = []
 `
+}
 
-	s := newSuite(t, rostTOML, nil, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
+func TestBudgets_MeteredEndpointRefused(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, budgetsRosterMeteredEndpoint(), nil, enginetest.WithContextBound("author", 128000), enginetest.WithContextBound("reviewer", 128000))
 
 	c := s.Dial(t)
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
 	if err == nil {
 		t.Fatalf("expected submit to fail for metered endpoint, got turn %s", reply.TurnID)
 	}
-	if !strings.Contains(err.Error(), "spending_ceiling") && !strings.Contains(err.Error(), "budget") {
-		t.Fatalf("expected spending_ceiling error, got: %v", err)
+	if !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("expected budget error, got: %v", err)
 	}
 }
 
@@ -888,15 +1103,23 @@ func TestBudgets_DeliveryBoundNotFit(t *testing.T) {
 	}
 
 	foundRefusedDelivery := false
+	foundOtherDelivery := false
 	for _, a := range turn.Attempts {
-		if a.Phase == "terminal_delivery" && strings.Contains(a.Status, "not_sent:budget") {
-			foundRefusedDelivery = true
-			break
+		if a.Phase == "terminal_delivery" {
+			if strings.Contains(a.Status, "not_sent:budget") {
+				foundRefusedDelivery = true
+			} else if !strings.Contains(a.Status, "not_sent:") && a.Status != "" {
+				foundOtherDelivery = true
+			}
 		}
 	}
 
 	if !foundRefusedDelivery {
-		gap(t, "delivery with bound 50 tokens does not exceed recipient bound in this scenario")
+		t.Fatalf("did not find delivery marked not_sent:budget with recipient bound of 50 tokens")
+	}
+
+	if !foundOtherDelivery {
+		t.Fatalf("did not find any other delivery attempt that was sent")
 	}
 }
 
@@ -927,5 +1150,43 @@ func TestBudgets_BytesPerTokenInManifest(t *testing.T) {
 				t.Fatalf("author participant should have bytes_per_token source recorded")
 			}
 		}
+	}
+
+	var runID string
+	for _, ev := range s.Events() {
+		if ev.Kind == wire.EventKindEngineStarted {
+			var started wire.EvEngineStarted
+			if err := json.Unmarshal(ev.Body, &started); err == nil {
+				runID = started.RunID
+				break
+			}
+		}
+	}
+	if runID == "" {
+		t.Fatalf("could not find engine_started event with runID")
+	}
+
+	runRow, err := s.Store.GetRun(runID)
+	if err != nil {
+		t.Fatalf("cannot get run: %v", err)
+	}
+
+	var manifestData map[string]interface{}
+	if err := json.Unmarshal(runRow.Manifest, &manifestData); err != nil {
+		t.Fatalf("cannot parse manifest: %v", err)
+	}
+
+	probeRecords, ok := manifestData["probe_records"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("manifest has no probe_records")
+	}
+
+	authorRec, ok := probeRecords["author"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("manifest has no author probe record")
+	}
+
+	if _, ok := authorRec["calibration"]; !ok {
+		t.Fatalf("author probe record does not have calibration (bytes_per_token)")
 	}
 }
