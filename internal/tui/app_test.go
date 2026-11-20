@@ -96,6 +96,44 @@ func (s *seen) snapshot() []int64 {
 	return append([]int64(nil), s.seqs...)
 }
 
+// probe wraps an App so a test can wait on the App's own state without
+// reading it from another goroutine: a condition is registered through the
+// program, evaluated on the program's goroutine after every message, and its
+// answer handed back on a channel. No polling, no production hook.
+type probe struct {
+	app     *App
+	waiters []*waiter
+}
+
+type waiter struct {
+	cond func(*App) (string, bool)
+	done chan string
+}
+
+type waitMsg struct{ w *waiter }
+
+func (p *probe) Init() tea.Cmd { return p.app.Init() }
+func (p *probe) View() string  { return p.app.View() }
+
+func (p *probe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	if w, ok := msg.(waitMsg); ok {
+		p.waiters = append(p.waiters, w.w)
+	} else {
+		_, cmd = p.app.Update(msg)
+	}
+	kept := p.waiters[:0]
+	for _, w := range p.waiters {
+		if v, ok := w.cond(p.app); ok {
+			w.done <- v
+		} else {
+			kept = append(kept, w)
+		}
+	}
+	p.waiters = kept
+	return p, cmd
+}
+
 type rig struct {
 	h     *enginetest.Harness
 	srv   *serving
@@ -103,6 +141,22 @@ type rig struct {
 	app   *App
 	tm    *teatest.TestModel
 	seen  *seen
+}
+
+// until blocks until cond holds of the App, evaluated on the program's
+// goroutine after every message, and returns the string cond produced. It
+// fails the test at its deadline.
+func (r *rig) until(t *testing.T, what string, cond func(*App) (string, bool)) string {
+	t.Helper()
+	w := &waiter{cond: cond, done: make(chan string, 1)}
+	r.tm.Send(waitMsg{w})
+	select {
+	case v := <-w.done:
+		return v
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return ""
+	}
 }
 
 func newRig(t *testing.T) *rig {
@@ -114,7 +168,7 @@ func newRig(t *testing.T) *rig {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	r.app = NewApp(ctx, paths.Socket, WithEventObserver(r.seen.observe))
-	r.tm = teatest.NewTestModel(t, r.app, teatest.WithInitialTermSize(80, 24))
+	r.tm = teatest.NewTestModel(t, &probe{app: r.app}, teatest.WithInitialTermSize(80, 24))
 	t.Cleanup(func() { _ = r.tm.Quit() })
 	return r
 }
@@ -125,25 +179,39 @@ func (r *rig) waitFor(t *testing.T, want string) {
 		teatest.WithDuration(10*time.Second), teatest.WithCheckInterval(10*time.Millisecond))
 }
 
-// waitCaughtUp waits for the journal to go quiet and the App to have applied
-// everything in it, and returns the last seq.
+// waitConnected waits for the App to be connected to the engine, so a line
+// typed afterwards is not refused with "not connected".
+func (r *rig) waitConnected(t *testing.T) {
+	t.Helper()
+	r.until(t, "the TUI to connect", func(a *App) (string, bool) {
+		return "", a.state.ConnState == ConnStateConnected
+	})
+}
+
+// waitCaughtUp waits for the App to be connected and to have applied every
+// event in the journal, and returns the last seq.
 func (r *rig) waitCaughtUp(t *testing.T) int64 {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	var prev int64 = -1
-	for time.Now().Before(deadline) {
-		max, err := r.h.Store.MaxSeq()
+	var max int64
+	r.until(t, "the TUI to catch up with the journal", func(a *App) (string, bool) {
+		m, err := r.h.Store.MaxSeq()
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return "", true
 		}
-		if s := r.seen.snapshot(); max == prev && len(s) > 0 && s[len(s)-1] == max {
-			return max
-		}
-		prev = max
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatal("the TUI never caught up with the journal")
-	return 0
+		max = m
+		return "", a.state.ConnState == ConnStateConnected && m > 0 && a.state.LastSeq == m
+	})
+	return max
+}
+
+// waitTurn waits for the App to hold a submitted, open turn with the input
+// line already cleared by the submit reply, and returns the turn's id.
+func (r *rig) waitTurn(t *testing.T) string {
+	t.Helper()
+	return r.until(t, "a submitted turn and an empty input", func(a *App) (string, bool) {
+		return a.CurrentTurn(), a.CurrentTurn() != "" && a.input.Value() == ""
+	})
 }
 
 func (r *rig) typeLine(s string) {
@@ -155,7 +223,7 @@ func (r *rig) typeLine(s string) {
 func (r *rig) final(t *testing.T) *App {
 	t.Helper()
 	_ = r.tm.Quit()
-	return r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
+	return r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*probe).app
 }
 
 func dial(t *testing.T, paths lockfile.Paths) *client.Client {
@@ -181,17 +249,16 @@ func openTurns(t *testing.T, paths lockfile.Paths) []string {
 	return st.TurnsOpen
 }
 
-func waitOpenTurn(t *testing.T, paths lockfile.Paths) string {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if ts := openTurns(t, paths); len(ts) == 1 {
-			return ts[0]
+// authorCalls is the author-phase calls the author adapter has received;
+// terminal delivery to the author is not one of them.
+func authorCalls(r *rig) []fake.CompleteCall {
+	var out []fake.CompleteCall
+	for _, c := range r.h.Adapters["author"].Calls() {
+		if c.Request.Envelope.Phase == "author" {
+			out = append(out, c)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("no open turn")
-	return ""
+	return out
 }
 
 func TestRegionsAndTabs(t *testing.T) {
@@ -223,11 +290,13 @@ func TestRegionsAndTabs(t *testing.T) {
 func TestSubmitBusyAndEventOrder(t *testing.T) {
 	r := newRig(t)
 	release := r.h.Hold("author")
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 
 	r.typeLine("what is the answer? héllo")
-	turn := waitOpenTurn(t, r.paths)
-	time.Sleep(300 * time.Millisecond) // let the submit reply clear the input
+	turn := r.waitTurn(t) // the submit reply has cleared the input
+	if ts := openTurns(t, r.paths); len(ts) != 1 || ts[0] != turn {
+		t.Fatalf("turns open = %v, want [%s]", ts, turn)
+	}
 
 	// A second submit is refused as busy; the code shows and the text stays.
 	r.typeLine("second question")
@@ -235,16 +304,16 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 
 	release()
 	r.h.WaitTurnState(turn, engine.StateApproved)
-	calls := r.h.Adapters["author"].Calls()
+	calls := authorCalls(r)
 	if len(calls) != 1 || !strings.Contains(calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content, "what is the answer? héllo") {
-		t.Fatalf("author calls = %+v", calls)
+		t.Fatalf("author-phase calls = %+v; all author adapter calls = %+v", calls, r.h.Adapters["author"].Calls())
 	}
 
 	max := r.waitCaughtUp(t)
 	app := r.final(t)
 	assertContiguous(t, r.seen.snapshot(), max)
-	if app.state.LastSeq != max {
-		t.Errorf("LastSeq = %d, want %d", app.state.LastSeq, max)
+	if seqs := r.seen.snapshot(); app.state.LastSeq != int64(len(seqs)) {
+		t.Errorf("LastSeq = %d, want %d", app.state.LastSeq, len(seqs))
 	}
 	if got := app.input.Value(); got != "second question" {
 		t.Errorf("input after refusal = %q", got)
@@ -262,10 +331,13 @@ func TestSubmitBusyAndEventOrder(t *testing.T) {
 	}
 }
 
+// assertContiguous checks the App applied every event up to max, each seq
+// once, in order. Events the engine journaled after max (terminal delivery
+// may still be running) may also have been applied, but never out of order.
 func assertContiguous(t *testing.T, seqs []int64, max int64) {
 	t.Helper()
-	if int64(len(seqs)) != max {
-		t.Fatalf("saw %d events, want %d: %v", len(seqs), max, seqs)
+	if int64(len(seqs)) < max {
+		t.Fatalf("saw %d events, want at least %d: %v", len(seqs), max, seqs)
 	}
 	for i, s := range seqs {
 		if s != int64(i)+1 {
@@ -276,7 +348,7 @@ func assertContiguous(t *testing.T, seqs []int64, max int64) {
 
 func TestRestartReplaysEveryMissedEventOnce(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 
 	if err := r.h.Engine.Stop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -316,13 +388,18 @@ func TestRestartReplaysEveryMissedEventOnce(t *testing.T) {
 
 func TestResumeReconnectsOnce(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("/resume")
-	time.Sleep(500 * time.Millisecond)
-	max, err := r.h.Store.MaxSeq()
-	if err != nil {
-		t.Fatal(err)
-	}
+	var max int64
+	r.until(t, "one reconnect to complete and the journal to be replayed", func(a *App) (string, bool) {
+		m, err := r.h.Store.MaxSeq()
+		if err != nil {
+			t.Error(err)
+			return "", true
+		}
+		max = m
+		return "", a.gen == 1 && a.state.ConnState == ConnStateConnected && a.state.LastSeq == m
+	})
 	app := r.final(t)
 	assertContiguous(t, r.seen.snapshot(), max)
 	if app.gen != 1 || app.state.ConnState != ConnStateConnected {
@@ -333,11 +410,11 @@ func TestResumeReconnectsOnce(t *testing.T) {
 func TestQuitLeavesTurnOpen(t *testing.T) {
 	r := newRig(t)
 	r.h.Hold("author")
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("long question")
-	turn := waitOpenTurn(t, r.paths)
+	turn := r.waitTurn(t)
 	r.typeLine("/quit")
-	app := r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
+	app := r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*probe).app
 	if app.CurrentTurn() != turn {
 		t.Fatalf("CurrentTurn = %q, want %q", app.CurrentTurn(), turn)
 	}
@@ -360,11 +437,13 @@ func TestReattachFindsOpenTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := NewApp(context.Background(), paths.Socket)
-	tm := teatest.NewTestModel(t, app, teatest.WithInitialTermSize(80, 24))
-	teatest.WaitFor(t, tm.Output(), func(b []byte) bool { return bytes.Contains(b, []byte("answer (placeholder)")) },
-		teatest.WithDuration(10*time.Second))
-	_ = tm.Quit()
-	got := tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*App)
+	r := &rig{h: h, paths: paths}
+	r.tm = teatest.NewTestModel(t, &probe{app: app}, teatest.WithInitialTermSize(80, 24))
+	t.Cleanup(func() { _ = r.tm.Quit() })
+	r.until(t, "the open turn to be reattached", func(a *App) (string, bool) {
+		return "", a.state.ConnState == ConnStateConnected && a.CurrentTurn() == reply.TurnID
+	})
+	got := r.final(t)
 	if got.CurrentTurn() != reply.TurnID {
 		t.Errorf("CurrentTurn = %q, want %q", got.CurrentTurn(), reply.TurnID)
 	}
@@ -372,7 +451,7 @@ func TestReattachFindsOpenTurn(t *testing.T) {
 
 func TestUnknownCommandSendsNothing(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	before, err := r.h.Store.MaxSeq()
 	if err != nil {
 		t.Fatal(err)
@@ -408,13 +487,21 @@ func TestFormatRefusal(t *testing.T) {
 // and it is submitted exactly as typed.
 func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
 	r := newRig(t)
-	r.waitFor(t, "answer (placeholder)")
+	r.waitConnected(t)
 	r.typeLine("  /quit now  ")
-	turn := waitOpenTurn(t, r.paths)
+	// The turn is not held, so it may already be over: wait for it to be approved.
+	turn := r.until(t, "the turn to be approved", func(a *App) (string, bool) {
+		for id, st := range a.state.TurnState {
+			if st == engine.StateApproved {
+				return id, true
+			}
+		}
+		return "", false
+	})
 	r.h.WaitTurnState(turn, engine.StateApproved)
-	calls := r.h.Adapters["author"].Calls()
-	if len(calls) == 0 {
-		t.Fatal("the line never reached the engine")
+	calls := authorCalls(r)
+	if len(calls) != 1 {
+		t.Fatalf("author-phase calls = %+v; all author adapter calls = %+v", calls, r.h.Adapters["author"].Calls())
 	}
 	got := calls[0].Request.Messages[len(calls[0].Request.Messages)-1].Content
 	if !strings.Contains(got, "  /quit now  ") {
