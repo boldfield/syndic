@@ -43,8 +43,7 @@ func init() {
 	cover(socket, "`submit` twice with one `submission_id` and the same content yields one turn and two identical replies, even when the second arrives while the turn is open", "TestSocket_SubmitIdempotent")
 	cover(socket, "the same id with different `input` is refused `submission_conflict` naming the turn", "TestSocket_SubmissionConflict")
 	cover(socket, "a refused submission's id can be reused with new content", "TestSocket_RefusedIDReusable")
-	cover(socket, "replay then live delivers each `seq` exactly once under concurrent event appends", "TestSocket_ReplayThenLive")
-	cover(socket, "dispatch latency measured during a 50,000-event replay by another client is unchanged", "TestSocket_DispatchDuringReplay")
+	cover(socket, "replay then live delivers each `seq` exactly once under concurrent event appends, and dispatch latency measured during a 50,000-event replay by another client is unchanged", "TestSocket_ReplayThenLive")
 	cover(socket, "a subscriber that stops reading is disconnected with `lagging` and the engine's dispatch is unaffected", "TestSocket_LaggingSubscriber")
 	cover(socket, "`status` output contains no secret value when the resolver holds a sentinel", "TestSocket_StatusHasNoSecret")
 	cover(socket, "detach with a turn open, reattach, turn finished meanwhile, answer tab shows the result", "TestSocket_DetachReattach")
@@ -606,8 +605,29 @@ func wantContiguous(t *testing.T, seqs []int64, first int64) {
 	}
 }
 
+// reattachEvents replaces the suite's own event subscription with a fresh one
+// from since. The suite's subscription is not read while a test floods the
+// journal, so under load the engine may have cut it off with lagging; a
+// subscription begun after the flood does not depend on it.
+func (s *suite) reattachEvents(t *testing.T, since int64) {
+	t.Helper()
+	c := s.Dial(t)
+	if _, err := c.Subscribe(s.ctx(), since); err != nil {
+		t.Fatalf("subscribe from %d: %v", since, err)
+	}
+	s.events = &eventStream{c: c}
+}
+
 func TestSocket_ReplayThenLive(t *testing.T) {
 	t.Parallel()
+	replayThenLive(t)
+	dispatchDuringReplay(t)
+}
+
+// replayThenLive: a subscriber replaying from an old seq while events are
+// appended receives every seq exactly once.
+func replayThenLive(t *testing.T) {
+	t.Helper()
 	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
@@ -632,11 +652,16 @@ func TestSocket_ReplayThenLive(t *testing.T) {
 	liveFrom, err := late.Subscribe(s.ctx(), since)
 	if err != nil {
 		close(proceed)
-		appender.Wait()
 		t.Fatalf("subscribe: %v", err)
 	}
 	close(proceed)
-	appender.Wait()
+	appended := make(chan struct{})
+	go func() { appender.Wait(); close(appended) }()
+	select {
+	case <-appended:
+	case <-s.ctx().Done():
+		t.Fatal("the concurrent appends did not finish")
+	}
 
 	watermark := s.maxSeq(t)
 	if watermark != atSubscribe+after {
@@ -655,13 +680,16 @@ func TestSocket_ReplayThenLive(t *testing.T) {
 	}
 }
 
-func TestSocket_DispatchDuringReplay(t *testing.T) {
-	t.Parallel()
+// dispatchDuringReplay: a turn is submitted and completes while another
+// client is midway through a large replay.
+func dispatchDuringReplay(t *testing.T) {
+	t.Helper()
 	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
 	n := floodSize()
 	start := s.maxSeq(t)
 	s.flood(t, n, 64, 500)
 	flooded := s.maxSeq(t)
+	s.reattachEvents(t, flooded)
 
 	// The replaying client takes a known number of frames and then stops
 	// reading, midway through the replay.
@@ -730,27 +758,48 @@ func TestSocket_LaggingSubscriber(t *testing.T) {
 		t.Fatalf("subscribe reply = %+v", f)
 	}
 
+	// A subscriber that reads throughout, to show the engine kept feeding the
+	// ones that do. Its frames are handed over a channel big enough for the
+	// whole run; the suite's own subscription is not read during the flood
+	// and is replaced once it is over.
+	reader := s.Dial(t)
+	if _, err := reader.Subscribe(s.ctx(), start); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	got := make(chan int64, 20000)
+	go func() {
+		for {
+			ev, err := reader.NextEvent(s.ctx())
+			if err != nil {
+				close(got)
+				return
+			}
+			got <- ev.Seq
+		}
+	}()
+
 	// From here slow reads nothing. A turn is in progress while a flood lands
 	// that is far more than the hub queues for a subscriber.
 	c := s.Dial(t)
 	turnID, release := s.openTurn(t, c, "lag-1")
 	s.flood(t, 6000, 1<<10, 100)
+	flooded := s.maxSeq(t)
+	s.reattachEvents(t, flooded)
 	release()
 	s.WaitTerminal(turnID)
 	wantTurn(t, s.Turn(t, c, turnID), engine.StateApproved, "all_approved")
 
-	// The suite's own subscriber, which reads, was given every event.
+	// The reading subscriber was given every event, in order.
 	last := s.maxSeq(t)
-	s.WaitEvent(func(ev event) bool { return ev.Seq == last })
-	prev := start
-	for _, ev := range s.Events() {
-		if ev.Seq <= start {
-			continue
+	for prev := start; prev < last; {
+		seq, ok := <-got
+		if !ok {
+			t.Fatalf("the reading subscriber's stream ended at seq %d of %d", prev, last)
 		}
-		if ev.Seq != prev+1 {
-			t.Fatalf("the reading subscriber went from seq %d to %d", prev, ev.Seq)
+		if seq != prev+1 {
+			t.Fatalf("the reading subscriber went from seq %d to %d", prev, seq)
 		}
-		prev = ev.Seq
+		prev = seq
 	}
 
 	// The one that did not read is read now: its backlog, then lagging
