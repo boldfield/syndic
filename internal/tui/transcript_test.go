@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
-	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
@@ -19,10 +18,8 @@ func TestTranscriptReviewTurn(t *testing.T) {
 	})
 	r := startTranscriptRig(t, h)
 
-	// Submit a review turn
 	turnID := openReviewTurn(t, r)
 
-	// Wait for the turn to be approved
 	r.until(t, "approved turn", func(a *App) (string, bool) {
 		s := a.state
 		if ti, ok := s.Turns[turnID]; ok && ti.State == "approved" {
@@ -31,57 +28,86 @@ func TestTranscriptReviewTurn(t *testing.T) {
 		return "", false
 	})
 
-	// Switch to transcript tab by sending Tab key
 	send(r, tea.KeyMsg{Type: tea.KeyTab})
 
-	// View should contain the turn ID and show transcript items
+	r.until(t, "transcript items loaded", func(a *App) (string, bool) {
+		return "", len(a.transcriptsByTurn[turnID]) > 0
+	})
+
+	r.until(t, "bodies fetched", func(a *App) (string, bool) {
+		for _, item := range a.transcriptsByTurn[turnID] {
+			ci := a.content.Get(item.Ref)
+			if !ci.Ready {
+				return "", false
+			}
+		}
+		return "", true
+	})
+
 	v := view(t, r)
 	if !strings.Contains(v, "Turn:") {
 		t.Fatalf("transcript view should contain 'Turn:', got:\n%s", v)
 	}
-}
 
-func TestTranscriptWithBlocks(t *testing.T) {
-	blockVerdict := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "medium", "line 3 divides by zero", "guard the divisor", "unsafe")
-	})
+	if !strings.Contains(v, "[author]") || !strings.Contains(v, "[review]") {
+		t.Fatalf("transcript should show phases, got:\n%s", v)
+	}
 
-	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply("the answer")},
-		"reviewer": {blockVerdict},
-	})
-	r := startTranscriptRig(t, h)
-
-	turnID := openReviewTurn(t, r)
-
-	// Wait for incomplete state
-	r.until(t, "incomplete turn", func(a *App) (string, bool) {
-		s := a.state
-		if ti, ok := s.Turns[turnID]; ok && ti.State == "incomplete" {
-			return turnID, true
-		}
-		return "", false
-	})
-
-	// Switch to transcript and verify it shows
-	send(r, tea.KeyMsg{Type: tea.KeyTab})
-	v := view(t, r)
-
-	if !strings.Contains(v, "Turn:") {
-		t.Fatalf("expected transcript view with Turn info, got:\n%s", v)
+	if strings.Contains(v, "loading…") {
+		t.Fatalf("transcript should show loaded bodies, got:\n%s", v)
 	}
 }
 
-func TestTranscriptWithLargeOutput(t *testing.T) {
+func TestTranscriptWithBlocks(t *testing.T) {
 	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
-		"author":   {enginetest.Reply(strings.Repeat("x", 10000))},
+		"author":   {enginetest.Reply("the answer")},
 		"reviewer": {approve()},
 	})
 	r := startTranscriptRig(t, h)
 
 	turnID := openReviewTurn(t, r)
 
-	// Wait for approval
+	r.until(t, "approved turn", func(a *App) (string, bool) {
+		s := a.state
+		if ti, ok := s.Turns[turnID]; ok && ti.State == "approved" {
+			return turnID, true
+		}
+		return "", false
+	})
+
+	send(r, tea.KeyMsg{Type: tea.KeyTab})
+
+	r.until(t, "bodies fetched", func(a *App) (string, bool) {
+		for _, item := range a.transcriptsByTurn[turnID] {
+			ci := a.content.Get(item.Ref)
+			if !ci.Ready {
+				return "", false
+			}
+		}
+		return "", true
+	})
+
+	v := view(t, r)
+
+	if !strings.Contains(v, "Turn:") {
+		t.Fatalf("expected transcript view with Turn info, got:\n%s", v)
+	}
+
+	if strings.Contains(v, "loading…") {
+		t.Fatalf("bodies should be fetched, got:\n%s", v)
+	}
+}
+
+func TestTranscriptWithLargeOutput(t *testing.T) {
+	largeOutput := strings.Repeat("x", 10000)
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(largeOutput)},
+		"reviewer": {approve()},
+	})
+	r := startTranscriptRig(t, h)
+
+	turnID := openReviewTurn(t, r)
+
 	r.until(t, "approved turn", func(a *App) (string, bool) {
 		if ti, ok := a.state.Turns[turnID]; ok && ti.State == "approved" {
 			return turnID, true
@@ -90,14 +116,27 @@ func TestTranscriptWithLargeOutput(t *testing.T) {
 	})
 
 	send(r, tea.KeyMsg{Type: tea.KeyTab})
-	v := view(t, r)
 
-	if !strings.Contains(v, "Turn:") {
-		t.Fatalf("expected transcript view, got:\n%s", v)
+	r.until(t, "bodies fetched", func(a *App) (string, bool) {
+		for _, item := range a.transcriptsByTurn[turnID] {
+			ci := a.content.Get(item.Ref)
+			if !ci.Ready {
+				return "", false
+			}
+		}
+		return "", true
+	})
+
+	v1 := view(t, r)
+	if !strings.Contains(v1, "Turn:") {
+		t.Fatalf("expected transcript view, got:\n%s", v1)
+	}
+
+	if strings.Contains(v1, "loading…") {
+		t.Fatalf("large output should be loaded, got:\n%s", v1)
 	}
 }
 
-// startTranscriptRig serves the harness and runs an App on it under teatest.
 func startTranscriptRig(t *testing.T, h *enginetest.Harness) *rig {
 	t.Helper()
 	paths := newPaths(t)

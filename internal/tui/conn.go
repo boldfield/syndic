@@ -132,20 +132,25 @@ func turnCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea
 
 // transcriptMsg carries fetched transcript items or the error that occurred.
 type transcriptMsg struct {
-	gen   int
-	id    string
-	items []wire.TranscriptItem
-	err   error
+	gen        int
+	id         string
+	items      []wire.TranscriptItem
+	nextCursor string
+	err        error
 }
 
-// transcriptCmd fetches transcript items for a turn.
-func transcriptCmd(ctx context.Context, gen int, cl *client.Client, turnID string) tea.Cmd {
+// transcriptCmd fetches transcript items for a turn starting at the given cursor.
+func transcriptCmd(ctx context.Context, gen int, cl *client.Client, turnID, cursor string) tea.Cmd {
 	return func() tea.Msg {
-		reply, err := cl.Transcript(ctx, turnID, "", 200)
+		reply, err := cl.Transcript(ctx, turnID, cursor, 200)
 		if err != nil {
 			return transcriptMsg{gen: gen, id: turnID, err: err}
 		}
-		return transcriptMsg{gen: gen, id: turnID, items: reply.Items}
+		nextCursor := ""
+		if reply.NextCursor != nil {
+			nextCursor = *reply.NextCursor
+		}
+		return transcriptMsg{gen: gen, id: turnID, items: reply.Items, nextCursor: nextCursor}
 	}
 }
 

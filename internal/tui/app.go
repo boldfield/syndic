@@ -47,14 +47,15 @@ type App struct {
 	tickRunning          bool
 	onEvent              func(wire.Frame)
 
-	content           *ContentCache
-	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
-	answerScrollRow   int   // first visible line of the answer tab
-	transcriptRow     int   // first visible line of the transcript tab
-	candidateIDByTurn map[string]string
-	transcriptsByTurn map[string][]wire.TranscriptItem // transcript items from turn replies
-	openBlocksByTurn  map[string][]wire.OpenBlock      // open blocks from turn replies
-	overrideReasons   map[string]string                // the reason of each override event
+	content                *ContentCache
+	drafts                 *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
+	answerScrollRow        int   // first visible line of the answer tab
+	transcriptRow          int   // first visible line of the transcript tab
+	candidateIDByTurn      map[string]string
+	transcriptsByTurn      map[string][]wire.TranscriptItem // transcript items from turn replies
+	transcriptCursorByTurn map[string]string                // next_cursor for pagination
+	openBlocksByTurn       map[string][]wire.OpenBlock      // open blocks from turn replies
+	overrideReasons        map[string]string                // the reason of each override event
 }
 
 // Option configures an App.
@@ -69,19 +70,20 @@ func WithEventObserver(f func(wire.Frame)) Option {
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
 	a := &App{
-		ctx:               ctx,
-		cancel:            cancel,
-		socket:            socketPath,
-		input:             newInput(),
-		width:             80,
-		height:            24,
-		state:             NewState(),
-		now:               time.Now,
-		content:           NewContentCache(),
-		candidateIDByTurn: make(map[string]string),
-		transcriptsByTurn: make(map[string][]wire.TranscriptItem),
-		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
-		overrideReasons:   make(map[string]string),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		socket:                 socketPath,
+		input:                  newInput(),
+		width:                  80,
+		height:                 24,
+		state:                  NewState(),
+		now:                    time.Now,
+		content:                NewContentCache(),
+		candidateIDByTurn:      make(map[string]string),
+		transcriptsByTurn:      make(map[string][]wire.TranscriptItem),
+		transcriptCursorByTurn: make(map[string]string),
+		openBlocksByTurn:       make(map[string][]wire.OpenBlock),
+		overrideReasons:        make(map[string]string),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -124,7 +126,17 @@ func (a *App) transcriptIn(turnID string) transcriptInput {
 	return transcriptInput{
 		content: a.content,
 		items:   a.transcriptsByTurn[turnID],
+		blocks:  a.openBlocksByTurn[turnID],
 	}
+}
+
+// transcriptRefs extracts all content refs from transcript items.
+func transcriptRefs(items []wire.TranscriptItem) []string {
+	var refs []string
+	for _, item := range items {
+		refs = append(refs, item.Ref)
+	}
+	return refs
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
@@ -133,18 +145,31 @@ func (a *App) fetchAnswerContent() tea.Cmd {
 	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
 }
 
+// fetchTranscriptContent starts fetches for the transcript tab.
+func (a *App) fetchTranscriptContent() tea.Cmd {
+	turnID := transcriptTurn(a.state)
+	items := a.transcriptsByTurn[turnID]
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, transcriptRefs(items))...)
+}
+
 // Init starts the first connection, from the beginning of the journal.
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
 }
 
-// Update handles one message, then starts any content fetch the answer tab
+// Update handles one message, then starts any content fetch the current tab
 // now needs. A content reply itself starts none, so a failing fetch is retried
 // on the next event or tick, not in a loop.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
 	if _, ok := msg.(contentMsg); !ok {
-		cmd = tea.Batch(cmd, a.fetchAnswerContent())
+		var fetchCmd tea.Cmd
+		if a.tab == tabTranscript {
+			fetchCmd = a.fetchTranscriptContent()
+		} else {
+			fetchCmd = a.fetchAnswerContent()
+		}
+		cmd = tea.Batch(cmd, fetchCmd)
 	}
 	return a, cmd
 }
@@ -441,17 +466,24 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
 	// Fetch transcript items for the turn
-	cmd := transcriptCmd(a.ctx, a.gen, a.cl, msg.id)
+	cmd := transcriptCmd(a.ctx, a.gen, a.cl, msg.id, "")
 	return a, cmd
 }
 
-// onTranscript stores fetched transcript items.
+// onTranscript stores fetched transcript items and fetches more if there are more pages.
 func (a *App) onTranscript(msg transcriptMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != a.gen {
 		return a, nil
 	}
 	if msg.err == nil {
-		a.transcriptsByTurn[msg.id] = msg.items
+		// Append items to existing items for this turn
+		a.transcriptsByTurn[msg.id] = append(a.transcriptsByTurn[msg.id], msg.items...)
+		// Store the cursor for the next page
+		a.transcriptCursorByTurn[msg.id] = msg.nextCursor
+		// If there are more items, fetch them
+		if msg.nextCursor != "" {
+			return a, transcriptCmd(a.ctx, a.gen, a.cl, msg.id, msg.nextCursor)
+		}
 	}
 	return a, nil
 }
