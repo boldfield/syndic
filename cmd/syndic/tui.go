@@ -39,10 +39,17 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 
 	// Run Bubble Tea
 	p := tea.NewProgram(app, tea.WithAltScreen())
-	_, err = p.Run()
+	finalModel, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: TUI error: %v\n", err)
 		return 2
+	}
+
+	// Print exit message if there's an open turn
+	if tuiApp, ok := finalModel.(*tui.App); ok {
+		if tuiApp.CurrentTurn() != "" {
+			fmt.Printf("Turn %s is still running and will continue\n", tuiApp.CurrentTurn())
+		}
 	}
 
 	return 0

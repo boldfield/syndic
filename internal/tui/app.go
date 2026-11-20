@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,12 +23,11 @@ type App struct {
 	width  int
 	height int
 
-	state          State
-	connector      *connector
-	activeTab      TabName
-	inputLine      string
-	refusal        string
-	lastOpenTurnID string
+	state     State
+	connector *connector
+	activeTab TabName
+	inputLine string
+	refusal   string
 }
 
 // NewApp creates a new App instance.
@@ -59,30 +57,7 @@ func (a *App) handleConnectorMsg(msg tea.Msg) tea.Msg {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return a, a.quitCmd()
-		case "tab":
-			a.activeTab = a.nextTab()
-			return a, nil
-		case "shift+tab":
-			a.activeTab = a.prevTab()
-			return a, nil
-		case "enter":
-			if a.inputLine != "" {
-				cmd := a.processInputCmd()
-				return a, cmd
-			}
-		case "backspace":
-			if len(a.inputLine) > 0 {
-				a.inputLine = a.inputLine[:len(a.inputLine)-1]
-			}
-		default:
-			if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
-				a.inputLine += msg.String()
-			}
-		}
-		return a, nil
+		return a.handleKeyMsg(msg)
 
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -96,13 +71,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleEvent(msg)
 
 	case HelloMsg:
-		a.state.Hello = msg.Hello
-		a.state.ConnState = ConnStateConnected
-		return a, a.connector.fetchStatusCmd(a.ctx)
+		return a.handleHello(msg)
 
 	case StatusMsg:
-		a.state.Status = msg.Status
-		return a, nil
+		return a.handleStatus(msg)
 
 	case SubmitResultMsg:
 		return a.handleSubmitResult(msg)
@@ -114,23 +86,71 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return a, tea.Quit
+	case "tab":
+		a.activeTab = a.nextTab()
+		return a, nil
+	case "shift+tab":
+		a.activeTab = a.prevTab()
+		return a, nil
+	case "enter":
+		if a.inputLine != "" {
+			cmd := a.processInputCmd()
+			return a, cmd
+		}
+	case "backspace":
+		if len(a.inputLine) > 0 {
+			a.inputLine = a.inputLine[:len(a.inputLine)-1]
+		}
+	default:
+		if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] < 127 {
+			a.inputLine += msg.String()
+		}
+	}
+	return a, nil
+}
+
 func (a *App) handleConnState(msg ConnStateMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		a.state.ConnState = ConnStateClosed
+		return a, a.connector.reconnectCmd(a.ctx)
+	}
+
 	switch msg.State {
 	case ConnStateConnected:
 		a.state.ConnState = ConnStateConnected
 		return a, a.connector.helloCmd(a.ctx)
-	case ConnStateReconnecting:
-		a.state.ConnState = ConnStateReconnecting
-		return a, nil
 	default:
-		a.state.ConnState = ConnStateClosed
+		a.state.ConnState = ConnStateReconnecting
 		return a, nil
 	}
 }
 
-func (a *App) handleEvent(msg EventMsg) (tea.Model, tea.Cmd) {
+func (a *App) handleHello(msg HelloMsg) (tea.Model, tea.Cmd) {
 	if msg.Err != nil {
 		a.state.ConnState = ConnStateClosed
+		return a, a.connector.reconnectCmd(a.ctx)
+	}
+	a.state.Hello = msg.Hello
+	a.state.ConnState = ConnStateConnected
+	return a, a.connector.fetchStatusCmd(a.ctx)
+}
+
+func (a *App) handleStatus(msg StatusMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		a.state.ConnState = ConnStateClosed
+		return a, a.connector.reconnectCmd(a.ctx)
+	}
+	a.state.Status = msg.Status
+	return a, a.connector.streamEventsCmd(a.ctx)
+}
+
+func (a *App) handleEvent(msg EventMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		a.state.ConnState = ConnStateReconnecting
 		return a, a.connector.reconnectCmd(a.ctx)
 	}
 	a.state = Apply(a.state, msg.Frame)
@@ -145,41 +165,17 @@ func (a *App) handleSubmitResult(msg SubmitResultMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.refusal = ""
-	a.lastOpenTurnID = msg.TurnID
+	a.state.CurrentTurn = msg.TurnID
 	a.inputLine = ""
 	return a, nil
 }
 
 // processInputCmd processes the input line.
 func (a *App) processInputCmd() tea.Cmd {
-	input := a.inputLine
+	input := strings.TrimSpace(a.inputLine)
 	if strings.HasPrefix(input, "/") {
-		parts := strings.Fields(input)
-		if len(parts) == 0 {
-			return nil
-		}
-		cmd := parts[0]
-		switch cmd {
-		case "/quit":
-			msg := "Goodbye"
-			if a.lastOpenTurnID != "" {
-				msg = fmt.Sprintf("Turn %s is still running and will continue", a.lastOpenTurnID)
-			}
-			fmt.Println(msg)
-			return func() tea.Msg { return tea.Quit() }
-		case "/resume":
-			return nil
-		default:
-			a.refusal = fmt.Sprintf("unknown command: %s", cmd)
-			a.inputLine = ""
-			return nil
-		}
+		return dispatchCommand(a, input)
 	}
-	return a.submitTextCmd(input)
-}
-
-// submitTextCmd submits the text as input.
-func (a *App) submitTextCmd(input string) tea.Cmd {
 	return a.connector.submitCmd(a.ctx, input)
 }
 
@@ -189,7 +185,6 @@ func (a *App) View() string {
 		return ""
 	}
 
-	// Calculate region heights (at least 3 for bottom input)
 	bottomHeight := 3
 	topHeight := 1
 	middleHeight := a.height - topHeight - bottomHeight
@@ -199,13 +194,9 @@ func (a *App) View() string {
 
 	var out strings.Builder
 
-	// Show reconnecting banner if needed
-	if a.state.ConnState == ConnStateReconnecting {
-		out.WriteString("engine: reconnecting\n")
-	}
-
-	// Status strip (top)
-	out.WriteString(a.renderStrip(a.width))
+	// Status strip (top) - includes reconnecting message
+	strip := a.renderStrip(a.width)
+	out.WriteString(strip)
 	out.WriteString("\n")
 
 	// Active tab content (middle)
@@ -266,13 +257,7 @@ func (a *App) prevTab() TabName {
 	return TabAnswer
 }
 
-func (a *App) quitCmd() tea.Cmd {
-	return func() tea.Msg {
-		msg := "Goodbye"
-		if a.lastOpenTurnID != "" {
-			msg = fmt.Sprintf("Turn %s is still running and will continue", a.lastOpenTurnID)
-		}
-		fmt.Println(msg)
-		return tea.Quit()
-	}
+// CurrentTurn returns the ID of the currently open turn, if any.
+func (a *App) CurrentTurn() string {
+	return a.state.CurrentTurn
 }

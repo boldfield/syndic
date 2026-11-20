@@ -28,12 +28,11 @@ func Apply(s State, event wire.Frame) State {
 		s.LastSeq = event.Seq
 	}
 
-	// Handle different event types
 	switch event.Kind {
 	case "turn_submitted":
-		// Turn submitted event - will track current turn
+		// Turn submitted - CurrentTurn is set by handleSubmitResult
 	case "engine_stopping":
-		s.ConnState = ConnStateClosed
+		s.ConnState = ConnStateReconnecting
 	}
 
 	return s

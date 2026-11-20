@@ -40,19 +40,21 @@ type SubmitResultMsg struct {
 
 // connector manages the socket connection and event stream.
 type connector struct {
-	socketPath string
-	client     *client.Client
-	lastSeq    int64
+	socketPath  string
+	client      *client.Client
+	lastSeq     int64
+	runFirstSeq int64
 }
 
 func newConnector(socketPath string) *connector {
 	return &connector{
-		socketPath: socketPath,
-		lastSeq:    0,
+		socketPath:  socketPath,
+		lastSeq:     0,
+		runFirstSeq: 0,
 	}
 }
 
-// listenCmd starts the connection and listens for events.
+// listenCmd starts the connection with backoff retry.
 func (c *connector) listenCmd(ctx context.Context, handleMsg func(tea.Msg) tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		backoff := 100 * time.Millisecond
@@ -82,12 +84,12 @@ func (c *connector) listenCmd(ctx context.Context, handleMsg func(tea.Msg) tea.M
 			}
 
 			c.client = cl
-			return ConnStateMsg{State: ConnStateConnecting}
+			return ConnStateMsg{State: ConnStateConnected}
 		}
 	}
 }
 
-// helloCmd sends hello and waits for response.
+// helloCmd sends hello, subscribes from the appropriate offset, and starts streaming events.
 func (c *connector) helloCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		if c.client == nil {
@@ -95,22 +97,23 @@ func (c *connector) helloCmd(ctx context.Context) tea.Cmd {
 		}
 
 		hello := c.client.Hello()
-		c.lastSeq = hello.RunFirstSeq - 1
+		c.runFirstSeq = hello.RunFirstSeq
 
-		_, err := c.client.Subscribe(ctx, c.lastSeq+1)
+		subscribeSeq := int64(0)
+		if c.lastSeq > 0 {
+			subscribeSeq = c.lastSeq + 1
+		}
+
+		_, err := c.client.Subscribe(ctx, subscribeSeq)
 		if err != nil {
 			return HelloMsg{Err: err}
 		}
-
-		go func() {
-			c.streamEventsCmd(ctx)
-		}()
 
 		return HelloMsg{Hello: hello}
 	}
 }
 
-// streamEventsCmd continuously reads events from the stream.
+// streamEventsCmd reads the next event from the stream and returns a command to read the next one.
 func (c *connector) streamEventsCmd(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		if c.client == nil {
@@ -198,7 +201,7 @@ func (c *connector) reconnectCmd(ctx context.Context) tea.Cmd {
 				}
 
 				c.client = cl
-				return ConnStateMsg{State: ConnStateReconnecting}
+				return ConnStateMsg{State: ConnStateConnected}
 			}
 		}
 	}

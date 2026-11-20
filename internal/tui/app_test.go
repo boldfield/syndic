@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/wire"
@@ -35,8 +36,7 @@ func TestTabSwitching(t *testing.T) {
 		t.Fatal("expected initial tab to be Answer")
 	}
 
-	// Simulate tab key
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tab")}
+	msg := tea.KeyMsg{Type: tea.KeyTab}
 	newApp, _ := app.Update(msg)
 	updatedApp := newApp.(*App)
 
@@ -44,7 +44,6 @@ func TestTabSwitching(t *testing.T) {
 		t.Fatal("expected tab to switch to Transcript")
 	}
 
-	// Simulate shift+tab
 	msg = tea.KeyMsg{Type: tea.KeyShiftTab}
 	newApp, _ = updatedApp.Update(msg)
 	updatedApp = newApp.(*App)
@@ -58,7 +57,6 @@ func TestTabSwitching(t *testing.T) {
 func TestInputHandling(t *testing.T) {
 	app := NewApp(context.Background(), "/tmp/test.sock")
 
-	// Simulate typing
 	for _, ch := range "hello" {
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 		newApp, _ := app.Update(msg)
@@ -69,7 +67,6 @@ func TestInputHandling(t *testing.T) {
 		t.Fatalf("expected input 'hello', got '%s'", app.inputLine)
 	}
 
-	// Simulate backspace
 	msg := tea.KeyMsg{Type: tea.KeyBackspace}
 	newApp, _ := app.Update(msg)
 	app = newApp.(*App)
@@ -83,14 +80,11 @@ func TestInputHandling(t *testing.T) {
 func TestUnknownCommand(t *testing.T) {
 	app := NewApp(context.Background(), "/tmp/test.sock")
 
-	// Set input to an unknown command
 	app.inputLine = "/unknown"
 
-	// Process the input
 	newApp, _ := app.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	app = newApp.(*App)
 
-	// After processing, the refusal should be set for unknown commands
 	if !contains(app.refusal, "unknown command") {
 		t.Fatalf("expected refusal to contain 'unknown command', got '%s'", app.refusal)
 	}
@@ -116,7 +110,6 @@ func TestQKeyDoesNotQuit(t *testing.T) {
 	newApp, cmd := app.Update(msg)
 	app = newApp.(*App)
 
-	// 'q' should be added to input, not quit
 	if app.inputLine != "q" {
 		t.Fatalf("expected 'q' to be added to input, got '%s'", app.inputLine)
 	}
@@ -132,14 +125,13 @@ func TestRefusalPreservesInput(t *testing.T) {
 	app.inputLine = "some input"
 	app.refusal = "some error"
 
-	// The input should still be there
 	if app.inputLine != "some input" {
 		t.Fatalf("expected input to be preserved, got '%s'", app.inputLine)
 	}
 }
 
-// TestReconnectingState tests that reconnecting state is shown.
-func TestReconnectingState(t *testing.T) {
+// TestReconnectingStateShownInStrip tests that reconnecting state is shown in strip.
+func TestReconnectingStateShownInStrip(t *testing.T) {
 	app := NewApp(context.Background(), "/tmp/test.sock")
 	app.width = 80
 	app.height = 24
@@ -165,7 +157,7 @@ func TestStateUpdatesLastSeq(t *testing.T) {
 	}
 }
 
-// TestStateHandlesEngineStopping tests that engine_stopping is handled.
+// TestStateHandlesEngineStopping tests that engine_stopping triggers reconnect.
 func TestStateHandlesEngineStopping(t *testing.T) {
 	s := State{ConnState: ConnStateConnected}
 	frame := wire.Frame{
@@ -174,8 +166,8 @@ func TestStateHandlesEngineStopping(t *testing.T) {
 	}
 
 	newS := Apply(s, frame)
-	if newS.ConnState != ConnStateClosed {
-		t.Fatalf("expected ConnState to be Closed, got %s", newS.ConnState)
+	if newS.ConnState != ConnStateReconnecting {
+		t.Fatalf("expected ConnState to be Reconnecting, got %s", newS.ConnState)
 	}
 }
 
@@ -189,6 +181,124 @@ func TestWindowResize(t *testing.T) {
 
 	if app.width != 100 || app.height != 50 {
 		t.Fatalf("expected width=100, height=50, got width=%d, height=%d", app.width, app.height)
+	}
+}
+
+// TestSubmitResultStoresCurrentTurn tests that a successful submit stores the turn ID.
+func TestSubmitResultStoresCurrentTurn(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.ConnState = ConnStateConnected
+
+	msg := SubmitResultMsg{TurnID: "turn-123"}
+	newApp, _ := app.Update(msg)
+	app = newApp.(*App)
+
+	if app.state.CurrentTurn != "turn-123" {
+		t.Fatalf("expected CurrentTurn to be 'turn-123', got '%s'", app.state.CurrentTurn)
+	}
+}
+
+// TestSubmitResultClearsInputOnSuccess tests that successful submit clears input.
+func TestSubmitResultClearsInputOnSuccess(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.ConnState = ConnStateConnected
+	app.inputLine = "some input"
+	app.refusal = ""
+
+	msg := SubmitResultMsg{TurnID: "turn-123"}
+	newApp, _ := app.Update(msg)
+	app = newApp.(*App)
+
+	if app.inputLine != "" {
+		t.Fatalf("expected input to be cleared, got '%s'", app.inputLine)
+	}
+}
+
+// TestSubmitResultErrorShowsRefusal tests that submit error shows refusal message.
+func TestSubmitResultErrorShowsRefusal(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.ConnState = ConnStateConnected
+	app.inputLine = "some input"
+
+	errMsg := "busy"
+	msg := SubmitResultMsg{Err: &wire.Error{Code: "busy"}, RefusalDetail: errMsg}
+	newApp, _ := app.Update(msg)
+	app = newApp.(*App)
+
+	if app.refusal == "" {
+		t.Fatal("expected refusal message")
+	}
+	if app.inputLine != "some input" {
+		t.Fatalf("expected input to be preserved on error, got '%s'", app.inputLine)
+	}
+}
+
+// TestConnStateConnectedTriggersHello tests that ConnStateConnected triggers hello.
+func TestConnStateConnectedTriggersHello(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+
+	msg := ConnStateMsg{State: ConnStateConnected}
+	_, cmd := app.Update(msg)
+
+	if cmd == nil {
+		t.Fatal("expected command to send hello")
+	}
+}
+
+// TestCurrentTurnGetter tests the CurrentTurn getter method.
+func TestCurrentTurnGetter(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.CurrentTurn = "turn-789"
+
+	if app.CurrentTurn() != "turn-789" {
+		t.Fatalf("expected CurrentTurn() to return 'turn-789', got '%s'", app.CurrentTurn())
+	}
+}
+
+// TestEventHandlingContinuesStream tests that event handling returns a command to continue streaming.
+func TestEventHandlingContinuesStream(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.ConnState = ConnStateConnected
+	app.connector = newConnector("/tmp/test.sock")
+
+	frame := wire.Frame{Seq: 1, Kind: "engine_started"}
+	msg := EventMsg{Frame: frame}
+
+	_, cmd := app.Update(msg)
+
+	if cmd == nil {
+		t.Fatal("expected command to continue streaming events")
+	}
+}
+
+// TestEventErrorTriggersReconnect tests that event error triggers reconnect.
+func TestEventErrorTriggersReconnect(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.ConnState = ConnStateConnected
+	app.connector = newConnector("/tmp/test.sock")
+
+	msg := EventMsg{Err: errors.New("connection lost")}
+
+	newApp, cmd := app.Update(msg)
+	app = newApp.(*App)
+
+	if app.state.ConnState != ConnStateReconnecting {
+		t.Fatalf("expected ConnState to be Reconnecting after event error")
+	}
+
+	if cmd == nil {
+		t.Fatal("expected reconnect command")
+	}
+}
+
+// TestGetterMethods tests that getter methods are correctly exported.
+func TestGetterMethods(t *testing.T) {
+	app := NewApp(context.Background(), "/tmp/test.sock")
+	app.state.CurrentTurn = "test-turn"
+
+	turn := app.CurrentTurn()
+	if turn != "test-turn" {
+		t.Fatalf("CurrentTurn() returned %q, expected %q", turn, "test-turn")
 	}
 }
 
@@ -211,28 +321,4 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
-}
-
-// BenchmarkAppUpdate benchmarks the Update method.
-func BenchmarkAppUpdate(b *testing.B) {
-	app := NewApp(context.Background(), "/tmp/test.sock")
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}
-
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		app.Update(msg)
-	}
-}
-
-// BenchmarkAppView benchmarks the View method.
-func BenchmarkAppView(b *testing.B) {
-	app := NewApp(context.Background(), "/tmp/test.sock")
-	app.width = 80
-	app.height = 24
-	app.state.ConnState = ConnStateConnected
-
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		app.View()
-	}
 }
