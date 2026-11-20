@@ -605,9 +605,10 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 			ti.CandidateHash = turn.CandidateHash
 		}
 	}
-	// The reply's figure sums the attempts so far; before any exists keep the
-	// estimate the submit reported.
-	if turn.EstimatedPromptTokens > 0 {
+	// The reply's figure sums the attempts it holds, while turn_submitted
+	// carries the whole-turn projection. A terminal reply is authoritative; an
+	// open one only fills a missing estimate.
+	if turn.EstimatedPromptTokens > 0 && (final || ti.EstimatedTokens == 0) {
 		ti.EstimatedTokens = turn.EstimatedPromptTokens
 	}
 

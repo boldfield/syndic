@@ -511,19 +511,20 @@ func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
 	s := NewState()
 	s.CurrentTurn = "t1"
 	cand := "hash1"
-	s.Turns["t1"] = TurnInfo{ID: "t1", State: "candidate_frozen", Preset: "review", SubmittedAt: t0, CandidateHash: &cand}
+	s.Turns["t1"] = TurnInfo{ID: "t1", State: "candidate_frozen", Preset: "review", SubmittedAt: t0, CandidateHash: &cand, EstimatedTokens: 9000}
 	s.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Status: "complete", ScrubCount: 2, VerdictClass: "valid", VerdictParsed: true}
 	s.Blocks["b1"] = BlockInfo{ID: "b1", Severity: "major", State: "resolved"}
 	s.Verdicts["v1"] = VerdictInfo{ID: "v1", AttemptID: "a1", Parsed: true, Class: "valid"}
 
 	s = MergeTurn(s, "t1", &wire.TurnReply{
-		State:      "author_dispatched",
-		Preset:     "review",
-		Attempts:   []wire.AttemptRecord{{ID: "a1", Status: "in_progress", Phase: "author"}, {ID: "a2", Status: "in_progress", Phase: "review", Participant: "r1"}},
-		Verdicts:   []wire.VerdictRecord{{ID: "v1", AttemptID: "a1", Parsed: false, ValidationStatus: "invalid"}},
-		OpenBlocks: []wire.OpenBlock{{ID: "b1", Severity: "major", State: "open"}},
-		Deadlines:  wire.TurnDeadlines{Turn: 900000},
-		Budget:     wire.BudgetRecord{Limit: ptr(int64(5000))},
+		State:                 "author_dispatched",
+		Preset:                "review",
+		EstimatedPromptTokens: 500,
+		Attempts:              []wire.AttemptRecord{{ID: "a1", Status: "in_progress", Phase: "author"}, {ID: "a2", Status: "in_progress", Phase: "review", Participant: "r1"}},
+		Verdicts:              []wire.VerdictRecord{{ID: "v1", AttemptID: "a1", Parsed: false, ValidationStatus: "invalid"}},
+		OpenBlocks:            []wire.OpenBlock{{ID: "b1", Severity: "major", State: "open"}},
+		Deadlines:             wire.TurnDeadlines{Turn: 900000},
+		Budget:                wire.BudgetRecord{Limit: ptr(int64(5000))},
 	}, t0)
 
 	ti := s.Turns["t1"]
@@ -532,6 +533,9 @@ func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
 	}
 	if a := s.Attempts["a1"]; a.Status != "complete" || a.ScrubCount != 2 || a.VerdictClass != "valid" || !a.VerdictParsed {
 		t.Errorf("attempt a1 rolled back: %+v", a)
+	}
+	if ti.EstimatedTokens != 9000 {
+		t.Errorf("estimate rolled back: %d", ti.EstimatedTokens)
 	}
 	if _, ok := s.Attempts["a2"]; !ok {
 		t.Errorf("unknown attempt a2 was not added")
