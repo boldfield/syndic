@@ -2107,3 +2107,82 @@ func insertTurnFor(t *testing.T, conn *sql.DB, turnID, runID, mode string) {
 	mustExec(t, conn, `INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`, turnID, runID, mode, "conv-"+turnID)
 }
+
+func TestGetReviewerOpenBlockIDsAcrossRounds(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Setup: create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Create two attempts (representing different rounds)
+	attempt1ID := "attempt-1"
+	attempt2ID := "attempt-2"
+	reviewerParticipant := "reviewer-1"
+
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, ?, 'review', 1, CURRENT_TIMESTAMP, 'completed')
+	`, attempt1ID, turnID, reviewerParticipant)
+
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, ?, 'review', 2, CURRENT_TIMESTAMP, 'completed')
+	`, attempt2ID, turnID, reviewerParticipant)
+
+	// Create verdicts for both attempts with different candidate hashes
+	candidateHashA := "hash-candidate-a"
+	candidateHashB := "hash-candidate-b"
+	verdict1ID := "verdict-1"
+	verdict2ID := "verdict-2"
+
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, ?, 'valid')
+	`, verdict1ID, attempt1ID, candidateHashA)
+
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, ?, 'valid')
+	`, verdict2ID, attempt2ID, candidateHashB)
+
+	// Create an open block from round 1 on candidate A
+	blockID := "block-1"
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id)
+		VALUES (?, ?, ?, 'low', 'evidence', 'remedy', 'open', ?)
+	`, blockID, verdict1ID, candidateHashA, blockID)
+
+	// Verify query returns the block from round 1 when querying for any round
+	rows, err := conn.Query(`
+		SELECT b.reviewer_block_id
+		FROM blocks b
+		JOIN verdicts v ON b.verdict_id = v.id
+		JOIN attempts a ON v.attempt_id = a.id
+		WHERE a.turn_id = ? AND b.state = 'open' AND a.participant = ?
+		ORDER BY b.reviewer_block_id
+	`, turnID, reviewerParticipant)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	blockIDs := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		blockIDs[id] = true
+	}
+
+	if len(blockIDs) != 1 {
+		t.Errorf("expected 1 open block, got %d", len(blockIDs))
+	}
+	if !blockIDs[blockID] {
+		t.Errorf("expected block %q to be in open blocks, got %v", blockID, blockIDs)
+	}
+}

@@ -841,3 +841,83 @@ func TestParseV2Context(t *testing.T) {
 		})
 	}
 }
+
+func TestV2ValidationWithContext(t *testing.T) {
+	cases := []struct {
+		name          string
+		text          string
+		round         int
+		ownerBlockIDs map[string]bool
+		expectValid   bool
+		expectProblem string
+	}{
+		{
+			name:          "wrong round is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 99\nverdict: approve\n",
+			round:         1,
+			ownerBlockIDs: map[string]bool{},
+			expectValid:   false,
+			expectProblem: "wrong round",
+		},
+		{
+			name:          "omitted own block is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\n",
+			round:         1,
+			ownerBlockIDs: map[string]bool{"block-1": true},
+			expectValid:   false,
+			expectProblem: "omitted",
+		},
+		{
+			name:          "foreign block is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nblock-state: foreign-block maintained\nverdict: approve\n",
+			round:         1,
+			ownerBlockIDs: map[string]bool{},
+			expectValid:   false,
+			expectProblem: "foreign",
+		},
+		{
+			name:          "correct round with maintained block",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 2\nblock-state: block-1 maintained\nverdict: approve\n",
+			round:         2,
+			ownerBlockIDs: map[string]bool{"block-1": true},
+			expectValid:   true,
+			expectProblem: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &V2Context{
+				Round:             tc.round,
+				OwnerOpenBlockIDs: tc.ownerBlockIDs,
+			}
+			result := ParseWithContext(tc.text, "hash", "att", ctx)
+
+			if tc.expectValid && result.Classification != Valid {
+				t.Errorf("expected Valid, got %v: %v", result.Classification, result.Problem)
+			}
+			if !tc.expectValid && result.Classification == Valid {
+				t.Errorf("expected malformed, got Valid")
+			}
+			if !tc.expectValid && tc.expectProblem != "" && !strings.Contains(result.Problem, tc.expectProblem) {
+				t.Errorf("expected problem containing %q, got %q", tc.expectProblem, result.Problem)
+			}
+		})
+	}
+}
+
+func TestV2MalformedOmittedBlockMaintainsRejection(t *testing.T) {
+	text := "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\n"
+	ctx := &V2Context{
+		Round:             1,
+		OwnerOpenBlockIDs: map[string]bool{"block-1": true},
+	}
+	result := ParseWithContext(text, "hash", "att", ctx)
+
+	if result.Classification != Malformed {
+		t.Errorf("expected Malformed, got %v", result.Classification)
+	}
+	if !strings.Contains(result.Problem, "block-1") {
+		t.Errorf("expected problem about missing block-1, got %q", result.Problem)
+	}
+}

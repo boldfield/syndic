@@ -671,16 +671,16 @@ func (tx *Tx) GetRoundForCandidateHash(turnID, candidateHash string) (int, error
 }
 
 // GetReviewerOpenBlockIDs returns the set of open block IDs for a specific reviewer in a turn.
-// Only returns blocks that are open against the specified candidate hash.
-func (tx *Tx) GetReviewerOpenBlockIDs(turnID, candidateHash, reviewerParticipant string) (map[string]bool, error) {
+// Returns all open blocks held by this reviewer from any round, regardless of which candidate they were opened against.
+func (tx *Tx) GetReviewerOpenBlockIDs(turnID, reviewerParticipant string) (map[string]bool, error) {
 	rows, err := tx.tx.Query(`
 		SELECT b.reviewer_block_id
 		FROM blocks b
 		JOIN verdicts v ON b.verdict_id = v.id
 		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ? AND b.candidate_hash = ? AND b.state = 'open' AND a.participant = ?
+		WHERE a.turn_id = ? AND b.state = 'open' AND a.participant = ?
 		ORDER BY b.reviewer_block_id
-	`, turnID, candidateHash, reviewerParticipant)
+	`, turnID, reviewerParticipant)
 	if err != nil {
 		return nil, fmt.Errorf("query reviewer blocks: %w", err)
 	}

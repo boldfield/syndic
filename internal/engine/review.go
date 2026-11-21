@@ -499,7 +499,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if err != nil {
 			return err
 		}
-		blockIDs, err := tx.GetReviewerOpenBlockIDs(t.id, t.candidateHash, d.participant)
+		blockIDs, err := tx.GetReviewerOpenBlockIDs(t.id, d.participant)
 		if err != nil {
 			return err
 		}
