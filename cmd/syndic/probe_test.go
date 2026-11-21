@@ -2639,6 +2639,105 @@ required_reviewers = ["reviewer"]
 	}
 }
 
+func TestProbeRawDirUnderGitDirWithHeadDirectory(t *testing.T) {
+	// A .git directory containing a directory named HEAD (not a file) should not qualify as a repository: pass
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+	// Create a directory named HEAD instead of a file
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.Mkdir(headPath, 0700); err != nil {
+		t.Fatalf("failed to create HEAD directory: %v", err)
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server with request counter
+	requestCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should not be 4 since HEAD is a directory, not a regular file
+	if exitCode == 4 {
+		t.Fatalf("expected non-4 exit code for HEAD directory, got %d", exitCode)
+	}
+
+	// Verify the probe proceeded (at least one request was made)
+	if requestCount.Load() < 1 {
+		t.Fatalf("expected at least one request to server (probe proceeded), got %d", requestCount.Load())
+	}
+}
+
 func TestProbeRawDirUnderFakeGitDirWithRealRepoAbove(t *testing.T) {
 	// A non-repository .git directory nearer the raw directory, with a real repository two levels further up: exit 4
 	tmpDir := t.TempDir()
