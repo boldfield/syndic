@@ -22,6 +22,7 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
+	"github.com/mattn/go-runewidth"
 )
 
 const answerText = "the answer is 42"
@@ -508,4 +509,100 @@ func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
 		t.Errorf("submitted input = %q; want it exactly as typed", got)
 	}
 	r.final(t)
+}
+
+// TestClipToWidth verifies width clipping for wide characters.
+func TestClipToWidth(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		width    int
+		want     string
+	}{
+		{
+			name: "ASCII within width",
+			line: "hello",
+			width: 10,
+			want: "hello",
+		},
+		{
+			name: "ASCII exceed width",
+			line: "hello world",
+			width: 8,
+			want: "hello wo",
+		},
+		{
+			name: "emoji clipping - fits with space after",
+			line: "test 😀 emoji",
+			width: 8,
+			want: "test 😀 ",
+		},
+		{
+			name: "CJK characters",
+			line: "测试文本",
+			width: 8,
+			want: "测试文本",
+		},
+		{
+			name: "mixed ASCII and CJK",
+			line: "hello 世界 test",
+			width: 12,
+			want: "hello 世界 t",
+		},
+		{
+			name: "width zero",
+			line: "test",
+			width: 0,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clipToWidth(tt.line, tt.width)
+			if got != tt.want {
+				t.Errorf("clipToWidth(%q, %d) = %q, want %q", tt.line, tt.width, got, tt.want)
+			}
+			gotWidth := runewidth.StringWidth(got)
+			if gotWidth > tt.width {
+				t.Errorf("result width %d exceeds limit %d for %q", gotWidth, tt.width, got)
+			}
+		})
+	}
+}
+
+// TestBannerCappingAt80x24 verifies that the +N more marker appears at 80x24 with 4 banners.
+func TestBannerCappingAt80x24(t *testing.T) {
+	banners := []string{"deadline: provisional", "roster file changed", "engine: reconnecting", "quick: unapproved profile"}
+
+	result := capBannersForHeight(banners, 24, 5)
+
+	if len(result) != 2 {
+		t.Fatalf("capBannersForHeight at 80×24 with 4 banners: got %d results, want 2 (first + marker)", len(result))
+	}
+
+	if result[0] != banners[0] {
+		t.Errorf("first banner: got %q, want %q", result[0], banners[0])
+	}
+
+	if !strings.Contains(result[1], "+3 more") {
+		t.Errorf("marker: got %q, want to contain '+3 more'", result[1])
+	}
+}
+
+// TestBannerCappingWithSpace verifies that all banners fit at larger heights.
+func TestBannerCappingWithSpace(t *testing.T) {
+	banners := []string{"deadline: provisional", "roster file changed", "engine: reconnecting", "quick: unapproved profile"}
+
+	result := capBannersForHeight(banners, 40, 5)
+
+	if len(result) != 4 {
+		t.Fatalf("capBannersForHeight at 80×40 with 4 banners: got %d results, want 4 (all banners)", len(result))
+	}
+
+	for i, want := range banners {
+		if result[i] != want {
+			t.Errorf("banner %d: got %q, want %q", i, result[i], want)
+		}
+	}
 }
