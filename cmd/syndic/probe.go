@@ -102,7 +102,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	}
 
 	// Build probe options
-	probeOpts := openai.ProbeOptions{
+	probeOpts := transport.ProbeOptions{
 		Timeout:            60 * time.Second,
 		DisableOverLength:  *skipOverLength,
 		DisableCalibration: *skipCalibration,
@@ -111,7 +111,10 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 
 	// Run probe with per-request timeouts, not an outer deadline
 	record, err := adapter.ProbeWithOptions(context.Background(), *endpointName, *modelName, probeOpts)
-	if err != nil {
+
+	// Check for incomplete probe (which still returns a record for diagnosis)
+	isIncompleteProbe := errors.Is(err, transport.ErrIncompleteProbe)
+	if err != nil && !isIncompleteProbe {
 		exitCode := getOperationalErrorCode(err)
 		if exitCode == 3 {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -138,6 +141,12 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	exportPath, err := evidence.WriteExport(exp, export)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to write export: %v\n", err)
+		return 1
+	}
+
+	// For incomplete probes, write raw and export for diagnosis but skip the usable manifest
+	if isIncompleteProbe {
+		fmt.Fprintf(os.Stderr, "note: incomplete probe written for diagnosis only (raw: %s, export: %s)\n", rawPath, exportPath)
 		return 1
 	}
 

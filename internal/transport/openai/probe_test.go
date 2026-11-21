@@ -222,7 +222,7 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
@@ -305,9 +305,20 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 			defer srv.Close()
 			// Enable calibration for tests that need it (when not skipping over-length)
 			disableCalibration := tt.skipOver
-			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: disableCalibration, AssumedContextLen: 131072,
 			})
+			// "both_rejected" and "server_error_no_followup" have incomplete probes (no MaxTokensField)
+			// per design v5 delta 1a: incomplete probes return ErrIncompleteProbe
+			if tt.name == "both_rejected" || tt.name == "server_error_no_followup" {
+				if err == nil {
+					t.Fatalf("expected incomplete probe error, got nil")
+				}
+				if !errors.Is(err, transport.ErrIncompleteProbe) {
+					t.Errorf("expected ErrIncompleteProbe, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -334,7 +345,7 @@ func TestProbeModelsVariants(t *testing.T) {
 	p := &probeServer{modelsStatus: http.StatusNotFound}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.Probe(context.Background(), "test", "m1")
+	rec, err := a.Probe(context.Background(), "test", "m1", transport.ProbeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +353,8 @@ func TestProbeModelsVariants(t *testing.T) {
 		t.Errorf("404: ModelsEndpoint %v", rec.ModelsEndpoint)
 	}
 
-	// 2xx without a parseable list stays unknown.
+	// 2xx without a parseable list stays unknown, and response without model field
+	// makes this an incomplete probe, which should return ErrIncompleteProbe per design v5 delta 1a.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
@@ -351,9 +363,12 @@ func TestProbeModelsVariants(t *testing.T) {
 	s2 := httptest.NewServer(mux)
 	defer s2.Close()
 	a2 := New(config.EndpointProfile{Name: "test", BaseURL: s2.URL}, &mockResolver{})
-	rec, err = a2.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{DisableOverLength: true, DisableCalibration: true})
-	if err != nil {
-		t.Fatal(err)
+	rec, err = a2.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{DisableOverLength: true, DisableCalibration: true})
+	if err == nil {
+		t.Fatal("expected incomplete probe error (missing model field)")
+	}
+	if !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Errorf("expected ErrIncompleteProbe, got %v", err)
 	}
 	if rec.ModelsEndpoint != transport.TriUnknown || rec.ModelListed != transport.TriUnknown {
 		t.Errorf("unparseable list: %v %v", rec.ModelsEndpoint, rec.ModelListed)
@@ -371,7 +386,7 @@ func TestProbeStep2ErrorMapping(t *testing.T) {
 	} {
 		p := &probeServer{chatStatus: status}
 		srv, a := newProbeServer(p)
-		_, err := a.Probe(context.Background(), "test", "m1")
+		_, err := a.Probe(context.Background(), "test", "m1", transport.ProbeOptions{})
 		srv.Close()
 		if !errors.Is(err, want) {
 			t.Errorf("status %d: got %v, want %v", status, err, want)
@@ -392,7 +407,7 @@ func TestProbeClosedPortUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := New(config.EndpointProfile{Name: "test", BaseURL: "http://" + addr}, &mockResolver{})
-	_, err = a.Probe(context.Background(), "test", "m1")
+	_, err = a.Probe(context.Background(), "test", "m1", transport.ProbeOptions{})
 	if !errors.Is(err, transport.ErrUnreachable) {
 		t.Errorf("got %v, want ErrUnreachable", err)
 	}
@@ -402,7 +417,7 @@ func TestProbeNoUsageBlock(t *testing.T) {
 	p := &probeServer{noUsage: true}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.Probe(context.Background(), "test", "m1")
+	rec, err := a.Probe(context.Background(), "test", "m1", transport.ProbeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +430,7 @@ func TestCalibrationSuccessful(t *testing.T) {
 	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -439,7 +454,7 @@ func TestCalibrationNoUsage(t *testing.T) {
 	p := &probeServer{noUsage: true}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -458,7 +473,7 @@ func TestCalibrationSameTokenCount(t *testing.T) {
 	p := &probeServer{calibrationBaseline: 100, calibrationObserved: 100}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -474,7 +489,7 @@ func TestCalibrationServerError(t *testing.T) {
 	p := &probeServer{calibrationTextStatus: http.StatusInternalServerError}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -488,7 +503,7 @@ func TestCalibrationServerError(t *testing.T) {
 	p2 := &probeServer{}
 	srv2, a2 := newProbeServer(p2)
 	defer srv2.Close()
-	recDisabled, errDisabled := a2.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	recDisabled, errDisabled := a2.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength:  true,
 		DisableCalibration: true,
 	})
@@ -514,7 +529,7 @@ func TestCalibrationDisabled(t *testing.T) {
 	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength:  true,
 		DisableCalibration: true,
 	})
@@ -549,7 +564,7 @@ func TestCalibrationRequestBody(t *testing.T) {
 	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
 	srv, a := newProbeServer(p)
 	defer srv.Close()
-	_, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	_, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -596,7 +611,7 @@ func TestCalibrationWithSentinelSecret(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -652,7 +667,7 @@ func TestCalibrationMissingBaselinePromptTokens(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -672,7 +687,7 @@ func TestCalibrationMissingTextPromptTokens(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
 	if err != nil {
@@ -688,11 +703,12 @@ func TestCalibrationResponseReadFailure(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
-	if err != nil {
-		t.Fatalf("probe should still succeed: %v", err)
+	// The calibration request was sent, so a body-read failure is uncertain.
+	if !errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("err = %v, want ErrUncertain", err)
 	}
 	if rec.Calibration != (transport.Calibration{}) {
 		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)
@@ -704,7 +720,7 @@ func TestProbeOverLengthNoContext(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 0,
 	})
 	if err != nil {
@@ -723,7 +739,7 @@ func TestProbeOverLengthNoCalibration(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
@@ -759,7 +775,7 @@ func TestProbeOverLengthMarkerEmbedded(t *testing.T) {
 			srv, a := newProbeServer(p)
 			defer srv.Close()
 
-			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 				AssumedContextLen: 131072,
 			})
 			if err != nil {
@@ -781,7 +797,7 @@ func TestProbeOverLengthContextRejection(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
@@ -860,7 +876,7 @@ func TestProbeOverLengthOtherRejections(t *testing.T) {
 			s := httptest.NewServer(mux)
 			defer s.Close()
 			a := New(config.EndpointProfile{Name: "test", BaseURL: s.URL}, &mockResolver{})
-			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 				AssumedContextLen: 131072,
 			})
 			if err != nil {
@@ -939,7 +955,7 @@ func TestProbeOverLengthTokenLimitExceeded(t *testing.T) {
 			s := httptest.NewServer(mux)
 			defer s.Close()
 			a := New(config.EndpointProfile{Name: "test", BaseURL: s.URL}, &mockResolver{})
-			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 				AssumedContextLen: 131072,
 			})
 			if err != nil {
@@ -960,7 +976,7 @@ func TestProbeOverLengthClassifierExported(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
@@ -983,7 +999,7 @@ func TestProbeOverLengthFinishReasonRecorded(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
@@ -1006,7 +1022,7 @@ func TestProbeOverLengthNoFinishReasonForRejection(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 	if err != nil {
