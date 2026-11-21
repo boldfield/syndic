@@ -175,7 +175,8 @@ type CapabilityRecord struct {
 	MaxTokensField           string
 	FinishReasons            map[string]CompletionStatus
 	OverLength               string // "rejected:context", "rejected:other", "accepted_whole", "markers_missing", "errored", "not_run:no_calibration", "not_run:no_context"
-	OverLengthClassifier     string // the classification rule used for rejections (e.g., "matches context_length_exceeded or maximum context length, case-insensitive")
+	OverLengthClassifier     string // the classification rule describing how rejections are classified by status and body
+	OverLengthFinishReason   string // the finish reason from the over-length response (empty if no response)
 	LatencyMillis            *int
 	ToolRestrictions         []string
 	ServerVersion            string

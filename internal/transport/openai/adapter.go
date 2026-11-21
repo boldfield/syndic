@@ -1011,6 +1011,8 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 // classifyRejectionError classifies an HTTP error response and returns both the classification and the rule.
 // Context-length errors are status 400/413 with specific error messages indicating token limit exceeded.
 // Returns (classification, rule).
+const overLengthClassificationRule = "status 400 or 413 with body containing context_length_exceeded, maximum context length, or token limit exceeded (case-insensitive) → rejected:context; status 401/403/404/429 or 5xx → rejected:other; other 400/413 → rejected:other; 2xx → accepted_whole or markers_missing"
+
 func classifyRejectionError(statusCode int, body []byte) (string, string) {
 	if statusCode == 401 || statusCode == 403 {
 		return "rejected:other", "authentication error"
@@ -1024,7 +1026,7 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 		if strings.Contains(bodyStr, "context_length_exceeded") ||
 			strings.Contains(bodyStr, "maximum context length") ||
 			strings.Contains(bodyStr, "token limit exceeded") {
-			return "rejected:context", "matches context_length_exceeded, maximum context length, or token limit exceeded (case-insensitive)"
+			return "rejected:context", "explicit context-length or token-limit signal"
 		}
 		return "rejected:other", "400 or 413 without explicit context-length signal"
 	}
@@ -1039,6 +1041,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Always set the classification rule for consistency
+	record.OverLengthClassifier = overLengthClassificationRule
 
 	// Check if calibration is available
 	if !record.Calibration.Available {
@@ -1125,11 +1130,13 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 
 	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
+	// Always set the classification rule
+	record.OverLengthClassifier = overLengthClassificationRule
+
 	// Classify rejection errors (4xx/5xx)
 	if httpResp.StatusCode != 0 && (httpResp.StatusCode < 200 || httpResp.StatusCode >= 300) {
-		outcome, rule := classifyRejectionError(httpResp.StatusCode, body)
+		outcome, _ := classifyRejectionError(httpResp.StatusCode, body)
 		record.OverLength = outcome
-		record.OverLengthClassifier = rule
 		return
 	}
 
@@ -1142,7 +1149,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	content := respData.Choices[0].Message.Content
 	finishReason := respData.Choices[0].FinishReason
 	if finishReason != "" {
-		finishReasons[finishReason] = mapFinishReason(finishReason)
+		record.OverLengthFinishReason = finishReason
 	}
 
 	// Check for markers (hex values must appear without requiring surrounding delimiters)
