@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,205 +27,36 @@ type TurnInConversation struct {
 	SubmittedAt   *time.Time
 }
 
-// ListConversations returns a page of conversations ordered by latest activity first.
-// workspace filters to a specific workspace (nil includes all workspaces; empty string matches NULL workspace).
-// limit is clamped to 1-200. cursor is opaque; empty for the first page.
-// Excludes null-workspace conversations from the default selection unless explicitly filtered.
-func (s *Store) ListConversations(workspace *string, cursor string, limit int) (conversations []ConversationRow, nextCursor string, err error) {
-	err = s.Tx(func(tx *Tx) error {
-		var txErr error
-		conversations, nextCursor, txErr = tx.ListConversations(workspace, cursor, limit)
-		return txErr
-	})
-	return conversations, nextCursor, err
+// ErrAmbiguousConversationID is returned when a prefix matches multiple conversations.
+var ErrAmbiguousConversationID = errors.New("ambiguous conversation ID")
+
+// ErrWorkspaceMismatch is returned when a conversation's workspace doesn't match the requested one.
+var ErrWorkspaceMismatch = errors.New("workspace_mismatch")
+
+// firstLine returns the first line of text cut to 80 cells (UTF-8 grapheme clusters approximated by bytes).
+// For simplicity, we cut to 80 bytes and find the nearest newline.
+func firstLine(text string, maxBytes int) string {
+	// Truncate to maxBytes
+	if len(text) > maxBytes {
+		text = text[:maxBytes]
+	}
+	// Find first newline
+	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+		return text[:idx]
+	}
+	return text
 }
 
-// ListConversations returns a page of conversations ordered by latest activity first.
-func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]ConversationRow, string, error) {
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	want := limit + 1 // one lookahead row tells us whether another page exists
-
-	// Parse cursor position from opaque cursor string
-	var offset int64
-	if cursor != "" {
-		fmt.Sscanf(cursor, "%d", &offset)
-	}
-
-	// Build query to get conversations with aggregated turn data.
-	// Order by max(turn rowid) DESC for deterministic ordering by latest turn.
-	// If workspace is not provided, exclude null-workspace conversations.
-	var rows *sql.Rows
-	var err error
-
-	if workspace == nil {
-		// Default: exclude null-workspace conversations
-		rows, err = tx.tx.Query(`
-			SELECT
-				c.id, c.created_at, c.workspace,
-				NULL as last_submitted_at,
-				COUNT(t.id) as turn_count,
-				(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-				COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
-					WHERE m.turn_id = (
-						SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-						ORDER BY t3.rowid DESC LIMIT 1
-					) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1), '') as preview
-			FROM conversations c
-			LEFT JOIN turns t ON c.id = t.conversation_id
-			WHERE c.workspace IS NOT NULL
-			GROUP BY c.id, c.created_at, c.workspace
-			ORDER BY (SELECT MAX(t2.rowid) FROM turns t2 WHERE t2.conversation_id = c.id) DESC
-			LIMIT ? OFFSET ?
-		`, want, offset)
-	} else if *workspace == "" {
-		// Explicit empty string: match NULL workspace
-		rows, err = tx.tx.Query(`
-			SELECT
-				c.id, c.created_at, c.workspace,
-				NULL as last_submitted_at,
-				COUNT(t.id) as turn_count,
-				(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-				COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
-					WHERE m.turn_id = (
-						SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-						ORDER BY t3.rowid DESC LIMIT 1
-					) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1), '') as preview
-			FROM conversations c
-			LEFT JOIN turns t ON c.id = t.conversation_id
-			WHERE c.workspace IS NULL
-			GROUP BY c.id, c.created_at, c.workspace
-			ORDER BY (SELECT MAX(t2.rowid) FROM turns t2 WHERE t2.conversation_id = c.id) DESC
-			LIMIT ? OFFSET ?
-		`, want, offset)
-	} else {
-		// Explicit workspace: match that workspace
-		rows, err = tx.tx.Query(`
-			SELECT
-				c.id, c.created_at, c.workspace,
-				NULL as last_submitted_at,
-				COUNT(t.id) as turn_count,
-				(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-				COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
-					WHERE m.turn_id = (
-						SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-						ORDER BY t3.rowid DESC LIMIT 1
-					) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1), '') as preview
-			FROM conversations c
-			LEFT JOIN turns t ON c.id = t.conversation_id
-			WHERE c.workspace = ?
-			GROUP BY c.id, c.created_at, c.workspace
-			ORDER BY (SELECT MAX(t2.rowid) FROM turns t2 WHERE t2.conversation_id = c.id) DESC
-			LIMIT ? OFFSET ?
-		`, *workspace, want, offset)
-	}
-
-	if err != nil {
-		return nil, "", fmt.Errorf("query conversations: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var conversations []ConversationRow
-	for rows.Next() {
-		var c ConversationRow
-		var createdAtStr string
-		var lastSubmittedAtStr sql.NullString
-		var running sql.NullInt64
-		var preview sql.NullString
-
-		if err := rows.Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
-			return nil, "", fmt.Errorf("scan conversation: %w", err)
-		}
-
-		t, err := parseTime(createdAtStr)
-		if err != nil {
-			return nil, "", fmt.Errorf("parse created_at: %w", err)
-		}
-		c.CreatedAt = t
-
-		if lastSubmittedAtStr.Valid {
-			t, err := parseTime(lastSubmittedAtStr.String)
-			if err != nil {
-				return nil, "", fmt.Errorf("parse last_submitted_at: %w", err)
-			}
-			c.LastSubmittedAt = &t
-		}
-
-		if running.Valid && running.Int64 != 0 {
-			c.Running = true
-		}
-
-		if preview.Valid {
-			c.Preview = preview.String
-		}
-
-		conversations = append(conversations, c)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("iterate conversations: %w", err)
-	}
-
-	nextCursor := ""
-	if len(conversations) > limit {
-		conversations = conversations[:limit]
-		nextCursor = fmt.Sprintf("%d", offset+int64(limit))
-	}
-
-	return conversations, nextCursor, nil
-}
-
-// GetConversation retrieves a conversation by ID or unique prefix.
-// If idPrefix is a full ID, it returns that conversation exactly.
-// If idPrefix is a prefix, it matches the first conversation whose ID starts with that prefix.
-// Returns ErrNoSuchContent if the ID is ambiguous or not found.
-func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
-	var row *ConversationRow
-	err := s.Tx(func(tx *Tx) error {
-		var txErr error
-		row, txErr = tx.GetConversation(idPrefix)
-		return txErr
-	})
-	return row, err
-}
-
-// GetConversation retrieves a conversation by ID or unique prefix.
-func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
+// scanConversationRow scans a conversation row from the query result.
+func scanConversationRow(row *sql.Row) (*ConversationRow, error) {
 	var c ConversationRow
 	var createdAtStr string
 	var lastSubmittedAtStr sql.NullString
 	var running sql.NullInt64
 	var preview sql.NullString
 
-	// Try exact match first, then prefix match
-	err := tx.tx.QueryRow(`
-		SELECT
-			c.id, c.created_at, c.workspace,
-			NULL as last_submitted_at,
-			COUNT(t.id) as turn_count,
-			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-			COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
-				WHERE m.turn_id = (
-					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-					ORDER BY t3.rowid DESC LIMIT 1
-				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1), '') as preview
-		FROM conversations c
-		LEFT JOIN turns t ON c.id = t.conversation_id
-		WHERE c.id = ? OR c.id LIKE ? || '%'
-		GROUP BY c.id, c.created_at, c.workspace
-		LIMIT 2
-	`, idPrefix, idPrefix).Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview)
-
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("conversation not found: %w", ErrNoSuchContent)
-		}
-		return nil, fmt.Errorf("query conversation: %w", err)
+	if err := row.Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
+		return nil, err
 	}
 
 	t, err := parseTime(createdAtStr)
@@ -245,13 +78,230 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	}
 
 	if preview.Valid {
-		c.Preview = preview.String
+		c.Preview = firstLine(preview.String, 80)
 	}
 
 	return &c, nil
 }
 
-// GetConversationTurns returns all turns in a conversation ordered by submission time.
+// scanConversationRows scans multiple conversation rows from query results.
+func scanConversationRows(rows *sql.Rows) ([]ConversationRow, error) {
+	var conversations []ConversationRow
+	for rows.Next() {
+		var c ConversationRow
+		var createdAtStr string
+		var lastSubmittedAtStr sql.NullString
+		var running sql.NullInt64
+		var preview sql.NullString
+
+		if err := rows.Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
+			return nil, fmt.Errorf("scan conversation: %w", err)
+		}
+
+		t, err := parseTime(createdAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse created_at: %w", err)
+		}
+		c.CreatedAt = t
+
+		if lastSubmittedAtStr.Valid {
+			t, err := parseTime(lastSubmittedAtStr.String)
+			if err != nil {
+				return nil, fmt.Errorf("parse last_submitted_at: %w", err)
+			}
+			c.LastSubmittedAt = &t
+		}
+
+		if running.Valid && running.Int64 != 0 {
+			c.Running = true
+		}
+
+		if preview.Valid {
+			c.Preview = firstLine(preview.String, 80)
+		}
+
+		conversations = append(conversations, c)
+	}
+	return conversations, rows.Err()
+}
+
+// ListConversations returns a page of conversations ordered by latest activity first.
+// workspace filters to a specific workspace (nil includes all workspaces; empty string matches NULL workspace).
+// limit is clamped to 1-200. cursor is opaque; empty for the first page.
+// When workspace is nil, includes all conversations (automatic selection filters NULL-workspace separately).
+func (s *Store) ListConversations(workspace *string, cursor string, limit int) (conversations []ConversationRow, nextCursor string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		conversations, nextCursor, txErr = tx.ListConversations(workspace, cursor, limit)
+		return txErr
+	})
+	return conversations, nextCursor, err
+}
+
+// ListConversations returns a page of conversations ordered by latest activity first using keyset pagination.
+func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]ConversationRow, string, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	want := limit + 1 // one lookahead row tells us whether another page exists
+
+	// Parse keyset cursor: "maxRowid,id" format
+	var cursorRowid int64 = -1
+	var cursorID string
+	if cursor != "" {
+		parts := strings.Split(cursor, ",")
+		if len(parts) == 2 {
+			if r, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+				cursorRowid = r
+				cursorID = parts[1]
+			}
+		}
+	}
+
+	// Build the query with keyset pagination over (max_turn_rowid DESC, c.id ASC)
+	// Get preview from FIRST turn (oldest)
+	var rows *sql.Rows
+	var err error
+
+	whereClause := ""
+	args := []interface{}{}
+
+	if workspace != nil && *workspace == "" {
+		whereClause = "WHERE c.workspace IS NULL"
+	} else if workspace != nil {
+		whereClause = "WHERE c.workspace = ?"
+		args = append(args, *workspace)
+	}
+	// else workspace is nil: include all conversations
+
+	// Use a subquery with MAX(t.rowid) to handle keyset cursor
+	// Apply keyset cursor filter: we want rows where (max_rowid, id) < (cursor_rowid, cursor_id) in DESC order
+	cursorWhere := ""
+	if cursorRowid >= 0 {
+		cursorWhere = "AND (COALESCE(cte.max_rowid, -1) < ? OR (COALESCE(cte.max_rowid, -1) = ? AND cte.id > ?))"
+		args = append(args, cursorRowid, cursorRowid, cursorID)
+	}
+
+	baseQuery := `
+		WITH conv_turns AS (
+			SELECT c.id, c.created_at, c.workspace, COALESCE(MAX(t.rowid), -1) as max_rowid
+			FROM conversations c
+			LEFT JOIN turns t ON c.id = t.conversation_id
+			` + whereClause + `
+			GROUP BY c.id, c.created_at, c.workspace
+		)
+		SELECT
+			cte.id, cte.created_at, cte.workspace,
+			NULL as last_submitted_at,
+			COUNT(t.id) as turn_count,
+			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = cte.id AND t2.terminal_state IS NULL)) as running,
+			(SELECT m.content FROM messages m
+				WHERE m.turn_id = (
+					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = cte.id
+					ORDER BY t3.rowid ASC LIMIT 1
+				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
+		FROM conv_turns cte
+		LEFT JOIN turns t ON cte.id = t.conversation_id
+		WHERE 1=1 ` + cursorWhere + `
+		GROUP BY cte.id, cte.created_at, cte.workspace, cte.max_rowid
+		ORDER BY cte.max_rowid DESC, cte.id ASC
+		LIMIT ?
+	`
+	args = append(args, want)
+
+	rows, err = tx.tx.Query(baseQuery, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("query conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	conversations, err := scanConversationRows(rows)
+	if err != nil {
+		return nil, "", fmt.Errorf("scan conversations: %w", err)
+	}
+
+	var nextCursor string
+	if len(conversations) > limit {
+		conversations = conversations[:limit]
+		// Extract the keyset from the last row for the next cursor
+		lastRow := conversations[len(conversations)-1]
+		// Get the max rowid for the last row (we need to query it back)
+		var nextRowid int64
+		err := tx.tx.QueryRow(`
+			SELECT COALESCE(MAX(t.rowid), -1)
+			FROM turns t
+			WHERE t.conversation_id = ?
+		`, lastRow.ID).Scan(&nextRowid)
+		if err != nil {
+			return nil, "", fmt.Errorf("get next rowid: %w", err)
+		}
+		nextCursor = fmt.Sprintf("%d,%s", nextRowid, lastRow.ID)
+	}
+
+	return conversations, nextCursor, nil
+}
+
+// GetConversation retrieves a conversation by ID or unique prefix.
+// If idPrefix is a full ID, it returns that conversation exactly.
+// If idPrefix is a prefix, it matches the first conversation whose ID starts with that prefix.
+// Returns ErrAmbiguousConversationID if the prefix matches multiple conversations.
+// Returns ErrNoSuchContent if the ID is not found.
+func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
+	var row *ConversationRow
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		row, txErr = tx.GetConversation(idPrefix)
+		return txErr
+	})
+	return row, err
+}
+
+// GetConversation retrieves a conversation by ID or unique prefix, checking for ambiguity.
+func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
+	// Use GLOB or substr for exact prefix matching (not LIKE which treats % and _ as wildcards)
+	rows, err := tx.tx.Query(`
+		SELECT
+			c.id, c.created_at, c.workspace,
+			NULL as last_submitted_at,
+			COUNT(t.id) as turn_count,
+			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
+			(SELECT m.content FROM messages m
+				WHERE m.turn_id = (
+					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
+					ORDER BY t3.rowid ASC LIMIT 1
+				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
+		FROM conversations c
+		LEFT JOIN turns t ON c.id = t.conversation_id
+		WHERE c.id = ? OR (c.id >= ? AND c.id < ?)
+		GROUP BY c.id, c.created_at, c.workspace
+		ORDER BY c.id
+		LIMIT 2
+	`, idPrefix, idPrefix, idPrefix+"~")
+	if err != nil {
+		return nil, fmt.Errorf("query conversation: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	conversations, err := scanConversationRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan conversations: %w", err)
+	}
+
+	switch len(conversations) {
+	case 0:
+		return nil, fmt.Errorf("conversation not found: %w", ErrNoSuchContent)
+	case 1:
+		return &conversations[0], nil
+	default:
+		return nil, fmt.Errorf("ambiguous conversation ID %q: %w", idPrefix, ErrAmbiguousConversationID)
+	}
+}
+
+// GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
 func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	var turns []TurnInConversation
 	err := s.Tx(func(tx *Tx) error {
@@ -262,13 +312,13 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 	return turns, err
 }
 
-// GetConversationTurns returns all turns in a conversation ordered by submission time.
+// GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
 		SELECT id, terminal_state, NULL
 		FROM turns
 		WHERE conversation_id = ?
-		ORDER BY rowid DESC
+		ORDER BY rowid ASC
 	`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("query conversation turns: %w", err)
@@ -308,14 +358,14 @@ func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation,
 }
 
 // SetConversationWorkspace sets the workspace for a conversation that currently has NULL workspace.
-// Returns an error if the conversation already has a workspace set (workspace mismatch).
+// Returns ErrWorkspaceMismatch if the conversation already has a different workspace set.
 func (s *Store) SetConversationWorkspace(conversationID, workspace string) error {
 	return s.Tx(func(tx *Tx) error {
 		return tx.SetConversationWorkspace(conversationID, workspace)
 	})
 }
 
-// SetConversationWorkspace sets the workspace for a conversation.
+// SetConversationWorkspace sets the workspace for a conversation (transactional with adoption check).
 func (tx *Tx) SetConversationWorkspace(conversationID, workspace string) error {
 	var currentWorkspace sql.NullString
 	if err := tx.tx.QueryRow(`
@@ -327,7 +377,7 @@ func (tx *Tx) SetConversationWorkspace(conversationID, workspace string) error {
 	// If the conversation already has a workspace, it's immutable
 	if currentWorkspace.Valid {
 		if currentWorkspace.String != workspace {
-			return fmt.Errorf("workspace_mismatch: conversation already has workspace %q", currentWorkspace.String)
+			return fmt.Errorf("%w: conversation already has workspace %q but got %q", ErrWorkspaceMismatch, currentWorkspace.String, workspace)
 		}
 		// Workspace already matches, nothing to do
 		return nil
@@ -344,7 +394,7 @@ func (tx *Tx) SetConversationWorkspace(conversationID, workspace string) error {
 }
 
 // GetMostRecentConversationForWorkspace returns the most recently submitted conversation
-// for a given workspace. Returns nil if no conversation with an active turn exists for that workspace.
+// for a given workspace. Returns nil if no conversation exists for that workspace.
 // Null-workspace conversations are excluded from this query.
 func (s *Store) GetMostRecentConversationForWorkspace(workspace string) (*ConversationRow, error) {
 	var row *ConversationRow
@@ -358,31 +408,26 @@ func (s *Store) GetMostRecentConversationForWorkspace(workspace string) (*Conver
 
 // GetMostRecentConversationForWorkspace returns the most recently submitted conversation for a workspace.
 func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*ConversationRow, error) {
-	var c ConversationRow
-	var createdAtStr string
-	var lastSubmittedAtStr sql.NullString
-	var running sql.NullInt64
-	var preview sql.NullString
-
-	err := tx.tx.QueryRow(`
+	row := tx.tx.QueryRow(`
 		SELECT
 			c.id, c.created_at, c.workspace,
 			NULL as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-			COALESCE((SELECT SUBSTR(m.content, 1, 80) FROM messages m
+			(SELECT m.content FROM messages m
 				WHERE m.turn_id = (
 					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-					ORDER BY t3.rowid DESC LIMIT 1
-				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1), '') as preview
+					ORDER BY t3.rowid ASC LIMIT 1
+				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
 		FROM conversations c
 		LEFT JOIN turns t ON c.id = t.conversation_id
 		WHERE c.workspace = ?
 		GROUP BY c.id, c.created_at, c.workspace
-		ORDER BY (SELECT MAX(t2.rowid) FROM turns t2 WHERE t2.conversation_id = c.id) DESC
+		ORDER BY COALESCE(MAX(t.rowid), -1) DESC, c.id ASC
 		LIMIT 1
-	`, workspace).Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview)
+	`, workspace)
 
+	c, err := scanConversationRow(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -390,27 +435,5 @@ func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*Conversa
 		return nil, fmt.Errorf("query most recent conversation: %w", err)
 	}
 
-	t, err := parseTime(createdAtStr)
-	if err != nil {
-		return nil, fmt.Errorf("parse created_at: %w", err)
-	}
-	c.CreatedAt = t
-
-	if lastSubmittedAtStr.Valid {
-		t, err := parseTime(lastSubmittedAtStr.String)
-		if err != nil {
-			return nil, fmt.Errorf("parse last_submitted_at: %w", err)
-		}
-		c.LastSubmittedAt = &t
-	}
-
-	if running.Valid && running.Int64 != 0 {
-		c.Running = true
-	}
-
-	if preview.Valid {
-		c.Preview = preview.String
-	}
-
-	return &c, nil
+	return c, nil
 }

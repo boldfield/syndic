@@ -2,6 +2,7 @@ package journal_test
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -109,8 +110,9 @@ func TestSetConversationWorkspaceRejectsMismatch(t *testing.T) {
 	if err == nil {
 		t.Error("SetConversationWorkspace accepted mismatched workspace")
 	}
-	if err.Error() != "workspace_mismatch: conversation already has workspace \"/home/user/project1\"" {
-		t.Errorf("unexpected error: %v", err)
+	// Check that it's a workspace_mismatch error
+	if !errors.Is(err, journal.ErrWorkspaceMismatch) {
+		t.Errorf("expected workspace_mismatch error, got: %v", err)
 	}
 }
 
@@ -129,7 +131,7 @@ func TestListConversationsEmpty(t *testing.T) {
 	}
 }
 
-func TestListConversationsExcludesNullWorkspaceByDefault(t *testing.T) {
+func TestListConversationsIncludesAllWithNilWorkspace(t *testing.T) {
 	f := newConvFixture(t)
 
 	// Create conversations with and without workspace
@@ -137,25 +139,24 @@ func TestListConversationsExcludesNullWorkspaceByDefault(t *testing.T) {
 	convWithWS := f.createConversation(t, &workspace)
 	convNoWS := f.createConversation(t, nil)
 
-	// List without workspace filter (default)
+	// List without workspace filter (nil includes ALL conversations)
 	conversations, _, err := f.store.ListConversations(nil, "", 10)
 	if err != nil {
 		t.Fatalf("ListConversations: %v", err)
 	}
 
-	// Should only get the one with workspace
-	if len(conversations) != 1 {
-		t.Errorf("expected 1 conversation, got %d", len(conversations))
-	}
-	if conversations[0].ID != convWithWS {
-		t.Errorf("expected conversation %s, got %s", convWithWS, conversations[0].ID)
+	// Should get both conversations
+	if len(conversations) != 2 {
+		t.Errorf("expected 2 conversations, got %d", len(conversations))
 	}
 
-	// Ensure the null-workspace one is not in the list
+	// Check both are in the list
+	found := make(map[string]bool)
 	for _, c := range conversations {
-		if c.ID == convNoWS {
-			t.Errorf("null-workspace conversation %s should not be in default list", convNoWS)
-		}
+		found[c.ID] = true
+	}
+	if !found[convWithWS] || !found[convNoWS] {
+		t.Errorf("expected both conversations to be found")
 	}
 }
 
@@ -310,8 +311,45 @@ func TestGetConversationNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("GetConversation should return error for non-existent conversation")
 	}
-	if err.Error() != "conversation not found: no such content" {
-		t.Errorf("unexpected error: %v", err)
+	if !errors.Is(err, journal.ErrNoSuchContent) {
+		t.Errorf("expected ErrNoSuchContent, got: %v", err)
+	}
+}
+
+func TestGetConversationAmbiguousPrefix(t *testing.T) {
+	f := newConvFixture(t)
+
+	ws := "/home/user/project"
+	// Create conversations with similar IDs (they'll have different generated IDs)
+	conv1 := f.createConversation(t, &ws)
+	conv2 := f.createConversation(t, &ws)
+
+	// Find a common prefix if the IDs start the same
+	minLen := len(conv1)
+	if len(conv2) < minLen {
+		minLen = len(conv2)
+	}
+
+	// Find shortest common prefix by comparing characters
+	commonPrefixLen := 0
+	for i := 0; i < minLen; i++ {
+		if conv1[i] == conv2[i] {
+			commonPrefixLen++
+		} else {
+			break
+		}
+	}
+
+	if commonPrefixLen > 0 {
+		// Use a prefix that matches both
+		prefix := conv1[:commonPrefixLen]
+		_, err := f.store.GetConversation(prefix)
+		if err == nil {
+			t.Fatal("GetConversation should return error for ambiguous prefix")
+		}
+		if !errors.Is(err, journal.ErrAmbiguousConversationID) {
+			t.Errorf("expected ErrAmbiguousConversationID, got: %v", err)
+		}
 	}
 }
 
@@ -340,12 +378,12 @@ func TestGetConversationTurnsInOrder(t *testing.T) {
 		t.Errorf("expected 2 turns, got %d", len(turns))
 	}
 
-	// Turns should be ordered by most recent first
-	if turns[0].ID != turn2 {
-		t.Errorf("expected first turn to be %s (most recent), got %s", turn2, turns[0].ID)
+	// Turns should be ordered by submission time (oldest first, per design spec §3)
+	if turns[0].ID != turn1 {
+		t.Errorf("expected first turn to be %s (oldest), got %s", turn1, turns[0].ID)
 	}
-	if turns[1].ID != turn1 {
-		t.Errorf("expected second turn to be %s, got %s", turn1, turns[1].ID)
+	if turns[1].ID != turn2 {
+		t.Errorf("expected second turn to be %s (most recent), got %s", turn2, turns[1].ID)
 	}
 }
 
@@ -399,7 +437,7 @@ func TestGetMostRecentConversationForWorkspaceEmpty(t *testing.T) {
 	}
 }
 
-func TestConversationPreviewFromMessage(t *testing.T) {
+func TestConversationPreviewFromFirstTurn(t *testing.T) {
 	f := newConvFixture(t)
 
 	// Create a run and conversation
@@ -410,9 +448,42 @@ func TestConversationPreviewFromMessage(t *testing.T) {
 
 	convID := f.createConversation(t, nil)
 
-	// Create a turn with a message
+	// Create first turn with a message
+	turnID1 := f.createTurn(t, runID, convID)
+	content1 := "First turn message"
+	f.addMessage(t, turnID1, content1)
+
+	// Create second turn
+	turnID2 := f.createTurn(t, runID, convID)
+	content2 := "Second turn message"
+	f.addMessage(t, turnID2, content2)
+
+	// Get the conversation
+	conv, err := f.store.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+
+	// Preview should be from FIRST turn, not last
+	if conv.Preview != content1 {
+		t.Errorf("preview = %q, want %q (from first turn)", conv.Preview, content1)
+	}
+}
+
+func TestConversationPreviewFirstLineOnly(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Create a run and conversation
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	convID := f.createConversation(t, nil)
+
+	// Create a turn with a multi-line message
 	turnID := f.createTurn(t, runID, convID)
-	content := "This is a test message for the conversation preview"
+	content := "First line\nSecond line\nThird line"
 	f.addMessage(t, turnID, content)
 
 	// Get the conversation
@@ -421,14 +492,9 @@ func TestConversationPreviewFromMessage(t *testing.T) {
 		t.Fatalf("GetConversation: %v", err)
 	}
 
-	// Preview should be first 80 characters of the message content
-	expectedPreview := "This is a test message for the conversation preview"
-	if len(expectedPreview) > 80 {
-		expectedPreview = expectedPreview[:80]
-	}
-
-	if conv.Preview != expectedPreview {
-		t.Errorf("preview = %q, want %q", conv.Preview, expectedPreview)
+	// Preview should only be the first line
+	if conv.Preview != "First line" {
+		t.Errorf("preview = %q, want %q (first line only)", conv.Preview, "First line")
 	}
 }
 
@@ -511,17 +577,25 @@ func TestConversationRunningDetection(t *testing.T) {
 }
 
 func TestListConversationsPaginationDeterministic(t *testing.T) {
-	t.Skip("pagination implementation pending")
 	f := newConvFixture(t)
+
+	// Create a run first to add turns to conversations
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 
 	ws := "/home/user/project"
 
-	// Create many conversations
+	// Create 5 conversations with turns to establish ordering
 	for i := 0; i < 5; i++ {
-		f.createConversation(t, &ws)
+		conv := f.createConversation(t, &ws)
+		// Add a turn to each to establish rowid ordering
+		turn := f.createTurn(t, runID, conv)
+		f.addMessage(t, turn, "message "+string(rune('a'+i)))
 	}
 
-	// List with limit 2
+	// List with limit 2 (should get most recent 2)
 	conversations1, cursor1, err := f.store.ListConversations(&ws, "", 2)
 	if err != nil {
 		t.Fatalf("ListConversations first page: %v", err)
@@ -574,12 +648,11 @@ func TestListConversationsPaginationDeterministic(t *testing.T) {
 }
 
 func TestConversationCreatedAtTimestampPresent(t *testing.T) {
-	t.Skip("timing precision test")
 	f := newConvFixture(t)
 
-	before := time.Now()
+	before := time.Now().Add(-time.Second)
 	convID, err := f.store.CreateConversation(nil)
-	after := time.Now()
+	after := time.Now().Add(time.Second)
 
 	if err != nil {
 		t.Fatalf("CreateConversation: %v", err)
@@ -590,7 +663,8 @@ func TestConversationCreatedAtTimestampPresent(t *testing.T) {
 		t.Fatalf("GetConversation: %v", err)
 	}
 
-	if conv.CreatedAt.Before(before) || conv.CreatedAt.After(after.Add(time.Second)) {
+	// Allow 2 second tolerance for time precision differences
+	if conv.CreatedAt.Before(before) || conv.CreatedAt.After(after) {
 		t.Errorf("created_at = %v, expected between %v and %v", conv.CreatedAt, before, after)
 	}
 }
