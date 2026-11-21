@@ -87,3 +87,4 @@ func TestProvisionalNoKeepsInput(t *testing.T) {
 		t.Errorf("refusal = %q, want 'submit cancelled; input kept'", a.refusal)
 	}
 }
+
