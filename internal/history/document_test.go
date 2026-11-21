@@ -154,8 +154,6 @@ func TestValidation(t *testing.T) {
 		"changes missing": func(x *Turn) { x.Changes = []Change{{"a", "applied"}} },
 		"bad outcome":     func(x *Turn) { x.ChangesState = "applied"; x.Changes = []Change{{"a", "done"}} },
 		"empty path":      func(x *Turn) { x.ChangesState = "applied"; x.Changes = []Change{{"", "applied"}} },
-		"newline path":    func(x *Turn) { x.ChangesState = "applied"; x.Changes = []Change{{"a\nb", "applied"}} },
-		"ambiguous path":  func(x *Turn) { x.ChangesState = "applied"; x.Changes = []Change{{"a not", "applied"}} },
 	}
 	for name, mut := range cases {
 		v := ok
@@ -174,6 +172,31 @@ func TestValidation(t *testing.T) {
 	p, err := Parse([]byte("syndic-history/v1\nturn 1\nt\nstate 8\napproved\ninput 0\n\nanswer 0\n\nlabel 8\nreviewed\nchanges 7\napplied\nchange 16\na.go not applied\n"))
 	if err != nil || p.Included()[0].Changes[0] != (Change{"a.go", "not applied"}) {
 		t.Fatalf("parse change: %v %+v", err, p)
+	}
+}
+
+func TestChangePathsAreByteExact(t *testing.T) {
+	d := build(t, Turn{ID: "t", State: "approved", Label: "reviewed", ChangesState: "applied",
+		Changes: []Change{{"a\nb", "applied"}, {"c\r\n", "conflict"}, {"é 世", "not applied"}, {"a not", "applied"}}})
+	want := "syndic-history/v1\nturn 1\nt\nstate 8\napproved\ninput 0\n\nanswer 0\n\nlabel 8\nreviewed\nchanges 7\napplied\n" +
+		"change 11\na\nb applied\n" +
+		"change 12\nc\r\n conflict\n" +
+		"change 18\né 世 not applied\n" +
+		"change 13\na not applied\n"
+	if string(d.Bytes()) != want {
+		t.Fatalf("bytes:\n%q\nwant:\n%q", d.Bytes(), want)
+	}
+	p, err := Parse(d.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := p.Included()[0].Changes
+	if ch[0] != (Change{"a\nb", "applied"}) || ch[1] != (Change{"c\r\n", "conflict"}) || ch[2] != (Change{"é 世", "not applied"}) {
+		t.Fatalf("parsed %+v", ch)
+	}
+	// The contract's textual form cannot tell "a not"+applied from "a"+"not applied".
+	if ch[3] != (Change{"a", "not applied"}) || !bytes.Equal(p.Bytes(), d.Bytes()) {
+		t.Fatalf("ambiguous change: %+v", ch[3])
 	}
 }
 

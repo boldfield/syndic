@@ -82,7 +82,12 @@ func ValidateChangesState(state string) error {
 	return fmt.Errorf("invalid changes state: %q", state)
 }
 
-// ValidateChange checks one per-path change.
+// ValidateChange checks one per-path change. A path may hold any byte, a
+// line break included: the field is byte-framed. The design's payload form
+// `<path> <outcome>` is textually ambiguous for path "p not" with outcome
+// "applied" versus path "p" with outcome "not applied"; both serialize to the
+// same bytes, so the document and its hash are identical and Parse reads the
+// longest outcome, "not applied".
 func ValidateChange(c Change) error {
 	switch c.Outcome {
 	case OutcomeApplied, OutcomeNotApplied, OutcomeConflict:
@@ -91,13 +96,6 @@ func ValidateChange(c Change) error {
 	}
 	if c.Path == "" {
 		return errors.New("invalid change: empty path")
-	}
-	if strings.ContainsAny(c.Path, "\r\n") {
-		return errors.New("invalid change: path contains a line break")
-	}
-	// "p not" + "applied" would read back as "p" + "not applied".
-	if c.Outcome == OutcomeApplied && strings.HasSuffix(c.Path, " not") {
-		return fmt.Errorf("invalid change: path %q is ambiguous with outcome %q", c.Path, c.Outcome)
 	}
 	return nil
 }
