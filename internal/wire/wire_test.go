@@ -1703,6 +1703,19 @@ func TestMaxConversationListSizeConstant(t *testing.T) {
 	}
 }
 
+func TestConversationListLimit(t *testing.T) {
+	i := func(n int) *int { return &n }
+	cases := []struct {
+		in   *int
+		want int
+	}{{nil, 200}, {i(0), 200}, {i(-5), 200}, {i(1), 1}, {i(200), 200}, {i(201), 200}, {i(5000), 200}}
+	for _, c := range cases {
+		if got := ConversationListLimit(c.in); got != c.want {
+			t.Errorf("ConversationListLimit(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
 func ptrBool(b bool) *bool {
 	return &b
 }

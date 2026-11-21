@@ -15,12 +15,22 @@ const (
 	MaxFrameBytes       = 1 << 20 // 1 MiB
 	MaxContentPageBytes = 262144  // 256 KiB
 	// MaxConversationListSize is the maximum number of conversation summaries that may be
-	// returned in a ConversationsReply. The server returns at most min(limit, 200) items
-	// and stops early to ensure the encoded reply fits within MaxFrameBytes, returning
+	// returned in a ConversationsReply. conversations.limit follows the transcript convention:
+	// absent or <= 0 means 200; a positive limit above 200 is clamped to 200. The server returns
+	// at most that many items (see ConversationListLimit) and stops early to ensure the encoded reply fits within MaxFrameBytes, returning
 	// next_cursor for remaining items. A page must always contain at least one item when
 	// available; if a single item exceeds MaxFrameBytes, it is refused with error{code:"frame"}.
 	MaxConversationListSize = 200
 )
+
+// ConversationListLimit resolves the optional conversations.limit to the page size:
+// absent or non-positive yields MaxConversationListSize, larger values are clamped.
+func ConversationListLimit(limit *int) int {
+	if limit == nil || *limit <= 0 || *limit > MaxConversationListSize {
+		return MaxConversationListSize
+	}
+	return *limit
+}
 
 var ErrFrameTooLarge = errors.New("frame exceeds 1 MiB")
 
