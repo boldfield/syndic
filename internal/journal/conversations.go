@@ -1,0 +1,393 @@
+package journal
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/mattn/go-runewidth"
+)
+
+// ConversationRow represents a conversation from the conversations table with aggregated turn data.
+type ConversationRow struct {
+	ID              string
+	CreatedAt       time.Time
+	Workspace       *string
+	LastSubmittedAt *time.Time
+	TurnCount       int
+	Running         bool
+	Preview         string
+}
+
+// TurnInConversation represents a turn in a conversation with its state.
+type TurnInConversation struct {
+	ID            string
+	TerminalState *string
+	SubmittedAt   *time.Time
+}
+
+// ErrAmbiguousConversationID is returned when a prefix matches multiple conversations.
+var ErrAmbiguousConversationID = errors.New("ambiguous conversation ID")
+
+// ErrWorkspaceMismatch is returned when a conversation's workspace doesn't match the requested one.
+var ErrWorkspaceMismatch = errors.New("workspace_mismatch")
+
+// ErrMalformedCursor is returned when a pagination cursor is invalid.
+var ErrMalformedCursor = errors.New("malformed cursor")
+
+// firstLine returns the first line of text cut to 80 cells, handling UTF-8 safely.
+// A cell is one display column; uses runewidth to handle wide characters correctly.
+// Design §3 specifies: "the first line of the first input cut to 80 cells".
+func firstLine(text string, maxCells int) string {
+	// Find first newline
+	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+		text = text[:idx]
+	}
+	// Cut to maxCells display width, handling wide characters (CJK, emoji, etc.)
+	return runewidth.Truncate(text, maxCells, "")
+}
+
+// convColumns is the single column list behind every conversation query; the
+// FROM clause must alias conversations as c. last_submitted_at comes from the
+// durable turns.submitted_at of the latest turn (the same turn the ordering key
+// picks); preview is the first line of the first turn's first input.
+const convColumns = `
+	c.id, c.created_at, c.workspace,
+	(SELECT t2.submitted_at FROM turns t2 WHERE t2.conversation_id = c.id ORDER BY t2.rowid DESC LIMIT 1),
+	(SELECT COUNT(*) FROM turns t2 WHERE t2.conversation_id = c.id),
+	EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL),
+	(SELECT m.content FROM messages m
+		WHERE m.turn_id = (
+			SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
+			ORDER BY t3.rowid ASC LIMIT 1
+		) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1)`
+
+// scanConvRow scans a conversation row from the query result using a Scan function.
+// Expects: id, created_at, workspace, last_submitted_at, turn_count, running, preview
+// extra receives any additional trailing columns.
+func scanConvRow(scan func(...any) error, extra ...any) (*ConversationRow, error) {
+	var c ConversationRow
+	var createdAtStr string
+	var lastSubmittedAtStr sql.NullString
+	var running sql.NullInt64
+	var preview sql.NullString
+
+	dest := append([]any{&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview}, extra...)
+	if err := scan(dest...); err != nil {
+		return nil, err
+	}
+
+	t, err := parseTime(createdAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse created_at: %w", err)
+	}
+	c.CreatedAt = t
+
+	if lastSubmittedAtStr.Valid {
+		t, err := parseTime(lastSubmittedAtStr.String)
+		if err != nil {
+			return nil, fmt.Errorf("parse last_submitted_at: %w", err)
+		}
+		c.LastSubmittedAt = &t
+	}
+
+	if running.Valid && running.Int64 != 0 {
+		c.Running = true
+	}
+
+	if preview.Valid {
+		c.Preview = firstLine(preview.String, 80)
+	}
+
+	return &c, nil
+}
+
+// scanConversationRow scans a conversation row from a single-row query.
+func scanConversationRow(row *sql.Row) (*ConversationRow, error) {
+	return scanConvRow(row.Scan)
+}
+
+// scanConversationRows scans multiple conversation rows from query results.
+func scanConversationRows(rows *sql.Rows) ([]ConversationRow, error) {
+	var conversations []ConversationRow
+	for rows.Next() {
+		c, err := scanConvRow(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan conversation: %w", err)
+		}
+		conversations = append(conversations, *c)
+	}
+	return conversations, rows.Err()
+}
+
+// ListConversations returns a page of conversations ordered by latest activity first.
+// workspace filters to a specific workspace (nil includes all workspaces; empty string matches NULL workspace).
+// limit is clamped to 1-200. cursor is opaque; empty for the first page.
+// When workspace is nil, includes all conversations (automatic selection filters NULL-workspace separately).
+func (s *Store) ListConversations(workspace *string, cursor string, limit int) (conversations []ConversationRow, nextCursor string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		conversations, nextCursor, txErr = tx.ListConversations(workspace, cursor, limit)
+		return txErr
+	})
+	return conversations, nextCursor, err
+}
+
+// ListConversations returns a page of conversations ordered by latest activity first using keyset pagination.
+//
+// Pagination guarantee: the cursor pins a snapshot (the highest turn rowid at the
+// first page). Later pages order by activity as of that snapshot, so turns submitted
+// between pages never move an unseen conversation across the cursor: every
+// conversation present at the first page appears exactly once across all pages.
+// Cursor format: "snapshot,key,id".
+func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]ConversationRow, string, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	var snap, cursorKey int64
+	var cursorID string
+	if cursor != "" {
+		parts := strings.SplitN(cursor, ",", 3)
+		if len(parts) != 3 || parts[2] == "" {
+			return nil, "", fmt.Errorf("invalid cursor format: %w", ErrMalformedCursor)
+		}
+		var err error
+		if snap, err = strconv.ParseInt(parts[0], 10, 64); err != nil || snap < 0 {
+			return nil, "", fmt.Errorf("invalid cursor snapshot: %w", ErrMalformedCursor)
+		}
+		if cursorKey, err = strconv.ParseInt(parts[1], 10, 64); err != nil || cursorKey < -1 {
+			return nil, "", fmt.Errorf("invalid cursor key: %w", ErrMalformedCursor)
+		}
+		cursorID = parts[2]
+	} else if err := tx.tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM turns`).Scan(&snap); err != nil {
+		return nil, "", fmt.Errorf("query snapshot: %w", err)
+	}
+
+	// key: rowid of the conversation's latest turn within the snapshot; -1 when none.
+	const key = `COALESCE((SELECT MAX(tk.rowid) FROM turns tk WHERE tk.conversation_id = c.id AND tk.rowid <= @snap), -1)`
+
+	where := "1=1"
+	args := []any{sql.Named("snap", snap), sql.Named("limit", limit+1)} // one lookahead row tells us whether another page exists
+	if workspace != nil && *workspace == "" {
+		where += " AND c.workspace IS NULL"
+	} else if workspace != nil {
+		where += " AND c.workspace = @workspace"
+		args = append(args, sql.Named("workspace", *workspace))
+	}
+	// A nil workspace includes every conversation; only automatic selection excludes legacy NULL-workspace rows.
+	if cursor != "" {
+		where += " AND (" + key + " < @ckey OR (" + key + " = @ckey AND c.id > @cid))"
+		args = append(args, sql.Named("ckey", cursorKey), sql.Named("cid", cursorID))
+	}
+
+	rows, err := tx.tx.Query(`SELECT `+convColumns+`, `+key+` FROM conversations c WHERE `+where+
+		` ORDER BY `+key+` DESC, c.id ASC LIMIT @limit`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("query conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var conversations []ConversationRow
+	var keys []int64
+	for rows.Next() {
+		var k int64
+		c, err := scanConvRow(rows.Scan, &k)
+		if err != nil {
+			return nil, "", fmt.Errorf("scan conversation: %w", err)
+		}
+		conversations = append(conversations, *c)
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("scan conversations: %w", err)
+	}
+
+	var nextCursor string
+	if len(conversations) > limit {
+		conversations = conversations[:limit]
+		last := limit - 1
+		nextCursor = fmt.Sprintf("%d,%d,%s", snap, keys[last], conversations[last].ID)
+	}
+
+	return conversations, nextCursor, nil
+}
+
+// GetConversation retrieves a conversation by ID or unique prefix.
+// If idPrefix is a full ID, it returns that conversation exactly.
+// If idPrefix is a prefix, it returns an error if multiple conversations match;
+// returns ErrNoSuchContent if the ID is not found.
+func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
+	var row *ConversationRow
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		row, txErr = tx.GetConversation(idPrefix)
+		return txErr
+	})
+	return row, err
+}
+
+// GetConversation retrieves a conversation by ID or unique prefix, checking for ambiguity.
+func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
+	// Use substr for exact prefix matching (not LIKE which treats % and _ as wildcards).
+	// substr(c.id,1,length(?)) = ? is safer for non-ASCII ids than range comparison.
+	rows, err := tx.tx.Query(`SELECT `+convColumns+`
+		FROM conversations c
+		WHERE substr(c.id, 1, length(?)) = ?
+		ORDER BY c.id = ? DESC, c.id
+		LIMIT 2
+	`, idPrefix, idPrefix, idPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	conversations, err := scanConversationRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan conversations: %w", err)
+	}
+
+	switch len(conversations) {
+	case 0:
+		return nil, fmt.Errorf("conversation not found: %w", ErrNoSuchContent)
+	case 1:
+		return &conversations[0], nil
+	default:
+		if conversations[0].ID == idPrefix {
+			return &conversations[0], nil // an exact ID wins over longer IDs it prefixes
+		}
+		return nil, fmt.Errorf("ambiguous conversation ID %q: %w", idPrefix, ErrAmbiguousConversationID)
+	}
+}
+
+// GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
+func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
+	var turns []TurnInConversation
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		turns, txErr = tx.GetConversationTurns(conversationID)
+		return txErr
+	})
+	return turns, err
+}
+
+// GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
+func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
+	rows, err := tx.tx.Query(`
+		SELECT t.id, t.terminal_state,
+			t.submitted_at
+		FROM turns t
+		WHERE t.conversation_id = ?
+		ORDER BY t.rowid ASC
+	`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation turns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var turns []TurnInConversation
+	for rows.Next() {
+		var t TurnInConversation
+		var terminalState sql.NullString
+		var submittedAtStr sql.NullString
+
+		if err := rows.Scan(&t.ID, &terminalState, &submittedAtStr); err != nil {
+			return nil, fmt.Errorf("scan turn: %w", err)
+		}
+
+		if terminalState.Valid {
+			t.TerminalState = &terminalState.String
+		}
+
+		if submittedAtStr.Valid {
+			st, err := parseTime(submittedAtStr.String)
+			if err != nil {
+				return nil, fmt.Errorf("parse submitted_at: %w", err)
+			}
+			t.SubmittedAt = &st
+		}
+
+		turns = append(turns, t)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate turns: %w", err)
+	}
+
+	return turns, nil
+}
+
+// SetConversationWorkspace sets the workspace for a conversation that currently has NULL workspace.
+// Returns ErrWorkspaceMismatch if the conversation already has a different workspace set.
+func (s *Store) SetConversationWorkspace(conversationID, workspace string) error {
+	return s.Tx(func(tx *Tx) error {
+		return tx.SetConversationWorkspace(conversationID, workspace)
+	})
+}
+
+// SetConversationWorkspace sets the workspace for a conversation (transactional with adoption check).
+func (tx *Tx) SetConversationWorkspace(conversationID, workspace string) error {
+	var currentWorkspace sql.NullString
+	if err := tx.tx.QueryRow(`
+		SELECT workspace FROM conversations WHERE id = ?
+	`, conversationID).Scan(&currentWorkspace); err != nil {
+		return fmt.Errorf("query conversation workspace: %w", err)
+	}
+
+	// If the conversation already has a workspace, it's immutable
+	if currentWorkspace.Valid {
+		if currentWorkspace.String != workspace {
+			return fmt.Errorf("%w: conversation already has workspace %q but got %q", ErrWorkspaceMismatch, currentWorkspace.String, workspace)
+		}
+		// Workspace already matches, nothing to do
+		return nil
+	}
+
+	// Set the workspace
+	if _, err := tx.tx.Exec(`
+		UPDATE conversations SET workspace = ? WHERE id = ?
+	`, workspace, conversationID); err != nil {
+		return fmt.Errorf("update conversation workspace: %w", err)
+	}
+
+	return nil
+}
+
+// GetMostRecentConversationForWorkspace returns the most recently submitted conversation
+// for a given workspace. Returns nil if no conversation exists for that workspace.
+// Null-workspace conversations are excluded from this query.
+func (s *Store) GetMostRecentConversationForWorkspace(workspace string) (*ConversationRow, error) {
+	var row *ConversationRow
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		row, txErr = tx.GetMostRecentConversationForWorkspace(workspace)
+		return txErr
+	})
+	return row, err
+}
+
+// GetMostRecentConversationForWorkspace returns the most recently submitted conversation for a workspace.
+func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*ConversationRow, error) {
+	row := tx.tx.QueryRow(`SELECT `+convColumns+`
+		FROM conversations c
+		WHERE c.workspace = ?
+		ORDER BY COALESCE((SELECT MAX(tk.rowid) FROM turns tk WHERE tk.conversation_id = c.id), -1) DESC, c.id ASC
+		LIMIT 1
+	`, workspace)
+
+	c, err := scanConversationRow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query most recent conversation: %w", err)
+	}
+
+	return c, nil
+}
