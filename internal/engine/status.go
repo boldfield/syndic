@@ -126,6 +126,7 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	ws := wire.Participant{
 		ID:                       p.ID,
 		Model:                    p.Model,
+		Endpoint:                 p.Endpoint,
 		Pool:                     poolName(p),
 		EligibleRoles:            make([]string, 0, len(p.EligibleRoles)),
 		DeclaredBilling:          ep.DeclaredBilling,

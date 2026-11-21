@@ -240,6 +240,7 @@ type StatusRequest struct{}
 type Participant struct {
 	ID                       string   `json:"id"`
 	Model                    string   `json:"model"`
+	Endpoint                 string   `json:"endpoint"`
 	ReportedModel            string   `json:"reported_model"`
 	Identity                 string   `json:"identity"`
 	State                    string   `json:"state"`

@@ -297,9 +297,11 @@ func logExternalSpendingControl(w io.Writer, eng *engine.Engine) {
 		return
 	}
 
+	logged := make(map[string]bool)
 	for _, p := range status.Participants {
-		if p.DeclaredBilling == "metered" && p.SpendingControl == "external" {
-			_, _ = fmt.Fprintf(w, "external spending control: %s (metered)\n", p.ID)
+		if p.DeclaredBilling == "metered" && p.SpendingControl == "external" && !logged[p.Endpoint] {
+			_, _ = fmt.Fprintf(w, "external spending control: %s (metered)\n", p.Endpoint)
+			logged[p.Endpoint] = true
 		}
 	}
 }
