@@ -605,3 +605,33 @@ func TestBudgetCalibrationSafetyOverrides(t *testing.T) {
 		t.Fatalf("quick safety projection = %d, want %d", reply.EstimatedTokens, roster)
 	}
 }
+
+// A metered endpoint without external spending control is refused with budget:spending_ceiling.
+func TestBudgetMeteringRefused(t *testing.T) {
+	toml := strings.ReplaceAll(enginetest.RosterTOML, `declared_billing = "none"`, `declared_billing = "metered"`)
+	h := enginetest.New(t, toml, nil)
+	_, err := submitInput(t, h, "s1", testInput)
+	we := wantBudgetError(t, err, "spending_ceiling")
+	if we.Participant == nil || *we.Participant == "" {
+		t.Fatalf("spending_ceiling error should name the participant, got %+v", we)
+	}
+}
+
+// A metered endpoint with external spending control is admitted for dispatch.
+func TestBudgetMeteringAllowed(t *testing.T) {
+	toml := strings.ReplaceAll(enginetest.RosterTOML, `declared_billing = "none"`, `declared_billing = "metered"`)
+	toml = strings.ReplaceAll(toml, `[[endpoints]]`, `[[endpoints]]
+spending_control = "external"`)
+	h := enginetest.New(t, toml, reviewScripts(approveStep()))
+	reply, err := submitInput(t, h, "s1", testInput)
+	if err != nil {
+		t.Fatalf("metered with external spending control should be accepted, got %v", err)
+	}
+	if reply.TurnID == "" {
+		t.Fatal("expected non-empty turn ID after successful submit")
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+	if calls := h.Adapters["author"].Calls(); len(calls) != 1 {
+		t.Fatalf("author should have one call, got %d", len(calls))
+	}
+}

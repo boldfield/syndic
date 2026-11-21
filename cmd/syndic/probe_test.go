@@ -3358,12 +3358,20 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("failed to write roster: %v", err)
 	}
 
-	// Run the probe command
+	// Run the probe command with output draining in a goroutine to prevent deadlock
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 	os.Stderr = w
+
+	var outputStr string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		output, _ := io.ReadAll(r)
+		outputStr = string(output)
+	}()
 
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	exitCode := cmdProbe(fs, []string{
@@ -3381,9 +3389,7 @@ required_reviewers = ["reviewer"]
 	}
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
-
-	output, _ := io.ReadAll(r)
-	outputStr := string(output)
+	<-done
 
 	// Should succeed with exit code 0
 	if exitCode != 0 {
@@ -3405,5 +3411,51 @@ required_reviewers = ["reviewer"]
 	}
 	if len(exportFiles) != 1 {
 		t.Fatalf("expected 1 export file, got %d", len(exportFiles))
+	}
+
+	// Verify export file is valid JSON and declares metered billing truthfully
+	exportPath := filepath.Join(exportDir, exportFiles[0].Name())
+	exportData, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("failed to read export: %v", err)
+	}
+
+	var exp evidence.Export
+	if err := json.Unmarshal(exportData, &exp); err != nil {
+		t.Fatalf("failed to parse export JSON: %v", err)
+	}
+
+	if exp.DeclaredBilling != "metered" {
+		t.Fatalf("expected declared_billing 'metered', got %q", exp.DeclaredBilling)
+	}
+
+	// Verify the probe manifest was written with fingerprint
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runManifest sql.NullString
+	if err := db.Conn().QueryRow("SELECT manifest FROM runs").Scan(&runManifest); err != nil {
+		t.Fatalf("failed to query run manifest: %v", err)
+	}
+
+	// Parse the probe manifest to verify it's valid
+	probeManifest, hasFingerprint, err := evidence.ParseProbeManifest([]byte(runManifest.String))
+	if err != nil {
+		t.Fatalf("failed to parse probe manifest: %v", err)
+	}
+
+	if !hasFingerprint {
+		t.Fatalf("probe manifest should have fingerprint")
+	}
+
+	if probeManifest.ConfigFingerprint == "" {
+		t.Fatalf("probe manifest should have non-empty config_fingerprint")
 	}
 }
