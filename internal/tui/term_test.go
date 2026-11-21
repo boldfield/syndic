@@ -2,84 +2,120 @@ package tui
 
 import (
 	"context"
-	"os"
+	"strings"
 	"testing"
 )
 
-func TestDetectTerminalMode(t *testing.T) {
-	// Save original env vars
-	origTerm := os.Getenv("TERM")
-	origNoColor := os.Getenv("NO_COLOR")
-	defer func() {
-		if origTerm != "" {
-			_ = os.Setenv("TERM", origTerm)
-		} else {
-			_ = os.Unsetenv("TERM")
-		}
-		if origNoColor != "" {
-			_ = os.Setenv("NO_COLOR", origNoColor)
-		} else {
-			_ = os.Unsetenv("NO_COLOR")
-		}
-	}()
+func TestDetectTerminalCapabilities(t *testing.T) {
+	tests := []struct {
+		name    string
+		term    string
+		noColor bool
+		want    TerminalCapabilities
+	}{
+		{
+			name:    "TERM=dumb",
+			term:    "dumb",
+			noColor: false,
+			want: TerminalCapabilities{
+				Color:     false,
+				AltScreen: false,
+				Mouse:     false,
+			},
+		},
+		{
+			name:    "TERM unset",
+			term:    "",
+			noColor: false,
+			want: TerminalCapabilities{
+				Color:     false,
+				AltScreen: false,
+				Mouse:     false,
+			},
+		},
+		{
+			name:    "NO_COLOR with xterm",
+			term:    "xterm-256color",
+			noColor: true,
+			want: TerminalCapabilities{
+				Color:     false,
+				AltScreen: true,
+				Mouse:     true,
+			},
+		},
+		{
+			name:    "Normal terminal",
+			term:    "xterm-256color",
+			noColor: false,
+			want: TerminalCapabilities{
+				Color:     true,
+				AltScreen: true,
+				Mouse:     true,
+			},
+		},
+	}
 
-	// Test: when TERM=dumb, should return Plain
-	_ = os.Setenv("TERM", "dumb")
-	mode, err := DetectTerminalMode()
-	if err != nil {
-		t.Errorf("DetectTerminalMode failed: %v", err)
-	}
-	if mode != TerminalModePlain {
-		t.Errorf("Expected TerminalModePlain for TERM=dumb, got %d", mode)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TERM", tt.term)
+			if tt.noColor {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("NO_COLOR", "")
+			}
 
-	// Test: when TERM is unset, should return Plain
-	_ = os.Unsetenv("TERM")
-	mode, err = DetectTerminalMode()
-	if err != nil {
-		t.Errorf("DetectTerminalMode failed: %v", err)
-	}
-	if mode != TerminalModePlain {
-		t.Errorf("Expected TerminalModePlain for TERM unset, got %d", mode)
-	}
-
-	// Test: when NO_COLOR is set, should return Plain
-	_ = os.Setenv("TERM", "xterm-256color")
-	_ = os.Setenv("NO_COLOR", "1")
-	mode, err = DetectTerminalMode()
-	if err != nil {
-		t.Errorf("DetectTerminalMode failed: %v", err)
-	}
-	if mode != TerminalModePlain {
-		t.Errorf("Expected TerminalModePlain for NO_COLOR=1, got %d", mode)
+			got := DetectTerminalCapabilities()
+			if got != tt.want {
+				t.Errorf("DetectTerminalCapabilities() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestAppTerminalMode(t *testing.T) {
+func TestAppTerminalCapabilities(t *testing.T) {
 	ctx := context.Background()
 
-	// Test that WithTerminalMode option sets the terminal mode
-	app := NewApp(ctx, "/tmp/test.sock", WithTerminalMode(TerminalModePlain))
-	if app.terminalMode != TerminalModePlain {
-		t.Errorf("Expected TerminalModePlain, got %d", app.terminalMode)
-	}
-
-	// Test that default is TerminalModeNormal
-	app2 := NewApp(ctx, "/tmp/test.sock")
-	if app2.terminalMode != TerminalModeNormal {
-		t.Errorf("Expected TerminalModeNormal by default, got %d", app2.terminalMode)
+	caps := TerminalCapabilities{Color: false, AltScreen: true, Mouse: true}
+	app := NewApp(ctx, "/tmp/test.sock", WithTerminalCapabilities(caps))
+	if app.terminalCapabilities != caps {
+		t.Errorf("Expected %v, got %v", caps, app.terminalCapabilities)
 	}
 }
 
 func TestPlainModeDraftBanner(t *testing.T) {
-	in := answerInput{
-		plainMode: true,
-		drafts:    true,
-	}
-	in.content = NewContentCache()
+	t.Setenv("TERM", "dumb")
 
-	// When plainMode is true, the draft banner should use plain text
-	if !in.plainMode {
-		t.Error("Expected plainMode to be true in test")
+	cc := NewContentCache()
+	cc.Store("attempt:1", "sample candidate text", nil)
+
+	in := answerInput{
+		plainMode:   true,
+		drafts:      true,
+		content:     cc,
+		candidateID: "",
+		openBlocks:  nil,
+	}
+
+	state := NewState()
+	state.Turns["turn1"] = TurnInfo{
+		State:         "author_dispatched",
+		CandidateHash: nil,
+	}
+	state.Attempts["attempt:1"] = AttemptInfo{
+		ID:     "attempt:1",
+		TurnID: "turn1",
+		Phase:  "author",
+		Status: "complete",
+		Epoch:  0,
+	}
+
+	rendered := renderAnswer(state, "turn1", in)
+
+	if rendered == "" {
+		t.Error("renderAnswer returned empty string")
+	}
+
+	if !strings.Contains(rendered, "!! UNREVIEWED DRAFT !!") {
+		t.Errorf("Expected plain draft banner with !! in: %q", rendered)
 	}
 }

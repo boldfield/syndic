@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
+	"github.com/mattn/go-runewidth"
 )
 
 type tab int
@@ -57,15 +58,15 @@ type App struct {
 	onSubmitRequest      func(wire.SubmitRequest)
 	allowProvisional     bool // the user accepted provisional deadlines for this process
 
-	content           *ContentCache
-	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
-	quickSelection    *QuickSelection // quick profile state
-	workDir           string          // where the quick profile search starts; the process directory when empty
-	answerScrollRow   int             // first visible line of the answer tab
-	candidateIDByTurn map[string]string
-	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
-	overrideReasons   map[string]string           // the reason of each override event
-	terminalMode      TerminalMode                // how to render: normal or plain
+	content              *ContentCache
+	drafts               *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection       *QuickSelection // quick profile state
+	workDir              string          // where the quick profile search starts; the process directory when empty
+	answerScrollRow      int             // first visible line of the answer tab
+	candidateIDByTurn    map[string]string
+	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons      map[string]string           // the reason of each override event
+	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -105,9 +106,9 @@ func WithWorkDir(dir string) Option {
 	return func(a *App) { a.workDir = dir }
 }
 
-// WithTerminalMode sets the terminal rendering mode.
-func WithTerminalMode(mode TerminalMode) Option {
-	return func(a *App) { a.terminalMode = mode }
+// WithTerminalCapabilities sets the terminal rendering capabilities.
+func WithTerminalCapabilities(caps TerminalCapabilities) Option {
+	return func(a *App) { a.terminalCapabilities = caps }
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -178,7 +179,7 @@ func (a *App) answerIn(turnID string) answerInput {
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
-		plainMode:      a.terminalMode == TerminalModePlain,
+		plainMode:      !a.terminalCapabilities.Color,
 	}
 }
 
@@ -896,7 +897,10 @@ func (a *App) View() string {
 
 	// When the terminal is too small, show a resize message
 	if a.isTerminalTooSmall() {
-		msg := fmt.Sprintf("Terminal too small. Minimum 40×10; current %d×%d. Please resize.", w, a.height)
+		msg := "Terminal too small. Resize to 40×10."
+		if runewidth.StringWidth(msg) > w {
+			msg = "Terminal too small."
+		}
 		return msg
 	}
 

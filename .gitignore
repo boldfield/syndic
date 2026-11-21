@@ -16,3 +16,4 @@ go.work.sum
 /evidence-raw/
 .env
 /syndicd
+/syndic

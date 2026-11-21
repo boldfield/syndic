@@ -18,7 +18,7 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	}
 
 	// Check if stdout is a TTY; refuse to run if not
-	if !isStdoutTTY() {
+	if !tui.IsStdoutTTY() {
 		fmt.Fprintf(os.Stderr, "error: standard output is not a terminal\n")
 		return 2
 	}
@@ -37,22 +37,18 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
-	// Detect terminal mode (plain vs normal)
-	mode, err := tui.DetectTerminalMode()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to detect terminal mode: %v\n", err)
-		return 2
-	}
+	// Detect terminal capabilities
+	caps := tui.DetectTerminalCapabilities()
 
 	// Create app
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	app := tui.NewApp(ctx, paths.Socket, tui.WithTerminalMode(mode))
+	app := tui.NewApp(ctx, paths.Socket, tui.WithTerminalCapabilities(caps))
 
-	// Choose Bubble Tea options based on terminal mode
+	// Choose Bubble Tea options based on capabilities
 	opts := []tea.ProgramOption{}
-	if mode == tui.TerminalModeNormal {
+	if caps.AltScreen {
 		opts = append(opts, tea.WithAltScreen())
 	}
 
@@ -71,12 +67,4 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	}
 
 	return 0
-}
-
-func isStdoutTTY() bool {
-	stat, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
 }

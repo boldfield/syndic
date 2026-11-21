@@ -162,6 +162,7 @@ func renderBanners(s State) []string {
 }
 
 // capBannersForHeight returns banners, limiting them to leave at least minTabHeight lines for the tab area.
+// When space is constrained, shows only the first banner plus a "+N more" marker.
 // height: total terminal height
 // minTabHeight: minimum lines to reserve for the tab content (usually 5)
 // strip takes 1 line, input takes 2 lines (refusal + input)
@@ -173,12 +174,15 @@ func capBannersForHeight(banners []string, height, minTabHeight int) []string {
 		return banners
 	}
 	if maxBannerLines == 0 {
-		return banners // Show at least one banner even if tab area gets less than 5
+		return banners
 	}
-	result := banners[:maxBannerLines]
-	remaining := len(banners) - maxBannerLines
-	if remaining > 0 {
-		result = append(result, fmt.Sprintf("+%d more", remaining))
+	if maxBannerLines == 1 {
+		remaining := len(banners) - 1
+		if remaining > 0 {
+			return []string{banners[0], fmt.Sprintf("+%d more", remaining)}
+		}
+		return []string{banners[0]}
 	}
-	return result
+	remaining := len(banners) - 1
+	return []string{banners[0], fmt.Sprintf("+%d more", remaining)}
 }
