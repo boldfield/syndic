@@ -273,6 +273,58 @@ func TestSetLatestCandidateWithRound(t *testing.T) {
 	}
 }
 
+func TestSetLatestCandidateValidation(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+	store := journal.NewStore(db)
+
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
+	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
+
+	// Create first candidate (round 0)
+	cand1ID, err := store.SetLatestCandidate("t1", "content1", "hash1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 0: %v", err)
+	}
+
+	// Test: round 0 with supersedes should fail
+	_, err = store.SetLatestCandidate("t1", "content", "hash", 0, "some_id")
+	if err == nil {
+		t.Fatal("expected error for round 0 with supersedes, got nil")
+	}
+
+	// Test: round > 0 without supersedes should fail
+	_, err = store.SetLatestCandidate("t1", "content", "hash", 1, "")
+	if err == nil {
+		t.Fatal("expected error for round 1 without supersedes, got nil")
+	}
+
+	// Test: round > 0 with nonexistent supersedes should fail
+	_, err = store.SetLatestCandidate("t1", "content", "hash", 1, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent supersedes, got nil")
+	}
+
+	// Test: round > 0 with supersedes from different turn should fail
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t2', 'r1', 'solo', 'c1')`)
+	cand2ID, _ := store.SetLatestCandidate("t2", "content2", "hash2", 0, "")
+	_, err = store.SetLatestCandidate("t1", "content", "hash", 1, cand2ID)
+	if err == nil {
+		t.Fatal("expected error for supersedes from different turn, got nil")
+	}
+
+	// Test: round > 0 with correct supersedes should succeed
+	cand3ID, err := store.SetLatestCandidate("t1", "content3", "hash3", 1, cand1ID)
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 1 with correct supersedes: %v", err)
+	}
+	if cand3ID == "" {
+		t.Fatal("expected candidate ID, got empty")
+	}
+}
+
 func TestAtomicRoundCandidateRollback(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()

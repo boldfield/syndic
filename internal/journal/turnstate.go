@@ -3,6 +3,7 @@ package journal
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -164,7 +165,48 @@ func (tx *Tx) FreezeCandidate(turnID, content, hash string) (candidateID string,
 
 // SetLatestCandidate creates a candidate with round/supersedes and atomically updates turns.candidate_id.
 // This is used for revision rounds where multiple candidates may exist for a turn.
+// Validates design invariants: round 0 has no supersedes, round > 0 supersedes the current candidate.
 func (tx *Tx) SetLatestCandidate(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	// Validate design invariants
+	if round == 0 && supersedes != "" {
+		return "", fmt.Errorf("round 0 cannot have a supersedes candidate")
+	}
+
+	if round > 0 {
+		if supersedes == "" {
+			return "", fmt.Errorf("round %d must supersede a previous candidate", round)
+		}
+
+		// Verify that the supersedes candidate exists and belongs to this turn
+		var supersedesTurnID string
+		err := tx.tx.QueryRow(`
+			SELECT turn_id FROM candidates WHERE id = ?
+		`, supersedes).Scan(&supersedesTurnID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("supersedes candidate %s does not exist", supersedes)
+			}
+			return "", fmt.Errorf("query supersedes candidate: %w", err)
+		}
+
+		if supersedesTurnID != turnID {
+			return "", fmt.Errorf("supersedes candidate %s belongs to turn %s, not turn %s", supersedes, supersedesTurnID, turnID)
+		}
+
+		// Verify that supersedes is the current candidate_id of the turn
+		var currentCandidateID sql.NullString
+		err = tx.tx.QueryRow(`
+			SELECT candidate_id FROM turns WHERE id = ?
+		`, turnID).Scan(&currentCandidateID)
+		if err != nil {
+			return "", fmt.Errorf("query turn candidate_id: %w", err)
+		}
+
+		if !currentCandidateID.Valid || currentCandidateID.String != supersedes {
+			return "", fmt.Errorf("supersedes must be the current candidate of the turn (got %q, current is %q)", supersedes, currentCandidateID.String)
+		}
+	}
+
 	// Create the candidate with round and supersedes
 	candidateID, err = tx.CreateCandidateWithRound(turnID, content, hash, round, supersedes)
 	if err != nil {
