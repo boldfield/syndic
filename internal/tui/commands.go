@@ -117,9 +117,15 @@ func cmdQuick(a *App, args []string) tea.Cmd {
 		return nil
 	}
 
+	if a.quickSelection == nil {
+		a.refusal = "quick profile not available"
+		return nil
+	}
+
 	name := args[0]
 	if name == "off" {
 		a.quickSelection.SessionOverride = &name
+		a.updateQuickProfileState()
 		a.refusal = "quick profile deselected for this process"
 		return nil
 	}
@@ -145,6 +151,7 @@ func cmdQuick(a *App, args []string) tea.Cmd {
 	}
 
 	a.quickSelection.SessionOverride = &name
+	a.updateQuickProfileState()
 	a.refusal = "quick profile " + name + " selected for this process"
 	return nil
 }
@@ -234,6 +241,14 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 }
 
 // releasePrompt is a /release waiting for its reason.
+type approvalPrompt struct {
+	filePath         string
+	profileName      string
+	fileSHA256       string
+	definitionSHA256 string
+	profile          wire.QuickProfile
+}
+
 type releasePrompt struct {
 	pool      string
 	attemptID string
@@ -300,6 +315,37 @@ func (a *App) confirmEnter() tea.Cmd {
 		}
 		return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
 	}
+}
+
+// cancelApproval drops a pending approval prompt without approving.
+func (a *App) cancelApproval(why string) {
+	a.approval = nil
+	a.panel = nil
+	a.input.Prompt = defaultPrompt
+	a.input.SetValue("")
+	a.refusal = why
+}
+
+// approvalYes approves the pending quick profile.
+func (a *App) approvalYes() tea.Cmd {
+	ap := a.approval
+	a.cancelApproval("")
+	if a.quickSelection == nil {
+		a.refusal = "quick selection not available"
+		return nil
+	}
+	if err := a.quickSelection.ApproveProfile(ap.filePath, ap.profileName, ap.fileSHA256, ap.definitionSHA256); err != nil {
+		a.refusal = fmt.Sprintf("cannot save approval: %v", err)
+		return nil
+	}
+	a.refusal = fmt.Sprintf("quick profile %s approved for this project", ap.profileName)
+	return nil
+}
+
+// approvalNo rejects the pending quick profile approval.
+func (a *App) approvalNo() tea.Cmd {
+	a.cancelApproval("quick profile approval rejected; it will not be sent")
+	return nil
 }
 
 // whyMsg carries the turn record /why asked for.

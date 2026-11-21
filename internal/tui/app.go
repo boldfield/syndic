@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -40,9 +42,10 @@ type App struct {
 	state         State
 	tab           tab
 	input         textinput.Model
-	refusal       string         // the one-line message under the body: a refusal, or what a command did
-	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
+	refusal       string          // the one-line message under the body: a refusal, or what a command did
+	panel         []string        // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	approval      *approvalPrompt // a quick profile approval pending yes/no
+	confirm       *releasePrompt  // a /release waiting for its reason; it takes the next line typed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
@@ -325,6 +328,19 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.approval != nil {
+		// An approval owns the keyboard: only y/n, esc and ctrl+c.
+		switch msg.String() {
+		case "y", "Y":
+			return a, a.approvalYes()
+		case "n", "N":
+			return a, a.approvalNo()
+		case "esc", "ctrl+c":
+			a.cancelApproval("quick profile approval cancelled")
+			return a, nil
+		}
+		return a, nil
+	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
 		switch msg.String() {
@@ -478,6 +494,10 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		return nil
 	}
 	a.input.SetValue("")
+	// Track if /mode was used for this turn
+	if a.state.NextPreset != "" {
+		a.state.ModeOverrideTurn = msg.turnID
+	}
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
@@ -518,7 +538,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateQuickProfileState checks if the project's quick profile is approved
-// and sets the UnapprovedProfile state accordingly.
+// and sets the UnapprovedProfile state accordingly. It may also trigger an approval prompt.
 func (a *App) updateQuickProfileState() {
 	if a.quickSelection == nil || a.quickSelection.ProjectProfile == nil {
 		a.state.UnapprovedProfile = nil
@@ -549,7 +569,73 @@ func (a *App) updateQuickProfileState() {
 		return
 	}
 
+	// Profile is not approved; show approval prompt if not already shown
 	a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+	a.requestApprovalIfNeeded()
+}
+
+// requestApprovalIfNeeded shows an approval prompt for an unapproved project profile.
+func (a *App) requestApprovalIfNeeded() {
+	if a.approval != nil || a.confirm != nil {
+		// Already showing a prompt
+		return
+	}
+	if a.quickSelection == nil || a.quickSelection.ProjectProfile == nil || a.state.Status == nil {
+		return
+	}
+
+	profileName := *a.quickSelection.ProjectProfile
+	filePath := a.quickSelection.ProjectFilePath
+	fileData := a.quickSelection.ProjectFileData
+
+	// Don't ask again if already approved or already asked this process
+	if a.quickSelection.SelectedProfile() != nil {
+		return
+	}
+
+	// Find the profile in status
+	var qp *wire.QuickProfile
+	for i := range a.state.Status.QuickProfiles {
+		if a.state.Status.QuickProfiles[i].Name == profileName {
+			qp = &a.state.Status.QuickProfiles[i]
+			break
+		}
+	}
+	if qp == nil {
+		return
+	}
+
+	// Compute file SHA256
+	fileHash := fmt.Sprintf("%x", sha256.Sum256(fileData))
+
+	// Show approval prompt
+	a.approval = &approvalPrompt{
+		filePath:         filePath,
+		profileName:      profileName,
+		fileSHA256:       fileHash,
+		definitionSHA256: qp.DefinitionSHA256,
+		profile:          *qp,
+	}
+
+	// Build panel with profile info
+	var budgetsStr string
+	if qp.Budgets != nil {
+		budgets, _ := json.Marshal(qp.Budgets)
+		budgetsStr = string(budgets)
+	}
+
+	a.panel = []string{
+		fmt.Sprintf("Project file: %s", filePath),
+		fmt.Sprintf("Select quick profile %q", profileName),
+		"",
+		fmt.Sprintf("  preset: %s", qp.Preset),
+		fmt.Sprintf("  drafts: %v", qp.Drafts),
+		fmt.Sprintf("  budgets: %s", budgetsStr),
+		"",
+		"Approve this selection? (y/n)",
+	}
+	a.input.Prompt = ""
+	a.refusal = ""
 }
 
 // onFrame applies a frame. Any stream error, including the engine's stopping

@@ -37,14 +37,20 @@ func TestFindQuickToml(t *testing.T) {
 }
 
 func TestFindQuickTomlStopsAtHome(t *testing.T) {
-	// Test: search stops at home directory (doesn't go into parents)
+	// Test: search stops at home directory (doesn't go into parents of home)
 	tmpdir := t.TempDir()
-	subdir := filepath.Join(tmpdir, "subdir")
-	if err := os.Mkdir(subdir, 0755); err != nil {
+	homedir := filepath.Join(tmpdir, "home")
+	subdir := filepath.Join(homedir, "subdir")
+	abovedir := filepath.Join(tmpdir, "above")
+
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(abovedir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create .syndic/quick.toml above home-like boundary
+	// Create .syndic/quick.toml above the home directory
 	quickdir := filepath.Join(tmpdir, ".syndic")
 	if err := os.Mkdir(quickdir, 0755); err != nil {
 		t.Fatal(err)
@@ -54,46 +60,52 @@ func TestFindQuickTomlStopsAtHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Find from subdir - should not find parent's file if we set tmpdir as effective home
-	oldHome := os.Getenv("HOME")
-	defer func() {
-		_ = os.Setenv("HOME", oldHome)
-	}()
-	_ = os.Setenv("HOME", tmpdir)
+	// Set home directory to homedir; search should stop there and not reach tmpdir
+	t.Setenv("HOME", homedir)
 
 	path, data, err := findQuickToml(subdir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Should find the file in tmpdir/.syndic (parent of subdir)
-	if path != quickfile {
-		t.Errorf("expected %q, got %q", quickfile, path)
+	// Should not find the file above home
+	if path != "" {
+		t.Errorf("expected no file, got %q", path)
 	}
-	if string(data) != `profile = "solo"` {
-		t.Errorf("unexpected data: %s", data)
+	if data != nil {
+		t.Errorf("expected no data, got %v", data)
 	}
 }
 
 func TestParseQuickToml(t *testing.T) {
 	tests := []struct {
-		name     string
-		data     string
-		expected string
+		name          string
+		data          string
+		expectedName  string
+		expectedError bool
 	}{
-		{"valid profile", `profile = "solo"`, "solo"},
-		{"valid profile with spaces", `profile = "my profile"`, "my profile"},
-		{"missing profile", "", ""},
-		{"empty profile", `profile = ""`, ""},
-		{"extra key", "profile = \"solo\"\nextra = \"key\"", "solo"},
-		{"invalid toml", `{invalid`, ""},
+		{"valid profile", `profile = "solo"`, "solo", false},
+		{"valid profile with spaces", `profile = "my profile"`, "my profile", false},
+		{"missing profile", "", "", true},
+		{"empty profile", `profile = ""`, "", true},
+		{"extra key", "profile = \"solo\"\nextra = \"key\"", "", true},
+		{"invalid toml", `{invalid`, "", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseQuickToml([]byte(tt.data))
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
+			name, errStr := parseQuickToml([]byte(tt.data))
+			if tt.expectedError {
+				if errStr == "" {
+					t.Errorf("expected error, got none")
+				}
+			} else {
+				if errStr != "" {
+					t.Errorf("expected no error, got %q", errStr)
+				}
+				if name != tt.expectedName {
+					t.Errorf("expected %q, got %q", tt.expectedName, name)
+				}
 			}
 		})
 	}

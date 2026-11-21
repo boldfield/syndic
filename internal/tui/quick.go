@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,16 +11,16 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
-	"github.com/boldfield/syndic/internal/wire"
 )
 
 // QuickSelection holds the current quick profile selection state.
 type QuickSelection struct {
-	ProjectProfile   *string // name from .syndic/quick.toml, if found and parsed
-	ProjectFilePath  string  // path to the .syndic/quick.toml file
-	ProjectFileData  []byte  // bytes of the .syndic/quick.toml file
-	SessionOverride  *string // set by /quick command; "off" means send nothing
-	ApprovedProfiles map[string]ApprovedProfile
+	ProjectProfile    *string // name from .syndic/quick.toml, if found and parsed
+	ProjectFilePath   string  // path to the .syndic/quick.toml file
+	ProjectFileData   []byte  // bytes of the .syndic/quick.toml file
+	ProjectParseError *string // error from parsing project file, if any
+	SessionOverride   *string // set by /quick command; "off" means send nothing
+	ApprovedProfiles  map[string]ApprovedProfile
 }
 
 // ApprovedProfile holds one approved quick profile record.
@@ -48,10 +46,14 @@ func (qs *QuickSelection) SelectedProfile() *string {
 	return nil
 }
 
-// IsUnapproved returns the name of an unapproved profile, or "" if none.
+// IsUnapproved returns the name/error of an unapproved profile, or nil if none.
+// Returns the parse error if one exists, otherwise the unapproved profile name.
 func (qs *QuickSelection) IsUnapproved() *string {
 	if qs.SessionOverride != nil && *qs.SessionOverride != "off" {
 		return nil
+	}
+	if qs.ProjectParseError != nil {
+		return qs.ProjectParseError
 	}
 	if qs.ProjectProfile != nil && !qs.isProjectProfileApproved() {
 		return qs.ProjectProfile
@@ -131,16 +133,31 @@ func getDevID(fi os.FileInfo) uint64 {
 	return stat.Dev
 }
 
-// parseQuickToml parses .syndic/quick.toml. Returns "" if invalid.
-func parseQuickToml(data []byte) string {
+// parseQuickToml parses .syndic/quick.toml. Returns the profile name, an error string if invalid, or ("", "").
+func parseQuickToml(data []byte) (string, string) {
+	// First, check for extra keys by unmarshaling to a map
+	var m map[string]interface{}
+	if err := toml.Unmarshal(data, &m); err != nil {
+		return "", fmt.Sprintf("quick: invalid: %v", err)
+	}
+
+	// Check for any keys other than "profile"
+	for key := range m {
+		if key != "profile" {
+			return "", "quick: invalid: extra keys not allowed"
+		}
+	}
+
+	// Now unmarshal to the struct
 	var file quickTomlFile
 	if err := toml.Unmarshal(data, &file); err != nil {
-		return ""
+		return "", fmt.Sprintf("quick: invalid: %v", err)
 	}
+
 	if file.Profile == nil || *file.Profile == "" {
-		return ""
+		return "", "quick: invalid: missing profile key"
 	}
-	return *file.Profile
+	return *file.Profile, ""
 }
 
 // approvalsPath returns the approvals file path.
@@ -227,20 +244,17 @@ func writeApproval(filePath, profileName, fileSHA256, definitionSHA256 string) e
 		return fmt.Errorf("cannot write approvals file: %w", err)
 	}
 
-	return nil
-}
-
-// profileDefinitionSHA256 computes the SHA-256 of a profile's definition.
-func profileDefinitionSHA256(qp wire.QuickProfile) string {
-	// Create a canonical representation of the profile definition.
-	def := map[string]interface{}{
-		"preset":  qp.Preset,
-		"drafts":  qp.Drafts,
-		"budgets": qp.Budgets,
+	// Ensure the file has correct permissions even if it already existed
+	if err := os.Chmod(file, 0600); err != nil {
+		return fmt.Errorf("cannot chmod approvals file: %w", err)
 	}
-	data, _ := json.Marshal(def)
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+
+	// Ensure directory has correct permissions
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("cannot chmod approvals directory: %w", err)
+	}
+
+	return nil
 }
 
 // NewQuickSelection creates a fresh QuickSelection, discovering and approving as needed.
@@ -264,7 +278,10 @@ func NewQuickSelection(wd string) (*QuickSelection, error) {
 	}
 
 	if data != nil {
-		if profile := parseQuickToml(data); profile != "" {
+		profile, parseErr := parseQuickToml(data)
+		if parseErr != "" {
+			qs.ProjectParseError = &parseErr
+		} else if profile != "" {
 			qs.ProjectProfile = &profile
 			qs.ProjectFilePath = path
 			qs.ProjectFileData = data
@@ -275,8 +292,8 @@ func NewQuickSelection(wd string) (*QuickSelection, error) {
 }
 
 // ApproveProfile marks a profile as approved after showing the user what it does.
-func (qs *QuickSelection) ApproveProfile(filePath string, profileName string, fileSHA256 string, qp wire.QuickProfile) error {
-	definitionSHA256 := profileDefinitionSHA256(qp)
+// definitionSHA256 must come from status.quick_profiles, not computed locally.
+func (qs *QuickSelection) ApproveProfile(filePath string, profileName string, fileSHA256 string, definitionSHA256 string) error {
 	return writeApproval(filePath, profileName, fileSHA256, definitionSHA256)
 }
 
