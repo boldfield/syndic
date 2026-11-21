@@ -175,9 +175,9 @@ func TestSetTurnContextHash(t *testing.T) {
 
 	hash := "abc123def456"
 
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
-	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 
 	if err := store.SetTurnContextHash("t1", hash); err != nil {
 		t.Fatal(err)
@@ -198,9 +198,9 @@ func TestSetTurnFileTainted(t *testing.T) {
 	conn := db.Conn()
 	store := journal.NewStore(db)
 
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
-	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 
 	if err := store.SetTurnFileTainted("t1", true); err != nil {
 		t.Fatal(err)
