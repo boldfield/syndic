@@ -273,8 +273,13 @@ func citedResultIDs(output string, known map[string]string) []string {
 		return nil
 	}
 	tokens := strings.FieldsFunc(evidence, func(r rune) bool {
-		return !(r == '_' || r == '-' || r == '.' || r == ':' ||
-			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+		switch {
+		case r == '_' || r == '-' || r == '.' || r == ':':
+			return false
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			return false
+		}
+		return true
 	})
 	seen := make(map[string]bool)
 	var ids []string
