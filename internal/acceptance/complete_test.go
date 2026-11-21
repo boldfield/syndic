@@ -47,7 +47,7 @@ func TestCoverage_ParagraphCounts(t *testing.T) {
 		journalCount        = 6
 		capacityCount       = 9
 		repairDeliveryCount = 7
-		tuiCount            = 10
+		tuiCount            = 11
 	)
 
 	expected := map[string]int{
