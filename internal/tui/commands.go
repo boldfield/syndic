@@ -376,6 +376,9 @@ func (a *App) onWhy(msg whyMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != a.gen {
 		return a, nil
 	}
+	if a.approval != nil {
+		return a, nil // the approval prompt owns the panel
+	}
 	if msg.err != nil {
 		a.refusal = "why: " + formatRefusal(msg.err)
 		return a, nil

@@ -581,6 +581,9 @@ func (a *App) updateQuickProfileState() {
 		}
 	}
 	if def == nil {
+		if a.approval != nil {
+			a.cancelApproval("") // an absent profile cannot be approved
+		}
 		msg := qs.ProjectProfile + " (engine has no such profile)"
 		a.state.UnapprovedProfile = &msg
 		return

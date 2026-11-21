@@ -13,6 +13,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 )
@@ -497,5 +498,30 @@ func TestQuickWithModeShowsTheOverride(t *testing.T) {
 	}
 	if strip := stripOf(t, r, turn); !strings.Contains(strip, "[quick:fast (mode set by /mode)]") {
 		t.Errorf("strip = %q", strip)
+	}
+}
+
+func TestQuickProfileVanishingCancelsOpenApproval(t *testing.T) {
+	_, project := quickEnv(t)
+	writeQuickFile(t, project, `profile = "fast"`)
+	a := NewApp(context.Background(), "unused.sock", WithWorkDir(project))
+	a.state.Status = &wire.StatusReply{QuickProfiles: []wire.QuickProfile{{Name: "fast", Preset: "solo", DefinitionSHA256: "d1"}}}
+	a.updateQuickProfileState()
+	if a.approval == nil || !strings.Contains(strings.Join(a.panel, "\n"), approvalPromptText) {
+		t.Fatalf("no approval prompt: %+v %v", a.approval, a.panel)
+	}
+
+	// A refresh arrives whose roster no longer has the profile.
+	a.state.Status = &wire.StatusReply{}
+	a.updateQuickProfileState()
+	if a.approval != nil || strings.Contains(a.View(), approvalPromptText) {
+		t.Fatalf("stale approval prompt remains:\n%s", a.View())
+	}
+	if v := a.View(); !strings.Contains(v, "quick: unapproved fast (engine has no such profile)") {
+		t.Errorf("banner missing:\n%s", v)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if approvals, err := readApprovals(); err != nil || len(approvals) != 0 {
+		t.Fatalf("approval written for an absent profile: %v %v", approvals, err)
 	}
 }
