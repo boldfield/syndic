@@ -17,22 +17,26 @@ const FingerprintRule = "fingerprint/v1"
 // {profile: <full profile>, model: <model>, adapter_version: <version>}.
 func ConfigFingerprint(profile config.EndpointProfile, model, adapterVersion string) (string, error) {
 	// Build the fingerprint input with the full profile details.
+	profileMap := map[string]interface{}{
+		"name":                profile.Name,
+		"base_url":            profile.BaseURL,
+		"auth":                profileAuth(profile.Auth),
+		"extra_headers":       profileExtraHeaders(profile.ExtraHeaders),
+		"declared_location":   profile.DeclaredLocation,
+		"declared_execution":  profile.DeclaredExecution,
+		"declared_billing":    profile.DeclaredBilling,
+		"network_dependency":  profile.NetworkDependency,
+		"dialect":             profile.Dialect,
+		"max_tokens_field":    profile.MaxTokensField,
+		"models":              profile.Models,
+		"terms_note":          profile.TermsNote,
+		"tokens_per_byte_max": profile.TokensPerByteMax,
+	}
+	if profile.SpendingControl != "" {
+		profileMap["spending_control"] = profile.SpendingControl
+	}
 	input := map[string]interface{}{
-		"profile": map[string]interface{}{
-			"name":                profile.Name,
-			"base_url":            profile.BaseURL,
-			"auth":                profileAuth(profile.Auth),
-			"extra_headers":       profileExtraHeaders(profile.ExtraHeaders),
-			"declared_location":   profile.DeclaredLocation,
-			"declared_execution":  profile.DeclaredExecution,
-			"declared_billing":    profile.DeclaredBilling,
-			"network_dependency":  profile.NetworkDependency,
-			"dialect":             profile.Dialect,
-			"max_tokens_field":    profile.MaxTokensField,
-			"models":              profile.Models,
-			"terms_note":          profile.TermsNote,
-			"tokens_per_byte_max": profile.TokensPerByteMax,
-		},
+		"profile":         profileMap,
 		"model":           model,
 		"adapter_version": adapterVersion,
 	}

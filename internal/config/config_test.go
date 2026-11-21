@@ -725,6 +725,29 @@ func TestValidateViolations(t *testing.T) {
 			},
 			wantMsgs: []string{"bytes_per_token", "NaN"},
 		},
+		{
+			name: "unknown spending_control",
+			mutate: func(r *Roster) {
+				r.Endpoints[0].SpendingControl = "invalid"
+			},
+			wantMsgs: []string{"ep1", "invalid", "unknown spending_control"},
+		},
+		{
+			name: "spending_control=external on metered endpoint (valid)",
+			mutate: func(r *Roster) {
+				r.Endpoints[0].DeclaredBilling = "metered"
+				r.Endpoints[0].SpendingControl = "external"
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "spending_control=external on non-metered endpoint (invalid)",
+			mutate: func(r *Roster) {
+				r.Endpoints[0].DeclaredBilling = "none"
+				r.Endpoints[0].SpendingControl = "external"
+			},
+			wantMsgs: []string{"ep1", "external", "metered"},
+		},
 	}
 
 	for _, tt := range tests {

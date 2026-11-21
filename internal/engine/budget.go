@@ -184,7 +184,8 @@ func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
 	for _, id := range ids {
-		if e.endpoint(e.participantConfig(id).Endpoint).DeclaredBilling == "metered" {
+		ep := e.endpoint(e.participantConfig(id).Endpoint)
+		if ep.DeclaredBilling == "metered" && ep.SpendingControl != "external" {
 			err := budgetError(budgetSpendingCeiling)
 			err.Participant = strPtr(id)
 			return budgetRecord{}, err

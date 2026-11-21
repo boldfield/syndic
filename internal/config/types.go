@@ -97,6 +97,7 @@ type EndpointProfile struct {
 	DeclaredLocation  string               `toml:"declared_location"`  // "local", "lan", "corporate", "cloud"
 	DeclaredExecution string               `toml:"declared_execution"` // "local", "remote", "unknown"
 	DeclaredBilling   string               `toml:"declared_billing"`   // "none", "flat", "metered", "unknown"
+	SpendingControl   string               `toml:"spending_control"`   // "", "external"
 	NetworkDependency string               `toml:"network_dependency"` // "none", "vpn", "other"
 	Dialect           string               `toml:"dialect"`            // "chat_completions_v1"
 	MaxTokensField    string               `toml:"max_tokens_field"`   // "max_tokens", "max_completion_tokens", ""

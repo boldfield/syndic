@@ -113,6 +113,17 @@ func (r *Roster) Validate() error {
 				ep.Name, ep.NetworkDependency))
 		}
 
+		// Validate spending_control (optional, "" is allowed)
+		if ep.SpendingControl != "" && ep.SpendingControl != "external" {
+			errs = append(errs, fmt.Errorf("endpoint %q has unknown spending_control: %q",
+				ep.Name, ep.SpendingControl))
+		}
+		// Validate that spending_control = "external" is only on metered endpoints
+		if ep.SpendingControl == "external" && ep.DeclaredBilling != "metered" {
+			errs = append(errs, fmt.Errorf("endpoint %q spending_control=external can only be used with declared_billing=metered",
+				ep.Name))
+		}
+
 		// Validate dialect (required, not empty)
 		if ep.Dialect == "" {
 			errs = append(errs, fmt.Errorf("endpoint %q has empty dialect", ep.Name))
