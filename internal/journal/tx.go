@@ -459,20 +459,25 @@ func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 // GetRun retrieves a run by ID.
 func (tx *Tx) GetRun(runID string) (*RunRow, error) {
 	var row RunRow
-	var manifestStr string
+	var manifestStr, manifestHash sql.NullString
 	var createdAtStr string
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, created_at, manifest, manifest_hash
+		SELECT id, created_at, manifest, manifest_hash, state
 		FROM runs WHERE id = ?
-	`, runID).Scan(&row.ID, &createdAtStr, &manifestStr, &row.ManifestHash); err != nil {
+	`, runID).Scan(&row.ID, &createdAtStr, &manifestStr, &manifestHash, &row.State); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("run not found")
 		}
 		return nil, fmt.Errorf("query run: %w", err)
 	}
 
-	row.Manifest = json.RawMessage(manifestStr)
+	// A run still probing has no manifest yet; Manifest stays nil and
+	// ManifestHash empty until FinalizeEngineRunManifest.
+	if manifestStr.Valid {
+		row.Manifest = json.RawMessage(manifestStr.String)
+	}
+	row.ManifestHash = manifestHash.String
 
 	t, err := parseTime(createdAtStr)
 	if err != nil {

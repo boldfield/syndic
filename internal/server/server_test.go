@@ -796,8 +796,8 @@ func TestRestartReplaysCurrentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev, err := c.NextEvent(ctx)
-	if err != nil || ev.Kind != "engine_started" || ev.Seq != first {
-		t.Fatalf("first event = %+v, %v; want engine_started at %d", ev, err, first)
+	if err != nil || ev.Kind != "run_opened" || ev.Seq != first {
+		t.Fatalf("first event = %+v, %v; want run_opened at %d", ev, err, first)
 	}
 }
 

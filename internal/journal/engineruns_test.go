@@ -1,6 +1,7 @@
 package journal_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -745,5 +746,171 @@ func TestCreateEngineTurnRequiresSubmissionID(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error when SubmissionID is empty")
+	}
+}
+
+func TestAllocateEngineRun(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	runID, err := store.AllocateEngineRun()
+	if err != nil {
+		t.Fatalf("AllocateEngineRun failed: %v", err)
+	}
+
+	if runID == "" {
+		t.Error("runID is empty")
+	}
+
+	// Verify the run is stored with state='probing' and NULL manifest
+	conn := db.Conn()
+	var kind, state string
+	var manifest, manifestHash sql.NullString
+	err = conn.QueryRow("SELECT kind, state, manifest, manifest_hash FROM runs WHERE id = ?", runID).Scan(&kind, &state, &manifest, &manifestHash)
+	if err != nil {
+		t.Fatalf("failed to query run: %v", err)
+	}
+	if kind != "engine" {
+		t.Errorf("expected kind='engine', got %q", kind)
+	}
+	if state != "probing" {
+		t.Errorf("expected state='probing', got %q", state)
+	}
+	if manifest.Valid {
+		t.Errorf("expected NULL manifest, got %q", manifest.String)
+	}
+	if manifestHash.Valid {
+		t.Errorf("expected NULL manifest_hash, got %q", manifestHash.String)
+	}
+}
+
+func TestFinalizeEngineRunManifest(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	// Allocate a run first
+	runID, err := store.AllocateEngineRun()
+	if err != nil {
+		t.Fatalf("AllocateEngineRun failed: %v", err)
+	}
+
+	// Finalize with a manifest
+	manifest := json.RawMessage(`{"key":"value","data":123}`)
+	manifestHash, err := store.FinalizeEngineRunManifest(runID, manifest)
+	if err != nil {
+		t.Fatalf("FinalizeEngineRunManifest failed: %v", err)
+	}
+
+	if manifestHash == "" {
+		t.Error("manifestHash is empty")
+	}
+
+	// Verify the run state changed to 'started' and manifest was written
+	conn := db.Conn()
+	var state, stored string
+	err = conn.QueryRow("SELECT state, manifest FROM runs WHERE id = ?", runID).Scan(&state, &stored)
+	if err != nil {
+		t.Fatalf("failed to query run: %v", err)
+	}
+	if state != "started" {
+		t.Errorf("expected state='started', got %q", state)
+	}
+	if stored != string(manifest) {
+		t.Errorf("manifest mismatch: got %q, want %q", stored, manifest)
+	}
+}
+
+func TestManifestImmutabilityAfterFinalize(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	// Allocate and finalize
+	runID, err := store.AllocateEngineRun()
+	if err != nil {
+		t.Fatalf("AllocateEngineRun failed: %v", err)
+	}
+
+	manifest := json.RawMessage(`{"original":true}`)
+	_, err = store.FinalizeEngineRunManifest(runID, manifest)
+	if err != nil {
+		t.Fatalf("FinalizeEngineRunManifest failed: %v", err)
+	}
+
+	// Try to update the manifest - should fail due to trigger
+	conn := db.Conn()
+	_, err = conn.Exec(`
+		UPDATE runs SET manifest = ?, manifest_hash = ? WHERE id = ?
+	`, `{"new":true}`, "new_hash", runID)
+	if err == nil {
+		t.Error("expected error when trying to update immutable manifest")
+	}
+}
+
+func TestAllocateAndFinalizeLifecycle(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	// Step 1: Allocate run in probing state
+	runID, err := store.AllocateEngineRun()
+	if err != nil {
+		t.Fatalf("AllocateEngineRun failed: %v", err)
+	}
+
+	conn := db.Conn()
+	var state1 string
+	err = conn.QueryRow("SELECT state FROM runs WHERE id = ?", runID).Scan(&state1)
+	if err != nil {
+		t.Fatalf("failed to query initial state: %v", err)
+	}
+	if state1 != "probing" {
+		t.Errorf("after allocation, expected state='probing', got %q", state1)
+	}
+
+	// Step 2: Finalize manifest
+	manifest := json.RawMessage(`{"endpoint":"test","model":"gpt-4"}`)
+	_, err = store.FinalizeEngineRunManifest(runID, manifest)
+	if err != nil {
+		t.Fatalf("FinalizeEngineRunManifest failed: %v", err)
+	}
+
+	// Step 3: Verify final state
+	var state2 string
+	var stored string
+	err = conn.QueryRow("SELECT state, manifest FROM runs WHERE id = ?", runID).Scan(&state2, &stored)
+	if err != nil {
+		t.Fatalf("failed to query final state: %v", err)
+	}
+	if state2 != "started" {
+		t.Errorf("after finalization, expected state='started', got %q", state2)
+	}
+	if stored != string(manifest) {
+		t.Errorf("manifest mismatch: got %q, want %q", stored, manifest)
+	}
+}
+
+func TestFinalizeWithInvalidJSON(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	runID, err := store.AllocateEngineRun()
+	if err != nil {
+		t.Fatalf("AllocateEngineRun failed: %v", err)
+	}
+
+	// Try to finalize with invalid JSON
+	invalidJSON := json.RawMessage(`{invalid}`)
+	_, err = store.FinalizeEngineRunManifest(runID, invalidJSON)
+	if err == nil {
+		t.Error("expected error when finalizing with invalid JSON")
 	}
 }

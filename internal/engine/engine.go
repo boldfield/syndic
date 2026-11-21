@@ -144,6 +144,7 @@ type Engine struct {
 	adapters      map[string]transport.Adapter
 	built         manifest.Built
 	runID         string
+	runState      string // "probing" or "started"
 	manifestHash  string
 	runFirstSeq   int64
 	startedAt     time.Time
@@ -394,11 +395,6 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("engine: build manifest: %w", err)
 	}
 
-	before, err := e.store.MaxSeq()
-	if err != nil {
-		return fmt.Errorf("engine: read journal: %w", err)
-	}
-
 	unprobed := []string{}
 	for _, p := range roster.Participants {
 		if !built.Participants[p.ID].Usable {
@@ -406,10 +402,46 @@ func (e *Engine) Start() error {
 		}
 	}
 
-	var runID, manifestHash string
+	// Phase 1, committed before any probe: close runs a crash left probing,
+	// allocate this run and open it with run_opened. The run's identity and
+	// run_first_seq are fixed here, whatever probing later does.
+	var runID string
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
-		runID, manifestHash, err = tx.CreateEngineRun(built.JSON)
+		if _, err = tx.AbandonProbingEngineRuns(); err != nil {
+			return err
+		}
+		runID, err = tx.AllocateEngineRun()
+		if err != nil {
+			return err
+		}
+		return emit("", wire.EventKindRunOpened, wire.EvRunOpened{
+			RunID:      runID,
+			RosterHash: built.RosterHash,
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("engine: open run: %w", err)
+	}
+	firstSeq, found, err := e.store.RunOpenedSeq(runID)
+	if err != nil {
+		return fmt.Errorf("engine: read journal: %w", err)
+	}
+	if !found {
+		return errors.New("engine: run_opened event not found")
+	}
+	e.runID = runID
+	e.runState = "probing"
+	e.runFirstSeq = firstSeq
+
+	// Start-time probes belong here, between the two commits; a crash in
+	// this window leaves a probing run that the next start abandons.
+
+	// Phase 2: write the manifest once and announce engine_started.
+	var manifestHash string
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		var err error
+		manifestHash, err = tx.FinalizeEngineRunManifest(runID, built.JSON)
 		if err != nil {
 			return err
 		}
@@ -434,19 +466,13 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("engine: write run: %w", err)
 	}
 
-	firstSeq, err := e.findEngineStarted(before, runID)
-	if err != nil {
-		return err
-	}
-
 	// Set roster before loading holds so armHold can use it
 	e.roster = roster
 	e.rosterAbs = path
 	e.adapters = adapters
 	e.built = built
-	e.runID = runID
+	e.runState = "started"
 	e.manifestHash = manifestHash
-	e.runFirstSeq = firstSeq
 	e.startedAt = startedAt
 
 	// Load all unreleased holds into memory and arm their timers
@@ -459,42 +485,21 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-// findEngineStarted returns the seq of the engine_started event for runID.
-// The run id in the payload identifies it exactly, whatever else was written
-// to the journal meanwhile.
-func (e *Engine) findEngineStarted(since int64, runID string) (int64, error) {
-	for {
-		events, err := e.store.EventsSince(since, 256)
-		if err != nil {
-			return 0, fmt.Errorf("engine: read journal: %w", err)
-		}
-		if len(events) == 0 {
-			return 0, errors.New("engine: engine_started event not found")
-		}
-		for _, ev := range events {
-			since = ev.Seq
-			if ev.Kind != wire.EventKindEngineStarted {
-				continue
-			}
-			var body wire.EvEngineStarted
-			if err := json.Unmarshal(ev.Data, &body); err == nil && body.RunID == runID {
-				return ev.Seq, nil
-			}
-		}
-	}
-}
-
-// Hello returns the handshake reply.
 func (e *Engine) Hello() wire.HelloReply {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	var manifestHash *string
+	if e.manifestHash != "" {
+		manifestHash = &e.manifestHash
+	}
 	return wire.HelloReply{
 		EngineVersion: e.version,
 		Protocol:      wire.ProtocolVersion,
 		RunID:         e.runID,
 		RunFirstSeq:   e.runFirstSeq,
 		RosterHash:    e.built.RosterHash,
-		ManifestHash:  e.manifestHash,
+		ManifestHash:  manifestHash,
+		State:         e.runState,
 	}
 }
 

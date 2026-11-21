@@ -367,7 +367,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 		if err != nil {
 			t.Fatalf("marshal probe manifest: %v", err)
 		}
-		if _, _, err := store.CreateRun(data); err != nil {
+		if _, _, err := store.CreateProbeRun(data); err != nil {
 			t.Fatalf("seed probe record for %s: %v", p.ID, err)
 		}
 	}

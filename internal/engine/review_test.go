@@ -166,8 +166,13 @@ func TestReviewApprove(t *testing.T) {
 	}
 
 	authorAttempt := attemptsOf(h, turnID, "author")[0]
+	helloReply := h.Engine.Hello()
+	var manifestHash string
+	if helloReply.ManifestHash != nil {
+		manifestHash = *helloReply.ManifestHash
+	}
 	wantHash, err := candidate.Hash(candidate.Identity{
-		ManifestHash:    h.Engine.Hello().ManifestHash,
+		ManifestHash:    manifestHash,
 		TurnID:          turnID,
 		AuthorAttemptID: authorAttempt,
 		Content:         []byte(authorText),

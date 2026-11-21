@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+func ptrString(s string) *string {
+	return &s
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	f := Frame{
 		V:    1,
@@ -338,6 +342,9 @@ func TestDecodePageRandomBytes(t *testing.T) {
 func TestEventKindsConstant(t *testing.T) {
 	// All event kinds from design should be present - literal design strings
 	expectedKinds := []string{
+		"run_opened",
+		"probe_started",
+		"probe_finished",
 		"engine_started",
 		"engine_stopping",
 		"turn_submitted",
@@ -646,7 +653,8 @@ func TestHelloReplyJSON(t *testing.T) {
 		RunID:         "run-123",
 		RunFirstSeq:   100,
 		RosterHash:    "abc123",
-		ManifestHash:  "def456",
+		ManifestHash:  ptrString("def456"),
+		State:         "started",
 	}
 
 	data, err := json.Marshal(reply)
@@ -666,6 +674,7 @@ func TestHelloReplyJSON(t *testing.T) {
 		"run_first_seq":  true,
 		"roster_hash":    true,
 		"manifest_hash":  true,
+		"state":          true,
 	}
 
 	// Check exact key set

@@ -298,7 +298,7 @@ func TestCapacity_HoldSurvivesRestart(t *testing.T) {
 
 	c2 := s.Dial(t)
 	hello := c2.Hello()
-	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
+	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > hello.RunFirstSeq })
 	started, _ := body[wire.EvEngineStarted](ev, wire.EventKindEngineStarted)
 	if !reflect.DeepEqual(started.UncertainCapacity, []string{"default"}) || len(started.OrphanedHolds) != 0 {
 		t.Fatalf("engine_started = %+v, want uncertain_capacity [default] and no orphaned holds", started)
@@ -352,7 +352,7 @@ func TestCapacity_CrashBeforeCancelLeavesHold(t *testing.T) {
 	s.Restart(enginetest.RosterTOML, capacityScripts())
 	c2 := s.Dial(t)
 	hello := c2.Hello()
-	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
+	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > hello.RunFirstSeq })
 	started, _ := body[wire.EvEngineStarted](ev, wire.EventKindEngineStarted)
 	if !reflect.DeepEqual(started.UncertainCapacity, []string{"default"}) {
 		t.Fatalf("engine_started = %+v, want uncertain_capacity [default]", started)

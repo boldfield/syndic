@@ -196,6 +196,7 @@ type RunRow struct {
 	CreatedAt    time.Time
 	Manifest     json.RawMessage
 	ManifestHash string
+	State        string // "probing", "started" or "abandoned"
 }
 
 // GetRun retrieves a run by ID.

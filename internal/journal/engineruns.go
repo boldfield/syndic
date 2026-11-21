@@ -11,8 +11,162 @@ import (
 
 var ErrDuplicateSubmission = errors.New("duplicate submission_id")
 
+// AllocateEngineRun allocates a new engine run without a manifest, in "probing" state.
+// The manifest is finalized later with FinalizeEngineRunManifest.
+// Returns the run ID.
+func (s *Store) AllocateEngineRun() (runID string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		runID, txErr = tx.AllocateEngineRun()
+		return txErr
+	})
+	return runID, err
+}
+
+// AllocateEngineRun allocates a new engine run without a manifest, in "probing" state.
+// Manifest and manifest_hash are NULL until finalization.
+func (tx *Tx) AllocateEngineRun() (runID string, err error) {
+	runID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, NULL, NULL, 'engine', 'probing')
+	`, runID); err != nil {
+		return "", fmt.Errorf("insert allocated engine run: %w", err)
+	}
+
+	return runID, nil
+}
+
+// FinalizeEngineRunManifest writes the manifest to an allocated engine run and transitions it to "started" state.
+// The manifest must be valid JSON; the hash is computed by the store.
+func (s *Store) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) (manifestHash string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		manifestHash, txErr = tx.FinalizeEngineRunManifest(runID, manifest)
+		return txErr
+	})
+	return manifestHash, err
+}
+
+// FinalizeEngineRunManifest writes the manifest to an allocated engine run and transitions it to "started" state.
+// Only succeeds if the run is in "probing" state. Returns error if no row is updated or run is already started.
+func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) (manifestHash string, err error) {
+	if !json.Valid(manifest) {
+		return "", fmt.Errorf("invalid JSON manifest")
+	}
+
+	manifestHash = computeSHA256(manifest)
+
+	result, err := tx.tx.Exec(`
+		UPDATE runs SET manifest = ?, manifest_hash = ?, state = 'started' WHERE id = ? AND state = 'probing'
+	`, string(manifest), manifestHash, runID)
+	if err != nil {
+		return "", fmt.Errorf("finalize engine run manifest: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return "", fmt.Errorf("finalize failed: run not in probing state or run does not exist")
+	}
+
+	return manifestHash, nil
+}
+
+// AbandonProbingEngineRuns marks every engine run still in "probing" state as
+// "abandoned" and returns their ids. A run left probing by a crash never
+// received a manifest; recovery closes it so the new run is the only live
+// one. Nothing is re-sent: probe requests are journaled as attempts, and
+// their uncertain-capacity holds are recovered from those rows.
+func (tx *Tx) AbandonProbingEngineRuns() ([]string, error) {
+	rows, err := tx.tx.Query(`SELECT id FROM runs WHERE kind = 'engine' AND state = 'probing' ORDER BY rowid`)
+	if err != nil {
+		return nil, fmt.Errorf("query probing runs: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan probing run: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate probing runs: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close probing runs: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.tx.Exec(`UPDATE runs SET state = 'abandoned' WHERE id = ? AND state = 'probing'`, id); err != nil {
+			return nil, fmt.Errorf("abandon probing run: %w", err)
+		}
+	}
+	return ids, nil
+}
+
+// RunOpenedSeq returns the seq of the run_opened event for runID. The run id
+// in the payload identifies it exactly.
+func (s *Store) RunOpenedSeq(runID string) (seq int64, found bool, err error) {
+	err = s.db.conn.QueryRow(`
+		SELECT id FROM events
+		WHERE event_type = 'run_opened' AND json_extract(data, '$.run_id') = ?
+		ORDER BY id LIMIT 1
+	`, runID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("query run_opened: %w", err)
+	}
+	return seq, true, nil
+}
+
+// CreateProbeRun creates a new run of kind 'probe' with the given manifest, returning the run ID and manifest hash.
+// The manifest must be valid JSON; the hash is computed by the store.
+func (s *Store) CreateProbeRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		runID, manifestHash, txErr = tx.CreateProbeRun(manifest)
+		return txErr
+	})
+	return runID, manifestHash, err
+}
+
+// CreateProbeRun creates a new run of kind 'probe' with the given manifest, returning the run ID and manifest hash.
+func (tx *Tx) CreateProbeRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
+	if !json.Valid(manifest) {
+		return "", "", fmt.Errorf("invalid JSON manifest")
+	}
+
+	runID, err = generateID()
+	if err != nil {
+		return "", "", err
+	}
+
+	manifestHash = computeSHA256(manifest)
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, ?, ?, 'probe', 'started')
+	`, runID, string(manifest), manifestHash); err != nil {
+		return "", "", fmt.Errorf("insert probe run: %w", err)
+	}
+
+	return runID, manifestHash, nil
+}
+
 // CreateEngineRun creates a new run of kind 'engine' with the given manifest, returning the run ID and manifest hash.
 // The manifest must be valid JSON; the hash is computed by the store.
+// This is the legacy method that combines allocation and finalization; new code should use AllocateEngineRun + FinalizeEngineRunManifest.
 func (s *Store) CreateEngineRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
 	err = s.Tx(func(tx *Tx) error {
 		var txErr error
@@ -36,8 +190,8 @@ func (tx *Tx) CreateEngineRun(manifest json.RawMessage) (runID, manifestHash str
 	manifestHash = computeSHA256(manifest)
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO runs (id, manifest, manifest_hash, kind)
-		VALUES (?, ?, ?, 'engine')
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, ?, ?, 'engine', 'started')
 	`, runID, string(manifest), manifestHash); err != nil {
 		return "", "", fmt.Errorf("insert engine run: %w", err)
 	}

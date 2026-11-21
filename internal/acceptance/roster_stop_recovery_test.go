@@ -137,7 +137,7 @@ func rosterRestarted(t *testing.T, s *suite, next string, ids ...string) (*clien
 	s.Restart(next, rosterScripts(ids...))
 	c := s.Dial(t)
 	runFirst := c.Hello().RunFirstSeq
-	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == runFirst })
+	ev := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > runFirst })
 	es, _ := body[wire.EvEngineStarted](ev, wire.EventKindEngineStarted)
 	return c, ev, es
 }
@@ -644,7 +644,7 @@ func TestRecovery_ReconnectWithLastSeq(t *testing.T) {
 	// Recovery committed and the new run announced: the journal holds what
 	// the client missed.
 	runFirst := s.Dial(t).Hello().RunFirstSeq
-	s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == runFirst })
+	s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > runFirst })
 	missed, err := s.Store.EventsSince(last, 1<<20)
 	if err != nil {
 		t.Fatal(err)
