@@ -29,8 +29,8 @@ func (a *gatedAdapter) hold() (release func()) {
 	return func() { once.Do(func() { close(gate) }) }
 }
 
-func (a *gatedAdapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
-	return a.inner.Probe(ctx, endpoint, model)
+func (a *gatedAdapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
+	return a.inner.Probe(ctx, endpoint, model, opts)
 }
 
 func (a *gatedAdapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
