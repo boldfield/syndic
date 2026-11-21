@@ -105,8 +105,10 @@ func findQuickToml(wd string) (string, []byte, error) {
 		return "", nil, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	home = filepath.Clean(home)
-	current := filepath.Clean(wd)
+	// Walk the physical ancestry: a working directory reached through a
+	// symlink must not lead the search above the real home directory.
+	home = physicalPath(home)
+	current := physicalPath(wd)
 	homeInfo, _ := os.Stat(home)
 	var currentDev uint64
 	if st, err := os.Stat(current); err == nil {
@@ -149,6 +151,18 @@ func findQuickToml(wd string) (string, []byte, error) {
 	}
 
 	return "", nil, nil
+}
+
+// physicalPath returns p as an absolute path with every symlink resolved,
+// falling back to the cleaned absolute path when it cannot be resolved.
+func physicalPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // getDevID extracts the device ID from a FileInfo.

@@ -550,3 +550,41 @@ func TestFindQuickTomlHomeWithTrailingSeparatorOrSymlink(t *testing.T) {
 		}
 	}
 }
+
+func TestFindQuickTomlSymlinkedWorkingDirectoryStopsAtHome(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "work", "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".syndic"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".syndic", "quick.toml"), []byte(`profile = "solo"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(home, "work"), alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	if path, _, err := findQuickToml(filepath.Join(alias, "project")); err != nil || path != "" {
+		t.Fatalf("found %q, %v above home through a symlinked working directory", path, err)
+	}
+
+	// A file inside home is still found through the alias, at its physical path.
+	if err := os.MkdirAll(filepath.Join(home, "work", ".syndic"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "work", ".syndic", "quick.toml")
+	if err := os.WriteFile(want, []byte(`profile = "fast"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if path, _, err := findQuickToml(filepath.Join(alias, "project")); err != nil || path != want {
+		t.Fatalf("found %q, %v, want %q", path, err, want)
+	}
+}
