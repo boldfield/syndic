@@ -32,6 +32,8 @@ type probeServer struct {
 	chatStatus  int // when non-zero, every chat request gets this status
 	noUsage     bool
 	overLength  string // "both", "head", "error", "error:context"
+	// markerFormat controls how markers are returned: "", "embedded", "embedded-only-tail"
+	markerFormat string
 	// calibration response control: prompt tokens for baseline and calibration
 	calibrationBaseline      int  // 0 means use default (1)
 	calibrationObserved      int  // 0 means use default (based on text size)
@@ -163,7 +165,14 @@ func (p *probeServer) handler() http.Handler {
 				}
 			default:
 				if len(markers) >= 2 {
-					answer = strings.Join(markers[:2], " ")
+					switch p.markerFormat {
+					case "embedded":
+						answer = "xx" + markers[0] + "yy\n" + markers[1] + "."
+					case "embedded-only-tail":
+						answer = markers[1] + "."
+					default:
+						answer = strings.Join(markers[:2], " ")
+					}
 				} else if len(markers) > 0 {
 					answer = markers[0]
 				}
@@ -213,7 +222,9 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.Probe(context.Background(), "test", "m1")
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,22 +738,37 @@ func TestProbeOverLengthNoCalibration(t *testing.T) {
 }
 
 func TestProbeOverLengthMarkerEmbedded(t *testing.T) {
-	p := &probeServer{
-		calibrationBaseline: 10,
-		calibrationObserved: 1034,
-		overLength:          "both",
+	tests := []struct {
+		name         string
+		markerFormat string
+		wantOverLen  string
+	}{
+		{"markers_space_separated", "", "accepted_whole"},
+		{"markers_with_surrounding_text", "embedded", "accepted_whole"},
+		{"only_tail_marker", "embedded-only-tail", "markers_missing"},
 	}
-	srv, a := newProbeServer(p)
-	defer srv.Close()
 
-	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
-		AssumedContextLen: 131072,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.OverLength != "accepted_whole" {
-		t.Errorf("OverLength: got %q, want accepted_whole (markers without delimiters)", rec.OverLength)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &probeServer{
+				calibrationBaseline: 10,
+				calibrationObserved: 1034,
+				overLength:          "both",
+				markerFormat:        tt.markerFormat,
+			}
+			srv, a := newProbeServer(p)
+			defer srv.Close()
+
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.OverLength != tt.wantOverLen {
+				t.Errorf("OverLength: got %q, want %q", rec.OverLength, tt.wantOverLen)
+			}
+		})
 	}
 }
 

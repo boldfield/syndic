@@ -90,12 +90,23 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	resolver := config.NewEnvFileResolver(secrets)
 	adapter := openai.New(*endpointProfile, resolver)
 
+	// Resolve assumed context length: --context-tokens, then participant context_tokens, else 0
+	assumedContextLen := *contextTokens
+	if assumedContextLen == 0 {
+		for _, p := range r.Participants {
+			if p.Endpoint == *endpointName && p.Model == *modelName && p.ContextTokens != nil {
+				assumedContextLen = *p.ContextTokens
+				break
+			}
+		}
+	}
+
 	// Build probe options
 	probeOpts := openai.ProbeOptions{
 		Timeout:            60 * time.Second,
 		DisableOverLength:  *skipOverLength,
 		DisableCalibration: *skipCalibration,
-		AssumedContextLen:  *contextTokens,
+		AssumedContextLen:  assumedContextLen,
 	}
 
 	// Run probe with per-request timeouts, not an outer deadline

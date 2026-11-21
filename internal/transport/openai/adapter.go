@@ -214,7 +214,7 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.
 	opts := ProbeOptions{
 		Timeout:           60 * time.Second,
 		DisableOverLength: false,
-		AssumedContextLen: 131072,
+		AssumedContextLen: 0,
 	}
 	return a.ProbeWithOptions(ctx, endpoint, model, opts)
 }
@@ -1008,27 +1008,30 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
-// classifyRejectionError classifies an HTTP error response as either context-length or other rejection.
+// classifyRejectionError classifies an HTTP error response and returns both the classification and the rule.
 // Context-length errors are status 400/413 with specific error messages indicating token limit exceeded.
-func classifyRejectionError(statusCode int, body []byte) string {
+// Returns (classification, rule).
+func classifyRejectionError(statusCode int, body []byte) (string, string) {
 	if statusCode == 401 || statusCode == 403 {
-		return "rejected:other"
+		return "rejected:other", "authentication error"
 	}
 	if statusCode == 404 || statusCode == 429 {
-		return "rejected:other"
+		return "rejected:other", "not found or rate limited"
 	}
 	if statusCode == 400 || statusCode == 413 {
-		bodyStr := string(body)
+		bodyStr := strings.ToLower(string(body))
+		// Check for explicit context-length or token-limit signals
 		if strings.Contains(bodyStr, "context_length_exceeded") ||
-			strings.Contains(bodyStr, "maximum context length") {
-			return "rejected:context"
+			strings.Contains(bodyStr, "maximum context length") ||
+			strings.Contains(bodyStr, "token limit exceeded") {
+			return "rejected:context", "matches context_length_exceeded, maximum context length, or token limit exceeded (case-insensitive)"
 		}
-		return "rejected:other"
+		return "rejected:other", "400 or 413 without explicit context-length signal"
 	}
 	if statusCode >= 500 && statusCode < 600 {
-		return "rejected:other"
+		return "rejected:other", "server error"
 	}
-	return "rejected:other"
+	return "rejected:other", "unknown error"
 }
 
 func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
@@ -1124,8 +1127,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 
 	// Classify rejection errors (4xx/5xx)
 	if httpResp.StatusCode != 0 && (httpResp.StatusCode < 200 || httpResp.StatusCode >= 300) {
-		outcome := classifyRejectionError(httpResp.StatusCode, body)
+		outcome, rule := classifyRejectionError(httpResp.StatusCode, body)
 		record.OverLength = outcome
+		record.OverLengthClassifier = rule
 		return
 	}
 

@@ -1390,7 +1390,9 @@ func TestProbeSecretScrubbing(t *testing.T) {
 	resolver := &mockResolver{secret: secret}
 	adapter := New(profile, resolver)
 
-	record, err := adapter.Probe(context.Background(), "test", "test-model")
+	record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1663,7 +1665,9 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 			}
 
 			adapter := New(profile, &mockResolver{})
-			record, err := adapter.Probe(context.Background(), "test", "test-model")
+			record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
