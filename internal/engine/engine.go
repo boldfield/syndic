@@ -445,15 +445,18 @@ func (e *Engine) Start() error {
 	}
 
 	startedAt := e.clock.Now().UTC()
-	built, err := manifest.Build(manifest.Input{
-		Store:          e.store,
-		Roster:         roster,
-		RosterPath:     path,
-		RosterFile:     file,
-		EngineVersion:  e.version,
-		StartedAt:      startedAt,
-		AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
-	})
+	build := func() (manifest.Built, error) {
+		return manifest.Build(manifest.Input{
+			Store:          e.store,
+			Roster:         roster,
+			RosterPath:     path,
+			RosterFile:     file,
+			EngineVersion:  e.version,
+			StartedAt:      startedAt,
+			AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
+		})
+	}
+	built, err := build()
 	if err != nil {
 		return fmt.Errorf("engine: build manifest: %w", err)
 	}
@@ -516,20 +519,31 @@ func (e *Engine) Start() error {
 			return fmt.Errorf("engine: run opened: %w", err)
 		}
 	}
-	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions)
+	// Reads during probing report records as they stand: after each probe
+	// that journaled a usable record the readable manifest is built again,
+	// and each settled failure shows as its probe_failed detail. Nothing is
+	// frozen until Phase 2.
+	current := built
+	progress := func(res probeResult, wrote bool) {
+		if wrote {
+			rebuilt, err := build()
+			if err != nil {
+				log.Printf("engine: build manifest during probes: %v", err)
+			} else {
+				current = rebuilt
+			}
+		}
+		readable := withProbeFailures(current, res.failed)
+		e.mu.Lock()
+		e.built = readable
+		e.mu.Unlock()
+	}
+	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions, progress)
 	e.mu.Lock()
 	if probed.wrote {
 		// The records the probes wrote are in the journal; build the manifest
 		// again so it freezes them.
-		rebuilt, err := manifest.Build(manifest.Input{
-			Store:          e.store,
-			Roster:         roster,
-			RosterPath:     path,
-			RosterFile:     file,
-			EngineVersion:  e.version,
-			StartedAt:      startedAt,
-			AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
-		})
+		rebuilt, err := build()
 		if err != nil {
 			// Probing must not stop the engine: freeze the state from before.
 			log.Printf("engine: build manifest after probes: %v", err)
@@ -537,12 +551,7 @@ func (e *Engine) Start() error {
 			built = rebuilt
 		}
 	}
-	for id, reason := range probed.failed {
-		if mp, ok := built.Participants[id]; ok && !mp.Usable {
-			mp.Detail = probeFailedPrefix + reason
-			built.Participants[id] = mp
-		}
-	}
+	built = withProbeFailures(built, probed.failed)
 	unprobed = unprobed[:0]
 	for _, p := range roster.Participants {
 		if !built.Participants[p.ID].Usable {

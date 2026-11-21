@@ -86,8 +86,11 @@ type probeResult struct {
 // runStartupProbes probes every participant and referee identity with no
 // usable record that the endpoint's billing and the recovered holds allow. It
 // never returns an error: every failure is the participant's probe_failed
-// detail. built is the manifest state before any probe.
-func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, built manifest.Built, adapters map[string]transport.Adapter, versions map[string]string) probeResult {
+// detail. built is the manifest state before any probe. progress, when set,
+// is called after each target is settled with the result so far and whether
+// that target journaled a usable record, so reads during probing can report
+// records as they stand.
+func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, built manifest.Built, adapters map[string]transport.Adapter, versions map[string]string, progress func(res probeResult, wrote bool)) probeResult {
 	res := probeResult{failed: map[string]string{}}
 	if e.noStartupProbes {
 		return res
@@ -107,11 +110,15 @@ func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, bu
 	slots := map[string]int{}
 	for i := range targets {
 		t := &targets[i]
+		wrote := false
 		if orphaned || blocked[t.pool] {
 			e.finishBlocked(t, &res)
-			continue
+		} else {
+			wrote = e.probeOne(ctx, roster, t, slots, blocked, &res)
 		}
-		e.probeOne(ctx, roster, t, slots, blocked, &res)
+		if progress != nil {
+			progress(res, wrote)
+		}
 	}
 	return res
 }
@@ -403,8 +410,9 @@ func (d *probeDispatch) settle(err error) (held bool) {
 	return hold
 }
 
-// probeOne runs one probe and records what came of it.
-func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTarget, slots map[string]int, blocked map[string]bool, res *probeResult) {
+// probeOne runs one probe and records what came of it. It reports whether a
+// usable record was journaled.
+func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTarget, slots map[string]int, blocked map[string]bool, res *probeResult) bool {
 	for _, label := range t.labels() {
 		e.emitProbe(wire.EventKindProbeStarted, wire.EvProbeStarted{Participant: label})
 	}
@@ -424,7 +432,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 
 	if t.adapter == nil {
 		fail(probeReasonUnreachable)
-		return
+		return false
 	}
 	limit, _ := roster.PoolFor(t.pool)
 	if limit < 1 {
@@ -449,7 +457,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	incomplete := errors.Is(err, transport.ErrIncompleteProbe)
 	if err != nil && !incomplete {
 		fail(probeFailureReason(err, held))
-		return
+		return false
 	}
 
 	// A probe that captured no reported model or no working max-tokens field
@@ -461,7 +469,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	}
 	if incomplete || record.ReportedModel == "" || record.MaxTokensField == "" || expErr != nil {
 		fail(probeReasonIncomplete)
-		return
+		return false
 	}
 
 	pm, err := evidence.NewProbeManifest(exp, t.endpoint, t.model, record.AdapterVersion, record.Calibration)
@@ -489,9 +497,10 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 		// Nothing was committed, so the identity stays unprobed.
 		log.Printf("engine: record probe %s/%s: %v", t.endpoint.Name, t.model, err)
 		fail(probeReasonIncomplete)
-		return
+		return false
 	}
 	res.wrote = true
+	return true
 }
 
 // writeProbeEvidence redacts the record into its export and writes the raw
@@ -576,4 +585,22 @@ func probeTimeoutOf(d time.Duration) time.Duration {
 		return probeTimeout
 	}
 	return d
+}
+
+// withProbeFailures returns b with each participant that failed its start-time
+// probe and has no usable record carrying its probe_failed detail. b is not
+// modified, since readers may hold it.
+func withProbeFailures(b manifest.Built, failed map[string]string) manifest.Built {
+	if len(failed) == 0 {
+		return b
+	}
+	parts := make(map[string]manifest.Participant, len(b.Participants))
+	for id, mp := range b.Participants {
+		if reason, ok := failed[id]; ok && !mp.Usable {
+			mp.Detail = probeFailedPrefix + reason
+		}
+		parts[id] = mp
+	}
+	b.Participants = parts
+	return b
 }

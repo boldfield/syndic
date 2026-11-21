@@ -812,6 +812,55 @@ func TestStartupProbeHelloAndSubmitDuringProbing(t *testing.T) {
 	}
 }
 
+// TestStartupProbeStatusDuringLaterProbe reads status while the reviewer is
+// being probed: the author's probe has settled, so its record is reported as
+// it stands, usable after a success and probe_failed after a failure, before
+// anything is frozen.
+func TestStartupProbeStatusDuringLaterProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		fail       error
+		wantUsable bool
+	}{
+		{name: "earlier probe succeeded", wantUsable: true},
+		{name: "earlier probe failed", fail: transport.ErrUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+			env.spies["author"].fail = tc.fail
+			eng := env.newEngine(nil)
+
+			var authorState, authorDetail, reviewerState, helloState string
+			env.spies["reviewer"].onProbe = func(string) {
+				helloState = eng.Hello().State
+				authorState, authorDetail = participantDetail(t, eng, "author")
+				reviewerState, _ = participantDetail(t, eng, "reviewer")
+			}
+			if err := eng.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+
+			if helloState != "probing" {
+				t.Fatalf("hello during the reviewer probe = %q, want probing", helloState)
+			}
+			if reviewerState != engine.ParticipantUnprobed {
+				t.Fatalf("reviewer during its own probe = %q, want unprobed", reviewerState)
+			}
+			if tc.wantUsable {
+				if authorState == engine.ParticipantUnprobed || authorDetail != "" {
+					t.Fatalf("author after its probe succeeded = %q %q, want usable", authorState, authorDetail)
+				}
+			} else if authorState != engine.ParticipantUnprobed || !strings.HasPrefix(authorDetail, "probe_failed:") {
+				t.Fatalf("author after its probe failed = %q %q, want unprobed probe_failed", authorState, authorDetail)
+			}
+			if state, _ := participantDetail(t, eng, "reviewer"); state == engine.ParticipantUnprobed {
+				t.Fatal("reviewer unprobed after its probe succeeded")
+			}
+		})
+	}
+}
+
 // TestStartupProbeEvidence covers the raw record and export a start-time
 // probe writes, as `syndic probe` does: an incomplete probe still writes both
 // for diagnosis, and evidence that cannot be written, or a raw dir inside a
