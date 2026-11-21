@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
@@ -312,10 +314,66 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 		return e.probeFinished(req.participantID, "probe_failed:incomplete", "")
 	}
 
-	// Probe succeeded - emit probe_finished
-	// The probe result record is provided by the adapter and will be used
-	// during manifest finalization to update participant usability
+	// Probe succeeded - store the result and emit probe_finished
 	return e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Get adapter version for fingerprinting
+		var adapterVersion string
+		for _, p := range roster.Participants {
+			if p.ID == req.participantID && p.Endpoint == req.endpoint.Name {
+				adapter := e.adapters[req.participantID]
+				if adapter != nil {
+					// Try to get version from the adapter
+					adapterVersion = record.AdapterVersion
+				}
+				break
+			}
+		}
+
+		// Create and store the probe manifest
+		probeManifest, err := evidence.NewProbeManifest(
+			evidence.Export{
+				EndpointName:             req.endpoint.Name,
+				Model:                    req.model,
+				Identity:                 record.Identity,
+				ReportedModel:            record.ReportedModel,
+				EligibleRequiredReviewer: record.EligibleRequiredReviewer,
+				ObservedAt:               time.Now().UTC(),
+				ContextBound:             record.ContextBound,
+				OutputBound:              record.OutputBound,
+			},
+			req.endpoint,
+			req.model,
+			adapterVersion,
+			record.Calibration,
+		)
+		if err != nil {
+			// If we can't create the manifest, still emit probe_finished but don't fail startup
+			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+				Participant: req.participantID,
+				Outcome:     "probe_failed:incomplete",
+			})
+			return nil
+		}
+
+		manifestJSON, err := json.Marshal(probeManifest)
+		if err != nil {
+			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+				Participant: req.participantID,
+				Outcome:     "probe_failed:incomplete",
+			})
+			return nil
+		}
+
+		// Store the probe run
+		if _, _, err := tx.CreateProbeRun(manifestJSON); err != nil {
+			// If we can't store the probe result, still emit probe_finished
+			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+				Participant: req.participantID,
+				Outcome:     "probed",
+			})
+			return nil
+		}
+
 		// Emit probe result event
 		return emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
 			Participant: req.participantID,
