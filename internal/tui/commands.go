@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -19,6 +20,7 @@ var commands = map[string]commandHandler{
 	"quit":         cmdQuit,
 	"resume":       cmdResume,
 	"mode":         cmdMode,
+	"quick":        cmdQuick,
 	"participants": cmdParticipants,
 	"cancel":       cmdCancel,
 	"why":          cmdWhy,
@@ -31,6 +33,7 @@ var commands = map[string]commandHandler{
 // commandHelp is one line per command, in the order /help lists them.
 var commandHelp = []string{
 	"/mode <preset>            use the preset for the next submit only",
+	"/quick <name>|off         select or deselect a quick profile for this process",
 	"/participants             show the participants tab",
 	"/cancel                   cancel the open turn",
 	"/why                      why the current or last turn ended, with the detail",
@@ -106,6 +109,37 @@ func cmdMode(a *App, args []string) tea.Cmd {
 		}
 	}
 	a.refusal = fmt.Sprintf("unknown preset %q; presets: %s", args[0], strings.Join(known, ", "))
+	return nil
+}
+
+func cmdQuick(a *App, args []string) tea.Cmd {
+	if len(args) != 1 {
+		a.refusal = "usage: /quick <name>|off"
+		return nil
+	}
+	name := args[0]
+	if name != "off" {
+		if a.state.Status == nil {
+			a.refusal = "engine: not connected"
+			return nil
+		}
+		names := make([]string, 0, len(a.state.Status.QuickProfiles))
+		for _, qp := range a.state.Status.QuickProfiles {
+			names = append(names, qp.Name)
+		}
+		sort.Strings(names)
+		if !slices.Contains(names, name) {
+			a.refusal = fmt.Sprintf("unknown quick profile %q; profiles: %s", name, strings.Join(names, ", "))
+			return nil
+		}
+	}
+	a.quickSelection.Override = &name
+	a.updateQuickProfileState()
+	if name == "off" {
+		a.refusal = "quick profile off for this process"
+	} else {
+		a.refusal = "quick profile " + name + " selected for this process"
+	}
 	return nil
 }
 
@@ -193,6 +227,14 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 	}
 }
 
+// approvalPrompt is a quick profile selection waiting for yes or no; the panel shows what it does.
+type approvalPrompt struct {
+	filePath         string
+	profileName      string
+	fileSHA256       string
+	definitionSHA256 string
+}
+
 // releasePrompt is a /release waiting for its reason.
 type releasePrompt struct {
 	pool      string
@@ -262,6 +304,41 @@ func (a *App) confirmEnter() tea.Cmd {
 	}
 }
 
+// cancelApproval drops a pending approval prompt without approving.
+func (a *App) cancelApproval(why string) {
+	a.approval = nil
+	a.panel = nil
+	a.input.Prompt = defaultPrompt
+	a.input.SetValue("")
+	a.refusal = why
+}
+
+// approvalYes records the approval and puts the selection into effect.
+func (a *App) approvalYes() tea.Cmd {
+	ap := a.approval
+	a.cancelApproval("")
+	qs := a.quickSelection
+	err := qs.approve(ap.definitionSHA256)
+	if err != nil {
+		qs.declined[qs.stateKey(ap.definitionSHA256)] = true // do not ask again for what cannot be saved
+	}
+	a.updateQuickProfileState()
+	if err != nil {
+		a.refusal = fmt.Sprintf("quick: cannot save approval: %v", err)
+	} else {
+		a.refusal = fmt.Sprintf("quick profile %s approved for this project", ap.profileName)
+	}
+	return nil
+}
+
+// approvalNo leaves the selection unapproved; it is not asked again in this process for this state.
+func (a *App) approvalNo() tea.Cmd {
+	ap := a.approval
+	a.cancelApproval("quick profile not approved; it will not be sent")
+	a.quickSelection.declined[a.quickSelection.stateKey(ap.definitionSHA256)] = true
+	return nil
+}
+
 // whyMsg carries the turn record /why asked for.
 type whyMsg struct {
 	gen  int
@@ -298,6 +375,9 @@ func whyFetch(gen int, cl *client.Client, id string) tea.Msg {
 func (a *App) onWhy(msg whyMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != a.gen {
 		return a, nil
+	}
+	if a.approval != nil {
+		return a, nil // the approval prompt owns the panel
 	}
 	if msg.err != nil {
 		a.refusal = "why: " + formatRefusal(msg.err)

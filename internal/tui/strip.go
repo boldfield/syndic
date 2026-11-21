@@ -46,9 +46,13 @@ func renderStrip(s State, width int, now time.Time) string {
 		segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
 	}
 
-	// [quick:<name>] when one governs
+	// [quick:<name>] or [quick:<name> (mode set by /mode)] when one governs
 	if ti.QuickProfile != nil && *ti.QuickProfile != "" {
-		segments = append(segments, fmt.Sprintf("[quick:%s]", *ti.QuickProfile))
+		if ti.ModeOverride {
+			segments = append(segments, fmt.Sprintf("[quick:%s (mode set by /mode)]", *ti.QuickProfile))
+		} else {
+			segments = append(segments, fmt.Sprintf("[quick:%s]", *ti.QuickProfile))
+		}
 	}
 
 	// [turn state]
@@ -147,6 +151,9 @@ func renderBanners(s State) []string {
 
 	if s.UnapprovedProfile != nil && *s.UnapprovedProfile != "" {
 		banners = append(banners, fmt.Sprintf("quick: unapproved %s", *s.UnapprovedProfile))
+	}
+	if s.QuickInvalid != "" {
+		banners = append(banners, s.QuickInvalid)
 	}
 
 	return banners

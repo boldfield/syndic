@@ -54,6 +54,7 @@ type TurnInfo struct {
 	State           string
 	Preset          string
 	QuickProfile    *string
+	ModeOverride    bool // true if /mode set the preset for this turn
 	SubmittedAt     time.Time
 	SubmitSeq       int64         // journal seq of turn_submitted; orders turns submitted within one second
 	TurnDeadline    *time.Time    // submit time plus DeadlineDur
@@ -151,6 +152,8 @@ type State struct {
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
 	UnapprovedProfile   *string
 	NextPreset          string // set by /mode: the preset of the next submit only
+	QuickInvalid        string // "quick: invalid <path>" when the project file cannot be used
+	ModeSubmissionID    string // submission id of the last submit that carried a /mode preset
 }
 
 // NewState returns a fresh State.
@@ -200,6 +203,7 @@ func apply(s State, f wire.Frame) State {
 				State:           "submitted",
 				Preset:          body.Preset,
 				QuickProfile:    body.QuickProfile,
+				ModeOverride:    s.ModeSubmissionID != "" && s.ModeSubmissionID == body.SubmissionID,
 				SubmittedAt:     frameTime,
 				SubmitSeq:       f.Seq,
 				EstimatedTokens: body.EstimatedTokens,

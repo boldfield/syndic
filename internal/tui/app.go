@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -10,6 +13,7 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 )
 
 type tab int
@@ -39,9 +43,10 @@ type App struct {
 	state         State
 	tab           tab
 	input         textinput.Model
-	refusal       string         // the one-line message under the body: a refusal, or what a command did
-	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
+	refusal       string          // the one-line message under the body: a refusal, or what a command did
+	panel         []string        // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	approval      *approvalPrompt // a quick profile approval pending yes/no
+	confirm       *releasePrompt  // a /release waiting for its reason; it takes the next line typed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
@@ -50,8 +55,10 @@ type App struct {
 	onEvent              func(wire.Frame)
 
 	content           *ContentCache
-	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
-	answerScrollRow   int   // first visible line of the answer tab
+	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection    *QuickSelection // quick profile state
+	workDir           string          // where the quick profile search starts; the process directory when empty
+	answerScrollRow   int             // first visible line of the answer tab
 	candidateIDByTurn map[string]string
 	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons   map[string]string           // the reason of each override event
@@ -83,6 +90,11 @@ func WithEventObserver(f func(wire.Frame)) Option {
 	return func(a *App) { a.onEvent = f }
 }
 
+// WithWorkDir starts the quick profile search in dir rather than the process's working directory.
+func WithWorkDir(dir string) Option {
+	return func(a *App) { a.workDir = dir }
+}
+
 // NewApp returns an App that talks to the engine socket at socketPath.
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
@@ -106,6 +118,22 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	for _, o := range opts {
 		o(a)
 	}
+	var errs []error
+	if a.workDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("quick: cannot find the working directory: %w", err))
+		}
+		a.workDir = wd
+	}
+	qs, err := NewQuickSelection(a.workDir)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		a.refusal = errors.Join(errs...).Error()
+	}
+	a.quickSelection = qs
 	return a
 }
 
@@ -321,6 +349,18 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.approval != nil {
+		// An approval owns the keyboard: only y/n, esc and ctrl+c.
+		switch msg.String() {
+		case "y", "Y":
+			return a, a.approvalYes()
+		case "n", "N":
+			return a, a.approvalNo()
+		case "esc", "ctrl+c":
+			return a, a.approvalNo()
+		}
+		return a, nil
+	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
 		switch msg.String() {
@@ -434,7 +474,16 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset)
+	var profiles []wire.QuickProfile
+	if a.state.Status != nil {
+		profiles = a.state.Status.QuickProfiles
+	}
+	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
+	id := uuid.NewString()
+	if a.state.NextPreset != "" {
+		a.state.ModeSubmissionID = id
+	}
+	return submitCmd(a.ctx, a.cl, id, line, a.state.NextPreset, a.quickSelection.selected(profiles))
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -491,6 +540,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.cl = msg.cl
 	a.state.Hello = msg.cl.Hello()
 	a.state = MergeStatus(a.state, &msg.status)
+	a.updateQuickProfileState()
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
@@ -506,6 +556,81 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
+}
+
+// updateQuickProfileState sets the quick profile banners from the project
+// selection and the roster's profiles, and opens the approval prompt when the
+// operator has not yet answered for this state.
+func (a *App) updateQuickProfileState() {
+	a.state.UnapprovedProfile, a.state.QuickInvalid = nil, ""
+	qs := a.quickSelection
+	if qs.Override != nil {
+		return // typed by the operator: no approval, no banner
+	}
+	if qs.Invalid != "" {
+		a.state.QuickInvalid = qs.Invalid
+		return
+	}
+	if qs.ProjectProfile == "" || a.state.Status == nil {
+		return
+	}
+	var def *wire.QuickProfile
+	for i := range a.state.Status.QuickProfiles {
+		if a.state.Status.QuickProfiles[i].Name == qs.ProjectProfile {
+			def = &a.state.Status.QuickProfiles[i]
+		}
+	}
+	if def == nil {
+		if a.approval != nil {
+			a.cancelApproval("") // an absent profile cannot be approved
+		}
+		msg := qs.ProjectProfile + " (engine has no such profile)"
+		a.state.UnapprovedProfile = &msg
+		return
+	}
+	if qs.approvedFor(def.DefinitionSHA256) {
+		if a.approval != nil {
+			a.cancelApproval("")
+		}
+		return
+	}
+	a.state.UnapprovedProfile = &qs.ProjectProfile
+	if qs.declined[qs.stateKey(def.DefinitionSHA256)] {
+		return
+	}
+	a.requestApproval(*def)
+}
+
+// requestApproval shows the file, the profile and its effect and asks yes or no.
+func (a *App) requestApproval(def wire.QuickProfile) {
+	qs := a.quickSelection
+	if a.confirm != nil || (a.approval != nil && a.approval.definitionSHA256 == def.DefinitionSHA256 && a.approval.fileSHA256 == qs.ProjectFileSHA) {
+		return
+	}
+	a.approval = &approvalPrompt{
+		filePath:         qs.ProjectFilePath,
+		profileName:      qs.ProjectProfile,
+		fileSHA256:       qs.ProjectFileSHA,
+		definitionSHA256: def.DefinitionSHA256,
+	}
+	budgets := "none"
+	if def.Budgets != nil {
+		if b, err := json.Marshal(def.Budgets); err == nil {
+			budgets = string(b)
+		}
+	}
+	a.panel = []string{
+		"Project file: " + qs.ProjectFilePath,
+		fmt.Sprintf("selects quick profile %q:", qs.ProjectProfile),
+		"",
+		"  preset:  " + def.Preset,
+		fmt.Sprintf("  drafts:  %v", def.Drafts),
+		"  budgets: " + budgets,
+		"",
+		"Approve this selection? (y/n)",
+	}
+	a.input.Prompt = ""
+	a.refusal = ""
 }
 
 // onFrame applies a frame. Any stream error, including the engine's stopping
@@ -621,6 +746,7 @@ func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.state = MergeStatus(a.state, &msg.status)
+	a.updateQuickProfileState()
 	a.ensureTurnInfo()
 	if a.statusDirty {
 		a.statusDirty = false
