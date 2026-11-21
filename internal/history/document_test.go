@@ -29,6 +29,12 @@ var goldens = []struct {
 	hash  string
 }{
 	{
+		name:  "empty",
+		turns: nil,
+		bytes: "syndic-history/v1\n",
+		hash:  "032325920ed3077e386903e2fc66a91810cce8b5dd8a53463eec518b799f4ee7",
+	},
+	{
 		name:  "simple",
 		turns: []Turn{{ID: "t1", State: "approved", Input: []byte("hi"), Answer: []byte("yo"), Label: "reviewed"}},
 		bytes: "syndic-history/v1\nturn 2\nt1\nstate 8\napproved\ninput 2\nhi\nanswer 2\nyo\nlabel 8\nreviewed\n",
@@ -101,7 +107,7 @@ func TestParseRoundtripIsByteExact(t *testing.T) {
 			}
 		})
 	}
-	d := build(t, goldens[1].turns...)
+	d := build(t, goldens[2].turns...)
 	p, _ := Parse(d.Bytes())
 	tr := p.Included()[0]
 	if !bytes.Equal(tr.Input, []byte("a\n\nb\n")) || !bytes.Equal(tr.Answer, []byte("\nanswer 1\nx\n")) {
@@ -494,7 +500,7 @@ func TestRenderChangeLinesInjective(t *testing.T) {
 }
 
 func TestRenderForReviewer(t *testing.T) {
-	d := build(t, goldens[1].turns...)
+	d := build(t, goldens[2].turns...)
 	out, err := d.RenderForReviewer(bytes.NewReader(bytes.Repeat([]byte{0xab}, 16)))
 	if err != nil {
 		t.Fatal(err)
