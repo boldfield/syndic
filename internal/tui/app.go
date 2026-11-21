@@ -505,12 +505,16 @@ func (a *App) enter() tea.Cmd {
 
 // submitInput sends the given input as a submit request.
 func (a *App) submitInput(line string) tea.Cmd {
+	id := uuid.NewString()
+	return a.submitInputWithID(line, id)
+}
+
+func (a *App) submitInputWithID(line string, id string) tea.Cmd {
 	var profiles []wire.QuickProfile
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
 	}
 	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
-	id := uuid.NewString()
 	if a.state.NextPreset != "" {
 		a.state.ModeSubmissionID = id
 	}
@@ -549,10 +553,8 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		// Check if this is a provisional error
 		var we *wire.Error
 		if errors.As(msg.err, &we) && we.Code == wire.ErrorCodeProvisional {
-			if a.state.Status != nil {
-				a.showProvisionalPrompt(a.state.Status)
-				return nil
-			}
+			a.showProvisionalPrompt(a.state.Status)
+			return nil
 		}
 		a.refusal = msg.refusal
 		return nil

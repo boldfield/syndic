@@ -3,6 +3,7 @@ package tui
 import (
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 )
 
 // provisionalPrompt is a provisional deadline confirmation waiting for yes or no.
@@ -10,15 +11,15 @@ type provisionalPrompt struct {
 	rosterPath string
 }
 
-// provisionalYes resends the submit with allow_provisional: true.
+// provisionalYes resends the submit with allow_provisional: true and a new submission_id.
 func (a *App) provisionalYes() tea.Cmd {
 	a.provisional = nil
 	a.allowProvisional = true
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
-	a.input.SetValue("")
 	a.refusal = ""
-	return a.submitInput(a.lastSubmitInput)
+	id := uuid.New().String()
+	return a.submitInputWithID(a.lastSubmitInput, id)
 }
 
 // provisionalNo cancels the submit without sending anything; keeps the input.
@@ -41,21 +42,16 @@ func (a *App) showProvisionalPrompt(status *wire.StatusReply) {
 	lines := []string{
 		"Provisional deadlines are in effect for this engine.",
 	}
-	if status.RosterPath != "" {
+	if status != nil && status.RosterPath != "" {
 		lines = append(lines, "Configured at: "+status.RosterPath)
+	} else if status == nil {
+		lines = []string{
+			"Provisional deadlines are in effect.",
+		}
 	}
 	lines = append(lines, "", "Type y to proceed with this submit, or n/esc to cancel.")
 	a.provisional = pp
 	a.panel = lines
 	a.input.Prompt = provisionalDeadlinePrompt
 	a.refusal = ""
-}
-
-// cancelProvisional drops the pending provisional prompt without sending.
-func (a *App) cancelProvisional(why string) {
-	a.provisional = nil
-	a.panel = nil
-	a.input.Prompt = defaultPrompt
-	a.input.SetValue("")
-	a.refusal = why
 }
