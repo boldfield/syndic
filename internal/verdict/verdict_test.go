@@ -326,6 +326,134 @@ func TestParseVerdicts(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:             "VerdictV2Approve",
+			text:             fake.VerdictV2Approve("hash123", "attempt1", 0),
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if r.Verdict.EnvelopeVersion != "v2" {
+					t.Errorf("expected envelope version v2, got %s", r.Verdict.EnvelopeVersion)
+				}
+				if r.Verdict.Round != 0 {
+					t.Errorf("expected round 0, got %d", r.Verdict.Round)
+				}
+			},
+		},
+		{
+			name:             "VerdictV2Block",
+			text:             fake.VerdictV2Block("hash123", "attempt1", 1, "b1", "high", "evidence text", "fix it", "reason text"),
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    Valid,
+			expectedDecision: "block",
+			checks: func(t *testing.T, r Result) {
+				if r.Verdict.EnvelopeVersion != "v2" {
+					t.Errorf("expected envelope version v2, got %s", r.Verdict.EnvelopeVersion)
+				}
+				if r.Verdict.Round != 1 {
+					t.Errorf("expected round 1, got %d", r.Verdict.Round)
+				}
+				if r.Verdict.Severity != "high" {
+					t.Errorf("expected severity high, got %s", r.Verdict.Severity)
+				}
+			},
+		},
+		{
+			name:            "VerdictV2ApproveMaintainedBlock",
+			text:            fake.VerdictV2ApproveMaintainedBlock("hash123", "attempt1", 1),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:             "VerdictV2WithdrawnBlock",
+			text:             fake.VerdictV2WithdrawnBlock("hash123", "attempt1", 1),
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if len(r.Verdict.BlockStates) != 1 {
+					t.Errorf("expected 1 block state, got %d", len(r.Verdict.BlockStates))
+				}
+				if r.Verdict.BlockStates[0].BlockID != "b1" {
+					t.Errorf("expected block ID b1, got %s", r.Verdict.BlockStates[0].BlockID)
+				}
+				if r.Verdict.BlockStates[0].State != "withdrawn" {
+					t.Errorf("expected block state withdrawn, got %s", r.Verdict.BlockStates[0].State)
+				}
+			},
+		},
+		{
+			name:            "VerdictV2MissingRound",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "VerdictV2InvalidRound",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: notanumber", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "VerdictV2NegativeRound",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: -1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "VerdictV2InvalidBlockState",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 0", "block-state: b1 unknown", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "VerdictV2MalformedBlockState",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 0", "block-state: b1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:            "VerdictV2MultipleBlockStates",
+			text:            fake.VerdictV2WithBlockStates("hash123", "attempt1", 1, []string{"block-state: b1 withdrawn", "block-state: b2 maintained"}),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "approve verdict cannot have maintained blocks") {
+					t.Errorf("expected error about approve with maintained blocks, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:             "VerdictV2AllWithdrawn",
+			text:             fake.VerdictV2WithBlockStates("hash123", "attempt1", 1, []string{"block-state: b1 withdrawn", "block-state: b2 withdrawn"}),
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if len(r.Verdict.BlockStates) != 2 {
+					t.Errorf("expected 2 block states, got %d", len(r.Verdict.BlockStates))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

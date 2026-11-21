@@ -7,16 +7,18 @@ import (
 )
 
 var (
-	fieldNameRegex = regexp.MustCompile(`^[a-z_]+: `)
+	fieldNameRegex = regexp.MustCompile(`^[a-z_-]+: `)
 	validFields    = map[string]bool{
-		"candidate": true,
-		"attempt":   true,
-		"verdict":   true,
-		"severity":  true,
-		"block_id":  true,
-		"evidence":  true,
-		"remedy":    true,
-		"reason":    true,
+		"candidate":   true,
+		"attempt":     true,
+		"verdict":     true,
+		"severity":    true,
+		"block_id":    true,
+		"evidence":    true,
+		"remedy":      true,
+		"reason":      true,
+		"round":       true,
+		"block-state": true,
 	}
 )
 
@@ -29,12 +31,20 @@ const (
 	Malformed       Classification = "malformed"
 )
 
+type BlockState struct {
+	BlockID string
+	State   string // "withdrawn" or "maintained"
+}
+
 type Verdict struct {
 	Candidate, Attempt string
 	Decision           string
 	Severity, BlockID  string
 	Evidence, Remedy   string
 	Reason             string
+	Round              int          // 0 for v1, >= 0 for v2
+	BlockStates        []BlockState // only for v2
+	EnvelopeVersion    string       // "v1" or "v2"
 }
 
 type Result struct {
@@ -56,12 +66,18 @@ func Parse(text, candidateHash, attemptID string) Result {
 	openIdx := -1
 	closeIdx := -1
 	verdictCount := 0
+	envelopeVersion := ""
 
 	for i, line := range lines {
-		if line == "VERDICT v1" {
+		if line == "VERDICT v1" || line == "VERDICT v2" {
 			if openIdx == -1 {
-				// First VERDICT v1 found
+				// First VERDICT found
 				openIdx = i
+				if line == "VERDICT v1" {
+					envelopeVersion = "v1"
+				} else {
+					envelopeVersion = "v2"
+				}
 			}
 			verdictCount++
 		}
@@ -99,6 +115,7 @@ func Parse(text, candidateHash, attemptID string) Result {
 
 	// Parse the fields
 	fields := make(map[string]string)
+	blockStates := []BlockState{}
 	lastMultilineField := ""
 
 	for _, line := range envelopeLines {
@@ -108,7 +125,7 @@ func Parse(text, candidateHash, attemptID string) Result {
 			name := parts[0]
 			value := parts[1]
 
-			// Check if name is valid (lowercase letters and underscores)
+			// Check if name is valid (lowercase letters, underscores, and hyphens)
 			if !isValidFieldName(name) {
 				return Result{
 					Classification: Malformed,
@@ -118,7 +135,33 @@ func Parse(text, candidateHash, attemptID string) Result {
 				}
 			}
 
-			// Check if field already exists
+			// Handle block-state specially (can appear multiple times)
+			if name == "block-state" {
+				stateParts := strings.SplitN(value, " ", 2)
+				if len(stateParts) != 2 {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        "block-state must have format: block-state: <block_id> <state>",
+					}
+				}
+				blockID := strings.TrimSpace(stateParts[0])
+				state := strings.TrimSpace(stateParts[1])
+				if state != "withdrawn" && state != "maintained" {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        fmt.Sprintf("invalid block-state value: %s (must be 'withdrawn' or 'maintained')", state),
+					}
+				}
+				blockStates = append(blockStates, BlockState{BlockID: blockID, State: state})
+				lastMultilineField = ""
+				continue
+			}
+
+			// Check if field already exists (block-state is handled above)
 			if _, exists := fields[name]; exists {
 				return Result{
 					Classification: Malformed,
@@ -168,6 +211,19 @@ func Parse(text, candidateHash, attemptID string) Result {
 		}
 	}
 
+	// For v2, round is required
+	if envelopeVersion == "v2" {
+		roundStr, exists := fields["round"]
+		if !exists || strings.TrimSpace(roundStr) == "" {
+			return Result{
+				Classification: Malformed,
+				Commentary:     commentary,
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        "missing or empty required field for VERDICT v2: round",
+			}
+		}
+	}
+
 	// Parse verdict value
 	verdict := fields["verdict"]
 	if verdict != "approve" && verdict != "block" && verdict != "approve-with-changes" {
@@ -176,6 +232,37 @@ func Parse(text, candidateHash, attemptID string) Result {
 			Commentary:     commentary,
 			Verdict:        buildPartialVerdict(fields),
 			Problem:        fmt.Sprintf("invalid verdict value: %s", verdict),
+		}
+	}
+
+	// Parse round value for v2
+	var roundValue int
+	if envelopeVersion == "v2" {
+		roundStr := strings.TrimSpace(fields["round"])
+		var err error
+		roundValue, err = parseRound(roundStr)
+		if err != nil {
+			return Result{
+				Classification: Malformed,
+				Commentary:     commentary,
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        fmt.Sprintf("invalid round value: %s", err.Error()),
+			}
+		}
+
+		// For round > 0, block-states must be present (checked later based on actual open blocks)
+		// For now, we validate that if approve is used with any maintained block, it's malformed
+		if verdict == "approve" && len(blockStates) > 0 {
+			for _, bs := range blockStates {
+				if bs.State == "maintained" {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        "approve verdict cannot have maintained blocks",
+					}
+				}
+			}
 		}
 	}
 
@@ -219,23 +306,26 @@ func Parse(text, candidateHash, attemptID string) Result {
 		}
 	}
 
-	// A second VERDICT v1 anywhere in the text is malformed
+	// A second VERDICT anywhere in the text is malformed
 	if verdictCount > 1 {
 		return Result{
 			Classification: Malformed,
 			Commentary:     commentary,
 			Verdict:        buildPartialVerdict(fields),
-			Problem:        "multiple VERDICT v1 lines found",
+			Problem:        "multiple VERDICT envelopes found",
 		}
 	}
 
 	// Build the Verdict struct
 	result := Result{
 		Verdict: Verdict{
-			Candidate: strings.TrimSpace(fields["candidate"]),
-			Attempt:   strings.TrimSpace(fields["attempt"]),
-			Decision:  verdict,
-			Reason:    strings.TrimSpace(fields["reason"]),
+			Candidate:       strings.TrimSpace(fields["candidate"]),
+			Attempt:         strings.TrimSpace(fields["attempt"]),
+			Decision:        verdict,
+			Reason:          strings.TrimSpace(fields["reason"]),
+			EnvelopeVersion: envelopeVersion,
+			Round:           roundValue,
+			BlockStates:     blockStates,
 		},
 		Commentary: commentary,
 	}
@@ -286,4 +376,17 @@ func buildPartialVerdict(fields map[string]string) Verdict {
 		Remedy:    strings.TrimSpace(fields["remedy"]),
 		Reason:    strings.TrimSpace(fields["reason"]),
 	}
+}
+
+// parseRound parses a round string as an integer.
+func parseRound(roundStr string) (int, error) {
+	var round int
+	_, err := fmt.Sscanf(roundStr, "%d", &round)
+	if err != nil {
+		return 0, fmt.Errorf("round must be a valid integer, got %q", roundStr)
+	}
+	if round < 0 {
+		return 0, fmt.Errorf("round must be non-negative, got %d", round)
+	}
+	return round, nil
 }
