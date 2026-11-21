@@ -361,6 +361,7 @@ type AttemptRecord struct {
 	Status                string         `json:"status"`
 	ScrubCount            int            `json:"scrub_count"`
 	TransportStatus       string         `json:"transport_status"`
+	GateError             *string        `json:"gate_error,omitempty"`
 	Usage                 *ReportedUsage `json:"usage,omitempty"`
 	Quarantined           bool           `json:"quarantined,omitempty"`
 }
@@ -373,7 +374,9 @@ type ReportedUsage struct {
 type VerdictRecord struct {
 	ID               string `json:"id"`
 	AttemptID        string `json:"attempt_id"`
+	Participant      string `json:"participant"`
 	Parsed           bool   `json:"parsed"`
+	Reason           string `json:"reason"`
 	ValidationStatus string `json:"validation_status"`
 }
 

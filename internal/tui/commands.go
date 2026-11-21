@@ -178,7 +178,17 @@ func cmdDrafts(a *App, args []string) tea.Cmd {
 }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
-	a.refusal = "commands: /mode <preset> /participants /cancel /why /override <reason> /release <pool> [attempt_id] /drafts on|off /help /quit /resume"
+	a.refusal = "commands:\n" +
+		"  /mode <preset> - set preset for next turn only\n" +
+		"  /participants - switch to participants tab\n" +
+		"  /cancel - cancel current turn\n" +
+		"  /why - show terminal reason and details\n" +
+		"  /override <reason> - override incomplete turn\n" +
+		"  /release <pool> [attempt_id] - release capacity hold\n" +
+		"  /drafts on|off - toggle author draft visibility\n" +
+		"  /quit - detach from engine\n" +
+		"  /resume - reconnect to engine\n" +
+		"  /help - show this help"
 	return nil
 }
 
@@ -215,12 +225,8 @@ func handleReleaseRefusal(err error) string {
 		msg = msg + ": " + *we.Detail
 	}
 	if we.Code == "ambiguous" && len(we.Holds) > 0 {
-		var holds []wire.Hold
-		if err := json.Unmarshal(we.Holds, &holds); err == nil && len(holds) > 0 {
-			var ids []string
-			for _, h := range holds {
-				ids = append(ids, h.AttemptID)
-			}
+		var ids []string
+		if err := json.Unmarshal(we.Holds, &ids); err == nil && len(ids) > 0 {
 			msg = fmt.Sprintf("%s (attempt ids: %s)", msg, strings.Join(ids, ", "))
 		}
 	}
@@ -232,21 +238,27 @@ func formatWhy(turn *wire.TurnReply, reason string) string {
 	msg := fmt.Sprintf("terminal reason: %s", reason)
 
 	if strings.HasPrefix(reason, "budget:") {
-		if turn.Budget.Reserved != nil && turn.Budget.Charged != nil && turn.Budget.Limit != nil {
-			parts := []string{msg}
-			if strings.Contains(reason, "context:") {
-				participant := strings.TrimPrefix(reason, "budget:context:")
-				parts = append(parts, fmt.Sprintf("participant: %s", participant))
-			}
+		parts := []string{msg}
+		if strings.Contains(reason, "context:") {
+			participant := strings.TrimPrefix(reason, "budget:context:")
+			parts = append(parts, fmt.Sprintf("participant: %s", participant))
+		}
+		if turn.Budget.Reserved != nil {
 			parts = append(parts, fmt.Sprintf("reserved: %d", *turn.Budget.Reserved))
+		}
+		if turn.Budget.Charged != nil {
 			parts = append(parts, fmt.Sprintf("charged: %d", *turn.Budget.Charged))
+		}
+		if turn.Budget.Limit != nil {
 			parts = append(parts, fmt.Sprintf("limit: %d", *turn.Budget.Limit))
+		}
+		if len(parts) > 1 {
 			msg = strings.Join(parts, " / ")
 		}
 	} else if strings.HasPrefix(reason, "gate:") {
 		for _, ai := range turn.Attempts {
-			if ai.TransportStatus != "" && ai.TransportStatus != "ok" {
-				msg = fmt.Sprintf("%s: %s", msg, ai.TransportStatus)
+			if ai.GateError != nil && *ai.GateError != "" {
+				msg = fmt.Sprintf("%s: %s", msg, *ai.GateError)
 				break
 			}
 		}
@@ -262,11 +274,19 @@ func formatWhy(turn *wire.TurnReply, reason string) string {
 			}
 		}
 	} else if strings.HasPrefix(reason, "revision_request:") {
-		participant := strings.TrimPrefix(reason, "revision_request:")
-		msg = fmt.Sprintf("%s: %s requested revisions", msg, participant)
+		for _, v := range turn.Verdicts {
+			if strings.Contains(v.Reason, reason) {
+				msg = fmt.Sprintf("%s: %s", msg, v.Reason)
+				break
+			}
+		}
 	} else if strings.HasPrefix(reason, "malformed_twice:") {
-		participant := strings.TrimPrefix(reason, "malformed_twice:")
-		msg = fmt.Sprintf("%s: %s malformed twice", msg, participant)
+		for _, v := range turn.Verdicts {
+			if strings.Contains(v.Reason, "malformed") {
+				msg = fmt.Sprintf("%s: %s", msg, v.Reason)
+				break
+			}
+		}
 	}
 
 	return msg

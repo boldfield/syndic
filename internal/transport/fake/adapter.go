@@ -28,6 +28,7 @@ type Step struct {
 	Status             transport.CompletionStatus
 	NativeFinishReason string
 	TransportStatus    string
+	GateError          *string
 	Identity           transport.ModelIdentity
 	ReportedModel      string
 	Delay              time.Duration

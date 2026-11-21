@@ -163,6 +163,10 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			attemptRecord.TransportStatus = *a.TransportStatus
 		}
 
+		if a.GateError != nil {
+			attemptRecord.GateError = a.GateError
+		}
+
 		if a.Deadline != nil {
 			attemptRecord.Deadline = a.Deadline.Format(time.RFC3339)
 		}
@@ -207,12 +211,20 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 	// Build verdict records. A verdict parsed unless it was malformed: an
 	// approve-with-changes parses but stores no decision, so the stored
 	// decision cannot tell.
+	attemptByID := make(map[string]*journal.AttemptRow)
+	for i := range attempts {
+		attemptByID[attempts[i].ID] = &attempts[i]
+	}
 	for _, v := range verdicts {
 		verdictRecord := wire.VerdictRecord{
 			ID:               v.ID,
 			AttemptID:        v.AttemptID,
 			Parsed:           v.ValidationStatus != string(verdict.Malformed),
 			ValidationStatus: v.ValidationStatus,
+			Reason:           v.Reason,
+		}
+		if attempt, ok := attemptByID[v.AttemptID]; ok {
+			verdictRecord.Participant = attempt.Participant
 		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}
