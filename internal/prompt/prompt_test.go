@@ -646,3 +646,500 @@ func TestDelimiterIsHex(t *testing.T) {
 		t.Errorf("delimiter should be lowercase hex")
 	}
 }
+
+func TestEnvelopeFormatV2(t *testing.T) {
+	if !strings.Contains(EnvelopeFormatV2, "VERDICT v2") {
+		t.Errorf("EnvelopeFormatV2 should contain 'VERDICT v2'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "round:") {
+		t.Errorf("EnvelopeFormatV2 should contain 'round:'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "block-state:") {
+		t.Errorf("EnvelopeFormatV2 should contain 'block-state:'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "approve-with-changes") {
+		t.Errorf("EnvelopeFormatV2 should contain 'approve-with-changes'")
+	}
+}
+
+func TestAuthorRevisionSuccess(t *testing.T) {
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		History: []HistoryTurn{
+			{
+				TurnID: "turn1",
+				State:  "approved",
+				Input:  "Create a document.",
+				Answer: "Here is the document.",
+				Label:  "reviewed",
+			},
+		},
+		Input:             "Now revise it.",
+		PreviousCandidate: "Here is my first attempt.",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "VERDICT v1\ncandidate: abc123\nattempt: attempt1\nverdict: block\nreason: needs work\nEND VERDICT",
+			},
+		},
+		Delimiter: "delim123",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	if messages[0].Role != "system" {
+		t.Errorf("first message should be system")
+	}
+	if messages[1].Role != "user" {
+		t.Errorf("second message should be user")
+	}
+
+	// Check that system message contains appropriate guidance
+	if !strings.Contains(messages[0].Content, "revised") {
+		t.Errorf("system message should mention revision")
+	}
+
+	// Check that user message contains history
+	if !strings.Contains(messages[1].Content, "turn1") {
+		t.Errorf("user message should contain history turn id")
+	}
+
+	// Check that user message contains reviewer feedback
+	if !strings.Contains(messages[1].Content, "reviewer 1") {
+		t.Errorf("user message should contain reviewer label")
+	}
+
+	// Check that user message contains previous candidate
+	if !strings.Contains(messages[1].Content, "first attempt") {
+		t.Errorf("user message should contain previous candidate")
+	}
+
+	// Check that delimiter fences are present
+	if !strings.Contains(messages[1].Content, "BEGIN HISTORY") {
+		t.Errorf("user message should contain BEGIN HISTORY delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "END HISTORY") {
+		t.Errorf("user message should contain END HISTORY delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "BEGIN PREVIOUS CANDIDATE") {
+		t.Errorf("user message should contain BEGIN PREVIOUS CANDIDATE delimiter")
+	}
+}
+
+func TestAuthorRevisionValidationErrors(t *testing.T) {
+	_, err := AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{},
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "",
+		Round:     1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty delimiter")
+	}
+
+	_, err = AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{},
+		Input:             "test",
+		PreviousCandidate: "",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty previous candidate")
+	}
+
+	_, err = AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{},
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback:  []RevisionFeedback{},
+		Delimiter:         "delim",
+		Round:             1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty reviewer feedback")
+	}
+}
+
+func TestAuthorRevisionMultipleFeedback(t *testing.T) {
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{},
+		Input:             "test",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "output1",
+			},
+			{
+				ReviewerLabel: "reviewer 2",
+				Output:        "output2",
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(messages[1].Content, "reviewer 1") {
+		t.Errorf("user message should contain reviewer 1")
+	}
+	if !strings.Contains(messages[1].Content, "reviewer 2") {
+		t.Errorf("user message should contain reviewer 2")
+	}
+	if !strings.Contains(messages[1].Content, "output1") {
+		t.Errorf("user message should contain output1")
+	}
+	if !strings.Contains(messages[1].Content, "output2") {
+		t.Errorf("user message should contain output2")
+	}
+}
+
+func TestReviewerRevisionSuccess(t *testing.T) {
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		History: []HistoryTurn{
+			{
+				TurnID: "turn1",
+				State:  "approved",
+				Input:  "Create something.",
+				Answer: "Here it is.",
+				Label:  "reviewed",
+			},
+		},
+		Request:       "Please create something.",
+		Candidate:     "Here is the revised version.",
+		CandidateHash: "abc123",
+		OpenBlocks: []OpenBlockForRevision{
+			{
+				BlockID:  "block1",
+				Severity: "high",
+				Evidence: "line 5",
+				Remedy:   "fix it",
+			},
+		},
+		AttemptID: "attempt1",
+		Delimiter: "delim123",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	if messages[0].Role != "system" {
+		t.Errorf("first message should be system")
+	}
+	if messages[1].Role != "user" {
+		t.Errorf("second message should be user")
+	}
+
+	// Check that system message contains VERDICT v2
+	if !strings.Contains(messages[0].Content, "VERDICT v2") {
+		t.Errorf("system message should contain VERDICT v2")
+	}
+
+	// Check that system message contains round number
+	if !strings.Contains(messages[0].Content, "round") {
+		t.Errorf("system message should mention round")
+	}
+
+	// Check that system message contains block-state requirement
+	if !strings.Contains(messages[0].Content, "block-state") {
+		t.Errorf("system message should mention block-state requirement")
+	}
+
+	// Check that user message contains request
+	if !strings.Contains(messages[1].Content, "Create something") {
+		t.Errorf("user message should contain request")
+	}
+
+	// Check that user message contains history
+	if !strings.Contains(messages[1].Content, "turn1") {
+		t.Errorf("user message should contain history turn id")
+	}
+
+	// Check that user message contains candidate
+	if !strings.Contains(messages[1].Content, "revised version") {
+		t.Errorf("user message should contain candidate")
+	}
+
+	// Check that user message contains open blocks
+	if !strings.Contains(messages[1].Content, "block1") {
+		t.Errorf("user message should contain open block id")
+	}
+	if !strings.Contains(messages[1].Content, "high") {
+		t.Errorf("user message should contain severity")
+	}
+
+	// Check that delimiter fences are present
+	if !strings.Contains(messages[1].Content, "BEGIN REQUEST") {
+		t.Errorf("user message should contain BEGIN REQUEST delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "BEGIN HISTORY") {
+		t.Errorf("user message should contain BEGIN HISTORY delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "BEGIN CANDIDATE") {
+		t.Errorf("user message should contain BEGIN CANDIDATE delimiter")
+	}
+}
+
+func TestReviewerRevisionValidationErrors(t *testing.T) {
+	_, err := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty delimiter")
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty candidate hash")
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty attempt id")
+	}
+}
+
+func TestReviewerRevisionDelimiterCollision(t *testing.T) {
+	_, err := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "Contains uniquedelim here",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "uniquedelim",
+		Round:         1,
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision in request, got %v", err)
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "Contains uniquedelim here",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "uniquedelim",
+		Round:         1,
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision in candidate, got %v", err)
+	}
+}
+
+func TestReviewerRevisionMultipleBlocks(t *testing.T) {
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks: []OpenBlockForRevision{
+			{BlockID: "block1", Severity: "low", Evidence: "e1", Remedy: "r1"},
+			{BlockID: "block2", Severity: "high", Evidence: "e2", Remedy: "r2"},
+		},
+		AttemptID: "id",
+		Delimiter: "delim",
+		Round:     2,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(messages[1].Content, "block1") {
+		t.Errorf("user message should contain block1")
+	}
+	if !strings.Contains(messages[1].Content, "block2") {
+		t.Errorf("user message should contain block2")
+	}
+	if !strings.Contains(messages[1].Content, "withdrawn or maintained") {
+		t.Errorf("user message should indicate need to mark blocks as withdrawn or maintained")
+	}
+}
+
+func TestReviewerRevisionNoBlocks(t *testing.T) {
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	// Should still work, just without open blocks section
+	if !strings.Contains(messages[1].Content, "BEGIN REQUEST") {
+		t.Errorf("user message should still have request")
+	}
+}
+
+func TestAuthorRevisionNoParticipantID(t *testing.T) {
+	messages, _ := AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{},
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, "participant") && !strings.Contains(msg.Content, "Participant") {
+			// Allow "Participant" in capitalized form if it's part of reviewer label structure
+			t.Errorf("author revision messages should not contain participant id")
+		}
+	}
+}
+
+func TestReviewerRevisionNoParticipantIDInBlocks(t *testing.T) {
+	messages, _ := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks: []OpenBlockForRevision{
+			{BlockID: "block1", Severity: "high", Evidence: "e1", Remedy: "r1"},
+		},
+		AttemptID: "id",
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, "reviewer_id") || strings.Contains(msg.Content, "participant_id") {
+			t.Errorf("reviewer revision messages should not contain participant/reviewer ids")
+		}
+	}
+}
+
+func TestReviewerRevisionHistoryPreserved(t *testing.T) {
+	historyTurn := HistoryTurn{
+		TurnID: "turn123",
+		State:  "approved",
+		Input:  "Original request with specific words",
+		Answer: "Answer with unique content",
+		Label:  "reviewed",
+	}
+
+	messages, _ := ReviewerRevision(ReviewerRevisionInput{
+		History:       []HistoryTurn{historyTurn},
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+
+	userContent := messages[1].Content
+	if !strings.Contains(userContent, "turn123") {
+		t.Errorf("history turn id should be preserved")
+	}
+	if !strings.Contains(userContent, "Original request with specific words") {
+		t.Errorf("history input should be preserved verbatim")
+	}
+	if !strings.Contains(userContent, "Answer with unique content") {
+		t.Errorf("history answer should be preserved verbatim")
+	}
+	if !strings.Contains(userContent, "reviewed") {
+		t.Errorf("history label should be preserved")
+	}
+}
+
+func TestAuthorRevisionHistoryPreserved(t *testing.T) {
+	historyTurn := HistoryTurn{
+		TurnID: "turn456",
+		State:  "incomplete",
+		Input:  "First attempt with details",
+		Answer: "no approved answer (incomplete)",
+		Label:  "unreviewed (solo)",
+	}
+
+	messages, _ := AuthorRevision(AuthorRevisionInput{
+		History:           []HistoryTurn{historyTurn},
+		Input:             "Revision request",
+		PreviousCandidate: "My answer",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	userContent := messages[1].Content
+	if !strings.Contains(userContent, "turn456") {
+		t.Errorf("history turn id should be preserved")
+	}
+	if !strings.Contains(userContent, "First attempt with details") {
+		t.Errorf("history input should be preserved verbatim")
+	}
+	if !strings.Contains(userContent, "no approved answer (incomplete)") {
+		t.Errorf("missing answer line should be preserved")
+	}
+	if !strings.Contains(userContent, "unreviewed (solo)") {
+		t.Errorf("history label should be preserved")
+	}
+}
