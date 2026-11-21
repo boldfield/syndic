@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -433,9 +434,13 @@ func (e *Engine) Start() error {
 	e.runID = runID
 	e.runState = "probing"
 	e.runFirstSeq = firstSeq
+	e.adapters = adapters
 
 	// Start-time probes belong here, between the two commits; a crash in
 	// this window leaves a probing run that the next start abandons.
+	if err := e.runStartupProbes(context.Background(), roster, built, false); err != nil {
+		return fmt.Errorf("engine: startup probes: %w", err)
+	}
 
 	// Phase 2: write the manifest once and announce engine_started.
 	var manifestHash string
@@ -469,7 +474,6 @@ func (e *Engine) Start() error {
 	// Set roster before loading holds so armHold can use it
 	e.roster = roster
 	e.rosterAbs = path
-	e.adapters = adapters
 	e.built = built
 	e.runState = "started"
 	e.manifestHash = manifestHash
