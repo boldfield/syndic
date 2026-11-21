@@ -1,6 +1,7 @@
 package journal_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -763,9 +764,10 @@ func TestAllocateEngineRun(t *testing.T) {
 		t.Error("runID is empty")
 	}
 
-	// Verify the run is stored with state='probing' and empty manifest
+	// Verify the run is stored with state='probing' and NULL manifest
 	conn := db.Conn()
-	var kind, state, manifest, manifestHash string
+	var kind, state string
+	var manifest, manifestHash sql.NullString
 	err = conn.QueryRow("SELECT kind, state, manifest, manifest_hash FROM runs WHERE id = ?", runID).Scan(&kind, &state, &manifest, &manifestHash)
 	if err != nil {
 		t.Fatalf("failed to query run: %v", err)
@@ -776,11 +778,11 @@ func TestAllocateEngineRun(t *testing.T) {
 	if state != "probing" {
 		t.Errorf("expected state='probing', got %q", state)
 	}
-	if manifest != "" {
-		t.Errorf("expected empty manifest, got %q", manifest)
+	if manifest.Valid {
+		t.Errorf("expected NULL manifest, got %q", manifest.String)
 	}
-	if manifestHash != "" {
-		t.Errorf("expected empty manifest_hash, got %q", manifestHash)
+	if manifestHash.Valid {
+		t.Errorf("expected NULL manifest_hash, got %q", manifestHash.String)
 	}
 }
 

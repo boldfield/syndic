@@ -76,6 +76,12 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("read migrations: %w", err)
 	}
 
+	// Disable foreign key constraints at the connection level to allow table rebuilds during migrations
+	if _, err := db.conn.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys for migrations: %w", err)
+	}
+	defer func() { _, _ = db.conn.Exec("PRAGMA foreign_keys = ON") }()
+
 	// Apply migrations sequentially
 	for _, mig := range migrationFiles {
 		if mig.IsDir() {

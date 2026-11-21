@@ -1,11 +1,16 @@
 -- Make manifest and manifest_hash nullable to support probing run lifecycle.
 -- A run allocated for probing has NULL manifest and manifest_hash until finalization.
 
--- SQLite doesn't support direct ALTER COLUMN, so we rebuild the table.
--- Create new runs table with nullable manifest and manifest_hash columns
+-- SQLite table rebuild for nullable manifest and manifest_hash.
+-- Note: Rebuilding the table with foreign key constraints requires the connection to have
+-- foreign_keys PRAGMA disabled. The Store code should handle this if needed.
+
+-- Create new runs table with nullable manifest and manifest_hash columns.
+-- Preserve the DEFAULT 'probe' for kind column established in migration 004.
+-- Preserve the CHECK constraint order to match the original migration 004.
 CREATE TABLE runs_new (
     id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('engine', 'probe')),
+    kind TEXT NOT NULL DEFAULT 'probe' CHECK (kind IN ('probe', 'engine')),
     state TEXT NOT NULL DEFAULT 'started' CHECK (state IN ('probing', 'started')),
     manifest TEXT,
     manifest_hash TEXT,
@@ -14,21 +19,17 @@ CREATE TABLE runs_new (
 
 -- Copy data from old table, preserving values
 INSERT INTO runs_new (id, kind, state, manifest, manifest_hash, created_at)
-SELECT id, kind, state,
-       CASE WHEN manifest = '' THEN NULL ELSE manifest END,
-       CASE WHEN manifest_hash = '' THEN NULL ELSE manifest_hash END,
-       created_at
+SELECT id, kind, state, manifest, manifest_hash, created_at
 FROM runs;
 
 -- Drop old table
 DROP TABLE runs;
 
--- Rename new table
+-- Rename new table to runs
 ALTER TABLE runs_new RENAME TO runs;
 
--- Recreate the manifest immutability trigger with proper NULL checking
-DROP TRIGGER IF EXISTS runs_manifest_immutable;
-
+-- Recreate the manifest immutability trigger with proper NULL checking.
+-- Only prevent updates when the manifest is already set (not NULL).
 CREATE TRIGGER runs_manifest_immutable BEFORE UPDATE OF manifest, manifest_hash ON runs
 WHEN OLD.manifest IS NOT NULL
 BEGIN
