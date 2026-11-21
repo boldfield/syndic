@@ -1904,3 +1904,175 @@ func TestMidBodyFailureUnwrapped(t *testing.T) {
 		t.Errorf("mid-body failure incorrectly wrapped with ErrNotSent")
 	}
 }
+
+// TestBeforeSendCalled verifies BeforeSend callback is invoked before the request is sent.
+func TestBeforeSendCalled(t *testing.T) {
+	callCount := 0
+	callback := func(req *transport.CompleteRequest) error {
+		callCount++
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg1","model":"test","choices":[{"message":{"content":"response"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("BeforeSend call count: %d, want 1", callCount)
+	}
+	if result.Text != "response" {
+		t.Errorf("response text: %q, want 'response'", result.Text)
+	}
+}
+
+// TestBeforeSendError verifies BeforeSend error is wrapped in ErrNotSent and no request is sent.
+func TestBeforeSendError(t *testing.T) {
+	callErr := errors.New("journaling failed")
+	callback := func(req *transport.CompleteRequest) error {
+		return callErr
+	}
+
+	hitCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg1","model":"test","choices":[{"message":{"content":"response"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not wrapped with ErrNotSent: %v", err)
+	}
+	if !errors.Is(err, callErr) {
+		t.Errorf("original error lost: %v", err)
+	}
+	if hitCount.Load() != 0 {
+		t.Errorf("HTTP server hit count: %d, want 0 (request should not be sent)", hitCount.Load())
+	}
+}
+
+// TestBeforeSendNil verifies nil BeforeSend callback is handled gracefully.
+func TestBeforeSendNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg1","model":"test","choices":[{"message":{"content":"response"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "test"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      nil,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete with nil callback: %v", err)
+	}
+	if result.Text != "response" {
+		t.Errorf("response text: %q, want 'response'", result.Text)
+	}
+}

@@ -1425,3 +1425,143 @@ func TestReplyWithoutUsage(t *testing.T) {
 		t.Errorf("result.Usage is not nil: %v", result.Usage)
 	}
 }
+
+// TestBeforeSendCalled verifies BeforeSend callback is invoked before the reply.
+func TestBeforeSendCalled(t *testing.T) {
+	callCount := 0
+	callback := func(req *transport.CompleteRequest) error {
+		callCount++
+		return nil
+	}
+
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("BeforeSend call count: %d, want 1", callCount)
+	}
+	if result.Text != "Response" {
+		t.Errorf("result text: %q, want Response", result.Text)
+	}
+}
+
+// TestBeforeSendError verifies BeforeSend error is wrapped in ErrNotSent.
+func TestBeforeSendError(t *testing.T) {
+	callErr := errors.New("journaling failed")
+	callback := func(req *transport.CompleteRequest) error {
+		return callErr
+	}
+
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not wrapped with ErrNotSent: %v", err)
+	}
+	if !errors.Is(err, callErr) {
+		t.Errorf("original error lost: %v", err)
+	}
+	if result.TransportStatus != "not_sent" {
+		t.Errorf("transport status: %q, want not_sent", result.TransportStatus)
+	}
+}
+
+// TestBeforeSendNil verifies nil BeforeSend callback is handled gracefully.
+func TestBeforeSendNil(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      nil,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete with nil callback: %v", err)
+	}
+	if result.Text != "Response" {
+		t.Errorf("result text: %q, want Response", result.Text)
+	}
+}

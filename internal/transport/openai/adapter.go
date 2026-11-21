@@ -487,6 +487,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	httpReq = httpReq.WithContext(cancelFunc)
 
+	if req.BeforeSend != nil {
+		if err := req.BeforeSend(&req); err != nil {
+			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
+	}
+
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
 		if isDeadlineExceededErr(err) {

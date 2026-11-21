@@ -128,6 +128,12 @@ type CompleteRequest struct {
 	Messages        []Message
 	MaxOutputTokens int
 	Deadline        time.Time
+	// BeforeSend is an optional callback invoked before the HTTP request is sent.
+	// It allows the engine to journal the attempt before dispatch and distinguish
+	// ErrNotSent (pre-send failures) from other errors. The callback receives the
+	// request and should return an error if the attempt cannot be journaled; in that
+	// case, Complete returns the error wrapped in ErrNotSent.
+	BeforeSend func(*CompleteRequest) error
 }
 
 // CompleteResult is the output of the Complete adapter method.

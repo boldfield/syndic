@@ -147,6 +147,22 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	a.mu.Unlock()
 
+	if req.BeforeSend != nil {
+		if err := req.BeforeSend(&req); err != nil {
+			return transport.CompleteResult{
+				Envelope:        req.Envelope,
+				RawOutput:       "",
+				Text:            "",
+				ScrubCount:      0,
+				Identity:        a.defaultIdentity,
+				ReportedModel:   "",
+				Status:          transport.StatusError,
+				NativeFinish:    "",
+				TransportStatus: "not_sent",
+			}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
+	}
+
 	switch step.Kind {
 	case StepKindReply:
 		if step.Build != nil {
