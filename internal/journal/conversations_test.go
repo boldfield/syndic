@@ -3,8 +3,10 @@ package journal_test
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
@@ -320,36 +322,29 @@ func TestGetConversationAmbiguousPrefix(t *testing.T) {
 	f := newConvFixture(t)
 
 	ws := "/home/user/project"
-	// Create conversations with similar IDs (they'll have different generated IDs)
-	conv1 := f.createConversation(t, &ws)
-	conv2 := f.createConversation(t, &ws)
+	// Create conversations with deterministic IDs for testing ambiguous prefix
+	conv1 := "aaaa-test-1111-bbbb"
+	conv2 := "aaaa-test-2222-cccc"
 
-	// Find a common prefix if the IDs start the same
-	minLen := len(conv1)
-	if len(conv2) < minLen {
-		minLen = len(conv2)
+	// Directly insert them into the database
+	_, err := f.db.Conn().Exec(`INSERT INTO conversations (id, workspace) VALUES (?, ?)`, conv1, ws)
+	if err != nil {
+		t.Fatalf("insert conv1: %v", err)
 	}
 
-	// Find shortest common prefix by comparing characters
-	commonPrefixLen := 0
-	for i := 0; i < minLen; i++ {
-		if conv1[i] == conv2[i] {
-			commonPrefixLen++
-		} else {
-			break
-		}
+	_, err = f.db.Conn().Exec(`INSERT INTO conversations (id, workspace) VALUES (?, ?)`, conv2, ws)
+	if err != nil {
+		t.Fatalf("insert conv2: %v", err)
 	}
 
-	if commonPrefixLen > 0 {
-		// Use a prefix that matches both
-		prefix := conv1[:commonPrefixLen]
-		_, err := f.store.GetConversation(prefix)
-		if err == nil {
-			t.Fatal("GetConversation should return error for ambiguous prefix")
-		}
-		if !errors.Is(err, journal.ErrAmbiguousConversationID) {
-			t.Errorf("expected ErrAmbiguousConversationID, got: %v", err)
-		}
+	// Use a prefix that matches both: "aaaa-test"
+	prefix := "aaaa-test"
+	_, err = f.store.GetConversation(prefix)
+	if err == nil {
+		t.Fatal("GetConversation should return error for ambiguous prefix")
+	}
+	if !errors.Is(err, journal.ErrAmbiguousConversationID) {
+		t.Errorf("expected ErrAmbiguousConversationID, got: %v", err)
 	}
 }
 
@@ -686,5 +681,135 @@ func TestConversationUniqueID(t *testing.T) {
 	// IDs should be different
 	if conv1 == conv2 {
 		t.Errorf("created conversations have same ID: %s", conv1)
+	}
+}
+
+func TestListConversationsMalformedCursor(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Test various malformed cursors
+	testCases := []string{
+		"not_a_valid_cursor",
+		"123",
+		"abc,",
+		",abc",
+		"not_a_number,abc",
+	}
+
+	for _, cursor := range testCases {
+		_, _, err := f.store.ListConversations(nil, cursor, 10)
+		if err == nil {
+			t.Errorf("ListConversations should reject malformed cursor: %q", cursor)
+		}
+		if !errors.Is(err, journal.ErrMalformedCursor) {
+			t.Errorf("expected ErrMalformedCursor for cursor %q, got: %v", cursor, err)
+		}
+	}
+}
+
+func TestListConversationsPaginationKeepsPreviousRows(t *testing.T) {
+	// This test verifies that pagination ordering is deterministic based on max_rowid and id
+	f := newConvFixture(t)
+
+	// Create a run first
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	ws := "/home/user/project"
+
+	// Create 5 conversations with turns to establish stable ordering
+	var conversations []string
+	for i := 0; i < 5; i++ {
+		conv := f.createConversation(t, &ws)
+		turn := f.createTurn(t, runID, conv)
+		f.addMessage(t, turn, "message "+string(rune('a'+i)))
+		conversations = append(conversations, conv)
+	}
+
+	// Get all pages in sequence without modifications
+	var allConvs []journal.ConversationRow
+	var cursor string
+	for page := 0; page < 3; page++ {
+		pageConvs, nextCursor, err := f.store.ListConversations(&ws, cursor, 2)
+		if err != nil {
+			t.Fatalf("ListConversations page %d: %v", page, err)
+		}
+		allConvs = append(allConvs, pageConvs...)
+		cursor = nextCursor
+	}
+
+	// Check that we got all 5 conversations
+	if len(allConvs) != 5 {
+		t.Errorf("expected 5 total conversations, got %d", len(allConvs))
+	}
+
+	// Check for duplicates
+	seen := make(map[string]bool)
+	for _, c := range allConvs {
+		if seen[c.ID] {
+			t.Errorf("duplicate conversation %s in pagination", c.ID)
+		}
+		seen[c.ID] = true
+	}
+}
+
+func TestConversationLastSubmittedAtNilWhenNoTurns(t *testing.T) {
+	f := newConvFixture(t)
+
+	convID := f.createConversation(t, nil)
+
+	// Get the conversation - should have nil LastSubmittedAt
+	conv, err := f.store.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+
+	if conv.LastSubmittedAt != nil {
+		t.Errorf("expected nil LastSubmittedAt for empty conversation, got %v", conv.LastSubmittedAt)
+	}
+}
+
+func TestConversationPreviewMultibyteTruncation(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Create a run and conversation
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	convID := f.createConversation(t, nil)
+
+	// Create a turn with multi-byte content and newline
+	turnID := f.createTurn(t, runID, convID)
+	// Create a string longer than 80 bytes but with multi-byte characters
+	// "你好世界" is 12 bytes (3 bytes per char), so 70 of them is 210 bytes
+	// We want to truncate at 80 chars (runes), not bytes
+	content := strings.Repeat("🎉", 90) + "\nSecond line"
+	f.addMessage(t, turnID, content)
+
+	// Get the conversation
+	conv, err := f.store.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+
+	// Preview should be truncated to first line, then to 80 runes
+	expectedLength := 80
+	actualLength := len([]rune(conv.Preview))
+	if actualLength > expectedLength {
+		t.Errorf("preview length %d exceeds 80 runes, got %d", expectedLength, actualLength)
+	}
+
+	// Should not contain the second line
+	if strings.Contains(conv.Preview, "Second line") {
+		t.Errorf("preview should not contain second line")
+	}
+
+	// Should be valid UTF-8
+	if !utf8.ValidString(conv.Preview) {
+		t.Errorf("preview is not valid UTF-8")
 	}
 }

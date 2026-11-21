@@ -33,29 +33,35 @@ var ErrAmbiguousConversationID = errors.New("ambiguous conversation ID")
 // ErrWorkspaceMismatch is returned when a conversation's workspace doesn't match the requested one.
 var ErrWorkspaceMismatch = errors.New("workspace_mismatch")
 
-// firstLine returns the first line of text cut to 80 cells (UTF-8 grapheme clusters approximated by bytes).
-// For simplicity, we cut to 80 bytes and find the nearest newline.
-func firstLine(text string, maxBytes int) string {
-	// Truncate to maxBytes
-	if len(text) > maxBytes {
-		text = text[:maxBytes]
-	}
+// ErrMalformedCursor is returned when a pagination cursor is invalid.
+var ErrMalformedCursor = errors.New("malformed cursor")
+
+// firstLine returns the first line of text cut to 80 cells, handling UTF-8 safely.
+// A cell is one display column; this approximates by counting runes, which over-counts wide characters.
+// Design §3 specifies: "the first line of the first input cut to 80 cells".
+func firstLine(text string, maxCells int) string {
 	// Find first newline
 	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
-		return text[:idx]
+		text = text[:idx]
 	}
-	return text
+	// Cut to maxCells runes, without splitting a multi-byte sequence
+	runes := []rune(text)
+	if len(runes) > maxCells {
+		runes = runes[:maxCells]
+	}
+	return string(runes)
 }
 
-// scanConversationRow scans a conversation row from the query result.
-func scanConversationRow(row *sql.Row) (*ConversationRow, error) {
+// scanConvRow scans a conversation row from the query result using a Scan function.
+// Expects: id, created_at, workspace, last_submitted_at, turn_count, running, preview
+func scanConvRow(scan func(...any) error) (*ConversationRow, error) {
 	var c ConversationRow
 	var createdAtStr string
 	var lastSubmittedAtStr sql.NullString
 	var running sql.NullInt64
 	var preview sql.NullString
 
-	if err := row.Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
+	if err := scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
 		return nil, err
 	}
 
@@ -84,43 +90,20 @@ func scanConversationRow(row *sql.Row) (*ConversationRow, error) {
 	return &c, nil
 }
 
+// scanConversationRow scans a conversation row from a single-row query.
+func scanConversationRow(row *sql.Row) (*ConversationRow, error) {
+	return scanConvRow(row.Scan)
+}
+
 // scanConversationRows scans multiple conversation rows from query results.
 func scanConversationRows(rows *sql.Rows) ([]ConversationRow, error) {
 	var conversations []ConversationRow
 	for rows.Next() {
-		var c ConversationRow
-		var createdAtStr string
-		var lastSubmittedAtStr sql.NullString
-		var running sql.NullInt64
-		var preview sql.NullString
-
-		if err := rows.Scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
+		c, err := scanConvRow(rows.Scan)
+		if err != nil {
 			return nil, fmt.Errorf("scan conversation: %w", err)
 		}
-
-		t, err := parseTime(createdAtStr)
-		if err != nil {
-			return nil, fmt.Errorf("parse created_at: %w", err)
-		}
-		c.CreatedAt = t
-
-		if lastSubmittedAtStr.Valid {
-			t, err := parseTime(lastSubmittedAtStr.String)
-			if err != nil {
-				return nil, fmt.Errorf("parse last_submitted_at: %w", err)
-			}
-			c.LastSubmittedAt = &t
-		}
-
-		if running.Valid && running.Int64 != 0 {
-			c.Running = true
-		}
-
-		if preview.Valid {
-			c.Preview = firstLine(preview.String, 80)
-		}
-
-		conversations = append(conversations, c)
+		conversations = append(conversations, *c)
 	}
 	return conversations, rows.Err()
 }
@@ -154,11 +137,17 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 	var cursorID string
 	if cursor != "" {
 		parts := strings.Split(cursor, ",")
-		if len(parts) == 2 {
-			if r, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-				cursorRowid = r
-				cursorID = parts[1]
-			}
+		if len(parts) != 2 {
+			return nil, "", fmt.Errorf("invalid cursor format: %w", ErrMalformedCursor)
+		}
+		r, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cursor rowid: %w", ErrMalformedCursor)
+		}
+		cursorRowid = r
+		cursorID = parts[1]
+		if cursorID == "" {
+			return nil, "", fmt.Errorf("invalid cursor id: %w", ErrMalformedCursor)
 		}
 	}
 
@@ -196,7 +185,9 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 		)
 		SELECT
 			cte.id, cte.created_at, cte.workspace,
-			NULL as last_submitted_at,
+			(SELECT MAX(a.dispatched_at) FROM turns t2
+				LEFT JOIN attempts a ON t2.id = a.turn_id
+				WHERE t2.conversation_id = cte.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = cte.id AND t2.terminal_state IS NULL)) as running,
 			(SELECT m.content FROM messages m
@@ -262,11 +253,14 @@ func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
 
 // GetConversation retrieves a conversation by ID or unique prefix, checking for ambiguity.
 func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
-	// Use GLOB or substr for exact prefix matching (not LIKE which treats % and _ as wildcards)
+	// Use substr for exact prefix matching (not LIKE which treats % and _ as wildcards).
+	// substr(c.id,1,length(?)) = ? is safer for non-ASCII ids than range comparison.
 	rows, err := tx.tx.Query(`
 		SELECT
 			c.id, c.created_at, c.workspace,
-			NULL as last_submitted_at,
+			(SELECT MAX(a.dispatched_at) FROM turns t2
+				LEFT JOIN attempts a ON t2.id = a.turn_id
+				WHERE t2.conversation_id = c.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
 			(SELECT m.content FROM messages m
@@ -276,11 +270,11 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
 		FROM conversations c
 		LEFT JOIN turns t ON c.id = t.conversation_id
-		WHERE c.id = ? OR (c.id >= ? AND c.id < ?)
+		WHERE c.id = ? OR substr(c.id, 1, length(?)) = ?
 		GROUP BY c.id, c.created_at, c.workspace
 		ORDER BY c.id
 		LIMIT 2
-	`, idPrefix, idPrefix, idPrefix+"~")
+	`, idPrefix, idPrefix, idPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("query conversation: %w", err)
 	}
@@ -315,10 +309,11 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 // GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
-		SELECT id, terminal_state, NULL
-		FROM turns
-		WHERE conversation_id = ?
-		ORDER BY rowid ASC
+		SELECT t.id, t.terminal_state,
+			(SELECT MAX(a.dispatched_at) FROM attempts a WHERE a.turn_id = t.id) as submitted_at
+		FROM turns t
+		WHERE t.conversation_id = ?
+		ORDER BY t.rowid ASC
 	`, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("query conversation turns: %w", err)
@@ -411,7 +406,9 @@ func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*Conversa
 	row := tx.tx.QueryRow(`
 		SELECT
 			c.id, c.created_at, c.workspace,
-			NULL as last_submitted_at,
+			(SELECT MAX(a.dispatched_at) FROM turns t2
+				LEFT JOIN attempts a ON t2.id = a.turn_id
+				WHERE t2.conversation_id = c.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
 			(SELECT m.content FROM messages m
