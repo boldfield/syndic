@@ -853,7 +853,7 @@ func TestV2ValidationWithContext(t *testing.T) {
 	}{
 		{
 			name:          "wrong round is malformed",
-			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 99\nverdict: approve\n",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 99\nverdict: approve\nreason: test\nEND VERDICT",
 			round:         1,
 			ownerBlockIDs: map[string]bool{},
 			expectValid:   false,
@@ -861,23 +861,23 @@ func TestV2ValidationWithContext(t *testing.T) {
 		},
 		{
 			name:          "omitted own block is malformed",
-			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\n",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\nreason: test\nEND VERDICT",
 			round:         1,
 			ownerBlockIDs: map[string]bool{"block-1": true},
 			expectValid:   false,
-			expectProblem: "omitted",
+			expectProblem: "missing block-state",
 		},
 		{
 			name:          "foreign block is malformed",
-			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nblock-state: foreign-block maintained\nverdict: approve\n",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nblock-state: foreign-block maintained\nverdict: approve\nreason: test\nEND VERDICT",
 			round:         1,
 			ownerBlockIDs: map[string]bool{},
 			expectValid:   false,
 			expectProblem: "foreign",
 		},
 		{
-			name:          "correct round with maintained block",
-			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 2\nblock-state: block-1 maintained\nverdict: approve\n",
+			name:          "correct round with withdrawn block",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 2\nblock-state: block-1 withdrawn\nverdict: approve\nreason: test\nEND VERDICT",
 			round:         2,
 			ownerBlockIDs: map[string]bool{"block-1": true},
 			expectValid:   true,
@@ -907,7 +907,7 @@ func TestV2ValidationWithContext(t *testing.T) {
 }
 
 func TestV2MalformedOmittedBlockMaintainsRejection(t *testing.T) {
-	text := "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\n"
+	text := "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\nreason: test\nEND VERDICT"
 	ctx := &V2Context{
 		Round:             1,
 		OwnerOpenBlockIDs: map[string]bool{"block-1": true},
