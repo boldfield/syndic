@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/boldfield/syndic/internal/prompt"
 )
 
 func build(t *testing.T, turns ...Turn) *Document {
@@ -513,7 +511,7 @@ func TestRenderForReviewer(t *testing.T) {
 
 	// A document containing the delimiter is refused.
 	hostile := build(t, Turn{ID: "t", State: "approved", Input: []byte("x" + delim), Answer: []byte("y"), Label: "reviewed"})
-	if _, err := hostile.RenderForReviewer(bytes.NewReader(bytes.Repeat([]byte{0xab}, 16))); !errors.Is(err, prompt.ErrDelimiterCollision) {
+	if _, err := hostile.RenderForReviewer(bytes.NewReader(bytes.Repeat([]byte{0xab}, 16))); !errors.Is(err, ErrDelimiterCollision) {
 		t.Fatalf("err = %v, want ErrDelimiterCollision", err)
 	}
 	if _, err := d.RenderForReviewer(bytes.NewReader(nil)); err == nil {

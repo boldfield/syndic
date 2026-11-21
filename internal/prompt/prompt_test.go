@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/boldfield/syndic/internal/history"
 )
 
 func TestNewDelimiter(t *testing.T) {
@@ -644,5 +646,1035 @@ func TestDelimiterIsHex(t *testing.T) {
 	// Should be lowercase
 	if delim != strings.ToLower(delim) {
 		t.Errorf("delimiter should be lowercase hex")
+	}
+}
+
+func TestEnvelopeFormatV2(t *testing.T) {
+	if !strings.Contains(EnvelopeFormatV2, "VERDICT v2") {
+		t.Errorf("EnvelopeFormatV2 should contain 'VERDICT v2'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "round:") {
+		t.Errorf("EnvelopeFormatV2 should contain 'round:'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "block-state:") {
+		t.Errorf("EnvelopeFormatV2 should contain 'block-state:'")
+	}
+	if !strings.Contains(EnvelopeFormatV2, "approve-with-changes") {
+		t.Errorf("EnvelopeFormatV2 should contain 'approve-with-changes'")
+	}
+}
+
+func TestAuthorRevisionSuccess(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("Create a document."),
+			Answer: []byte("Here is the document."),
+			Label:  "reviewed",
+		})
+
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "Now revise it.",
+		PreviousCandidate: "Here is my first attempt.",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "VERDICT v1\ncandidate: abc123\nattempt: attempt1\nverdict: block\nreason: needs work\nEND VERDICT",
+			},
+		},
+		Delimiter: "delim123",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Message sequence: system, history (user, assistant), original input (user),
+	// previous candidate (assistant), feedback (user) = 6 messages
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d", len(messages))
+	}
+
+	if messages[0].Role != "system" {
+		t.Errorf("first message should be system")
+	}
+
+	// Check message roles: user, assistant, user, assistant, user
+	expectedRoles := []string{"system", "user", "assistant", "user", "assistant", "user"}
+	for i, expectedRole := range expectedRoles {
+		if messages[i].Role != expectedRole {
+			t.Errorf("message %d: expected role %s, got %s", i, expectedRole, messages[i].Role)
+		}
+	}
+
+	// Check that system message contains appropriate guidance
+	if !strings.Contains(messages[0].Content, "revised") {
+		t.Errorf("system message should mention revision")
+	}
+
+	// Check that history user message contains turn id
+	if !strings.Contains(messages[1].Content, "turn1") {
+		t.Errorf("history user message should contain turn id")
+	}
+
+	// Check that history assistant message contains answer
+	if !strings.Contains(messages[2].Content, "Here is the document") {
+		t.Errorf("history assistant message should contain answer")
+	}
+
+	// Check that original input message contains the input
+	if !strings.Contains(messages[3].Content, "Now revise it") {
+		t.Errorf("original input message should contain the input")
+	}
+
+	// Check that previous candidate message contains the candidate
+	if !strings.Contains(messages[4].Content, "first attempt") {
+		t.Errorf("previous candidate message should contain the candidate")
+	}
+
+	// Check that feedback message contains reviewer feedback
+	if !strings.Contains(messages[5].Content, "reviewer 1") {
+		t.Errorf("feedback message should contain reviewer label")
+	}
+	if !strings.Contains(messages[5].Content, "VERDICT v1") {
+		t.Errorf("feedback message should contain verdict")
+	}
+}
+
+func TestAuthorRevisionValidationErrors(t *testing.T) {
+	historyDoc := buildHistoryDoc(t)
+
+	_, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "",
+		Round:     1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty delimiter")
+	}
+
+	_, err = AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "test",
+		PreviousCandidate: "",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty previous candidate")
+	}
+
+	_, err = AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback:  []RevisionFeedback{},
+		Delimiter:         "delim",
+		Round:             1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty reviewer feedback")
+	}
+}
+
+func TestAuthorRevisionMultipleFeedback(t *testing.T) {
+	historyDoc := buildHistoryDoc(t)
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "test",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "output1",
+			},
+			{
+				ReviewerLabel: "reviewer 2",
+				Output:        "output2",
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Message sequence: system, input (user), previous candidate (assistant), feedback (user) = 4 messages
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages (no history), got %d", len(messages))
+	}
+
+	// Feedback is in the last message
+	feedbackMessage := messages[3].Content
+
+	if !strings.Contains(feedbackMessage, "reviewer 1") {
+		t.Errorf("feedback message should contain reviewer 1")
+	}
+	if !strings.Contains(feedbackMessage, "reviewer 2") {
+		t.Errorf("feedback message should contain reviewer 2")
+	}
+	if !strings.Contains(feedbackMessage, "output1") {
+		t.Errorf("feedback message should contain output1")
+	}
+	if !strings.Contains(feedbackMessage, "output2") {
+		t.Errorf("feedback message should contain output2")
+	}
+}
+
+func TestReviewerRevisionSuccess(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("Create something."),
+			Answer: []byte("Here it is."),
+			Label:  "reviewed",
+		})
+
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    historyDoc,
+		Request:       "Please create something.",
+		Candidate:     "Here is the revised version.",
+		CandidateHash: "abc123",
+		OpenBlocks: []OpenBlockForRevision{
+			{
+				BlockID:  "block1",
+				Severity: "high",
+				Evidence: "line 5",
+				Remedy:   "fix it",
+			},
+		},
+		AttemptID: "attempt1",
+		Delimiter: "delim123",
+		Round:     1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	if messages[0].Role != "system" {
+		t.Errorf("first message should be system")
+	}
+	if messages[1].Role != "user" {
+		t.Errorf("second message should be user")
+	}
+
+	// Check that system message contains VERDICT v2
+	if !strings.Contains(messages[0].Content, "VERDICT v2") {
+		t.Errorf("system message should contain VERDICT v2")
+	}
+
+	// Check that system message contains round number
+	if !strings.Contains(messages[0].Content, "round") {
+		t.Errorf("system message should mention round")
+	}
+
+	// Check that system message contains block-state requirement
+	if !strings.Contains(messages[0].Content, "block-state") {
+		t.Errorf("system message should mention block-state requirement")
+	}
+
+	// Check that user message contains request
+	if !strings.Contains(messages[1].Content, "Create something") {
+		t.Errorf("user message should contain request")
+	}
+
+	// Check that user message contains history
+	if !strings.Contains(messages[1].Content, "turn1") {
+		t.Errorf("user message should contain history turn id")
+	}
+
+	// Check that user message contains candidate
+	if !strings.Contains(messages[1].Content, "revised version") {
+		t.Errorf("user message should contain candidate")
+	}
+
+	// Check that user message contains open blocks
+	if !strings.Contains(messages[1].Content, "block1") {
+		t.Errorf("user message should contain open block id")
+	}
+	if !strings.Contains(messages[1].Content, "high") {
+		t.Errorf("user message should contain severity")
+	}
+
+	// Check that delimiter fences are present
+	if !strings.Contains(messages[1].Content, "BEGIN REQUEST") {
+		t.Errorf("user message should contain BEGIN REQUEST delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "BEGIN HISTORY") {
+		t.Errorf("user message should contain BEGIN HISTORY delimiter")
+	}
+	if !strings.Contains(messages[1].Content, "BEGIN CANDIDATE") {
+		t.Errorf("user message should contain BEGIN CANDIDATE delimiter")
+	}
+}
+
+func TestReviewerRevisionValidationErrors(t *testing.T) {
+	_, err := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty delimiter")
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty candidate hash")
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+	if err == nil {
+		t.Errorf("expected error for empty attempt id")
+	}
+}
+
+func TestReviewerRevisionDelimiterCollision(t *testing.T) {
+	_, err := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "Contains uniquedelim here",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "uniquedelim",
+		Round:         1,
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision in request, got %v", err)
+	}
+
+	_, err = ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "Contains uniquedelim here",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "uniquedelim",
+		Round:         1,
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision in candidate, got %v", err)
+	}
+}
+
+func TestReviewerRevisionMultipleBlocks(t *testing.T) {
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks: []OpenBlockForRevision{
+			{BlockID: "block1", Severity: "low", Evidence: "e1", Remedy: "r1"},
+			{BlockID: "block2", Severity: "high", Evidence: "e2", Remedy: "r2"},
+		},
+		AttemptID: "id",
+		Delimiter: "delim",
+		Round:     2,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(messages[1].Content, "block1") {
+		t.Errorf("user message should contain block1")
+	}
+	if !strings.Contains(messages[1].Content, "block2") {
+		t.Errorf("user message should contain block2")
+	}
+	if !strings.Contains(messages[1].Content, "withdrawn or maintained") {
+		t.Errorf("user message should indicate need to mark blocks as withdrawn or maintained")
+	}
+}
+
+func TestReviewerRevisionNoBlocks(t *testing.T) {
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	// Should still work, just without open blocks section
+	if !strings.Contains(messages[1].Content, "BEGIN REQUEST") {
+		t.Errorf("user message should still have request")
+	}
+}
+
+func TestAuthorRevisionNoParticipantID(t *testing.T) {
+	messages, _ := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        buildHistoryDoc(t),
+		Input:             "test",
+		PreviousCandidate: "test",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, "participant") && !strings.Contains(msg.Content, "Participant") {
+			// Allow "Participant" in capitalized form if it's part of reviewer label structure
+			t.Errorf("author revision messages should not contain participant id")
+		}
+	}
+}
+
+func TestReviewerRevisionNoParticipantIDInBlocks(t *testing.T) {
+	messages, _ := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks: []OpenBlockForRevision{
+			{BlockID: "block1", Severity: "high", Evidence: "e1", Remedy: "r1"},
+		},
+		AttemptID: "id",
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, "reviewer_id") || strings.Contains(msg.Content, "participant_id") {
+			t.Errorf("reviewer revision messages should not contain participant/reviewer ids")
+		}
+	}
+}
+
+func TestReviewerRevisionHistoryPreserved(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn123",
+			State:  "approved",
+			Input:  []byte("Original request with specific words"),
+			Answer: []byte("Answer with unique content"),
+			Label:  "reviewed",
+		})
+
+	messages, _ := ReviewerRevision(ReviewerRevisionInput{
+		HistoryDoc:    historyDoc,
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "hash",
+		OpenBlocks:    []OpenBlockForRevision{},
+		AttemptID:     "id",
+		Delimiter:     "delim",
+		Round:         1,
+	})
+
+	userContent := messages[1].Content
+	if !strings.Contains(userContent, "turn123") {
+		t.Errorf("history turn id should be preserved")
+	}
+	if !strings.Contains(userContent, "Original request with specific words") {
+		t.Errorf("history input should be preserved verbatim")
+	}
+	if !strings.Contains(userContent, "Answer with unique content") {
+		t.Errorf("history answer should be preserved verbatim")
+	}
+	if !strings.Contains(userContent, "reviewed") {
+		t.Errorf("history label should be preserved")
+	}
+}
+
+func TestAuthorRevisionHistoryPreserved(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn456",
+			State:  "incomplete",
+			Input:  []byte("First attempt with details"),
+			Answer: nil,
+			Label:  "unreviewed (solo)",
+		})
+
+	messages, _ := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "Revision request",
+		PreviousCandidate: "My answer",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+
+	// Message sequence: system, history user, history assistant, input, candidate, feedback
+	// History turn ID and label should be in messages[1] (history user message)
+	historyUserContent := messages[1].Content
+	if !strings.Contains(historyUserContent, "turn456") {
+		t.Errorf("history turn id should be preserved in history user message")
+	}
+	if !strings.Contains(historyUserContent, "First attempt with details") {
+		t.Errorf("history input should be preserved verbatim in history user message")
+	}
+	if !strings.Contains(historyUserContent, "unreviewed (solo)") {
+		t.Errorf("history label should be preserved in history user message")
+	}
+
+	// History assistant message should contain the missing answer line
+	historyAssistantContent := messages[2].Content
+	if !strings.Contains(historyAssistantContent, "no approved answer (incomplete)") {
+		t.Errorf("missing answer line should be preserved in history assistant message")
+	}
+}
+
+// Helper to build a test history document
+func buildHistoryDoc(t *testing.T, turns ...history.Turn) *history.Document {
+	t.Helper()
+	d := history.New()
+	for _, tr := range turns {
+		if err := d.AddTurn(tr); err != nil {
+			t.Fatalf("AddTurn(%q): %v", tr.ID, err)
+		}
+	}
+	return d
+}
+
+// TestAuthorRevisionWithCitedToolResults tests that only cited tool results are included
+func TestAuthorRevisionWithCitedToolResults(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("Create a document"),
+			Answer: []byte("Here it is"),
+			Label:  "reviewed",
+		})
+
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "Revise it",
+		PreviousCandidate: "My first try",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "VERDICT v1\ncandidate: abc\nattempt: att1\nverdict: block\nevidence: tool:result1 is wrong\nEND VERDICT",
+			},
+		},
+		Delimiter: "delim123",
+		Round:     1,
+		ToolResults: map[string]string{
+			"result1": "tool result 1 content",
+			"result2": "tool result 2 content",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Check that result1 is included (cited)
+	feedbackContent := messages[len(messages)-1].Content
+	if !strings.Contains(feedbackContent, "result1") {
+		t.Errorf("feedback should reference cited result1")
+	}
+	if !strings.Contains(feedbackContent, "tool result 1 content") {
+		t.Errorf("feedback should include content of cited result1")
+	}
+
+	// Check that result2 is NOT included (not cited)
+	if strings.Contains(feedbackContent, "result2") {
+		t.Errorf("feedback should NOT reference uncited result2")
+	}
+	if strings.Contains(feedbackContent, "tool result 2 content") {
+		t.Errorf("feedback should NOT include content of uncited result2")
+	}
+}
+
+// TestAuthorRevisionToolResultFencing tests that tool results are properly fenced
+func TestAuthorRevisionToolResultFencing(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output:        "evidence: tool:t1\nverdict: block",
+			},
+		},
+		Delimiter: "mydelim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"t1": "result content",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	feedbackContent := messages[len(messages)-1].Content
+	// Check that result is fenced with BEGIN/END
+	if !strings.Contains(feedbackContent, "===== mydelim BEGIN TOOL RESULT t1 =====") {
+		t.Errorf("tool result should be fenced with BEGIN marker")
+	}
+	if !strings.Contains(feedbackContent, "===== mydelim END TOOL RESULT t1 =====") {
+		t.Errorf("tool result should be fenced with END marker")
+	}
+}
+
+// TestAuthorRevisionCanonicalHistory tests that AuthorRevision requires HistoryDoc
+func TestAuthorRevisionCanonicalHistory(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("input text"),
+			Answer: []byte("answer text"),
+			Label:  "reviewed",
+		})
+
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "new input",
+		PreviousCandidate: "previous",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// First message is system
+	if messages[0].Role != "system" {
+		t.Errorf("first message should be system")
+	}
+	// History should come from canonical document rendering
+	if len(messages) < 2 {
+		t.Errorf("should have history messages")
+	}
+}
+
+// TestAuthorRevisionMissingHistoryDoc tests that AuthorRevision requires HistoryDoc
+func TestAuthorRevisionMissingHistoryDoc(t *testing.T) {
+	_, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        nil,
+		Input:             "input",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{ReviewerLabel: "reviewer 1", Output: "feedback"},
+		},
+		Delimiter: "delim",
+		Round:     1,
+	})
+	if err == nil {
+		t.Errorf("should error when HistoryDoc is nil")
+	}
+	if !strings.Contains(err.Error(), "history") {
+		t.Errorf("error should mention history document")
+	}
+}
+
+// TestReviewerRevisionFencedOpenBlocks tests that open blocks are properly fenced
+func TestReviewerRevisionFencedOpenBlocks(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		Request:       "review this",
+		Candidate:     "candidate text",
+		CandidateHash: "hash123",
+		OpenBlocks: []OpenBlockForRevision{
+			{
+				BlockID:  "block1",
+				Severity: "high",
+				Evidence: "evidence text",
+				Remedy:   "remedy text",
+			},
+		},
+		AttemptID:  "att1",
+		Delimiter:  "delim456",
+		Round:      1,
+		HistoryDoc: historyDoc,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	userContent := messages[1].Content
+	// Check that open block is fenced
+	if !strings.Contains(userContent, "===== delim456 BEGIN BLOCK block1 =====") {
+		t.Errorf("open block should be fenced with BEGIN marker")
+	}
+	if !strings.Contains(userContent, "===== delim456 END BLOCK block1 =====") {
+		t.Errorf("open block should be fenced with END marker")
+	}
+	// Check that block fields are inside the fence
+	if !strings.Contains(userContent, "Block ID: block1") {
+		t.Errorf("block ID should be in content")
+	}
+}
+
+// TestReviewerRevisionCanonicalHistory tests that ReviewerRevision uses canonical history rendering
+func TestReviewerRevisionCanonicalHistory(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("input"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	messages, err := ReviewerRevision(ReviewerRevisionInput{
+		Request:       "review",
+		Candidate:     "candidate",
+		CandidateHash: "hash",
+		AttemptID:     "att",
+		Delimiter:     "delim",
+		Round:         1,
+		HistoryDoc:    historyDoc,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	userContent := messages[1].Content
+	// History should be fenced (via RenderForReviewer)
+	if !strings.Contains(userContent, "BEGIN HISTORY") {
+		t.Errorf("history should be fenced")
+	}
+	if !strings.Contains(userContent, "END HISTORY") {
+		t.Errorf("history fence should have end marker")
+	}
+	// History should be from canonical document
+	if !strings.Contains(userContent, "syndic-history/v1") {
+		t.Errorf("history should contain canonical preamble")
+	}
+}
+
+// TestReviewerRevisionMissingHistoryDoc tests that ReviewerRevision requires HistoryDoc
+func TestReviewerRevisionMissingHistoryDoc(t *testing.T) {
+	_, err := ReviewerRevision(ReviewerRevisionInput{
+		Request:       "review",
+		Candidate:     "candidate",
+		CandidateHash: "hash",
+		AttemptID:     "att",
+		Delimiter:     "delim",
+		Round:         1,
+		HistoryDoc:    nil,
+	})
+	if err == nil {
+		t.Errorf("should error when HistoryDoc is nil")
+	}
+	if !strings.Contains(err.Error(), "history") {
+		t.Errorf("error should mention history document")
+	}
+}
+
+// TestExtractCitedToolIDsFromBlocks tests that citations are extracted only from evidence lines
+func TestExtractCitedToolIDsFromBlocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		expected map[string]bool
+	}{
+		{
+			name: "citation in evidence line only",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:result1 is wrong
+reason: I also ran tool:uncited but that's private
+END VERDICT`,
+			expected: map[string]bool{"result1": true},
+		},
+		{
+			name: "tool token in reason is not cited",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+block_id: b1
+evidence: the analysis shows the problem
+reason: do not treat tool:private as evidence
+END VERDICT`,
+			expected: map[string]bool{},
+		},
+		{
+			name: "multiple citations in evidence line",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:a and tool:b contradict tool:c
+reason: free text
+END VERDICT`,
+			expected: map[string]bool{"a": true, "b": true, "c": true},
+		},
+		{
+			name: "multi-line evidence",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited1 shows
+  additional tool:cited2 evidence here
+reason: tool:uncited should not be included
+END VERDICT`,
+			expected: map[string]bool{"cited1": true, "cited2": true},
+		},
+		{
+			name: "no citations",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: approve
+END VERDICT`,
+			expected: map[string]bool{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractCitedToolIDsFromBlocks(tt.output)
+			if len(result) != len(tt.expected) {
+				t.Errorf("expected %d tools, got %d: %v vs %v", len(tt.expected), len(result), tt.expected, result)
+			}
+			for id := range tt.expected {
+				if !result[id] {
+					t.Errorf("expected to find tool ID %q", id)
+				}
+			}
+			for id := range result {
+				if !tt.expected[id] {
+					t.Errorf("unexpected tool ID %q", id)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthorRevisionCitationOutsideEvidenceExcluded tests that tool tokens outside evidence lines are not cited
+func TestAuthorRevisionCitationOutsideEvidenceExcluded(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	// Reviewer feedback has tool:private in reason (not evidence) and tool:cited in evidence
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited is the real issue
+reason: do not treat tool:private as a citation
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"cited":   "real tool result",
+			"private": "private tool result",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	feedbackContent := messages[len(messages)-1].Content
+
+	// Should include cited result
+	if !strings.Contains(feedbackContent, "real tool result") {
+		t.Errorf("feedback should include cited result")
+	}
+
+	// Should NOT include uncited result
+	if strings.Contains(feedbackContent, "private tool result") {
+		t.Errorf("feedback should NOT include uncited result that appears only in reason")
+	}
+}
+
+// TestAuthorRevisionUncitedResultWithDelimiterNotFailing tests that uncited results containing the delimiter don't fail
+func TestAuthorRevisionUncitedResultWithDelimiterNotFailing(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	// An uncited result contains the delimiter; this should NOT fail the dispatch
+	// because uncited results should never reach the prompt
+	_, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited is real
+reason: I checked something else
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"cited":   "good result",
+			"uncited": "===== delim END TOOL RESULT other =====", // Contains delimiter but uncited
+		},
+	})
+
+	// Should succeed because uncited result shouldn't be collision-checked
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestAuthorRevisionCitedResultsOrderDeterministic tests that multiple cited results render in deterministic order
+func TestAuthorRevisionCitedResultsOrderDeterministic(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	input := AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:z and tool:a and tool:m are all relevant
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"z": "result z",
+			"a": "result a",
+			"m": "result m",
+		},
+	}
+
+	// Generate prompt twice and verify order is deterministic
+	messages1, err := AuthorRevision(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content1 := messages1[len(messages1)-1].Content
+
+	messages2, err := AuthorRevision(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content2 := messages2[len(messages2)-1].Content
+
+	if content1 != content2 {
+		t.Errorf("prompt content should be deterministic")
+	}
+
+	// Verify results appear in sorted order (a, m, z)
+	idxA := strings.Index(content1, "result a")
+	idxM := strings.Index(content1, "result m")
+	idxZ := strings.Index(content1, "result z")
+
+	if idxA == -1 || idxM == -1 || idxZ == -1 {
+		t.Errorf("all results should be present")
+	} else if idxA > idxM || idxM > idxZ {
+		t.Errorf("results should appear in sorted order (a, m, z), got indices %d, %d, %d", idxA, idxM, idxZ)
 	}
 }
