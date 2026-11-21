@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -339,7 +340,15 @@ func TestProvisionalNewProcessAsksAgain(t *testing.T) {
 		return a.View(), a.provisional != nil
 	})
 	send(r1, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	r1.until(t, "allowProvisional set", func(a *App) (string, bool) {
+	r1.until(t, "first turn created and settled", func(a *App) (string, bool) {
+		if len(a.state.Turns) != 1 {
+			return "", false
+		}
+		for id := range a.state.Turns {
+			if !isTerminalState(a.state.TurnState[id]) {
+				return "", false
+			}
+		}
 		return "", a.allowProvisional
 	})
 
@@ -352,4 +361,63 @@ func TestProvisionalNewProcessAsksAgain(t *testing.T) {
 	r2.until(t, "second process asks again", func(a *App) (string, bool) {
 		return a.View(), a.provisional != nil && !a.allowProvisional
 	})
+}
+
+func pressAppKey(a *App, k string) {
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+}
+
+// A quick profile approval and the provisional question share one yes/no
+// prompt: whichever opens first keeps the keyboard, the other waits, and
+// answering one never clears the other's panel or the typed input.
+func TestProvisionalAndApprovalNeverOpenTogether(t *testing.T) {
+	_, project := quickEnv(t)
+	writeQuickFile(t, project, `profile = "fast"`)
+	newApp := func() *App {
+		a := NewApp(context.Background(), "unused.sock", WithWorkDir(project))
+		a.state.Status = &wire.StatusReply{
+			RosterPath:    "/etc/roster.toml",
+			QuickProfiles: []wire.QuickProfile{{Name: "fast", Preset: "solo", DefinitionSHA256: "d1"}},
+		}
+		return a
+	}
+
+	// Provisional first: a status refresh does not open the approval over it.
+	a := newApp()
+	a.input.SetValue("my question")
+	a.lastSubmitInput = "my question"
+	a.showProvisionalPrompt(a.state.Status)
+	a.updateQuickProfileState()
+	v := a.View()
+	if a.approval != nil || !strings.Contains(v, "Provisional deadlines") || strings.Contains(v, approvalPromptText) || !strings.Contains(v, "(y/n)> ") {
+		t.Fatalf("approval opened over the provisional prompt:\n%s", v)
+	}
+	pressAppKey(a, "n")
+	if a.input.Value() != "my question" {
+		t.Errorf("input lost: %q", a.input.Value())
+	}
+	if v := a.View(); !strings.Contains(v, approvalPromptText) || strings.Contains(v, "Provisional deadlines") {
+		t.Fatalf("approval did not open after the provisional answer:\n%s", v)
+	}
+	pressAppKey(a, "n")
+	if a.yesNo != nil || a.approval != nil {
+		t.Fatalf("prompts left open: %+v %+v", a.yesNo, a.approval)
+	}
+
+	// Approval first: the provisional refusal does not replace its panel, and keeps the input.
+	a = newApp()
+	a.updateQuickProfileState()
+	a.input.SetValue("my question")
+	a.showProvisionalPrompt(a.state.Status)
+	v = a.View()
+	if a.provisional != nil || !strings.Contains(v, approvalPromptText) || strings.Contains(v, "Provisional deadlines") {
+		t.Fatalf("provisional prompt replaced the approval:\n%s", v)
+	}
+	if !strings.Contains(v, "answer the open prompt") {
+		t.Errorf("no refusal shown:\n%s", v)
+	}
+	pressAppKey(a, "y")
+	if a.yesNo != nil || a.provisional != nil {
+		t.Fatalf("prompt left open after y: %+v", a.yesNo)
+	}
 }

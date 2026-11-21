@@ -45,6 +45,7 @@ type App struct {
 	input            textinput.Model
 	refusal          string             // the one-line message under the body: a refusal, or what a command did
 	panel            []string           // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	yesNo            *yesNoPrompt       // the one yes/no prompt that may be open; it owns the keyboard
 	approval         *approvalPrompt    // a quick profile approval pending yes/no
 	confirm          *releasePrompt     // a /release waiting for its reason; it takes the next line typed
 	provisional      *provisionalPrompt // provisional deadline confirmation pending yes/no
@@ -352,19 +353,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.approval != nil {
-		// An approval owns the keyboard: only y/n, esc and ctrl+c.
-		if cmd := a.handleYesNoKey(msg, a.approvalYes, a.approvalNo); cmd != nil {
-			return a, cmd
-		}
-		return a, nil
-	}
-	if a.provisional != nil {
-		// A provisional prompt owns the keyboard: only y/n, esc and ctrl+c.
-		if cmd := a.handleYesNoKey(msg, a.provisionalYes, a.provisionalNo); cmd != nil {
-			return a, cmd
-		}
-		return a, nil
+	if a.yesNo != nil {
+		// A yes/no prompt owns the keyboard: only y/n, esc and ctrl+c.
+		return a, a.handleYesNoKey(msg, a.yesNo.yes, a.yesNo.no)
 	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
@@ -497,13 +488,9 @@ func (a *App) enter() tea.Cmd {
 	return a.submitInput(line)
 }
 
-// submitInput sends the given input as a submit request.
+// submitInput sends the given input as a submit request under a fresh submission id.
 func (a *App) submitInput(line string) tea.Cmd {
 	id := uuid.NewString()
-	return a.submitInputWithID(line, id)
-}
-
-func (a *App) submitInputWithID(line string, id string) tea.Cmd {
 	var profiles []wire.QuickProfile
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
@@ -544,7 +531,6 @@ func (a *App) ensureTurnInfo() {
 
 func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if msg.refusal != "" {
-		// Check if this is a provisional error
 		var we *wire.Error
 		if errors.As(msg.err, &we) && we.Code == wire.ErrorCodeProvisional {
 			a.showProvisionalPrompt(a.state.Status)
@@ -639,7 +625,7 @@ func (a *App) updateQuickProfileState() {
 // requestApproval shows the file, the profile and its effect and asks yes or no.
 func (a *App) requestApproval(def wire.QuickProfile) {
 	qs := a.quickSelection
-	if a.confirm != nil || (a.approval != nil && a.approval.definitionSHA256 == def.DefinitionSHA256 && a.approval.fileSHA256 == qs.ProjectFileSHA) {
+	if a.confirm != nil || (a.yesNo != nil && a.approval == nil) || (a.approval != nil && a.approval.definitionSHA256 == def.DefinitionSHA256 && a.approval.fileSHA256 == qs.ProjectFileSHA) {
 		return
 	}
 	a.approval = &approvalPrompt{
@@ -648,6 +634,7 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 		fileSHA256:       qs.ProjectFileSHA,
 		definitionSHA256: def.DefinitionSHA256,
 	}
+	a.yesNo = &yesNoPrompt{yes: a.approvalYes, no: a.approvalNo}
 	budgets := "none"
 	if def.Budgets != nil {
 		if b, err := json.Marshal(def.Budgets); err == nil {

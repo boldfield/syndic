@@ -306,7 +306,7 @@ func (a *App) confirmEnter() tea.Cmd {
 
 // cancelApproval drops a pending approval prompt without approving.
 func (a *App) cancelApproval(why string) {
-	a.approval = nil
+	a.approval, a.yesNo = nil, nil
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
 	a.input.SetValue("")
@@ -376,8 +376,8 @@ func (a *App) onWhy(msg whyMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != a.gen {
 		return a, nil
 	}
-	if a.approval != nil {
-		return a, nil // the approval prompt owns the panel
+	if a.yesNo != nil {
+		return a, nil // the open yes/no prompt owns the panel
 	}
 	if msg.err != nil {
 		a.refusal = "why: " + formatRefusal(msg.err)
