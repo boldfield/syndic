@@ -148,6 +148,7 @@ type Engine struct {
 	built         manifest.Built
 	runID         string
 	runState      string // "probing" or "started"
+	probingTurnID string
 	manifestHash  string
 	runFirstSeq   int64
 	startedAt     time.Time
@@ -409,7 +410,7 @@ func (e *Engine) Start() error {
 	// Phase 1, committed before any probe: close runs a crash left probing,
 	// allocate this run and open it with run_opened. The run's identity and
 	// run_first_seq are fixed here, whatever probing later does.
-	var runID string
+	var runID, probingTurnID string
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
 		if _, err = tx.AbandonProbingEngineRuns(); err != nil {
@@ -418,6 +419,11 @@ func (e *Engine) Start() error {
 		runID, err = tx.AllocateEngineRun()
 		if err != nil {
 			return err
+		}
+		// Create a probing turn to hold all probe attempts
+		probingTurnID, err = tx.CreateTurn(runID, "solo", nil)
+		if err != nil {
+			return fmt.Errorf("create probing turn: %w", err)
 		}
 		return emit("", wire.EventKindRunOpened, wire.EvRunOpened{
 			RunID:      runID,
@@ -435,14 +441,33 @@ func (e *Engine) Start() error {
 		return errors.New("engine: run_opened event not found")
 	}
 	e.runID = runID
+	e.probingTurnID = probingTurnID
 	e.runState = "probing"
 	e.runFirstSeq = firstSeq
 	e.adapters = adapters
 
 	// Start-time probes belong here, between the two commits; a crash in
 	// this window leaves a probing run that the next start abandons.
+	// Errors are logged but do not abort startup; the engine must start
+	// and remain available for reads and recovery.
 	if err := e.runStartupProbes(context.Background(), roster, built, e.probeMissing); err != nil {
-		return fmt.Errorf("engine: startup probes: %w", err)
+		log.Printf("engine: startup probes: %v", err)
+	}
+
+	// Rebuild the manifest to include successful probe results
+	manifestAfterProbes, err := manifest.Build(manifest.Input{
+		Store:          e.store,
+		Roster:         roster,
+		RosterPath:     path,
+		RosterFile:     file,
+		EngineVersion:  e.version,
+		StartedAt:      startedAt,
+		AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
+	})
+	if err == nil {
+		built = manifestAfterProbes
+	} else {
+		log.Printf("engine: rebuild manifest after probes: %v", err)
 	}
 
 	// Phase 2: write the manifest once and announce engine_started.

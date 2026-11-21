@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// startupProbeRequest describes a participant or referee to probe.
 type startupProbeRequest struct {
 	participantID string
 	endpoint      config.EndpointProfile
@@ -31,11 +31,13 @@ type startupProbeRequest struct {
 // and before the manifest is finalized.
 // Probes are treated as dispatches: they journal attempts, take pool slots, and
 // leave holds on uncertain outcomes.
+// The built manifest is updated with successful probe results before being finalized.
 func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, built manifest.Built, probeMissing bool) error {
 	// Check for orphaned holds that would block all probes using proper classification
 	orphanedHolds, err := e.checkOrphanedHolds(roster)
 	if err != nil {
-		return fmt.Errorf("check orphaned holds: %w", err)
+		log.Printf("engine: check orphaned holds: %v", err)
+		orphanedHolds = false
 	}
 	if orphanedHolds {
 		// All probes are blocked; emit probe_failed:hold for all needed participants
@@ -44,7 +46,7 @@ func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, bu
 			if !participantRecord.Usable {
 				ep := e.endpointByName(roster, p.Endpoint)
 				if ep != nil && e.shouldProbeAutomatically(ep, probeMissing) {
-					_ = e.probeFinished(p.ID, "probe_failed:hold", "")
+					_ = e.probeFinished(e.probingTurnID, p.ID, "probe_failed:hold", "")
 				}
 			}
 		}
@@ -54,13 +56,46 @@ func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, bu
 	// Find participants and referees that need probes
 	probeRequests, err := e.findProbesNeeded(roster, built, probeMissing)
 	if err != nil {
-		return fmt.Errorf("find probes needed: %w", err)
+		log.Printf("engine: find probes needed: %v", err)
+		return nil
+	}
+
+	// Get held pools for ordinary hold checking
+	holds, err := e.store.UnreleasedHolds()
+	if err != nil {
+		log.Printf("engine: get unreleased holds: %v", err)
+		// Proceed without hold information if we can't fetch it
+		holds = []journal.Hold{}
+	}
+
+	// Build a set of pools with ordinary holds
+	poolsWithHolds := make(map[string]bool)
+	index := poolMembers(roster)
+	for _, h := range holds {
+		pools := appliedPools(index, h.Group)
+		for _, pool := range pools {
+			poolsWithHolds[pool] = true
+		}
 	}
 
 	// Run probes one at a time
 	for _, req := range probeRequests {
-		// Errors are logged but do not stop the engine
-		_ = e.runOneStartupProbe(ctx, req, roster)
+		poolName := req.endpoint.Name
+		for _, p := range roster.Participants {
+			if p.ID == req.participantID && p.Pool != "" {
+				poolName = p.Pool
+				break
+			}
+		}
+		if !req.isReferee && poolsWithHolds[poolName] {
+			// This participant's pool has an ordinary hold
+			_ = e.probeFinished(e.probingTurnID, req.participantID, "probe_failed:hold", "")
+			continue
+		}
+
+		if err := e.runOneStartupProbe(ctx, req, roster); err != nil {
+			log.Printf("engine: probe for %s: %v", req.participantID, err)
+		}
 	}
 
 	return nil
@@ -89,7 +124,6 @@ func (e *Engine) checkOrphanedHolds(roster *config.Roster) (bool, error) {
 
 // findProbesNeeded identifies participants and referees that need probes.
 // A participant or referee needs a probe if it has no usable record.
-// An ordinary hold on a pool blocks probing of that pool's participants only.
 func (e *Engine) findProbesNeeded(roster *config.Roster, built manifest.Built, probeMissing bool) ([]startupProbeRequest, error) {
 	var requests []startupProbeRequest
 
@@ -99,36 +133,10 @@ func (e *Engine) findProbesNeeded(roster *config.Roster, built manifest.Built, p
 		endpointsByName[ep.Name] = ep
 	}
 
-	// Get unreleased holds and classify them
-	holds, err := e.store.UnreleasedHolds()
-	if err != nil {
-		return nil, fmt.Errorf("get unreleased holds: %w", err)
-	}
-
-	// Build a set of pools with ordinary holds (not orphaned)
-	poolsWithHolds := make(map[string]bool)
-	index := poolMembers(roster)
-	for _, h := range holds {
-		pools := appliedPools(index, h.Group)
-		for _, pool := range pools {
-			poolsWithHolds[pool] = true
-		}
-	}
-
 	// Find participants with no usable record
 	for _, p := range roster.Participants {
 		participantRecord := built.Participants[p.ID]
 		if !participantRecord.Usable {
-			poolName := p.Pool
-			if poolName == "" {
-				poolName = defaultPool
-			}
-
-			// Skip if this participant's pool has an ordinary hold
-			if poolsWithHolds[poolName] {
-				continue
-			}
-
 			ep := endpointsByName[p.Endpoint]
 			if e.shouldProbeAutomatically(&ep, probeMissing) {
 				requests = append(requests, startupProbeRequest{
@@ -153,6 +161,9 @@ func (e *Engine) findProbesNeeded(roster *config.Roster, built manifest.Built, p
 // - Automatic for `none` or `flat` endpoints
 // - Only with --probe-missing for `metered` or `unknown` endpoints
 func (e *Engine) shouldProbeAutomatically(ep *config.EndpointProfile, probeMissing bool) bool {
+	if ep == nil {
+		return false
+	}
 	switch ep.DeclaredBilling {
 	case "none", "flat":
 		return true
@@ -173,13 +184,15 @@ func (e *Engine) endpointByName(roster *config.Roster, name string) *config.Endp
 	return nil
 }
 
-// runOneStartupProbe runs a single startup probe for a participant.
+// runOneStartupProbe runs a single startup probe for a participant or referee.
 // It emits probe_started and probe_finished events, journals the attempt,
-// and handles holds appropriately. Probe requests are treated as dispatches.
+// and handles holds appropriately.
+// Probe requests are treated as dispatches: they use the probing turn for attempts,
+// take pool slots, and leave holds on uncertain outcomes.
 func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest, roster *config.Roster) error {
 	// Emit probe_started event
 	if err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		return emit("", wire.EventKindProbeStarted, wire.EvProbeStarted{
+		return emit(e.probingTurnID, wire.EventKindProbeStarted, wire.EvProbeStarted{
 			Participant: req.participantID,
 		})
 	}); err != nil {
@@ -189,7 +202,7 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 	adapter := e.adapters[req.participantID]
 	if adapter == nil {
 		// Endpoint unreachable
-		return e.probeFinished(req.participantID, "probe_failed:unreachable", "")
+		return e.probeFinished(e.probingTurnID, req.participantID, "probe_failed:unreachable", "")
 	}
 
 	// Get configured probe timeout from deadlines if available
@@ -205,6 +218,9 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 			pool = p.Pool
 			break
 		}
+	}
+	if pool == "" {
+		pool = defaultPool
 	}
 
 	// Determine the group for this probe (all models in the endpoint)
@@ -235,9 +251,9 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 	// Journal the probe attempt before sending (durable intent)
 	var attemptID string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		// Create attempt row for the probe
+		// Create attempt row for the probe using the probing turn
 		newAttemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
-			TurnID:                e.runID,
+			TurnID:                e.probingTurnID,
 			Participant:           req.participantID,
 			Phase:                 "probe",
 			Epoch:                 1,
@@ -254,25 +270,20 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 		return nil
 	})
 	if err != nil {
-		// Error journaling attempt - emit failure and return
-		_ = e.probeFinished(req.participantID, "probe_failed:unreachable", "")
-		return err
+		return e.probeFinished(e.probingTurnID, req.participantID, "probe_failed:unreachable", "")
 	}
 
 	// Create probe context with timeout
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	// Run the actual probe with BeforeSend hook
+	// Run the actual probe
 	record, probeErr := adapter.Probe(probeCtx, req.endpoint.Name, req.model, transport.ProbeOptions{
 		Timeout:            probeTimeout,
 		DisableOverLength:  false,
 		DisableCalibration: false,
 		AssumedContextLen:  0,
-		BeforeSend: func(preq *transport.ProbeRequest) error {
-			// Durable intent is already journaled; this callback is for further hooks if needed
-			return nil
-		},
+		BeforeSend:         nil,
 	})
 
 	// Handle probe result
@@ -288,47 +299,29 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 					EndpointName: req.endpoint.Name,
 					Model:        req.model,
 					Group:        group,
-					HeldSince:    time.Now().UTC(),
+					HeldSince:    e.clock.Now().UTC(),
 				}); err != nil {
 					return fmt.Errorf("open hold: %w", err)
 				}
 				// Emit probe_finished with the hold detail
-				return emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+				return emit(e.probingTurnID, wire.EventKindProbeFinished, wire.EvProbeFinished{
 					Participant: req.participantID,
 					Outcome:     "probe_failed:" + detail,
 				})
 			})
 			return err
 		}
-		if errors.Is(probeErr, transport.ErrNotSent) {
-			// Pre-send failure does not leave a hold
-			detail := e.probeErrorDetail(probeErr)
-			return e.probeFinished(req.participantID, "probe_failed:"+detail, "")
-		}
 		detail := e.probeErrorDetail(probeErr)
-		return e.probeFinished(req.participantID, "probe_failed:"+detail, "")
+		return e.probeFinished(e.probingTurnID, req.participantID, "probe_failed:"+detail, "")
 	}
 
 	// If probe was incomplete, it's still a failure
 	if record.ReportedModel == "" || (record.ContextBound == nil && record.OutputBound == nil) {
-		return e.probeFinished(req.participantID, "probe_failed:incomplete", "")
+		return e.probeFinished(e.probingTurnID, req.participantID, "probe_failed:incomplete", "")
 	}
 
 	// Probe succeeded - store the result and emit probe_finished
-	return e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		// Get adapter version for fingerprinting
-		var adapterVersion string
-		for _, p := range roster.Participants {
-			if p.ID == req.participantID && p.Endpoint == req.endpoint.Name {
-				adapter := e.adapters[req.participantID]
-				if adapter != nil {
-					// Try to get version from the adapter
-					adapterVersion = record.AdapterVersion
-				}
-				break
-			}
-		}
-
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		// Create and store the probe manifest
 		probeManifest, err := evidence.NewProbeManifest(
 			evidence.Export{
@@ -337,18 +330,18 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 				Identity:                 record.Identity,
 				ReportedModel:            record.ReportedModel,
 				EligibleRequiredReviewer: record.EligibleRequiredReviewer,
-				ObservedAt:               time.Now().UTC(),
+				ObservedAt:               e.clock.Now().UTC(),
 				ContextBound:             record.ContextBound,
 				OutputBound:              record.OutputBound,
 			},
 			req.endpoint,
 			req.model,
-			adapterVersion,
+			record.AdapterVersion,
 			record.Calibration,
 		)
 		if err != nil {
-			// If we can't create the manifest, still emit probe_finished but don't fail startup
-			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+			// If we can't create the manifest, it's a failure
+			_ = emit(e.probingTurnID, wire.EventKindProbeFinished, wire.EvProbeFinished{
 				Participant: req.participantID,
 				Outcome:     "probe_failed:incomplete",
 			})
@@ -357,7 +350,7 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 
 		manifestJSON, err := json.Marshal(probeManifest)
 		if err != nil {
-			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+			_ = emit(e.probingTurnID, wire.EventKindProbeFinished, wire.EvProbeFinished{
 				Participant: req.participantID,
 				Outcome:     "probe_failed:incomplete",
 			})
@@ -366,23 +359,27 @@ func (e *Engine) runOneStartupProbe(ctx context.Context, req startupProbeRequest
 
 		// Store the probe run
 		if _, _, err := tx.CreateProbeRun(manifestJSON); err != nil {
-			// If we can't store the probe result, still emit probe_finished
-			_ = emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+			_ = emit(e.probingTurnID, wire.EventKindProbeFinished, wire.EvProbeFinished{
 				Participant: req.participantID,
-				Outcome:     "probed",
+				Outcome:     "probe_failed:incomplete",
 			})
 			return nil
 		}
 
 		// Emit probe result event
-		return emit("", wire.EventKindProbeFinished, wire.EvProbeFinished{
+		return emit(e.probingTurnID, wire.EventKindProbeFinished, wire.EvProbeFinished{
 			Participant: req.participantID,
 			Outcome:     "probed",
 		})
 	})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// probeErrorDetail maps probe errors to detail strings.
+// probeErrorDetail maps probe errors to detail strings, using the wire protocol vocabulary.
 func (e *Engine) probeErrorDetail(err error) string {
 	if err == nil {
 		return "unreachable"
@@ -397,13 +394,12 @@ func (e *Engine) probeErrorDetail(err error) string {
 		return "incomplete"
 	default:
 		// For now, classify unknown errors as unreachable
-		// A full implementation would do more sophisticated error classification
 		return "unreachable"
 	}
 }
 
 // probeFinished emits the probe_finished event without a hold.
-func (e *Engine) probeFinished(participantID, outcome, detail string) error {
+func (e *Engine) probeFinished(turnID, participantID, outcome, detail string) error {
 	return e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		evt := wire.EvProbeFinished{
 			Participant: participantID,
@@ -412,6 +408,6 @@ func (e *Engine) probeFinished(participantID, outcome, detail string) error {
 		if detail != "" {
 			evt.Detail = &detail
 		}
-		return emit("", wire.EventKindProbeFinished, evt)
+		return emit(turnID, wire.EventKindProbeFinished, evt)
 	})
 }
