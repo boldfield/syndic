@@ -111,19 +111,21 @@ type Options struct {
 	Clock         Clock     // nil means the real clock
 	Rand          io.Reader // nil means crypto/rand.Reader
 	NewAdapter    func(p config.Participant, ep config.EndpointProfile) (adapter transport.Adapter, adapterVersion string, err error)
+	ProbeMissing  bool // enable probing for metered/unknown endpoints at startup
 }
 
 // Engine is the review engine.
 type Engine struct {
-	store      *journal.Store
-	hub        *hub.Hub
-	rosterPath string
-	version    string
-	clock      Clock
-	rand       io.Reader
-	retryDelay time.Duration // the package-level retryDelay when the engine was built
-	noDelivery bool          // the package-level deliveryOff when the engine was built
-	newAdapter func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
+	store        *journal.Store
+	hub          *hub.Hub
+	rosterPath   string
+	version      string
+	clock        Clock
+	rand         io.Reader
+	retryDelay   time.Duration // the package-level retryDelay when the engine was built
+	noDelivery   bool          // the package-level deliveryOff when the engine was built
+	probeMissing bool          // enable probing for metered/unknown endpoints at startup
+	newAdapter   func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -192,6 +194,7 @@ func New(o Options) (*Engine, error) {
 		rand:          o.Rand,
 		retryDelay:    retryDelay,
 		noDelivery:    deliveryOff,
+		probeMissing:  o.ProbeMissing,
 		newAdapter:    o.NewAdapter,
 		running:       make(map[string]bool),
 		inflight:      make(map[string]int),
@@ -438,9 +441,7 @@ func (e *Engine) Start() error {
 
 	// Start-time probes belong here, between the two commits; a crash in
 	// this window leaves a probing run that the next start abandons.
-	// probeMissing is false by default; it should be plumbed from CLI flags in a later task.
-	probeMissing := false
-	if err := e.runStartupProbes(context.Background(), roster, built, probeMissing); err != nil {
+	if err := e.runStartupProbes(context.Background(), roster, built, e.probeMissing); err != nil {
 		return fmt.Errorf("engine: startup probes: %w", err)
 	}
 
