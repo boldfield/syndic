@@ -19,6 +19,7 @@ var commands = map[string]commandHandler{
 	"quit":         cmdQuit,
 	"resume":       cmdResume,
 	"mode":         cmdMode,
+	"quick":        cmdQuick,
 	"participants": cmdParticipants,
 	"cancel":       cmdCancel,
 	"why":          cmdWhy,
@@ -31,6 +32,7 @@ var commands = map[string]commandHandler{
 // commandHelp is one line per command, in the order /help lists them.
 var commandHelp = []string{
 	"/mode <preset>            use the preset for the next submit only",
+	"/quick <name>|off         select or deselect a quick profile for this process",
 	"/participants             show the participants tab",
 	"/cancel                   cancel the open turn",
 	"/why                      why the current or last turn ended, with the detail",
@@ -106,6 +108,44 @@ func cmdMode(a *App, args []string) tea.Cmd {
 		}
 	}
 	a.refusal = fmt.Sprintf("unknown preset %q; presets: %s", args[0], strings.Join(known, ", "))
+	return nil
+}
+
+func cmdQuick(a *App, args []string) tea.Cmd {
+	if len(args) != 1 {
+		a.refusal = "usage: /quick <name>|off"
+		return nil
+	}
+
+	name := args[0]
+	if name == "off" {
+		a.quickSelection.SessionOverride = &name
+		a.refusal = "quick profile deselected for this process"
+		return nil
+	}
+
+	if a.state.Status == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+
+	known := make(map[string]bool)
+	for _, qp := range a.state.Status.QuickProfiles {
+		known[qp.Name] = true
+	}
+
+	if !known[name] {
+		names := make([]string, 0, len(a.state.Status.QuickProfiles))
+		for _, qp := range a.state.Status.QuickProfiles {
+			names = append(names, qp.Name)
+		}
+		sort.Strings(names)
+		a.refusal = fmt.Sprintf("unknown profile %q; available: %s", name, strings.Join(names, ", "))
+		return nil
+	}
+
+	a.quickSelection.SessionOverride = &name
+	a.refusal = "quick profile " + name + " selected for this process"
 	return nil
 }
 

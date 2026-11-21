@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"time"
 
@@ -50,8 +51,9 @@ type App struct {
 	onEvent              func(wire.Frame)
 
 	content           *ContentCache
-	drafts            *bool // the user's drafts toggle; nil until set, then it overrides the quick profile
-	answerScrollRow   int   // first visible line of the answer tab
+	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection    *QuickSelection // quick profile state
+	answerScrollRow   int             // first visible line of the answer tab
 	candidateIDByTurn map[string]string
 	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons   map[string]string           // the reason of each override event
@@ -103,6 +105,8 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		blockDetail:       make(map[string]wire.OpenBlock),
 	}
 	a.state.ConnState = ConnStateConnecting
+	wd, _ := os.Getwd()
+	a.quickSelection, _ = NewQuickSelection(wd)
 	for _, o := range opts {
 		o(a)
 	}
@@ -434,7 +438,11 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset)
+	var quickProfile *string
+	if a.quickSelection != nil {
+		quickProfile = a.quickSelection.SelectedProfile()
+	}
+	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset, quickProfile)
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -491,6 +499,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.cl = msg.cl
 	a.state.Hello = msg.cl.Hello()
 	a.state = MergeStatus(a.state, &msg.status)
+	a.updateQuickProfileState()
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
@@ -506,6 +515,41 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
+}
+
+// updateQuickProfileState checks if the project's quick profile is approved
+// and sets the UnapprovedProfile state accordingly.
+func (a *App) updateQuickProfileState() {
+	if a.quickSelection == nil || a.quickSelection.ProjectProfile == nil {
+		a.state.UnapprovedProfile = nil
+		return
+	}
+
+	profileName := *a.quickSelection.ProjectProfile
+	if a.state.Status == nil {
+		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+		return
+	}
+
+	var qp *wire.QuickProfile
+	for i := range a.state.Status.QuickProfiles {
+		if a.state.Status.QuickProfiles[i].Name == profileName {
+			qp = &a.state.Status.QuickProfiles[i]
+			break
+		}
+	}
+
+	if qp == nil {
+		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+		return
+	}
+
+	if a.quickSelection.SelectedProfile() != nil {
+		a.state.UnapprovedProfile = nil
+		return
+	}
+
+	a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
 }
 
 // onFrame applies a frame. Any stream error, including the engine's stopping
@@ -621,6 +665,7 @@ func (a *App) onStatusRefresh(msg statusMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	a.state = MergeStatus(a.state, &msg.status)
+	a.updateQuickProfileState()
 	a.ensureTurnInfo()
 	if a.statusDirty {
 		a.statusDirty = false

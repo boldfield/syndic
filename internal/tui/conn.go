@@ -88,12 +88,15 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
-// submitCmd submits input with a fresh submission id and the preset, if any.
-func submitCmd(ctx context.Context, cl *client.Client, input, preset string) tea.Cmd {
+// submitCmd submits input with a fresh submission id, preset, and quick profile if any.
+func submitCmd(ctx context.Context, cl *client.Client, input, preset string, quickProfile *string) tea.Cmd {
 	return func() tea.Msg {
 		req := wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input}
 		if preset != "" {
 			req.Preset = &preset
+		}
+		if quickProfile != nil {
+			req.QuickProfile = quickProfile
 		}
 		reply, err := cl.Submit(ctx, req)
 		if err != nil {
