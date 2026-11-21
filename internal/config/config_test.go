@@ -748,6 +748,89 @@ func TestValidateViolations(t *testing.T) {
 			},
 			wantMsgs: []string{"ep1", "external", "metered"},
 		},
+		{
+			name: "valid revision settings at roster level",
+			mutate: func(r *Roster) {
+				mr := 2
+				mrc := 5
+				r.Revision = Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid max_rounds (negative)",
+			mutate: func(r *Roster) {
+				mr := -1
+				r.Revision = Revision{MaxRounds: &mr}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds (exceeds 5)",
+			mutate: func(r *Roster) {
+				mr := 6
+				r.Revision = Revision{MaxRounds: &mr}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds_ceiling (negative)",
+			mutate: func(r *Roster) {
+				mrc := -1
+				r.Revision = Revision{MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds_ceiling", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds_ceiling (exceeds 5)",
+			mutate: func(r *Roster) {
+				mrc := 6
+				r.Revision = Revision{MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds_ceiling", "must be between 0 and 5"},
+		},
+		{
+			name: "max_rounds exceeds max_rounds_ceiling at roster level",
+			mutate: func(r *Roster) {
+				mr := 4
+				mrc := 2
+				r.Revision = Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must not exceed", "revision.max_rounds_ceiling"},
+		},
+		{
+			name: "solo preset with revision settings (invalid)",
+			mutate: func(r *Roster) {
+				mr := 2
+				mrc := 5
+				soloPreset := r.Presets["review"]
+				soloPreset.Mode = "solo"
+				soloPreset.RequiredReviewers = []string{}
+				soloPreset.Revision = &Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+				r.Presets["solo_with_revision"] = soloPreset
+				r.DefaultPreset = "review"
+			},
+			wantMsgs: []string{"solo_with_revision", "solo mode must not have revision settings"},
+		},
+		{
+			name: "valid revision settings in review preset",
+			mutate: func(r *Roster) {
+				mr := 1
+				mrc := 3
+				p := r.Presets["review"]
+				p.Revision = &Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "valid accept_unknown_truncation on participant",
+			mutate: func(r *Roster) {
+				acceptUnknown := true
+				r.Participants[0].AcceptUnknownTruncation = &acceptUnknown
+			},
+			wantMsgs: []string{},
+		},
 	}
 
 	for _, tt := range tests {

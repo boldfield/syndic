@@ -388,8 +388,41 @@ func (r *Roster) Validate() error {
 		}
 	}
 
-	// Validate Preset deadlines and budgets overrides
+	// Validate Revision
+	if r.Revision.MaxRounds != nil && (*r.Revision.MaxRounds < 0 || *r.Revision.MaxRounds > 5) {
+		errs = append(errs, fmt.Errorf("revision.max_rounds must be between 0 and 5"))
+	}
+	if r.Revision.MaxRoundsCeiling != nil && (*r.Revision.MaxRoundsCeiling < 0 || *r.Revision.MaxRoundsCeiling > 5) {
+		errs = append(errs, fmt.Errorf("revision.max_rounds_ceiling must be between 0 and 5"))
+	}
+	if r.Revision.MaxRounds != nil && r.Revision.MaxRoundsCeiling != nil {
+		if *r.Revision.MaxRounds > *r.Revision.MaxRoundsCeiling {
+			errs = append(errs, fmt.Errorf("revision.max_rounds (%d) must not exceed revision.max_rounds_ceiling (%d)", *r.Revision.MaxRounds, *r.Revision.MaxRoundsCeiling))
+		}
+	}
+
+	// Validate Preset deadlines, budgets and revision overrides
 	for name, preset := range r.Presets {
+		// Solo presets cannot have revision settings
+		if preset.Mode == "solo" && preset.Revision != nil {
+			errs = append(errs, fmt.Errorf("presets[%q]: solo mode must not have revision settings", name))
+		}
+
+		// Validate revision overrides
+		if preset.Revision != nil {
+			if preset.Revision.MaxRounds != nil && (*preset.Revision.MaxRounds < 0 || *preset.Revision.MaxRounds > 5) {
+				errs = append(errs, fmt.Errorf("presets[%q].revision.max_rounds must be between 0 and 5", name))
+			}
+			if preset.Revision.MaxRoundsCeiling != nil && (*preset.Revision.MaxRoundsCeiling < 0 || *preset.Revision.MaxRoundsCeiling > 5) {
+				errs = append(errs, fmt.Errorf("presets[%q].revision.max_rounds_ceiling must be between 0 and 5", name))
+			}
+			if preset.Revision.MaxRounds != nil && preset.Revision.MaxRoundsCeiling != nil {
+				if *preset.Revision.MaxRounds > *preset.Revision.MaxRoundsCeiling {
+					errs = append(errs, fmt.Errorf("presets[%q].revision.max_rounds (%d) must not exceed presets[%q].revision.max_rounds_ceiling (%d)", name, *preset.Revision.MaxRounds, name, *preset.Revision.MaxRoundsCeiling))
+				}
+			}
+		}
+
 		if preset.Deadlines != nil {
 			if preset.Deadlines.Attempt != nil && preset.Deadlines.Attempt.Duration <= 0 {
 				errs = append(errs, fmt.Errorf("presets[%q].deadlines.attempt must be positive", name))
@@ -451,6 +484,23 @@ func (r *Roster) Validate() error {
 		if effTurn != nil && effAttempt != nil {
 			if effTurn.Duration < effAttempt.Duration {
 				errs = append(errs, fmt.Errorf("presets[%q]: effective turn deadline must be at least effective attempt deadline", name))
+			}
+		}
+
+		// Validate effective max_rounds <= effective max_rounds_ceiling for preset
+		effMaxRounds := r.Revision.MaxRounds
+		effMaxRoundsCeiling := r.Revision.MaxRoundsCeiling
+		if preset.Revision != nil {
+			if preset.Revision.MaxRounds != nil {
+				effMaxRounds = preset.Revision.MaxRounds
+			}
+			if preset.Revision.MaxRoundsCeiling != nil {
+				effMaxRoundsCeiling = preset.Revision.MaxRoundsCeiling
+			}
+		}
+		if effMaxRounds != nil && effMaxRoundsCeiling != nil {
+			if *effMaxRounds > *effMaxRoundsCeiling {
+				errs = append(errs, fmt.Errorf("presets[%q]: effective max_rounds (%d) must not exceed effective max_rounds_ceiling (%d)", name, *effMaxRounds, *effMaxRoundsCeiling))
 			}
 		}
 	}

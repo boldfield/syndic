@@ -68,6 +68,11 @@ type Budgets struct {
 	TurnMaxEstimatedTokens  *int     `toml:"turn_max_estimated_tokens"`
 }
 
+type Revision struct {
+	MaxRounds        *int `toml:"max_rounds"`
+	MaxRoundsCeiling *int `toml:"max_rounds_ceiling"`
+}
+
 type EngineSettings struct {
 	StopGrace *Duration `toml:"stop_grace"`
 }
@@ -78,15 +83,16 @@ type Pool struct {
 }
 
 type Participant struct {
-	ID            string   `toml:"id"`
-	Model         string   `toml:"model"`
-	Route         string   `toml:"route"` // "api" or "cli"
-	Endpoint      string   `toml:"endpoint"`
-	Binary        string   `toml:"binary"`
-	EligibleRoles []Role   `toml:"eligible_roles"`
-	Pool          string   `toml:"pool"`
-	ContextTokens *int     `toml:"context_tokens"`
-	BytesPerToken *float64 `toml:"bytes_per_token"`
+	ID                      string   `toml:"id"`
+	Model                   string   `toml:"model"`
+	Route                   string   `toml:"route"` // "api" or "cli"
+	Endpoint                string   `toml:"endpoint"`
+	Binary                  string   `toml:"binary"`
+	EligibleRoles           []Role   `toml:"eligible_roles"`
+	Pool                    string   `toml:"pool"`
+	ContextTokens           *int     `toml:"context_tokens"`
+	BytesPerToken           *float64 `toml:"bytes_per_token"`
+	AcceptUnknownTruncation *bool    `toml:"accept_unknown_truncation"`
 }
 
 type EndpointProfile struct {
@@ -112,6 +118,7 @@ type Preset struct {
 	RequiredReviewers []string   `toml:"required_reviewers"`
 	Deadlines         *Deadlines `toml:"deadlines"`
 	Budgets           *Budgets   `toml:"budgets"`
+	Revision          *Revision  `toml:"revision"`
 }
 
 type QuickProfile struct {
@@ -131,6 +138,7 @@ type Effective struct {
 	Drafts       bool
 	Deadlines    Deadlines
 	Budgets      Budgets
+	Revision     Revision
 }
 
 type RoutingPolicy struct {
@@ -146,6 +154,7 @@ type Roster struct {
 	Policy        RoutingPolicy           `toml:"policy"`
 	Deadlines     Deadlines               `toml:"deadlines"`
 	Budgets       Budgets                 `toml:"budgets"`
+	Revision      Revision                `toml:"revision"`
 	Engine        EngineSettings          `toml:"engine"`
 	Pools         map[string]Pool         `toml:"pools"`
 	Quick         map[string]QuickProfile `toml:"quick"`
@@ -216,6 +225,16 @@ func (r *Roster) ApplyDefaults() {
 		sg := 5 * time.Second
 		r.Engine.StopGrace = &Duration{sg}
 	}
+
+	// Revision defaults
+	if r.Revision.MaxRounds == nil {
+		mr := 2
+		r.Revision.MaxRounds = &mr
+	}
+	if r.Revision.MaxRoundsCeiling == nil {
+		mrc := 5
+		r.Revision.MaxRoundsCeiling = &mrc
+	}
 }
 
 // Resolve resolves deadlines and budgets for a given preset and quick profile.
@@ -269,9 +288,10 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 		result.Drafts = quickProf.Drafts
 	}
 
-	// Copy roster-level deadlines and budgets
+	// Copy roster-level deadlines, budgets, and revision
 	result.Deadlines = r.Deadlines
 	result.Budgets = r.Budgets
+	result.Revision = r.Revision
 
 	// Apply preset overrides to deadlines
 	if preset.Deadlines != nil {
@@ -314,6 +334,16 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 		}
 		if preset.Budgets.TurnMaxEstimatedTokens != nil {
 			result.Budgets.TurnMaxEstimatedTokens = preset.Budgets.TurnMaxEstimatedTokens
+		}
+	}
+
+	// Apply preset overrides to revision
+	if preset.Revision != nil {
+		if preset.Revision.MaxRounds != nil {
+			result.Revision.MaxRounds = preset.Revision.MaxRounds
+		}
+		if preset.Revision.MaxRoundsCeiling != nil {
+			result.Revision.MaxRoundsCeiling = preset.Revision.MaxRoundsCeiling
 		}
 	}
 
