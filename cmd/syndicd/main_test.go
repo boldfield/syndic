@@ -657,6 +657,11 @@ func TestLogExternalSpendingControl(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Set up isolated environment for the daemon
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
 	// Create roster with external spending control on a metered endpoint
 	rosterWithExternal := strings.Replace(
 		enginetest.RosterTOML,
@@ -708,20 +713,26 @@ spending_control = "external"`,
 		)
 	}()
 
-	// Give the daemon time to start
-	time.Sleep(500 * time.Millisecond)
-
-	// Check that external spending control logging appears in stderr
-	stderrOutput := stderr.String()
-	hasMeteredExternal := strings.Contains(stderrOutput, "external spending control:") &&
-		strings.Contains(stderrOutput, "(metered)")
+	// Poll for the log message indicating daemon is ready and has logged external spending control
+	var stderrOutput string
+	var hasMeteredExternal bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stderrOutput = stderr.String()
+		hasMeteredExternal = strings.Contains(stderrOutput, "external spending control:") &&
+			strings.Contains(stderrOutput, "(metered)")
+		if hasMeteredExternal {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// Stop the daemon
 	sigChan <- os.Interrupt
 	exitCode := <-done
 
 	if exitCode != 0 {
-		t.Fatalf("want exit code 0, got %d", exitCode)
+		t.Fatalf("want exit code 0, got %d; stderr: %s", exitCode, stderr.String())
 	}
 
 	if !hasMeteredExternal {
