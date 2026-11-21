@@ -88,6 +88,10 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
+// onSubmitRequest, when set, sees each submit request before it is sent. Tests use it to check
+// what went over the wire; nothing in the program sets it.
+var onSubmitRequest func(wire.SubmitRequest)
+
 // submitCmd submits input under the submission id, with the preset and quick profile, if any.
 func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, preset string, quickProfile *string, allowProvisional bool) tea.Cmd {
 	return func() tea.Msg {
@@ -101,6 +105,9 @@ func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, pres
 		if allowProvisional {
 			t := true
 			req.AllowProvisional = &t
+		}
+		if onSubmitRequest != nil {
+			onSubmitRequest(req)
 		}
 		reply, err := cl.Submit(ctx, req)
 		if err != nil {

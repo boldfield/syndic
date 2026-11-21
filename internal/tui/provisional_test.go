@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -27,6 +28,28 @@ func submissionIDsFromTurns(h *enginetest.Harness) []string {
 	return ids
 }
 
+// recordRequests captures every submit request the App sends until the test ends.
+func recordRequests(t *testing.T) func() []wire.SubmitRequest {
+	t.Helper()
+	var mu sync.Mutex
+	var reqs []wire.SubmitRequest
+	onSubmitRequest = func(r wire.SubmitRequest) {
+		mu.Lock()
+		defer mu.Unlock()
+		reqs = append(reqs, r)
+	}
+	t.Cleanup(func() { onSubmitRequest = nil })
+	return func() []wire.SubmitRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]wire.SubmitRequest(nil), reqs...)
+	}
+}
+
+func allowsProvisional(r wire.SubmitRequest) bool {
+	return r.AllowProvisional != nil && *r.AllowProvisional
+}
+
 func provisionalRoster(replace ...string) string {
 	roster := strings.Replace(enginetest.RosterTOML, "provisional = false", "provisional = true", 1)
 	for i := 0; i+1 < len(replace); i += 2 {
@@ -42,6 +65,7 @@ func TestProvisionalFirstSubmitPromptsCreatesNoTurn(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
 	h := enginetest.New(t, roster, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// Type a question and press Enter; the submit should fail with provisional error
@@ -56,6 +80,10 @@ func TestProvisionalFirstSubmitPromptsCreatesNoTurn(t *testing.T) {
 	// Verify no turn was created yet
 	if len(r.app.state.Turns) != 0 {
 		t.Fatalf("turn created before confirmation: %d turns exist", len(r.app.state.Turns))
+	}
+
+	if got := reqs(); len(got) != 1 || got[0].AllowProvisional != nil {
+		t.Fatalf("first submit sent %+v, want one request without allow_provisional", got)
 	}
 
 	// Verify the input is still present
@@ -79,6 +107,7 @@ func TestProvisionalYesResendsProceedsCreatesOneTurn(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
 	h := enginetest.New(t, roster, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// Submit a question; should show provisional prompt
@@ -96,20 +125,38 @@ func TestProvisionalYesResendsProceedsCreatesOneTurn(t *testing.T) {
 		return view, len(a.state.Turns) == 1 && a.provisional == nil && a.input.Value() == "" && a.allowProvisional && !strings.Contains(view, "Provisional deadlines")
 	})
 
-	// Verify exactly one submission ID was recorded (the resend)
+	// Let the turn settle, then check a double send did not create a second turn.
+	idle(t, r)
 	ids := submissionIDsFromTurns(h)
 	if len(ids) != 1 {
 		t.Fatalf("expected 1 turn submitted, got %d; submission IDs: %v", len(ids), ids)
 	}
+	got := reqs()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 requests (refused, resend), got %+v", got)
+	}
+	if got[0].AllowProvisional != nil {
+		t.Errorf("refused request carried allow_provisional: %+v", got[0])
+	}
+	if !allowsProvisional(got[1]) {
+		t.Errorf("resend lacks allow_provisional true: %+v", got[1])
+	}
+	if got[0].SubmissionID == got[1].SubmissionID {
+		t.Errorf("resend reused submission_id %q", got[1].SubmissionID)
+	}
+	if got[1].SubmissionID != ids[0] {
+		t.Errorf("turn was created by %q, want the resend %q", ids[0], got[1].SubmissionID)
+	}
 }
 
 // TestProvisionalSecondSubmitNoPrompt verifies that after answering yes
-// to a provisional prompt, the allowProvisional flag is set so subsequent
-// submit attempts don't re-prompt.
+// to a provisional prompt, a second submit creates a second turn without a
+// prompt, and that its request carries allow_provisional: true.
 func TestProvisionalSecondSubmitNoPrompt(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer"), enginetest.Reply("answer2")}, "reviewer": {approve(), approve()}}
 	h := enginetest.New(t, roster, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// First submit with provisional prompt
@@ -136,6 +183,14 @@ func TestProvisionalSecondSubmitNoPrompt(t *testing.T) {
 	r.until(t, "second turn created without prompt", func(a *App) (string, bool) {
 		return a.View(), len(a.state.Turns) == 2 && a.provisional == nil && !strings.Contains(a.View(), "Provisional deadlines")
 	})
+	idle(t, r)
+	if n := len(submissionIDsFromTurns(h)); n != 2 {
+		t.Fatalf("expected 2 turns, got %d", n)
+	}
+	got := reqs()
+	if len(got) != 3 || !allowsProvisional(got[2]) {
+		t.Fatalf("want 3 requests with the last allowing provisional, got %+v", got)
+	}
 }
 
 // TestProvisionalNoCancelsKeepsInput verifies that pressing 'n' or 'esc'
@@ -145,6 +200,7 @@ func TestProvisionalNoCancelsKeepsInput(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
 	h := enginetest.New(t, roster, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// Submit a question
@@ -161,12 +217,19 @@ func TestProvisionalNoCancelsKeepsInput(t *testing.T) {
 		return "", a.provisional == nil && a.input.Value() == "my question" && len(a.state.Turns) == 0
 	})
 
+	if got := reqs(); len(got) != 1 {
+		t.Fatalf("a request was sent after n: %+v", got)
+	}
+
 	// Now submit again - should prompt again
 	send(r, tea.KeyMsg{Type: tea.KeyEnter})
 
 	r.until(t, "provisional prompt shown again", func(a *App) (string, bool) {
 		return a.View(), a.provisional != nil
 	})
+	if got := reqs(); len(got) != 2 || got[1].AllowProvisional != nil {
+		t.Fatalf("second submit sent %+v, want a plain request", got)
+	}
 }
 
 // TestProvisionalEscKeySameAsNo verifies that pressing 'esc' behaves like 'n'.
@@ -174,6 +237,7 @@ func TestProvisionalEscKeySameAsNo(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
 	h := enginetest.New(t, roster, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// Submit and get provisional prompt
@@ -189,6 +253,9 @@ func TestProvisionalEscKeySameAsNo(t *testing.T) {
 	r.until(t, "esc cancels like no, no turn", func(a *App) (string, bool) {
 		return "", a.provisional == nil && a.input.Value() == "test input" && len(a.state.Turns) == 0
 	})
+	if got := reqs(); len(got) != 1 {
+		t.Fatalf("a request was sent after esc: %+v", got)
+	}
 }
 
 // TestProvisionalBannerPersists verifies that the deadlines: provisional
@@ -235,6 +302,7 @@ func TestProvisionalFalseNoPrompt(t *testing.T) {
 	// Use the standard roster with provisional = false
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
 	h := enginetest.New(t, enginetest.RosterTOML, scripts)
+	reqs := recordRequests(t)
 	r := startAnswerRig(t, h)
 
 	// Submit a question
@@ -245,6 +313,15 @@ func TestProvisionalFalseNoPrompt(t *testing.T) {
 		view := a.View()
 		return view, len(a.state.Turns) > 0 && a.provisional == nil && !strings.Contains(view, "deadlines: provisional")
 	})
+	got := reqs()
+	if len(got) == 0 {
+		t.Fatal("no request recorded")
+	}
+	for _, q := range got {
+		if q.AllowProvisional != nil {
+			t.Errorf("request carries allow_provisional with provisional = false: %+v", q)
+		}
+	}
 }
 
 // TestProvisionalNewProcessAsksAgain verifies that each App instance
