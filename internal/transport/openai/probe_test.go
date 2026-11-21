@@ -309,13 +309,13 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: disableCalibration, AssumedContextLen: 131072,
 			})
 			// "both_rejected" and "server_error_no_followup" have incomplete probes (no MaxTokensField)
-			// per design v5 delta 1a: incomplete probes return ErrNotSent
+			// per design v5 delta 1a: incomplete probes return ErrIncompleteProbe
 			if tt.name == "both_rejected" || tt.name == "server_error_no_followup" {
 				if err == nil {
 					t.Fatalf("expected incomplete probe error, got nil")
 				}
-				if !errors.Is(err, transport.ErrNotSent) {
-					t.Errorf("expected ErrNotSent, got %v", err)
+				if !errors.Is(err, transport.ErrIncompleteProbe) {
+					t.Errorf("expected ErrIncompleteProbe, got %v", err)
 				}
 				return
 			}
@@ -354,7 +354,7 @@ func TestProbeModelsVariants(t *testing.T) {
 	}
 
 	// 2xx without a parseable list stays unknown, and response without model field
-	// makes this an incomplete probe, which should return ErrNotSent per design v5 delta 1a.
+	// makes this an incomplete probe, which should return ErrIncompleteProbe per design v5 delta 1a.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
@@ -367,10 +367,9 @@ func TestProbeModelsVariants(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected incomplete probe error (missing model field)")
 	}
-	if !errors.Is(err, transport.ErrNotSent) {
-		t.Errorf("expected ErrNotSent, got %v", err)
+	if !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Errorf("expected ErrIncompleteProbe, got %v", err)
 	}
-	return
 	if rec.ModelsEndpoint != transport.TriUnknown || rec.ModelListed != transport.TriUnknown {
 		t.Errorf("unparseable list: %v %v", rec.ModelsEndpoint, rec.ModelListed)
 	}

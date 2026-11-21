@@ -3069,13 +3069,15 @@ func TestProbeJournalFailureLockRelease(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
-			"id": "test-run",
-			"model": "test-model",
-			"input_tokens": 100,
-			"output_tokens": 50,
-			"stop_reason": "end_turn"
-		}`)
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"test-model","object":"model"}]}`)
+		} else {
+			_, _ = io.WriteString(w, `{
+				"model": "test-model",
+				"choices": [{"message":{"role":"assistant","content":"test"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":10,"completion_tokens":5}
+			}`)
+		}
 	}))
 	defer server.Close()
 

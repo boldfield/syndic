@@ -364,7 +364,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, fmt.Errorf("%w: incomplete probe: missing ReportedModel or MaxTokensField", transport.ErrNotSent)
+		return record, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
 	}
 
 	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
