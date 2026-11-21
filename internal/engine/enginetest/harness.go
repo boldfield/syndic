@@ -68,6 +68,7 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
+accept_unknown_truncation = true
 
 [[endpoints]]
 name = "local"

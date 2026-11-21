@@ -69,6 +69,15 @@ func strPtr(s string) *string { return &s }
 
 func refusal(code string) *wire.Error { return &wire.Error{Code: code} }
 
+func findParticipant(participants []config.Participant, id string) *config.Participant {
+	for i := range participants {
+		if participants[i].ID == id {
+			return &participants[i]
+		}
+	}
+	return nil
+}
+
 // Submit admits a turn, or refuses it with a *wire.Error. A refused
 // submission writes nothing.
 func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
@@ -161,10 +170,19 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	}
 
 	for _, id := range eff.Preset.RequiredReviewers {
-		if e.built.Participants[id].EligibleRequiredReviewer == transport.TriNo {
+		p := e.built.Participants[id]
+		if p.EligibleRequiredReviewer == transport.TriNo {
 			invalid := refusal(wire.ErrorCodePresetInvalid)
 			invalid.Detail = strPtr("ineligible_required_reviewer:" + id)
 			return wire.SubmitReply{}, invalid
+		}
+		if p.EligibleRequiredReviewer == transport.TriUnknown {
+			rosterParticipant := findParticipant(e.roster.Participants, id)
+			if rosterParticipant == nil || rosterParticipant.AcceptUnknownTruncation == nil || !*rosterParticipant.AcceptUnknownTruncation {
+				invalid := refusal(wire.ErrorCodePresetInvalid)
+				invalid.Detail = strPtr("unknown_required_reviewer_not_accepted:" + id)
+				return wire.SubmitReply{}, invalid
+			}
 		}
 	}
 

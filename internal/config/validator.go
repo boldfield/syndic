@@ -180,8 +180,6 @@ func (r *Roster) Validate() error {
 		if preset.Mode == "solo" && len(preset.RequiredReviewers) > 0 {
 			errs = append(errs, fmt.Errorf("preset %q: solo mode must not have required reviewers", name))
 		}
-
-		// Validate that all preset participants exist
 		allPresetParticipants := []string{preset.Author}
 		allPresetParticipants = append(allPresetParticipants, preset.RequiredReviewers...)
 
@@ -403,11 +401,6 @@ func (r *Roster) Validate() error {
 
 	// Validate Preset deadlines, budgets and revision overrides
 	for name, preset := range r.Presets {
-		// Solo presets cannot have revision settings
-		if preset.Mode == "solo" && preset.Revision != nil {
-			errs = append(errs, fmt.Errorf("presets[%q]: solo mode must not have revision settings", name))
-		}
-
 		// Validate revision overrides
 		if preset.Revision != nil {
 			if preset.Revision.MaxRounds != nil && (*preset.Revision.MaxRounds < 0 || *preset.Revision.MaxRounds > 5) {

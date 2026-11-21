@@ -29,7 +29,7 @@ func schedRoster(attempt, turn string, reviewers []reviewer, pools map[string]in
 	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
 	var participants, quoted []string
 	for _, r := range reviewers {
-		participants = append(participants, "[[participants]]\nid = \""+r.id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \""+r.pool+"\"\n")
+		participants = append(participants, "[[participants]]\nid = \""+r.id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \""+r.pool+"\"\naccept_unknown_truncation = true\n")
 		quoted = append(quoted, `"`+r.id+`"`)
 	}
 	toml = strings.Replace(toml, "[[endpoints]]", strings.Join(participants, "\n")+"\n[[endpoints]]", 1)
