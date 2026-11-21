@@ -53,9 +53,9 @@ type Verdict struct {
 	Severity, BlockID  string
 	Evidence, Remedy   string
 	Reason             string
-	Round              int          // 0 for v1, >= 0 for v2
+	Round              int          // see EnvelopeVersion
 	BlockStates        []BlockState // only for v2
-	EnvelopeVersion    string       // "v1" or "v2"
+	EnvelopeVersion    string       // "v1" or "v2"; v1 has Round=0, v2 has Round>=0
 }
 
 type Result struct {
@@ -177,6 +177,14 @@ func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) R
 				}
 				blockID := strings.TrimSpace(stateParts[0])
 				state := strings.TrimSpace(stateParts[1])
+				if blockID == "" {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        "block-state block_id cannot be empty",
+					}
+				}
 				if state != "withdrawn" && state != "maintained" {
 					return Result{
 						Classification: Malformed,
@@ -278,6 +286,16 @@ func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) R
 	// Parse round value for v2
 	var roundValue int
 	if envelopeVersion == "v2" {
+		// V2 without context is malformed (fail closed)
+		if v2Ctx == nil {
+			return Result{
+				Classification: Malformed,
+				Commentary:     commentary,
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        "VERDICT v2 requires validation context (round and owner open blocks)",
+			}
+		}
+
 		roundStr := strings.TrimSpace(fields["round"])
 		var err error
 		roundValue, err = parseRound(roundStr)
@@ -290,8 +308,8 @@ func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) R
 			}
 		}
 
-		// Validate round matches expected round if context is provided
-		if v2Ctx != nil && roundValue != v2Ctx.Round {
+		// Validate round matches expected round
+		if roundValue != v2Ctx.Round {
 			return Result{
 				Classification: Malformed,
 				Commentary:     commentary,
@@ -301,29 +319,27 @@ func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) R
 		}
 
 		// Validate block-state dispositions against expected open blocks
-		if v2Ctx != nil && len(v2Ctx.OwnerOpenBlockIDs) > 0 {
-			seenBlocks := make(map[string]bool)
-			for _, bs := range blockStates {
-				seenBlocks[bs.BlockID] = true
-				// Check if this block is in the expected set
-				if !v2Ctx.OwnerOpenBlockIDs[bs.BlockID] {
-					return Result{
-						Classification: Malformed,
-						Commentary:     commentary,
-						Verdict:        buildPartialVerdict(fields),
-						Problem:        fmt.Sprintf("foreign block-state: %s is not an open block owned by this reviewer", bs.BlockID),
-					}
+		seenBlocks := make(map[string]bool)
+		for _, bs := range blockStates {
+			seenBlocks[bs.BlockID] = true
+			// Check if this block is in the expected set
+			if !v2Ctx.OwnerOpenBlockIDs[bs.BlockID] {
+				return Result{
+					Classification: Malformed,
+					Commentary:     commentary,
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("foreign block-state: %s is not an open block owned by this reviewer", bs.BlockID),
 				}
 			}
-			// Check for missing block-state lines
-			for blockID := range v2Ctx.OwnerOpenBlockIDs {
-				if !seenBlocks[blockID] {
-					return Result{
-						Classification: Malformed,
-						Commentary:     commentary,
-						Verdict:        buildPartialVerdict(fields),
-						Problem:        fmt.Sprintf("missing block-state for open block %s", blockID),
-					}
+		}
+		// Check for missing block-state lines
+		for blockID := range v2Ctx.OwnerOpenBlockIDs {
+			if !seenBlocks[blockID] {
+				return Result{
+					Classification: Malformed,
+					Commentary:     commentary,
+					Verdict:        buildPartialVerdict(fields),
+					Problem:        fmt.Sprintf("missing block-state for open block %s", blockID),
 				}
 			}
 		}
@@ -458,9 +474,22 @@ func buildPartialVerdict(fields map[string]string) Verdict {
 	}
 }
 
-// parseRound parses a round string as an integer.
+// parseRound parses a round string as a non-negative integer.
+// Rejects leading '+', leading zeros, and trailing garbage.
 func parseRound(roundStr string) (int, error) {
 	roundStr = strings.TrimSpace(roundStr)
+	if roundStr == "" {
+		return 0, fmt.Errorf("round cannot be empty")
+	}
+	// Reject leading '+'
+	if roundStr[0] == '+' {
+		return 0, fmt.Errorf("round must not have leading '+' sign, got %q", roundStr)
+	}
+	// Reject leading zeros (except for "0" itself)
+	if len(roundStr) > 1 && roundStr[0] == '0' {
+		return 0, fmt.Errorf("round must not have leading zeros, got %q", roundStr)
+	}
+	// Use strconv.Atoi which will reject non-numeric characters
 	round, err := strconv.Atoi(roundStr)
 	if err != nil {
 		return 0, fmt.Errorf("round must be a valid integer, got %q", roundStr)

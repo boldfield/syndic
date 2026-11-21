@@ -493,7 +493,22 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 
-		parsed := verdict.Parse(res.Text, t.candidateHash, d.attemptID)
+		// Parse the verdict with context for v2 validation
+		var v2Ctx *verdict.V2Context
+		round, err := tx.GetRoundForCandidateHash(t.id, t.candidateHash)
+		if err != nil {
+			return err
+		}
+		blockIDs, err := tx.GetReviewerOpenBlockIDs(t.id, t.candidateHash, d.participant)
+		if err != nil {
+			return err
+		}
+		v2Ctx = &verdict.V2Context{
+			Round:             round,
+			OwnerOpenBlockIDs: blockIDs,
+		}
+
+		parsed := verdict.ParseWithContext(res.Text, t.candidateHash, d.attemptID, v2Ctx)
 		if err := tx.SetAttemptCommentary(d.attemptID, parsed.Commentary); err != nil {
 			return err
 		}

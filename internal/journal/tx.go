@@ -652,6 +652,58 @@ func (tx *Tx) OpenBlocks(turnID string) ([]Block, error) {
 	return blocks, nil
 }
 
+// GetRoundForCandidateHash returns the round number for a candidate by its hash within a turn.
+func (tx *Tx) GetRoundForCandidateHash(turnID, candidateHash string) (int, error) {
+	var round int
+	if err := tx.tx.QueryRow(`
+		SELECT COALESCE(c.round, 0)
+		FROM candidates c
+		WHERE c.turn_id = ? AND c.content_hash = ?
+		ORDER BY c.id DESC
+		LIMIT 1
+	`, turnID, candidateHash).Scan(&round); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("candidate not found: %w", ErrNoSuchContent)
+		}
+		return 0, fmt.Errorf("query candidate round: %w", err)
+	}
+	return round, nil
+}
+
+// GetReviewerOpenBlockIDs returns the set of open block IDs for a specific reviewer in a turn.
+// Only returns blocks that are open against the specified candidate hash.
+func (tx *Tx) GetReviewerOpenBlockIDs(turnID, candidateHash, reviewerParticipant string) (map[string]bool, error) {
+	rows, err := tx.tx.Query(`
+		SELECT b.reviewer_block_id
+		FROM blocks b
+		JOIN verdicts v ON b.verdict_id = v.id
+		JOIN attempts a ON v.attempt_id = a.id
+		WHERE a.turn_id = ? AND b.candidate_hash = ? AND b.state = 'open' AND a.participant = ?
+		ORDER BY b.reviewer_block_id
+	`, turnID, candidateHash, reviewerParticipant)
+	if err != nil {
+		return nil, fmt.Errorf("query reviewer blocks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	blockIDs := make(map[string]bool)
+	for rows.Next() {
+		var blockID sql.NullString
+		if err := rows.Scan(&blockID); err != nil {
+			return nil, fmt.Errorf("scan block ID: %w", err)
+		}
+		if blockID.Valid && blockID.String != "" {
+			blockIDs[blockID.String] = true
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	return blockIDs, nil
+}
+
 // nextJournalSeq takes the next value of the journal-wide ordering counter and
 // advances it. It runs inside the caller's transaction, so a rollback leaves
 // the counter unchanged.
