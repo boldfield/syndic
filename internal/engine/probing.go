@@ -205,11 +205,15 @@ func (e *Engine) probeTargets(roster *config.Roster, built manifest.Built, adapt
 // the endpoint: automatically on `none` or `flat`, on `metered` or `unknown`
 // only under --probe-missing. An endpoint with a spending_control of
 // "external" is still `metered` here; the setting does not lift the flag.
+// A metered endpoint without that spending control is never probed, flag or
+// not, as `syndic probe` refuses it.
 func probeAllowed(ep config.EndpointProfile, probeMissing bool) bool {
 	switch ep.DeclaredBilling {
 	case "none", "flat":
 		return true
-	case "metered", "unknown":
+	case "metered":
+		return probeMissing && ep.SpendingControl == "external"
+	case "unknown":
 		return probeMissing
 	}
 	return false

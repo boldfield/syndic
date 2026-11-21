@@ -136,7 +136,15 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		return openai.New(ep, resolver), openai.AdapterVersion, nil
 	}
 
-	// Create the engine
+	// The control socket opens as soon as run_opened is committed, before
+	// any probe, so a client attaching during probing gets hello state
+	// "probing" and the probe events. The engine is created first and the
+	// server is wired to it from the hook.
+	var srv *server.Server
+	serveDone := make(chan error, 1)
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+
 	eng, err := engine.New(engine.Options{
 		Store:         store,
 		Hub:           eventHub,
@@ -147,14 +155,30 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		ProbeMissing:   *probeMissing,
 		ProbeRawDir:    *probeRawDir,
 		ProbeExportDir: *probeExportDir,
+		OnRunOpened: func() error {
+			if err := srv.Listen(); err != nil {
+				return fmt.Errorf("server listen: %w", err)
+			}
+			go func() {
+				serveDone <- srv.Serve(serveCtx)
+			}()
+			return nil
+		},
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create engine: %v\n", err)
 		return 1
 	}
+	srv = server.New(server.Options{
+		Paths:  paths,
+		Engine: eng,
+		Store:  store,
+		Hub:    eventHub,
+	})
 
 	// Start the engine
 	if err := eng.Start(); err != nil {
+		_ = srv.Close()
 		var rosterErr *engine.RosterError
 		if errors.As(err, &rosterErr) {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
@@ -166,28 +190,6 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 
 	// Log external spending control settings at start
 	logExternalSpendingControl(stderr, eng)
-
-	// Create and start the server
-	srv := server.New(server.Options{
-		Paths:  paths,
-		Engine: eng,
-		Store:  store,
-		Hub:    eventHub,
-	})
-
-	if err := srv.Listen(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "server listen: %v\n", err)
-		_ = eng.Stop(context.Background())
-		return 1
-	}
-
-	// Start server in a goroutine
-	serveDone := make(chan error, 1)
-	serveCtx, cancelServe := context.WithCancel(context.Background())
-	defer cancelServe()
-	go func() {
-		serveDone <- srv.Serve(serveCtx)
-	}()
 
 	// Print startup info
 	hello := eng.Hello()

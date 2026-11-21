@@ -126,6 +126,11 @@ type Options struct {
 	// without a usable record unprobed. It exists for tests of the states a
 	// missing or stale record leaves; the daemon never sets it.
 	NoStartupProbes bool
+	// OnRunOpened, when set, is called once run_opened is committed and
+	// before any probe runs, with the engine unlocked so Hello, Status and
+	// Submit already answer. The daemon opens its control socket here. An
+	// error aborts Start.
+	OnRunOpened func() error
 }
 
 // Engine is the review engine.
@@ -141,6 +146,7 @@ type Engine struct {
 	probeMissing    bool
 	probeTimeout    time.Duration
 	probeRawDir     string
+	onRunOpened     func() error
 	probeExportDir  string
 	noStartupProbes bool
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
@@ -217,6 +223,7 @@ func New(o Options) (*Engine, error) {
 		probeRawDir:     o.ProbeRawDir,
 		probeExportDir:  o.ProbeExportDir,
 		noStartupProbes: o.NoStartupProbes,
+		onRunOpened:     o.OnRunOpened,
 		newAdapter:      o.NewAdapter,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
@@ -487,6 +494,12 @@ func (e *Engine) Start() error {
 	e.runID = runID
 	e.runState = "probing"
 	e.runFirstSeq = firstSeq
+	// Reads during probing answer from the roster and the manifest as built
+	// before any probe; the frozen state replaces them after probing.
+	e.roster = roster
+	e.rosterAbs = path
+	e.built = built
+	e.startedAt = startedAt
 
 	// Start-time probes run between the two commits; a crash in this window
 	// leaves a probing run that the next start abandons. e.mu is released
@@ -495,6 +508,12 @@ func (e *Engine) Start() error {
 	// never fails the start: a probe that fails leaves its participant
 	// unprobed, and the engine stays available for reads and recovery.
 	e.mu.Unlock()
+	if e.onRunOpened != nil {
+		if err := e.onRunOpened(); err != nil {
+			e.mu.Lock()
+			return fmt.Errorf("engine: run opened: %w", err)
+		}
+	}
 	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions)
 	e.mu.Lock()
 	if probed.wrote {

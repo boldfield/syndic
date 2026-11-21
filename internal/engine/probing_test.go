@@ -405,17 +405,19 @@ func TestStartupProbeBillingGate(t *testing.T) {
 		billing    string
 		flag       bool
 		wantProbed bool
+		noExternal bool
 	}{
-		{"none", false, true},
-		{"flat", false, true},
-		{"metered", false, false},
-		{"unknown", false, false},
-		{"metered", true, true},
-		{"unknown", true, true},
+		{"none", false, true, false},
+		{"flat", false, true, false},
+		{"metered", false, false, false},
+		{"unknown", false, false, false},
+		{"metered", true, true, false},
+		{"unknown", true, true, false},
+		{"metered", true, false, true},
 	} {
 		t.Run(fmt.Sprintf("%s/flag=%v", tc.billing, tc.flag), func(t *testing.T) {
 			roster := probeRoster(tc.billing)
-			if tc.billing == "metered" {
+			if tc.billing == "metered" && !tc.noExternal {
 				roster = strings.Replace(roster, `declared_billing = "metered"`, `declared_billing = "metered"`+"\nspending_control = \"external\"", 1)
 			}
 			env := newProbeEnv(t, roster, goodCapability(), "")
@@ -756,12 +758,14 @@ func TestStartupProbeHelloAndSubmitDuringProbing(t *testing.T) {
 	eng := env.newEngine(nil)
 
 	var hello wire.HelloReply
-	var submitErr error
+	var submitErr, statusErr error
+	var status wire.StatusReply
 	var attempts int
 	once := sync.Once{}
 	env.spies["author"].onProbe = func(string) {
 		once.Do(func() {
 			hello = eng.Hello()
+			status, statusErr = eng.Status()
 			_, submitErr = eng.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
 			attempts = env.count(`SELECT COUNT(*) FROM turns`)
 		})
@@ -777,6 +781,9 @@ func TestStartupProbeHelloAndSubmitDuringProbing(t *testing.T) {
 	opened, found, err := env.store.RunOpenedSeq(hello.RunID)
 	if err != nil || !found || hello.RunFirstSeq != opened {
 		t.Fatalf("run_first_seq %d, run_opened %d (found %v, %v)", hello.RunFirstSeq, opened, found, err)
+	}
+	if statusErr != nil || status.RunID != hello.RunID || status.RosterHash == "" || hello.RosterHash != status.RosterHash || len(status.Participants) == 0 {
+		t.Fatalf("status during probing = %+v, %v", status, statusErr)
 	}
 	var we *wire.Error
 	if !errors.As(submitErr, &we) || we.Code != wire.ErrorCodeProbing {
@@ -799,5 +806,26 @@ func TestStartupProbeWritesRawRecordAndExport(t *testing.T) {
 		if err != nil || len(entries) == 0 {
 			t.Fatalf("%s dir has %d entries, err %v; want the probes' evidence", name, len(entries), err)
 		}
+	}
+}
+
+func TestStartupOnRunOpenedRunsBeforeProbes(t *testing.T) {
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	var probesAtOpen int
+	var state string
+	var eng *engine.Engine
+	eng = env.newEngine(func(o *engine.Options) {
+		o.OnRunOpened = func() error {
+			probesAtOpen = len(env.spies["author"].probed()) + len(env.spies["reviewer"].probed())
+			state = eng.Hello().State
+			return nil
+		}
+	})
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+	if probesAtOpen != 0 || state != "probing" {
+		t.Fatalf("at run opened: %d probes, state %q; want 0 and probing", probesAtOpen, state)
 	}
 }
