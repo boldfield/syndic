@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	fieldNameRegex = regexp.MustCompile(`^[a-z_-]+: `)
+	fieldNameRegex = regexp.MustCompile(`^([a-z_]+|block-state): `)
 	validFieldsV1  = map[string]bool{
 		"candidate": true,
 		"attempt":   true,
