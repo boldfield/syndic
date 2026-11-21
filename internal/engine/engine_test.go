@@ -728,3 +728,69 @@ func TestNewRequiresOptions(t *testing.T) {
 		t.Fatal("New accepted a missing NewAdapter")
 	}
 }
+
+// A crash between run_opened and the manifest leaves a probing run with no
+// manifest. The next start closes it and opens a new run; it never reuses the
+// stale run or sends a request on its behalf.
+func TestStartAbandonsUnfinishedProbingRun(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil)
+	first := h.Engine.Hello()
+
+	var staleID string
+	err := h.Store.Tx(func(tx *journal.Tx) error {
+		var err error
+		if staleID, err = tx.AllocateEngineRun(); err != nil {
+			return err
+		}
+		_, err = tx.Emit("", wire.EventKindRunOpened, []byte(`{"run_id":"`+staleID+`","roster_hash":"x"}`))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleSeq, found, err := h.Store.RunOpenedSeq(staleID)
+	if err != nil || !found {
+		t.Fatalf("stale run_opened: found %v, err %v", found, err)
+	}
+	if run, err := h.Store.GetRun(staleID); err != nil || run.State != "probing" || run.ManifestHash != "" || run.Manifest != nil {
+		t.Fatalf("stale run = %+v, err %v", run, err)
+	}
+
+	second, err := engine.New(engine.Options{
+		Store:         h.Store,
+		Hub:           h.Hub,
+		RosterPath:    h.RosterPath,
+		EngineVersion: enginetest.EngineVersion,
+		Clock:         h.Clock,
+		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+			return h.Adapters[p.ID], enginetest.AdapterVersion, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Start(); err != nil {
+		t.Fatalf("restart over a probing run: %v", err)
+	}
+	hello := second.Hello()
+	if hello.RunID == staleID || hello.RunID == first.RunID {
+		t.Fatalf("restart reused run %s", hello.RunID)
+	}
+	if hello.State != "started" || hello.ManifestHash == nil {
+		t.Fatalf("hello = %+v, want started with a manifest hash", hello)
+	}
+	if hello.RunFirstSeq <= staleSeq {
+		t.Fatalf("run_first_seq %d not after the stale run_opened %d", hello.RunFirstSeq, staleSeq)
+	}
+	events, err := h.Store.EventsSince(hello.RunFirstSeq-1, 1)
+	if err != nil || len(events) != 1 || events[0].Kind != wire.EventKindRunOpened {
+		t.Fatalf("event at run_first_seq = %+v, err %v", events, err)
+	}
+	if run, err := h.Store.GetRun(staleID); err != nil || run.State != "abandoned" || run.Manifest != nil {
+		t.Fatalf("stale run after restart = %+v, err %v", run, err)
+	}
+	var attempts int
+	if err := h.DB.Conn().QueryRow(`SELECT COUNT(*) FROM attempts`).Scan(&attempts); err != nil || attempts != 0 {
+		t.Fatalf("attempts = %d, err %v; restart must not replay requests", attempts, err)
+	}
+}

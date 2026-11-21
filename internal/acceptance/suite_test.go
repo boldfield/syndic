@@ -36,7 +36,7 @@ func TestSuite_RestartAfterCrash(t *testing.T) {
 
 	c2 := s.Dial(t)
 	hello := c2.Hello()
-	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
+	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > hello.RunFirstSeq })
 	es, _ := body[wire.EvEngineStarted](started, wire.EventKindEngineStarted)
 	if es.RunID != hello.RunID || len(es.UncertainCapacity) != 1 || es.UncertainCapacity[0] != "default" {
 		t.Fatalf("engine_started = %+v, want the new run carrying the uncertain pool default", es)

@@ -1,6 +1,7 @@
 package journal
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -76,11 +77,15 @@ func (db *DB) migrate() error {
 		return fmt.Errorf("read migrations: %w", err)
 	}
 
-	// Disable foreign key constraints at the connection level to allow table rebuilds during migrations
-	if _, err := db.conn.Exec("PRAGMA foreign_keys = OFF"); err != nil {
-		return fmt.Errorf("disable foreign keys for migrations: %w", err)
+	// Pin one connection for all migrations: PRAGMA foreign_keys is
+	// per-connection and a no-op inside a transaction, so it must be set on
+	// the same connection, outside the transaction, that applies the DDL.
+	ctx := context.Background()
+	conn, err := db.conn.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer func() { _, _ = db.conn.Exec("PRAGMA foreign_keys = ON") }()
+	defer func() { _ = conn.Close() }()
 
 	// Apply migrations sequentially
 	for _, mig := range migrationFiles {
@@ -98,36 +103,66 @@ func (db *DB) migrate() error {
 			continue // Already applied
 		}
 
-		// Read and execute migration
 		content, err := fs.ReadFile(migrations, "migrations/"+mig.Name())
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", mig.Name(), err)
 		}
 
-		tx, err := db.conn.Begin()
-		if err != nil {
-			return fmt.Errorf("begin transaction for migration %s: %w", mig.Name(), err)
-		}
-
-		if _, err := tx.Exec(string(content)); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				return fmt.Errorf("execute migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
-			}
-			return fmt.Errorf("execute migration %s: %w", mig.Name(), err)
-		}
-
-		// Record the applied migration
-		if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil {
-				return fmt.Errorf("record migration %s: %w; rollback also failed: %w", mig.Name(), err, rbErr)
-			}
-			return fmt.Errorf("record migration %s: %w", mig.Name(), err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", mig.Name(), err)
+		if err := applyMigration(ctx, conn, mig.Name(), version, string(content)); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// applyMigration runs one migration and records its version in a single
+// transaction on conn. Foreign keys are off while it runs so tables can be
+// rebuilt; foreign_key_check re-validates before commit and enforcement is
+// restored afterwards.
+func applyMigration(ctx context.Context, conn *sql.Conn, name string, version int, content string) (err error) {
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys for migration %s: %w", name, err)
+	}
+	defer func() {
+		if _, ferr := conn.ExecContext(ctx, "PRAGMA foreign_keys = ON"); ferr != nil && err == nil {
+			err = fmt.Errorf("restore foreign keys after migration %s: %w", name, ferr)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction for migration %s: %w", name, err)
+	}
+	fail := func(err error) error {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("%w; rollback also failed: %w", err, rbErr)
+		}
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, content); err != nil {
+		return fail(fmt.Errorf("execute migration %s: %w", name, err))
+	}
+
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fail(fmt.Errorf("foreign key check after migration %s: %w", name, err))
+	}
+	violated := rows.Next()
+	if closeErr := rows.Close(); closeErr != nil {
+		return fail(fmt.Errorf("foreign key check after migration %s: %w", name, closeErr))
+	}
+	if violated {
+		return fail(fmt.Errorf("migration %s left foreign key violations", name))
+	}
+
+	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_version (version) VALUES (?)", version); err != nil {
+		return fail(fmt.Errorf("record migration %s: %w", name, err))
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", name, err)
+	}
 	return nil
 }

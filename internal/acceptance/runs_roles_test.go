@@ -39,7 +39,7 @@ func init() {
 	cover(runsManifest, "a seeded bare export with no fingerprint yields `unprobed:no_fingerprint`", "TestRunsManifest_UnprobedNoFingerprint")
 	cover(runsManifest, "two participants sharing endpoint and model select the same record", "TestRunsManifest_SharedRecordSameEndpointModel")
 	cover(runsManifest, "a seeded export with `eligible_required_reviewer: no` makes a preset naming that participant as required reviewer fail with `preset_invalid`", "TestRunsManifest_IneligibleRequiredReviewerPresetInvalid")
-	cover(runsManifest, "after a restart `hello.run_first_seq` is the `seq` of the new `engine_started` event and `subscribe{since_seq: run_first_seq - 1}` replays exactly the new run", "TestRunsManifest_RestartRunFirstSeqReplay")
+	cover(runsManifest, "after a restart `hello.run_first_seq` is the `seq` of the new `run_opened` event and `subscribe{since_seq: run_first_seq - 1}` replays exactly the new run", "TestRunsManifest_RestartRunFirstSeqReplay")
 	cover(runsManifest, "`subscribe{since_seq: 0}` replays the seeded `probe_completed` rows and the client ignores them", "TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted")
 	cover(runsManifest, "the manifest JSON contains no secret value when the resolver holds a sentinel and no member outside the list in section 1a", "TestRunsManifest_ManifestContainsNoSecretValue")
 	cover(runsManifest, "`syndic probe` against a fake server that returns `usage` writes a manifest with `export`, `config_fingerprint`, `fingerprint_rule` and a `calibration` whose `bytes_per_token` follows from the fake's reported counts", "cmd/syndic.TestProbeSuccess")
@@ -294,7 +294,7 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 		}
 		t.Fatalf("hello.manifest_hash = %s, want %s", got, run.Hash)
 	}
-	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
+	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > hello.RunFirstSeq })
 	if es, _ := body[wire.EvEngineStarted](started, wire.EventKindEngineStarted); es.ManifestHash != run.Hash || es.RunID != hello.RunID {
 		t.Fatalf("engine_started = %+v, want run %s with manifest_hash %s", es, hello.RunID, run.Hash)
 	}
@@ -553,9 +553,9 @@ func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
 		t.Fatalf("restart gave run %s at seq %d after run %s at seq %d", hello.RunID, hello.RunFirstSeq, oldHello.RunID, oldHello.RunFirstSeq)
 	}
 	// The hello names the seq of the new engine_started event.
-	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
+	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq > hello.RunFirstSeq })
 	if es, _ := body[wire.EvEngineStarted](started, wire.EventKindEngineStarted); es.RunID != hello.RunID {
-		t.Fatalf("engine_started at run_first_seq is of run %s, want %s", es.RunID, hello.RunID)
+		t.Fatalf("engine_started after run_first_seq is of run %s, want %s", es.RunID, hello.RunID)
 	}
 	rows, err := s.Store.EventsSince(0, 100000)
 	if err != nil {
@@ -566,8 +566,8 @@ func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
 		if row.Kind == wire.EventKindEngineStarted && row.Seq > oldHello.RunFirstSeq-1 && row.Seq < hello.RunFirstSeq {
 			startedBefore++
 		}
-		if row.Kind == wire.EventKindEngineStarted && row.Seq > hello.RunFirstSeq {
-			t.Fatalf("a second engine_started at seq %d follows the run's own at %d", row.Seq, hello.RunFirstSeq)
+		if row.Kind == wire.EventKindEngineStarted && row.Seq > hello.RunFirstSeq+1 {
+			t.Fatalf("a second engine_started at seq %d follows the run's own after run_opened at %d", row.Seq, hello.RunFirstSeq)
 		}
 	}
 	if startedBefore != 1 {
@@ -610,8 +610,8 @@ func TestRunsManifest_RestartRunFirstSeqReplay(t *testing.T) {
 			t.Fatalf("replay of the new run carried a probe_completed row at seq %d", frame.Seq)
 		}
 	}
-	if len(frames) == 0 || frames[0].Seq != hello.RunFirstSeq || frames[0].Kind != wire.EventKindEngineStarted {
-		t.Fatalf("replay begins with %v, want engine_started at %d", got, hello.RunFirstSeq)
+	if len(frames) == 0 || frames[0].Seq != hello.RunFirstSeq || frames[0].Kind != wire.EventKindRunOpened {
+		t.Fatalf("replay begins with %v, want run_opened at %d", got, hello.RunFirstSeq)
 	}
 	if engineStarts != 1 {
 		t.Fatalf("replay carried %d engine_started frames, want 1", engineStarts)
@@ -686,11 +686,11 @@ func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 
 	// What belongs to the current run is what begins at run_first_seq, and no
 	// probe row is in it.
-	if len(current) == 0 || current[0].Seq != hello.RunFirstSeq || current[0].Kind != wire.EventKindEngineStarted {
-		t.Fatalf("current run frames = %d, want a run beginning with engine_started at %d", len(current), hello.RunFirstSeq)
+	if len(current) == 0 || current[0].Seq != hello.RunFirstSeq || current[0].Kind != wire.EventKindRunOpened {
+		t.Fatalf("current run frames = %d, want a run beginning with run_opened at %d", len(current), hello.RunFirstSeq)
 	}
-	if es, _ := body[wire.EvEngineStarted](event{Kind: current[0].Kind, Body: current[0].Body}, wire.EventKindEngineStarted); es.RunID != hello.RunID {
-		t.Fatalf("current run begins with run %s, want %s", es.RunID, hello.RunID)
+	if ro, _ := body[wire.EvRunOpened](event{Kind: current[0].Kind, Body: current[0].Body}, wire.EventKindRunOpened); ro.RunID != hello.RunID {
+		t.Fatalf("current run begins with run %s, want %s", ro.RunID, hello.RunID)
 	}
 	for _, frame := range current {
 		if frame.Kind == "probe_completed" {

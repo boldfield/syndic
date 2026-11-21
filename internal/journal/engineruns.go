@@ -79,6 +79,57 @@ func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) 
 	return manifestHash, nil
 }
 
+// AbandonProbingEngineRuns marks every engine run still in "probing" state as
+// "abandoned" and returns their ids. A run left probing by a crash never
+// received a manifest; recovery closes it so the new run is the only live
+// one. Nothing is re-sent: probe requests are journaled as attempts, and
+// their uncertain-capacity holds are recovered from those rows.
+func (tx *Tx) AbandonProbingEngineRuns() ([]string, error) {
+	rows, err := tx.tx.Query(`SELECT id FROM runs WHERE kind = 'engine' AND state = 'probing' ORDER BY rowid`)
+	if err != nil {
+		return nil, fmt.Errorf("query probing runs: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan probing run: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate probing runs: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close probing runs: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.tx.Exec(`UPDATE runs SET state = 'abandoned' WHERE id = ? AND state = 'probing'`, id); err != nil {
+			return nil, fmt.Errorf("abandon probing run: %w", err)
+		}
+	}
+	return ids, nil
+}
+
+// RunOpenedSeq returns the seq of the run_opened event for runID. The run id
+// in the payload identifies it exactly.
+func (s *Store) RunOpenedSeq(runID string) (seq int64, found bool, err error) {
+	err = s.db.conn.QueryRow(`
+		SELECT id FROM events
+		WHERE event_type = 'run_opened' AND json_extract(data, '$.run_id') = ?
+		ORDER BY id LIMIT 1
+	`, runID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("query run_opened: %w", err)
+	}
+	return seq, true, nil
+}
+
 // CreateProbeRun creates a new run of kind 'probe' with the given manifest, returning the run ID and manifest hash.
 // The manifest must be valid JSON; the hash is computed by the store.
 func (s *Store) CreateProbeRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
