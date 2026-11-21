@@ -332,9 +332,9 @@ func isRealGitRepository(gitPath string) bool {
 	}
 
 	if fi.IsDir() {
-		// It's a directory. Check if it contains a HEAD file.
+		// It's a directory. Check if it contains a HEAD regular file.
 		headPath := filepath.Join(gitPath, "HEAD")
-		_, err := os.Stat(headPath)
+		fi, err := os.Stat(headPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// HEAD doesn't exist
@@ -343,18 +343,21 @@ func isRealGitRepository(gitPath string) bool {
 			// Can't inspect HEAD, fail closed
 			return true
 		}
-		// HEAD exists, it's a repository
-		return true
-	} else {
-		// It's a file. Check if it starts with "gitdir:" after leading whitespace.
-		content, err := os.ReadFile(gitPath)
-		if err != nil {
-			// Can't read the file, fail closed
-			return true
-		}
-		contentStr := strings.TrimSpace(string(content))
-		return strings.HasPrefix(contentStr, "gitdir:")
+		// HEAD exists and is a regular file, it's a repository
+		return fi.Mode().IsRegular()
 	}
+	// It's a file (or symlink, etc). Check if it's a regular file containing "gitdir:" after leading whitespace.
+	if !fi.Mode().IsRegular() {
+		// Not a regular file (could be FIFO, socket, etc), ignore it
+		return false
+	}
+	content, err := os.ReadFile(gitPath)
+	if err != nil {
+		// Can't read the file, fail closed
+		return true
+	}
+	contentStr := strings.TrimSpace(string(content))
+	return strings.HasPrefix(contentStr, "gitdir:")
 }
 
 func getOperationalErrorCode(err error) int {

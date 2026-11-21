@@ -2263,8 +2263,9 @@ required_reviewers = ["reviewer"]
 }
 
 func TestProbeRawDirUnderGitDirWithHead(t *testing.T) {
-	// A raw directory under a directory whose .git is a directory containing HEAD: exit 4
+	// A raw directory under a directory whose .git is a directory containing HEAD: exit 4, nothing written, and test server received zero requests
 	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
 	gitDir := filepath.Join(tmpDir, ".git")
 	if err := os.Mkdir(gitDir, 0700); err != nil {
 		t.Fatalf("failed to create .git: %v", err)
@@ -2273,6 +2274,11 @@ func TestProbeRawDirUnderGitDirWithHead(t *testing.T) {
 	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
 		t.Fatalf("failed to create HEAD: %v", err)
 	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	rawDir := filepath.Join(tmpDir, "raw")
 	secretsDir := filepath.Join(tmpDir, "secrets")
@@ -2284,12 +2290,19 @@ func TestProbeRawDirUnderGitDirWithHead(t *testing.T) {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
 
+	// Create a test server with an atomic request counter
+	requestCount := atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
 
-	rosterContent := `
+	rosterContent := fmt.Sprintf(`
 default_preset = "test-preset"
 
 [[participants]]
@@ -2302,7 +2315,7 @@ pool = "default"
 
 [[endpoints]]
 name = "test-endpoint"
-base_url = "http://localhost:9999"
+base_url = "%s"
 dialect = "chat_completions_v1"
 models = ["test-model"]
 declared_location = "local"
@@ -2322,7 +2335,7 @@ pool = "default"
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
-`
+`, server.URL)
 	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
 		t.Fatalf("failed to write roster: %v", err)
 	}
@@ -2341,6 +2354,11 @@ required_reviewers = ["reviewer"]
 
 	if exitCode != 4 {
 		t.Fatalf("expected exit code 4, got %d", exitCode)
+	}
+
+	// Verify server received zero requests
+	if requestCount.Load() > 0 {
+		t.Fatalf("expected zero requests to server, got %d", requestCount.Load())
 	}
 
 	// Verify no files were written
@@ -2457,8 +2475,10 @@ func TestProbeRawDirUnderFakeGitDirWithHooksOnly(t *testing.T) {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
 
-	// Create a test server
+	// Create a test server with request counter
+	requestCount := atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
@@ -2514,9 +2534,14 @@ required_reviewers = ["reviewer"]
 		"--secrets-dir", secretsDir,
 	})
 
-	// Should not be 4 since the check passes (no real repository found)
+	// Check should pass (not 4), and probe should proceed (at least one request)
 	if exitCode == 4 {
 		t.Fatalf("expected non-4 exit code for fake .git directory, got %d", exitCode)
+	}
+
+	// Verify the probe proceeded by checking that at least one request was made to the server
+	if requestCount.Load() < 1 {
+		t.Fatalf("expected at least one request to server (probe proceeded), got %d", requestCount.Load())
 	}
 }
 
@@ -2544,8 +2569,10 @@ func TestProbeRawDirUnderEmptyGitFile(t *testing.T) {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
 
-	// Create a test server
+	// Create a test server with request counter
+	requestCount := atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
@@ -2601,9 +2628,14 @@ required_reviewers = ["reviewer"]
 		"--secrets-dir", secretsDir,
 	})
 
-	// Should not be 4 since it's an empty file, not a worktree
+	// Check should pass (not 4), and probe should proceed (at least one request)
 	if exitCode == 4 {
 		t.Fatalf("expected non-4 exit code for empty .git file, got %d", exitCode)
+	}
+
+	// Verify the probe proceeded by checking that at least one request was made to the server
+	if requestCount.Load() < 1 {
+		t.Fatalf("expected at least one request to server (probe proceeded), got %d", requestCount.Load())
 	}
 }
 
