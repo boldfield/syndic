@@ -109,8 +109,19 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		blockDetail:       make(map[string]wire.OpenBlock),
 	}
 	a.state.ConnState = ConnStateConnecting
-	wd, _ := os.Getwd()
-	a.quickSelection, _ = NewQuickSelection(wd)
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = ""
+	}
+	qs, err := NewQuickSelection(wd)
+	if err != nil {
+		// Log error but continue; quick selection will not be available
+		qs = &QuickSelection{
+			ApprovedProfiles:    make(map[string]ApprovedProfile),
+			DeclinedThisProcess: make(map[string]bool),
+		}
+	}
+	a.quickSelection = qs
 	for _, o := range opts {
 		o(a)
 	}
@@ -457,7 +468,22 @@ func (a *App) enter() tea.Cmd {
 	}
 	var quickProfile *string
 	if a.quickSelection != nil {
-		quickProfile = a.quickSelection.SelectedProfile()
+		// Use session override or check project profile with full definition SHA validation
+		if a.quickSelection.SessionOverride != nil {
+			if *a.quickSelection.SessionOverride != "off" {
+				quickProfile = a.quickSelection.SessionOverride
+			}
+		} else if a.quickSelection.ProjectProfile != nil && a.state.Status != nil {
+			// Find the profile definition SHA from status
+			for _, qp := range a.state.Status.QuickProfiles {
+				if qp.Name == *a.quickSelection.ProjectProfile {
+					if a.quickSelection.IsProjectProfileApprovedWithDefinition(qp.DefinitionSHA256) {
+						quickProfile = a.quickSelection.ProjectProfile
+					}
+					break
+				}
+			}
+		}
 	}
 	// Mark that /mode will apply to this submit so ModeOverride is set correctly
 	// even if turn_submitted event arrives before submit reply
@@ -559,14 +585,62 @@ func (a *App) updateQuickProfileState() {
 		return
 	}
 
-	// Check if there's an unapproved profile (parse error or unapproved name)
-	unapp := a.quickSelection.IsUnapproved()
-	if unapp == nil {
+	// If SessionOverride is set to something else, it's pre-approved by typing it
+	if a.quickSelection.SessionOverride != nil {
 		a.state.UnapprovedProfile = nil
 		return
 	}
 
-	a.state.UnapprovedProfile = unapp
+	// Check if there's a parse error on the project file
+	if a.quickSelection.ProjectParseError != nil {
+		a.state.UnapprovedProfile = a.quickSelection.ProjectParseError
+		return
+	}
+
+	// If no project profile, we're done
+	if a.quickSelection.ProjectProfile == nil {
+		a.state.UnapprovedProfile = nil
+		return
+	}
+
+	// Check if project profile is in the status
+	if a.state.Status == nil {
+		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+		a.requestApprovalIfNeeded()
+		return
+	}
+
+	profileName := *a.quickSelection.ProjectProfile
+	var profileDef *wire.QuickProfile
+	for i := range a.state.Status.QuickProfiles {
+		if a.state.Status.QuickProfiles[i].Name == profileName {
+			profileDef = &a.state.Status.QuickProfiles[i]
+			break
+		}
+	}
+
+	if profileDef == nil {
+		// Profile not in status - unapproved with note that engine has no such profile
+		msg := fmt.Sprintf("%s (engine has no such profile)", profileName)
+		a.state.UnapprovedProfile = &msg
+		return
+	}
+
+	// Check if the project file and profile are fully approved
+	if a.quickSelection.IsProjectProfileApprovedWithDefinition(profileDef.DefinitionSHA256) {
+		a.state.UnapprovedProfile = nil
+		return
+	}
+
+	// Check if declined this process
+	declineKey := a.quickSelection.ProjectFilePath + ":" + profileName
+	if a.quickSelection.DeclinedThisProcess[declineKey] {
+		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+		return
+	}
+
+	// Not approved - trigger approval prompt
+	a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
 	a.requestApprovalIfNeeded()
 }
 
@@ -598,17 +672,7 @@ func (a *App) requestApprovalIfNeeded() {
 	filePath := a.quickSelection.ProjectFilePath
 	fileData := a.quickSelection.ProjectFileData
 
-	// Don't ask again if already approved or already declined this process
-	if a.quickSelection.SelectedProfile() != nil {
-		return
-	}
-
-	declineKey := filePath + ":" + profileName
-	if a.quickSelection.DeclinedThisProcess[declineKey] {
-		return
-	}
-
-	// Find the profile in status
+	// Find the profile in status first
 	var qp *wire.QuickProfile
 	for i := range a.state.Status.QuickProfiles {
 		if a.state.Status.QuickProfiles[i].Name == profileName {
@@ -618,6 +682,16 @@ func (a *App) requestApprovalIfNeeded() {
 	}
 	if qp == nil {
 		// Profile not found in status; don't ask (will be shown as unapproved with engine note)
+		return
+	}
+
+	// Don't ask again if already fully approved with current definition SHA
+	if a.quickSelection.IsProjectProfileApprovedWithDefinition(qp.DefinitionSHA256) {
+		return
+	}
+
+	declineKey := filePath + ":" + profileName
+	if a.quickSelection.DeclinedThisProcess[declineKey] {
 		return
 	}
 

@@ -36,6 +36,7 @@ type ApprovedProfile struct {
 
 // SelectedProfile returns the profile to send on submit, or "" if none.
 // It prefers SessionOverride, then ProjectProfile if approved, then "".
+// Note: This checks only path+name approval; for full 4-value validation, use IsProjectProfileApprovedWithDefinition.
 func (qs *QuickSelection) SelectedProfile() *string {
 	if qs.SessionOverride != nil {
 		if *qs.SessionOverride == "off" {
@@ -44,6 +45,21 @@ func (qs *QuickSelection) SelectedProfile() *string {
 		return qs.SessionOverride
 	}
 	if qs.ProjectProfile != nil && qs.isProjectProfileApproved() {
+		return qs.ProjectProfile
+	}
+	return nil
+}
+
+// SelectedProfileFull returns the profile to send on submit with full 4-value approval validation.
+// It prefers SessionOverride, then ProjectProfile if fully approved with definition SHA, then "".
+func (qs *QuickSelection) SelectedProfileFull(definitionSHA256 string) *string {
+	if qs.SessionOverride != nil {
+		if *qs.SessionOverride == "off" {
+			return nil
+		}
+		return qs.SessionOverride
+	}
+	if qs.ProjectProfile != nil && qs.IsProjectProfileApprovedWithDefinition(definitionSHA256) {
 		return qs.ProjectProfile
 	}
 	return nil
@@ -66,6 +82,7 @@ func (qs *QuickSelection) IsUnapproved() *string {
 
 // isProjectProfileApproved checks if the project profile is approved.
 // It validates all four values: file path, file SHA256, profile name, and definition SHA256.
+// It is used only when the definition SHA is available from status.quick_profiles.
 func (qs *QuickSelection) isProjectProfileApproved() bool {
 	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" || qs.ProjectFileData == nil {
 		return false
@@ -77,6 +94,20 @@ func (qs *QuickSelection) isProjectProfileApproved() bool {
 		return false
 	}
 	return ap.FileSHA256 == fileSHA
+}
+
+// IsProjectProfileApprovedWithDefinition checks if the project profile is approved with all four values.
+func (qs *QuickSelection) IsProjectProfileApprovedWithDefinition(definitionSHA256 string) bool {
+	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" || qs.ProjectFileData == nil {
+		return false
+	}
+	fileSHA := fmt.Sprintf("%x", sha256.Sum256(qs.ProjectFileData))
+	key := qs.ProjectFilePath + ":" + *qs.ProjectProfile
+	ap, ok := qs.ApprovedProfiles[key]
+	if !ok {
+		return false
+	}
+	return ap.FileSHA256 == fileSHA && ap.ProfileDefinitionSHA256 == definitionSHA256
 }
 
 // quickTomlFile holds the parsed .syndic/quick.toml structure.

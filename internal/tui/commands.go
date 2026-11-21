@@ -240,7 +240,7 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 	}
 }
 
-// releasePrompt is a /release waiting for its reason.
+// approvalPrompt is a quick profile approval waiting for yes/no.
 type approvalPrompt struct {
 	filePath         string
 	profileName      string
@@ -249,6 +249,7 @@ type approvalPrompt struct {
 	profile          wire.QuickProfile
 }
 
+// releasePrompt is a /release waiting for its reason.
 type releasePrompt struct {
 	pool      string
 	attemptID string
