@@ -175,3 +175,50 @@ func TestProbeNoWorkingMaxTokensFieldIsIncomplete(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIncompleteProbe", err)
 	}
 }
+
+// truncatedBodyServer advertises a longer body than it sends, then drops the
+// connection, on the request for the given 1-based step.
+func newTruncatingServer(t *testing.T, inner http.Handler, failAt int) *httptest.Server {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if int(n.Add(1)) != failAt {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"usage":`))
+		w.(http.Flusher).Flush()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestProbeTruncatedBodyIsUncertainOnEveryStep(t *testing.T) {
+	for idx, step := range allProbeSteps {
+		t.Run(step, func(t *testing.T) {
+			var hits atomic.Int32
+			inner := newDispatchServer(t, &hits, false)
+			srv := newTruncatingServer(t, inner.Config.Handler, idx+1)
+			calls := 0
+			_, err := newDispatchAdapter(srv).ProbeWithOptions(context.Background(), "test", "m", dispatchProbeOpts(func(*transport.ProbeRequest) error {
+				calls++
+				return nil
+			}))
+			if !errors.Is(err, transport.ErrUncertain) {
+				t.Fatalf("err = %v, want ErrUncertain", err)
+			}
+			if errors.Is(err, transport.ErrNotSent) {
+				t.Fatalf("post-send failure must not be ErrNotSent: %v", err)
+			}
+			if calls != idx+1 {
+				t.Fatalf("hook calls = %d, want %d", calls, idx+1)
+			}
+		})
+	}
+}

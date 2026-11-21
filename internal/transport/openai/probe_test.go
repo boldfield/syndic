@@ -706,8 +706,9 @@ func TestCalibrationResponseReadFailure(t *testing.T) {
 	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 		DisableOverLength: true,
 	})
-	if err != nil {
-		t.Fatalf("probe should still succeed: %v", err)
+	// The calibration request was sent, so a body-read failure is uncertain.
+	if !errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("err = %v, want ErrUncertain", err)
 	}
 	if rec.Calibration != (transport.Calibration{}) {
 		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)

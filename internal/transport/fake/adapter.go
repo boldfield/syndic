@@ -104,15 +104,15 @@ type Options struct {
 
 // Probe returns the configured capability record.
 // When opts.BeforeSend is provided, it is called before each request the real
-// adapter would send: models, max_tokens, max_completion_tokens (only when the
-// configured capability's MaxTokensField is max_completion_tokens), system_role,
+// adapter would send: models, max_tokens, max_completion_tokens (whenever the
+// configured capability's MaxTokensField is not max_tokens), system_role,
 // the two calibration requests (unless disabled), and over_length (only when
 // calibration is enabled and available and AssumedContextLen > 0).
 // ProbeUncertainStep, when set, makes the named step fail after its hook ran,
 // as a sent request of uncertain completion (transport.ErrUncertain).
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
 	steps := []string{"models", "max_tokens"}
-	if a.capability.MaxTokensField == "max_completion_tokens" {
+	if a.capability.MaxTokensField != "max_tokens" {
 		steps = append(steps, "max_completion_tokens")
 	}
 	steps = append(steps, "system_role")
@@ -135,6 +135,9 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transp
 		if a.ProbeUncertainStep == step {
 			return transport.CapabilityRecord{}, fmt.Errorf("%w: fake probe failure after send at %s", transport.ErrUncertain, step)
 		}
+	}
+	if a.capability.ReportedModel == "" || a.capability.MaxTokensField == "" {
+		return a.capability, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
 	}
 	return a.capability, nil
 }

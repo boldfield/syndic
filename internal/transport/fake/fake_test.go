@@ -1585,19 +1585,25 @@ func TestProbeSequenceMatchesRealAdapter(t *testing.T) {
 		opts transport.ProbeOptions
 		want []string
 	}{
-		{"no calibration data skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens"}, transport.ProbeOptions{AssumedContextLen: 100},
+		{"no calibration data skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens"}, transport.ProbeOptions{AssumedContextLen: 100},
 			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
-		{"max_completion_tokens adds a request", transport.CapabilityRecord{MaxTokensField: "max_completion_tokens", Calibration: cal}, transport.ProbeOptions{AssumedContextLen: 100},
+		{"max_completion_tokens adds a request", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_completion_tokens", Calibration: cal}, transport.ProbeOptions{AssumedContextLen: 100},
 			[]string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration", "over_length"}},
-		{"no context length skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{},
+		{"no context length skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{},
 			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
-		{"calibration disabled skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{DisableCalibration: true, AssumedContextLen: 100},
+		{"no working max field sends both and is incomplete", transport.CapabilityRecord{ReportedModel: "m"}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"calibration disabled skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{DisableCalibration: true, AssumedContextLen: 100},
 			[]string{"models", "max_tokens", "system_role"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := probeSteps(t, New(nil, Options{Capability: tc.cap}), tc.opts)
-			if err != nil {
+			if tc.cap.MaxTokensField == "" {
+				if !errors.Is(err, transport.ErrIncompleteProbe) {
+					t.Fatalf("err = %v, want ErrIncompleteProbe", err)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
@@ -1608,7 +1614,7 @@ func TestProbeSequenceMatchesRealAdapter(t *testing.T) {
 }
 
 func TestProbeUncertainStepAfterSend(t *testing.T) {
-	a := New(nil, Options{Capability: transport.CapabilityRecord{MaxTokensField: "max_tokens"}, ProbeUncertainStep: "system_role"})
+	a := New(nil, Options{Capability: transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens"}, ProbeUncertainStep: "system_role"})
 	steps, err := probeSteps(t, a, transport.ProbeOptions{})
 	if !errors.Is(err, transport.ErrUncertain) || errors.Is(err, transport.ErrNotSent) {
 		t.Fatalf("err = %v, want ErrUncertain only", err)
@@ -1623,5 +1629,12 @@ func TestProbeHookFailureIsNotSent(t *testing.T) {
 	_, err := a.Probe(context.Background(), "ep", "m", transport.ProbeOptions{BeforeSend: func(*transport.ProbeRequest) error { return errors.New("no slot") }})
 	if !errors.Is(err, transport.ErrNotSent) || errors.Is(err, transport.ErrUncertain) {
 		t.Fatalf("err = %v, want ErrNotSent only", err)
+	}
+}
+
+func TestProbeMissingModelIsIncomplete(t *testing.T) {
+	a := New(nil, Options{Capability: transport.CapabilityRecord{MaxTokensField: "max_tokens"}})
+	if _, err := a.Probe(context.Background(), "ep", "m", transport.ProbeOptions{}); !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Fatalf("err = %v, want ErrIncompleteProbe", err)
 	}
 }

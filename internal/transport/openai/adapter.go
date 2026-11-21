@@ -826,9 +826,13 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return uncertainErr(err)
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-	if err := httpResp.Body.Close(); err != nil {
-		return uncertainErr(err)
+	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	closeErr := httpResp.Body.Close()
+	if readErr != nil {
+		return uncertainErr(readErr)
+	}
+	if closeErr != nil {
+		return uncertainErr(closeErr)
 	}
 
 	recordRawStep(rawSteps, "models", "/models", httpResp.StatusCode, httpResp.Header, body)
@@ -932,11 +936,14 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 			return nil, 0, "", uncertainErr(err)
 		}
 
-		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		closeErr := httpResp.Body.Close()
 		cancel()
-		if err := closeErr; err != nil {
-			return nil, 0, "", uncertainErr(err)
+		if readErr != nil {
+			return nil, 0, "", uncertainErr(readErr)
+		}
+		if closeErr != nil {
+			return nil, 0, "", uncertainErr(closeErr)
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
@@ -1037,9 +1044,13 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-	if err := httpResp.Body.Close(); err != nil {
-		return uncertainErr(err)
+	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	closeErr := httpResp.Body.Close()
+	if readErr != nil {
+		return uncertainErr(readErr)
+	}
+	if closeErr != nil {
+		return uncertainErr(closeErr)
 	}
 
 	recordRawStep(rawSteps, "system_role", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
@@ -1190,10 +1201,15 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
-	if err := httpResp.Body.Close(); err != nil {
+	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
+	closeErr := httpResp.Body.Close()
+	if readErr != nil {
 		record.OverLength = "errored"
-		return uncertainErr(err)
+		return uncertainErr(readErr)
+	}
+	if closeErr != nil {
+		record.OverLength = "errored"
+		return uncertainErr(closeErr)
 	}
 
 	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
@@ -1358,7 +1374,7 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 
 	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
 	if err != nil {
-		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, err
+		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(err)
 	}
 
 	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil
