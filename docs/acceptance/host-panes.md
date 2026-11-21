@@ -9,7 +9,8 @@ This document describes the manual verification steps for running the syndic TUI
 - Create directories: `mkdir -p /tmp/syndic-evidence/raw /tmp/syndic-evidence/export /tmp/syndic-secrets`
 - Run a stub endpoint or use the test endpoint in `internal/acceptance/tmux_test.go`
 - Use the roster file provided in the "Stub Roster" section below, with the endpoint URL for your environment
-- Run `./syndic probe --roster roster.toml --endpoint stub-endpoint --model test-model --raw-dir ./raw --export-dir ./export --journal journal.db --secrets-dir ./secrets` for both author and reviewer roles
+- Run `./syndic probe --roster roster.toml --endpoint stub-endpoint --model test-model-author --raw-dir ./raw --export-dir ./export --journal journal.db --secrets-dir ./secrets`
+- Run `./syndic probe --roster roster.toml --endpoint stub-endpoint --model test-model-reviewer --raw-dir ./raw --export-dir ./export --journal journal.db --secrets-dir ./secrets`
 - Start `./syndicd -roster roster.toml -journal journal.db -secrets-dir ./secrets` in a background window
 - The engine listens on `$XDG_RUNTIME_DIR/syndic/engine.sock`
 
@@ -24,7 +25,6 @@ default_preset = "test-preset"
 attempt = "30s"
 turn = "60s"
 delivery = "10s"
-provisional = true
 
 [presets.test-preset]
 mode = "review"
@@ -33,7 +33,7 @@ required_reviewers = ["reviewer"]
 
 [[participants]]
 id = "author"
-model = "test-model"
+model = "test-model-author"
 route = "api"
 endpoint = "stub-endpoint"
 eligible_roles = ["author"]
@@ -41,7 +41,7 @@ pool = "default"
 
 [[participants]]
 id = "reviewer"
-model = "test-model"
+model = "test-model-reviewer"
 route = "api"
 endpoint = "stub-endpoint"
 eligible_roles = ["reviewer"]
@@ -51,7 +51,7 @@ pool = "default"
 name = "stub-endpoint"
 base_url = "http://localhost:8080"
 dialect = "chat_completions_v1"
-models = ["test-model"]
+models = ["test-model-author", "test-model-reviewer"]
 declared_location = "local"
 declared_execution = "remote"
 declared_billing = "none"
@@ -67,20 +67,23 @@ concurrency = 10
 
 Your stub endpoint must handle these requests:
 
-1. **`GET /models`**: Return a JSON list with at least one model
+1. **`GET /models`**: Return a JSON list with both models
    ```json
    {
      "object": "list",
-     "data": [{"id": "test-model", "object": "model"}]
+     "data": [
+       {"id": "test-model-author", "object": "model"},
+       {"id": "test-model-reviewer", "object": "model"}
+     ]
    }
    ```
 
-2. **Author request**: Return a simple chat completion. Author requests have a system message that does not mention "reviewer".
+2. **Author request**: Return a simple chat completion. Author requests have a system message starting with "You are the author".
    ```json
    {
      "id": "chatcmpl-123",
      "object": "chat.completion",
-     "model": "test-model",
+     "model": "test-model-author",
      "choices": [{
        "message": {"role": "assistant", "content": "This is a test answer to your question."},
        "finish_reason": "stop"
@@ -89,20 +92,20 @@ Your stub endpoint must handle these requests:
    }
    ```
 
-3. **Reviewer request (verdict)**: The request's system message will contain the word "reviewer". Extract `candidate:` and `attempt:` from the user message, and return a well-formed approval envelope with both values populated:
+3. **Reviewer request (verdict)**: The request's system message will start with "You are a reviewer" and contain lines like "The candidate hash is: <HASH>" and "The attempt ID is: <ID>". Extract these values from the system message and return a well-formed approval envelope with both values populated:
    ```json
    {
      "id": "chatcmpl-456",
      "object": "chat.completion",
-     "model": "test-model",
+     "model": "test-model-reviewer",
      "choices": [{
-       "message": {"role": "assistant", "content": "VERDICT v1\ncandidate: <HASH_FROM_REQUEST>\nattempt: <ID_FROM_REQUEST>\nverdict: approve\nreason: Approved\nEND VERDICT"},
+       "message": {"role": "assistant", "content": "VERDICT v1\ncandidate: <HASH_FROM_SYSTEM_MESSAGE>\nattempt: <ID_FROM_SYSTEM_MESSAGE>\nverdict: approve\nreason: Approved\nEND VERDICT"},
        "finish_reason": "stop"
      }],
      "usage": {"prompt_tokens": 20, "completion_tokens": 10}
    }
    ```
-   The hash and attempt ID must match what the engine sent in the request; mismatches cause rejection.
+   The hash and attempt ID must match what the engine sent in the system message; mismatches cause rejection.
 
 4. **Block request (verdict block)**: Return a block verdict with the same candidate/attempt extraction as step 3, but with verdict type "block":
    ```text
@@ -153,15 +156,18 @@ Each step lists what to type, what to observe, and what to verify.
 ### Step 4: Detach and reattach during a turn
 
 - **Submit** a new question (as in Step 2)
-- **While the turn is open** (before the answer arrives), press `Ctrl+D` to detach or close the terminal window
-- **Observe:** The TUI exits; the engine continues processing in the background
+- **While the turn is open** (before the answer arrives), kill the TUI by pressing `Ctrl+C` or closing the terminal window abruptly
+- **Observe:** The TUI exits; the engine continues processing the turn in the background
 - **Type:** `./syndic` again (reconnect to the engine)
 - **Observe:**
   - The TUI reconnects to the engine and loads the previous turn's state
   - The same turn ID is shown
   - If the answer has arrived, it appears with approval
   - If still pending, the status shows "awaiting answer"
-- **Verify:** No turn is lost; reattach shows the exact final state including any approved answer; the turn was not cancelled by detach
+- **Verify:**
+  - No turn is lost or cancelled; reattach shows the exact final state
+  - If the reviewer's approval arrives after the TUI was detached, it still appears correctly on reattach
+  - The turn was not cancelled by the detach; the engine continued processing
 
 ### Step 5: Test with `TERM=dumb`
 
