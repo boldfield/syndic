@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Turn represents the minimal data needed to build one turn's history entry.
@@ -75,6 +76,17 @@ func ValidateLabel(label string) error {
 	return nil
 }
 
+// ValidateChangesState checks if a changes state is valid.
+func ValidateChangesState(state string) error {
+	// Check that it doesn't contain newlines or other invalid characters
+	if bytes.ContainsAny([]byte(state), "\n\r") {
+		return fmt.Errorf("invalid changes state: contains invalid characters")
+	}
+	// Valid states are defined by the design, but we allow any non-empty string
+	// as long as it doesn't contain invalid characters
+	return nil
+}
+
 // ValidateChange checks if a change line is in the required format: "<path> applied|not applied|conflict"
 func ValidateChange(change string) error {
 	// Split on the last space to separate path and outcome
@@ -95,6 +107,16 @@ func ValidateChange(change string) error {
 
 	if path == "" {
 		return fmt.Errorf("invalid change format: empty path")
+	}
+
+	// Check that path doesn't contain newlines or other invalid characters
+	if bytes.ContainsAny([]byte(path), "\n\r") {
+		return fmt.Errorf("invalid change format: path contains invalid characters")
+	}
+
+	// Check that outcome doesn't contain newlines or other invalid characters
+	if bytes.ContainsAny([]byte(outcome), "\n\r") {
+		return fmt.Errorf("invalid change format: outcome contains invalid characters")
 	}
 
 	validOutcomes := map[string]bool{
@@ -119,6 +141,13 @@ func (d *Document) AddTurn(turn Turn) error {
 	}
 	if err := ValidateLabel(turn.Label); err != nil {
 		return err
+	}
+
+	// Validate ChangesState
+	if turn.ChangesState != "" {
+		if err := ValidateChangesState(turn.ChangesState); err != nil {
+			return err
+		}
 	}
 
 	// Validate change annotations format
@@ -483,10 +512,24 @@ func (d *Document) RenderForAuthor() ([]Message, error) {
 }
 
 // RenderForReviewer renders the document as a fenced data block for reviewers.
-// Returns the full canonical document formatted for inclusion in a reviewer's message.
-func (d *Document) RenderForReviewer(fenceDelim string) string {
+// Uses the provided delimiter and checks for collisions in the document.
+// Returns the full canonical document formatted for inclusion in a reviewer's message, or an error if the delimiter collides with the document content.
+func (d *Document) RenderForReviewer(fenceDelim string) (string, error) {
 	if fenceDelim == "" {
 		fenceDelim = "```data"
 	}
-	return fmt.Sprintf("%s\n%s%s\n", fenceDelim, string(d.Bytes()), fenceDelim)
+
+	docBytes := d.Bytes()
+	docStr := string(docBytes)
+
+	// Check for collision: delimiter should not appear in the document
+	if strings.Contains(docStr, fenceDelim) {
+		return "", fmt.Errorf("delimiter collision: %q appears in document", fenceDelim)
+	}
+
+	// Use the delimiter in a v4-style format: ===== <delimiter> BEGIN/END <section> =====
+	delimBegin := fmt.Sprintf("===== %s BEGIN HISTORY =====", fenceDelim)
+	delimEnd := fmt.Sprintf("===== %s END HISTORY =====", fenceDelim)
+
+	return fmt.Sprintf("%s\n%s\n%s\n", delimBegin, docStr, delimEnd), nil
 }

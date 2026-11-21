@@ -586,14 +586,17 @@ func TestDocumentRenderForReviewer(t *testing.T) {
 		t.Fatalf("AddTurn failed: %v", err)
 	}
 
-	rendered := doc.RenderForReviewer("```data")
-
-	// Should be wrapped in fence delimiters
-	if !strings.HasPrefix(rendered, "```data\n") {
-		t.Errorf("reviewer rendering should start with fence delimiter")
+	rendered, err := doc.RenderForReviewer("delim123")
+	if err != nil {
+		t.Fatalf("RenderForReviewer failed: %v", err)
 	}
-	if !strings.HasSuffix(rendered, "\n```data\n") {
-		t.Errorf("reviewer rendering should end with fence delimiter")
+
+	// Should be wrapped in fence delimiters with v4 format
+	if !strings.Contains(rendered, "===== delim123 BEGIN HISTORY =====") {
+		t.Errorf("reviewer rendering should contain BEGIN HISTORY delimiter")
+	}
+	if !strings.Contains(rendered, "===== delim123 END HISTORY =====") {
+		t.Errorf("reviewer rendering should contain END HISTORY delimiter")
 	}
 
 	// Should contain the canonical document
@@ -602,6 +605,29 @@ func TestDocumentRenderForReviewer(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "turn-1") {
 		t.Errorf("reviewer rendering should contain turn data")
+	}
+}
+
+func TestDocumentRenderForReviewerCollision(t *testing.T) {
+	doc := New()
+	turn := Turn{
+		ID:           "turn-1",
+		State:        "approved",
+		Input:        []byte("Question"),
+		Answer:       []byte("Answer"),
+		Label:        "reviewed",
+		ChangesState: "",
+		Changes:      nil,
+	}
+
+	if err := doc.AddTurn(turn); err != nil {
+		t.Fatalf("AddTurn failed: %v", err)
+	}
+
+	// Try to use a delimiter that appears in the document
+	_, err := doc.RenderForReviewer("turn-1")
+	if err == nil {
+		t.Errorf("expected error for delimiter collision, got nil")
 	}
 }
 
@@ -1032,6 +1058,11 @@ func TestDocumentStrictParsing_RejectNonCanonical(t *testing.T) {
 			docStr:  "syndic-history/v1\nturn +1\nT\nstate 1\nA\ninput 1\nI\nanswer 1\nA\nlabel 8\nreviewed\n",
 			wantErr: true,
 		},
+		{
+			name:    "trailing_garbage_in_length",
+			docStr:  "syndic-history/v1\nturn 1x\nT\nstate 1\nA\ninput 1\nI\nanswer 1\nA\nlabel 8\nreviewed\n",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1041,15 +1072,15 @@ func TestDocumentStrictParsing_RejectNonCanonical(t *testing.T) {
 				turns: []Turn{},
 			}
 
-			// Try to parse the malformed document
+			// Try to parse the malformed document by calling RenderForAuthor
 			_, err := testDoc.RenderForAuthor()
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("expected error for malformed document, got nil")
+					t.Errorf("expected error for malformed document %q, got nil", tt.name)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("valid document should parse: %v", err)
+					t.Errorf("valid document should parse without error: %v", err)
 				}
 			}
 		})
@@ -1273,6 +1304,172 @@ func TestDocumentSetContextFromTurnUnknownID(t *testing.T) {
 	err := doc.SetContextFromTurn("unknown-id")
 	if err == nil {
 		t.Errorf("expected error for unknown turn ID, got nil")
+	}
+}
+
+// Golden fixture with multibyte content and pinned bytes
+func TestDocumentGoldenFixture_PinnedBytes_Multibyte(t *testing.T) {
+	doc := New()
+	inputStr := "こんにちは"
+	answerStr := "世界"
+	turn := Turn{
+		ID:           "turn-mb",
+		State:        "approved",
+		Input:        []byte(inputStr),
+		Answer:       []byte(answerStr),
+		Label:        "reviewed",
+		ChangesState: "",
+		Changes:      nil,
+	}
+
+	if err := doc.AddTurn(turn); err != nil {
+		t.Fatalf("AddTurn failed: %v", err)
+	}
+
+	docBytes := doc.Bytes()
+	hash := doc.Hash()
+
+	// Verify the document contains the preamble
+	if !strings.HasPrefix(string(docBytes), "syndic-history/v1\n") {
+		t.Errorf("missing preamble")
+	}
+
+	// Verify byte lengths are correct for multibyte content
+	inputBytes := []byte(inputStr)
+	answerBytes := []byte(answerStr)
+	expectedInputLen := strconv.Itoa(len(inputBytes))
+	expectedAnswerLen := strconv.Itoa(len(answerBytes))
+
+	if !strings.Contains(string(docBytes), "input "+expectedInputLen+"\n"+inputStr+"\n") {
+		t.Errorf("multibyte input not preserved correctly")
+	}
+	if !strings.Contains(string(docBytes), "answer "+expectedAnswerLen+"\n"+answerStr+"\n") {
+		t.Errorf("multibyte answer not preserved correctly")
+	}
+
+	// Hash should be deterministic
+	if len(hash) != 64 {
+		t.Errorf("hash should be 64 hex chars, got %d", len(hash))
+	}
+
+	// Verify roundtrip
+	messages, err := doc.RenderForAuthor()
+	if err != nil {
+		t.Fatalf("RenderForAuthor failed: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	if !strings.Contains(messages[0].Content, inputStr) {
+		t.Errorf("multibyte input not in rendered message")
+	}
+	if !strings.Contains(messages[1].Content, answerStr) {
+		t.Errorf("multibyte answer not in rendered message")
+	}
+}
+
+// Golden fixture with missing answer (incomplete state) and pinned bytes
+func TestDocumentGoldenFixture_PinnedBytes_MissingAnswer(t *testing.T) {
+	doc := New()
+	turn := Turn{
+		ID:           "turn-incomplete",
+		State:        "incomplete",
+		Input:        []byte("Question"),
+		Answer:       []byte(""),
+		Label:        "unreviewed (solo)",
+		ChangesState: "",
+		Changes:      nil,
+	}
+
+	if err := doc.AddTurn(turn); err != nil {
+		t.Fatalf("AddTurn failed: %v", err)
+	}
+
+	docBytes := doc.Bytes()
+	hash := doc.Hash()
+
+	// Verify the missing-answer marker is in the document
+	missingAnswerMarker := "no approved answer (incomplete)"
+	if !strings.Contains(string(docBytes), missingAnswerMarker) {
+		t.Errorf("missing-answer marker not found in document")
+	}
+
+	// Render and verify missing-answer message is lossless
+	messages, err := doc.RenderForAuthor()
+	if err != nil {
+		t.Fatalf("RenderForAuthor failed: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	if messages[1].Content != missingAnswerMarker {
+		t.Errorf("missing-answer message should be only the marker. expected %q, got %q", missingAnswerMarker, messages[1].Content)
+	}
+
+	// Hash should be deterministic
+	if len(hash) != 64 {
+		t.Errorf("hash should be 64 hex chars, got %d", len(hash))
+	}
+}
+
+// Golden fixture with multi-turn and pinned bytes
+func TestDocumentGoldenFixture_PinnedBytes_MultiTurn(t *testing.T) {
+	doc := New()
+	turns := []Turn{
+		{
+			ID:           "turn-1",
+			State:        "approved",
+			Input:        []byte("Q1"),
+			Answer:       []byte("A1"),
+			Label:        "reviewed",
+			ChangesState: "",
+			Changes:      nil,
+		},
+		{
+			ID:           "turn-2",
+			State:        "approved",
+			Input:        []byte("Q2"),
+			Answer:       []byte("A2"),
+			Label:        "reviewed",
+			ChangesState: "",
+			Changes:      nil,
+		},
+	}
+
+	for _, turn := range turns {
+		if err := doc.AddTurn(turn); err != nil {
+			t.Fatalf("AddTurn failed: %v", err)
+		}
+	}
+
+	docBytes := doc.Bytes()
+	hash := doc.Hash()
+
+	// Verify both turns are present
+	docStr := string(docBytes)
+	if !strings.Contains(docStr, "turn 6\nturn-1\n") {
+		t.Errorf("turn-1 not found")
+	}
+	if !strings.Contains(docStr, "turn 6\nturn-2\n") {
+		t.Errorf("turn-2 not found")
+	}
+
+	// Hash should be deterministic and 64 hex chars
+	if len(hash) != 64 {
+		t.Errorf("hash should be 64 hex chars, got %d", len(hash))
+	}
+
+	// Verify consistency
+	doc2 := New()
+	for _, turn := range turns {
+		if err := doc2.AddTurn(turn); err != nil {
+			t.Fatalf("AddTurn failed: %v", err)
+		}
+	}
+	if doc2.Hash() != hash {
+		t.Errorf("multi-turn hash not deterministic")
 	}
 }
 
