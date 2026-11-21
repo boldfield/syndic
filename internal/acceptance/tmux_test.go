@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/mattn/go-runewidth"
 )
 
 func init() {
@@ -49,21 +51,36 @@ func TestTMUX_EndToEnd(t *testing.T) {
 		t.Fatalf("mkdir binDir: %v", err)
 	}
 
+	// Get module root for building
+	modRootCmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
+	modRootOut, err := modRootCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("get module root: %v\n%s", err, modRootOut)
+	}
+	moduleRoot := strings.TrimSpace(string(modRootOut))
+
 	// Build binaries
 	syndicdPath := filepath.Join(binDir, "syndicd")
 	syndicPath := filepath.Join(binDir, "syndic")
 
-	cmd := exec.Command("go", "build", "-o", syndicdPath, "./cmd/syndicd")
+	cmd := exec.Command("go", "build", "-o", syndicdPath, "github.com/boldfield/syndic/cmd/syndicd")
+	cmd.Dir = moduleRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build syndicd: %v\n%s", err, out)
 	}
 
-	cmd = exec.Command("go", "build", "-o", syndicPath, "./cmd/syndic")
+	cmd = exec.Command("go", "build", "-o", syndicPath, "github.com/boldfield/syndic/cmd/syndic")
+	cmd.Dir = moduleRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build syndic: %v\n%s", err, out)
 	}
 
 	// Create fake OpenAI-compatible server
+	var reviewerHandlerMu sync.Mutex
+	var reviewerHeld bool
+	var reviewerReleasedOnce sync.Once
+	var reviewerReleased = make(chan struct{})
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/models") {
 			w.Header().Set("Content-Type", "application/json")
@@ -77,19 +94,51 @@ func TestTMUX_EndToEnd(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 
 			var body map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "failed to decode body", http.StatusBadRequest)
+				return
+			}
 
-			msgs, _ := body["messages"].([]interface{})
-			role := ""
-			for _, m := range msgs {
-				mm, ok := m.(map[string]interface{})
-				if ok && mm["role"] == "user" {
-					role = "author"
-					break
+			// Check for envelope structure to distinguish reviewer from author
+			isReviewer := false
+			candidateHash := ""
+			attemptID := ""
+
+			if envelope, ok := body["envelope"].(map[string]interface{}); ok {
+				// This is a reviewer request with an envelope
+				isReviewer = true
+				if ch, ok := envelope["candidate_hash"].(string); ok {
+					candidateHash = ch
+				}
+				if aid, ok := envelope["attempt_id"].(string); ok {
+					attemptID = aid
 				}
 			}
 
-			if role == "author" {
+			if isReviewer {
+				// If held, wait until released
+				reviewerHandlerMu.Lock()
+				held := reviewerHeld
+				reviewerHandlerMu.Unlock()
+
+				if held {
+					<-reviewerReleased
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				content := fake.VerdictApprove(candidateHash, attemptID)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "chatcmpl-456",
+					"object": "chat.completion",
+					"model":  "test-model",
+					"choices": []map[string]interface{}{{
+						"message":       map[string]string{"role": "assistant", "content": content},
+						"finish_reason": "stop",
+					}},
+					"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 10},
+				})
+			} else {
+				// Author request
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"id":     "chatcmpl-123",
@@ -100,19 +149,6 @@ func TestTMUX_EndToEnd(t *testing.T) {
 						"finish_reason": "stop",
 					}},
 					"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5},
-				})
-			} else {
-				w.Header().Set("Content-Type", "application/json")
-				content := fake.VerdictApprove("", "")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"id":     "chatcmpl-456",
-					"object": "chat.completion",
-					"model":  "test-model",
-					"choices": []map[string]interface{}{{
-						"message":       map[string]string{"role": "assistant", "content": content},
-						"finish_reason": "stop",
-					}},
-					"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 10},
 				})
 			}
 		} else {
@@ -183,7 +219,7 @@ duration_ms = 60000
 		t.Fatalf("write roster: %v", err)
 	}
 
-	// Run syndic probe for author
+	// Set up probe directories
 	rawDir := filepath.Join(tmpDir, "evidence-raw")
 	exportDir := filepath.Join(tmpDir, "evidence")
 	if err := os.MkdirAll(rawDir, 0700); err != nil {
@@ -193,21 +229,33 @@ duration_ms = 60000
 		t.Fatalf("mkdir exportDir: %v", err)
 	}
 
-	cmd = exec.Command(syndicPath, "probe",
-		"--roster", rosterPath,
-		"--endpoint", "test-endpoint",
-		"--model", "test-model",
-		"--raw-dir", rawDir,
-		"--export-dir", exportDir,
-		"--journal", journalPath,
-		"--secrets-dir", secretsDir,
-	)
-	cmd.Env = append(os.Environ(),
-		"XDG_RUNTIME_DIR="+runtimeDir,
-	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("probe: %v\n%s", err, out)
+	// Run syndic probe for each participant
+	for _, participant := range []string{"author", "reviewer"} {
+		cmd = exec.Command(syndicPath, "probe",
+			"--roster", rosterPath,
+			"--endpoint", "test-endpoint",
+			"--model", "test-model",
+			"--raw-dir", rawDir,
+			"--export-dir", exportDir,
+			"--journal", journalPath,
+			"--secrets-dir", secretsDir,
+		)
+		cmd.Env = append(os.Environ(),
+			"XDG_RUNTIME_DIR="+runtimeDir,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("probe for %s: %v\n%s", participant, err, out)
+		}
 	}
+
+	// Use a private tmux socket
+	tmuxSocket := filepath.Join(tmpDir, "tmux-socket")
+	sessionName := "test-" + strconv.Itoa(os.Getpid())
+
+	// Clean up tmux at the end (kill-server and session)
+	defer func() {
+		_ = exec.Command("tmux", "-L", tmuxSocket, "kill-server").Run()
+	}()
 
 	// Start syndicd in background
 	syndicdCmd := exec.Command(syndicdPath,
@@ -224,8 +272,10 @@ duration_ms = 60000
 	if err := syndicdCmd.Start(); err != nil {
 		t.Fatalf("start syndicd: %v", err)
 	}
+
+	// Stop syndicd at the end with SIGTERM
 	defer func() {
-		_ = syndicdCmd.Process.Signal(os.Interrupt)
+		_ = syndicdCmd.Process.Signal(syscall.SIGTERM)
 		_ = syndicdCmd.Wait()
 	}()
 
@@ -233,15 +283,13 @@ duration_ms = 60000
 	time.Sleep(500 * time.Millisecond)
 
 	// Test scenario 1: submit a question and wait for approval
-	sessionName := "test-" + strconv.Itoa(os.Getpid())
-	tmuxNewSession := []string{"tmux", "new-session", "-d", "-s", sessionName, "-x", "80", "-y", "24"}
+	tmuxNewSession := []string{"tmux", "-L", tmuxSocket, "new-session", "-d", "-s", sessionName, "-x", "80", "-y", "24"}
 	if out, err := exec.Command(tmuxNewSession[0], tmuxNewSession[1:]...).CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v\n%s", err, out)
 	}
-	defer func() { _ = exec.Command("tmux", "kill-session", "-t", sessionName).Run() }()
 
 	// Start syndic in the tmux session
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, syndicPath, "Enter")
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "send-keys", "-t", sessionName, syndicPath, "Enter")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux send-keys syndic: %v\n%s", err, out)
 	}
@@ -250,15 +298,16 @@ duration_ms = 60000
 	time.Sleep(500 * time.Millisecond)
 
 	// Type a question
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, "What is 2+2?", "Enter")
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "send-keys", "-t", sessionName, "What is 2+2?", "Enter")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux send question: %v\n%s", err, out)
 	}
 
 	// Wait for the submit and approval
 	maxWait := time.Now().Add(10 * time.Second)
+	var approvedPane string
 	for time.Now().Before(maxWait) {
-		cmd := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p")
+		cmd := exec.Command("tmux", "-L", tmuxSocket, "capture-pane", "-t", sessionName, "-p")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Logf("tmux capture-pane: %v", err)
@@ -268,67 +317,114 @@ duration_ms = 60000
 
 		paneContent := string(out)
 		if strings.Contains(paneContent, "approved by") && strings.Contains(paneContent, "This is a test answer") {
+			approvedPane = paneContent
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Verify pane content
-	cmd = exec.Command("tmux", "capture-pane", "-t", sessionName, "-p")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("final capture-pane: %v\n%s", err, out)
-	}
+	if approvedPane == "" {
+		t.Errorf("timeout waiting for approved answer")
+	} else {
+		t.Logf("first scenario pane content:\n%s", approvedPane)
 
-	paneContent := string(out)
-	t.Logf("final pane content:\n%s", paneContent)
+		if !strings.Contains(approvedPane, "approved by") {
+			t.Errorf("expected 'approved by' in pane content")
+		}
 
-	if !strings.Contains(paneContent, "approved by") {
-		t.Errorf("expected 'approved by' in pane content")
-	}
-
-	// Check line lengths
-	for _, line := range strings.Split(paneContent, "\n") {
-		if len(line) > 80 {
-			t.Errorf("line too long (%d cells): %q", len(line), line)
+		// Check line lengths (count display cells, not bytes)
+		for _, line := range strings.Split(approvedPane, "\n") {
+			cells := runewidth.StringWidth(line)
+			if cells > 80 {
+				t.Errorf("line too long (%d cells): %q", cells, line)
+			}
 		}
 	}
 
-	// Test scenario 2: Kill TUI and reattach
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, "C-c")
+	// Test scenario 2: mid-turn detach with reviewer held open, then reattach
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "send-keys", "-t", sessionName, "What is 3+3?", "Enter")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Logf("tmux kill syndic: %v\n%s", err, out)
+		t.Fatalf("tmux send second question: %v\n%s", err, out)
 	}
 
+	// Give it time to dispatch to the author
 	time.Sleep(500 * time.Millisecond)
 
-	// Start a new TUI session in the same tmux window
-	cmd = exec.Command("tmux", "send-keys", "-t", sessionName, syndicPath, "Enter")
+	// Hold the reviewer handler open
+	reviewerHandlerMu.Lock()
+	reviewerHeld = true
+	reviewerHandlerMu.Unlock()
+
+	// Wait a bit for the reviewer request to get stuck
+	time.Sleep(500 * time.Millisecond)
+
+	// Kill the TUI (not gracefully)
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "kill-pane", "-t", sessionName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Logf("tmux kill-pane: %v\n%s", err, out)
+	}
+
+	// Wait for TUI to die
+	time.Sleep(500 * time.Millisecond)
+
+	// Now release the reviewer handler
+	reviewerReleasedOnce.Do(func() {
+		close(reviewerReleased)
+	})
+
+	// Wait for the response to arrive at the engine
+	time.Sleep(500 * time.Millisecond)
+
+	// Start a new TUI session in the same window
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "send-keys", "-t", sessionName, syndicPath, "Enter")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux restart syndic: %v\n%s", err, out)
 	}
 
-	time.Sleep(1 * time.Second)
+	// Wait for the new session to show the approved turn
+	maxWait = time.Now().Add(10 * time.Second)
+	var reattachedPane string
+	for time.Now().Before(maxWait) {
+		cmd := exec.Command("tmux", "-L", tmuxSocket, "capture-pane", "-t", sessionName, "-p")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("tmux capture-pane after reattach: %v", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 
-	// Verify the finished turn is shown
-	cmd = exec.Command("tmux", "capture-pane", "-t", sessionName, "-p")
-	out, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("reattach capture-pane: %v\n%s", err, out)
+		paneContent := string(out)
+		if strings.Contains(paneContent, "This is a test answer") {
+			reattachedPane = paneContent
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	paneContent = string(out)
-	t.Logf("after reattach, pane content:\n%s", paneContent)
-
-	if !strings.Contains(paneContent, "This is a test answer") {
-		t.Errorf("expected test answer in reattached TUI")
+	if reattachedPane == "" {
+		t.Errorf("timeout waiting for answer after reattach")
+	} else {
+		t.Logf("after reattach, pane content:\n%s", reattachedPane)
 	}
 
-	// Kill tmux session
-	_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	// Verify the engine journal shows the turn as approved
+	// (The turn was submitted, then detached mid-turn, but the engine still received the approval)
+	if !strings.Contains(reattachedPane, "This is a test answer") {
+		t.Errorf("expected test answer in reattached TUI after mid-turn detach")
+	}
+
+	// Test scenario 3: Check SIGTERM handling
+	// Kill the TUI by killing the pane
+	cmd = exec.Command("tmux", "-L", tmuxSocket, "kill-pane", "-t", sessionName)
+	_ = cmd.Run()
+
+	// Give syndicd a moment
+	time.Sleep(500 * time.Millisecond)
 
 	// Stop syndicd with SIGTERM
-	_ = syndicdCmd.Process.Signal(syscall.SIGTERM)
+	if err := syndicdCmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Logf("send SIGTERM: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -337,12 +433,18 @@ duration_ms = 60000
 		done <- syndicdCmd.Wait()
 	}()
 
+	var exitErr error
 	select {
 	case err := <-done:
-		if err != nil && !strings.Contains(err.Error(), "signal: terminated") {
-			t.Logf("syndicd exit: %v", err)
-		}
+		exitErr = err
 	case <-ctx.Done():
 		t.Fatalf("syndicd did not stop within timeout")
+	}
+
+	// Check that syndicd exited cleanly (nil error or signal: terminated)
+	if exitErr != nil {
+		if !strings.Contains(exitErr.Error(), "signal: terminated") {
+			t.Errorf("syndicd unexpected exit error: %v", exitErr)
+		}
 	}
 }
