@@ -829,10 +829,7 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 	}
 
 	// Insert test turn
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	// Insert test attempt and verdict
 	_, err = conn.Exec("INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state) VALUES ('attempt-1', 'turn-1', 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed')")
@@ -983,10 +980,7 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		t.Fatalf("failed to insert run: %v", err)
 	}
 
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	_, err = conn.Exec("INSERT INTO events (event_type, data) VALUES ('probe_complete', 'probe data')")
 	if err != nil {
@@ -1176,10 +1170,7 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to insert run: %v", err)
 	}
 
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	// Insert test event at v1
 	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'test_event', 'event data')")
@@ -1397,10 +1388,11 @@ func setupTestData(t *testing.T, conn *sql.DB, runID, turnID string) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'review')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'review', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -2097,4 +2089,21 @@ func TestStoreAppendEventWithoutTurn(t *testing.T) {
 	if n != 1 {
 		t.Errorf("expected 1 event, got %d", n)
 	}
+}
+
+// insertTurnFor inserts a turn row on a database at any schema version. From
+// migration 007 on a turn must reference a conversation, so one is created
+// (conv-<turnID>) when the table exists; older schemas get a bare turn.
+func insertTurnFor(t *testing.T, conn *sql.DB, turnID, runID, mode string) {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='conversations'`).Scan(&n); err != nil {
+		t.Fatalf("probe conversations table: %v", err)
+	}
+	if n == 0 {
+		mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)`, turnID, runID, mode)
+		return
+	}
+	mustExec(t, conn, `INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`, turnID, runID, mode, "conv-"+turnID)
 }
