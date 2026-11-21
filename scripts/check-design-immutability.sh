@@ -23,9 +23,13 @@ if ! git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
 fi
 
 # Get the list of changed files in docs/design/ excluding open-questions.md
+# We separate git diff from grep so we only tolerate grep's exit status (1 for no match),
+# not git's errors. This prevents failing open when git diff itself errors.
 changed_design_files=$(
-	git diff --name-only "${base_ref}...HEAD" -- "docs/design/" --no-renames | \
-	grep -vxF "docs/design/open-questions.md" || true
+	git diff --name-only --no-renames "${base_ref}...HEAD" -- "docs/design/"
+)
+changed_design_files=$(
+	echo "$changed_design_files" | grep -vxF "docs/design/open-questions.md" || true
 )
 
 if [[ -n "$changed_design_files" ]]; then

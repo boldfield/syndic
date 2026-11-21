@@ -16,6 +16,7 @@ func init() {
 	cover(designDocsPara, "the design immutability check fails when the base ref cannot be resolved", "TestDesignDocs_UnresolvableBaseRefFails")
 	cover(designDocsPara, "a pull request modifying both open-questions.md and a protected doc fails the design immutability check", "TestDesignDocs_MixedChangeFails")
 	cover(designDocsPara, "files similar to open-questions.md are caught as protected documents", "TestDesignDocs_SimilarFilesFail")
+	cover(designDocsPara, "the design immutability check fails when git diff fails due to unrelated histories", "TestDesignDocs_DiffFailsUnrelatedHistories")
 }
 
 func TestDesignDocs_ProtectedDocsFail(t *testing.T) {
@@ -300,6 +301,52 @@ func TestDesignDocs_SimilarFilesFail(t *testing.T) {
 
 	if err := cmd.Run(); err == nil {
 		t.Fatal("Expected script to fail on similar file modification but it succeeded")
+	}
+}
+
+func TestDesignDocs_DiffFailsUnrelatedHistories(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	// Set up a bare repo to act as origin with main branch
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	// Create initial main branch
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v4-delta.md"), []byte("# Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write design file: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial main commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	// Create an orphan branch (unrelated history)
+	runCmd(t, testRepo, "git", "checkout", "--orphan", "feature")
+	runCmd(t, testRepo, "git", "rm", "-rf", ".")
+	if err := os.WriteFile(filepath.Join(testRepo, "README.md"), []byte("# Feature\n"), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Feature orphan commit")
+
+	// Run the check - should fail because there is no merge base
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail with unrelated histories but it succeeded")
 	}
 }
 
