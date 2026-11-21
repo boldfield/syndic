@@ -507,14 +507,14 @@ func TestQuickProfileVanishingCancelsOpenApproval(t *testing.T) {
 	a := NewApp(context.Background(), "unused.sock", WithWorkDir(project))
 	a.state.Status = &wire.StatusReply{QuickProfiles: []wire.QuickProfile{{Name: "fast", Preset: "solo", DefinitionSHA256: "d1"}}}
 	a.updateQuickProfileState()
-	if a.approval == nil || !strings.Contains(strings.Join(a.panel, "\n"), approvalPromptText) {
-		t.Fatalf("no approval prompt: %+v %v", a.approval, a.panel)
+	if a.pendingApproval() == nil || !strings.Contains(strings.Join(a.panel, "\n"), approvalPromptText) {
+		t.Fatalf("no approval prompt: %+v %v", a.pendingApproval(), a.panel)
 	}
 
 	// A refresh arrives whose roster no longer has the profile.
 	a.state.Status = &wire.StatusReply{}
 	a.updateQuickProfileState()
-	if a.approval != nil || strings.Contains(a.View(), approvalPromptText) {
+	if a.pendingApproval() != nil || strings.Contains(a.View(), approvalPromptText) {
 		t.Fatalf("stale approval prompt remains:\n%s", a.View())
 	}
 	if v := a.View(); !strings.Contains(v, "quick: unapproved fast (engine has no such profile)") {

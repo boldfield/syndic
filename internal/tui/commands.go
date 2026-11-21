@@ -175,9 +175,10 @@ func (a *App) onCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 
 // say shows a command's one-line outcome. A line wider than the screen, as an
 // engine refusal with many members can be, is shown whole in the panel and
-// its first word stays on the message line.
+// its first word stays on the message line; while a question owns the panel
+// it is only clipped.
 func (a *App) say(line string) {
-	if runewidth.StringWidth(line) <= a.width {
+	if a.question != nil || runewidth.StringWidth(line) <= a.width {
 		a.refusal = line
 		return
 	}
@@ -268,13 +269,15 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 	return nil
 }
 
-// cancelConfirm drops a pending confirmation without sending anything.
+// cancelConfirm drops a pending confirmation without sending anything, then
+// opens any question that waited behind it.
 func (a *App) cancelConfirm(why string) {
 	a.confirm = nil
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
 	a.input.SetValue("")
 	a.refusal = why
+	a.nextQuestion()
 }
 
 // confirmEnter answers the pending confirmation with the input line.
@@ -304,39 +307,110 @@ func (a *App) confirmEnter() tea.Cmd {
 	}
 }
 
-// cancelApproval drops a pending approval prompt without approving.
-func (a *App) cancelApproval(why string) {
-	a.approval = nil
+// question is a yes/no prompt: its panel shows what is asked, and it owns
+// the keyboard until it is answered. Only one is open at a time; one asked
+// while another, or a /release confirmation, is open waits behind it.
+type question struct {
+	lines    []string
+	yes, no  func(*App) tea.Cmd // esc and ctrl+c answer no
+	approval *approvalPrompt    // set when the question is a quick profile approval
+	refused  *submission        // set when it asks whether to resend a submit refused as provisional
+}
+
+// ask opens the question, or queues it behind the one the user is answering.
+func (a *App) ask(q *question) {
+	if a.question != nil || a.confirm != nil {
+		a.questions = append(a.questions, q)
+		return
+	}
+	a.question = q
+	a.panel = q.lines
+	a.input.Prompt = yesNoPrompt
+	a.refusal = ""
+}
+
+// answer closes the open question, runs the chosen answer, then opens the
+// next question waiting. The input line keeps what the user had typed.
+func (a *App) answer(yes bool) tea.Cmd {
+	q := a.question
+	a.closeQuestion("")
+	var cmd tea.Cmd
+	if yes {
+		cmd = q.yes(a)
+	} else {
+		cmd = q.no(a)
+	}
+	a.nextQuestion()
+	return cmd
+}
+
+// closeQuestion takes the open question down without answering it.
+func (a *App) closeQuestion(why string) {
+	a.question = nil
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
-	a.input.SetValue("")
 	a.refusal = why
 }
 
-// approvalYes records the approval and puts the selection into effect.
-func (a *App) approvalYes() tea.Cmd {
-	ap := a.approval
-	a.cancelApproval("")
-	qs := a.quickSelection
-	err := qs.approve(ap.definitionSHA256)
-	if err != nil {
-		qs.declined[qs.stateKey(ap.definitionSHA256)] = true // do not ask again for what cannot be saved
+// nextQuestion opens the first question waiting, if nothing else is open.
+func (a *App) nextQuestion() {
+	if a.question != nil || a.confirm != nil || len(a.questions) == 0 {
+		return
 	}
-	a.updateQuickProfileState()
-	if err != nil {
-		a.refusal = fmt.Sprintf("quick: cannot save approval: %v", err)
-	} else {
-		a.refusal = fmt.Sprintf("quick profile %s approved for this project", ap.profileName)
+	q := a.questions[0]
+	a.questions = a.questions[1:]
+	why := a.refusal
+	a.ask(q)
+	a.refusal = why // what the last answer did stays visible
+}
+
+// pendingApproval is the quick profile approval open or waiting, if any.
+func (a *App) pendingApproval() *approvalPrompt {
+	if a.question != nil && a.question.approval != nil {
+		return a.question.approval
+	}
+	for _, q := range a.questions {
+		if q.approval != nil {
+			return q.approval
+		}
 	}
 	return nil
 }
 
+// cancelApproval drops a pending approval, open or waiting, without approving.
+func (a *App) cancelApproval() {
+	a.questions = slices.DeleteFunc(a.questions, func(q *question) bool { return q.approval != nil })
+	if a.question != nil && a.question.approval != nil {
+		a.closeQuestion("")
+		a.nextQuestion()
+	}
+}
+
+// approvalYes records the approval and puts the selection into effect.
+func approvalYes(ap *approvalPrompt) func(*App) tea.Cmd {
+	return func(a *App) tea.Cmd {
+		qs := a.quickSelection
+		err := qs.approve(ap.definitionSHA256)
+		if err != nil {
+			qs.declined[qs.stateKey(ap.definitionSHA256)] = true // do not ask again for what cannot be saved
+		}
+		a.updateQuickProfileState()
+		if err != nil {
+			a.refusal = fmt.Sprintf("quick: cannot save approval: %v", err)
+		} else {
+			a.refusal = fmt.Sprintf("quick profile %s approved for this project", ap.profileName)
+		}
+		return nil
+	}
+}
+
 // approvalNo leaves the selection unapproved; it is not asked again in this process for this state.
-func (a *App) approvalNo() tea.Cmd {
-	ap := a.approval
-	a.cancelApproval("quick profile not approved; it will not be sent")
-	a.quickSelection.declined[a.quickSelection.stateKey(ap.definitionSHA256)] = true
-	return nil
+func approvalNo(ap *approvalPrompt) func(*App) tea.Cmd {
+	return func(a *App) tea.Cmd {
+		a.refusal = "quick profile not approved; it will not be sent"
+		a.quickSelection.declined[a.quickSelection.stateKey(ap.definitionSHA256)] = true
+		return nil
+	}
 }
 
 // whyMsg carries the turn record /why asked for.
@@ -376,8 +450,8 @@ func (a *App) onWhy(msg whyMsg) (tea.Model, tea.Cmd) {
 	if msg.gen != a.gen {
 		return a, nil
 	}
-	if a.approval != nil {
-		return a, nil // the approval prompt owns the panel
+	if a.question != nil {
+		return a, nil // the open question owns the panel
 	}
 	if msg.err != nil {
 		a.refusal = "why: " + formatRefusal(msg.err)

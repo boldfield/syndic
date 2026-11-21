@@ -43,16 +43,19 @@ type App struct {
 	state         State
 	tab           tab
 	input         textinput.Model
-	refusal       string          // the one-line message under the body: a refusal, or what a command did
-	panel         []string        // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	approval      *approvalPrompt // a quick profile approval pending yes/no
-	confirm       *releasePrompt  // a /release waiting for its reason; it takes the next line typed
+	refusal       string         // the one-line message under the body: a refusal, or what a command did
+	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	question      *question      // the yes/no question being answered: a quick profile approval or provisional deadlines
+	questions     []*question    // questions waiting behind it, or behind confirm
+	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
 	now                  func() time.Time
 	tickRunning          bool
 	onEvent              func(wire.Frame)
+	onSubmitRequest      func(wire.SubmitRequest)
+	allowProvisional     bool // the user accepted provisional deadlines for this process
 
 	content           *ContentCache
 	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
@@ -88,6 +91,12 @@ type Option func(*App)
 // WithEventObserver calls f for every event frame the App applies, in order.
 func WithEventObserver(f func(wire.Frame)) Option {
 	return func(a *App) { a.onEvent = f }
+}
+
+// WithSubmitObserver calls f with every submit request the App sends, from
+// the goroutine that sends it.
+func WithSubmitObserver(f func(wire.SubmitRequest)) Option {
+	return func(a *App) { a.onSubmitRequest = f }
 }
 
 // WithWorkDir starts the quick profile search in dir rather than the process's working directory.
@@ -349,15 +358,13 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if a.approval != nil {
-		// An approval owns the keyboard: only y/n, esc and ctrl+c.
+	if a.question != nil {
+		// A question owns the keyboard: only y/n, esc and ctrl+c.
 		switch msg.String() {
 		case "y", "Y":
-			return a, a.approvalYes()
-		case "n", "N":
-			return a, a.approvalNo()
-		case "esc", "ctrl+c":
-			return a, a.approvalNo()
+			return a, a.answer(true)
+		case "n", "N", "esc", "ctrl+c":
+			return a, a.answer(false)
 		}
 		return a, nil
 	}
@@ -478,12 +485,22 @@ func (a *App) enter() tea.Cmd {
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
 	}
+	return a.send(submission{
+		input:            line,
+		preset:           a.state.NextPreset,
+		quickProfile:     a.quickSelection.selected(profiles),
+		allowProvisional: a.allowProvisional,
+	})
+}
+
+// send submits under a new submission id.
+func (a *App) send(sub submission) tea.Cmd {
+	sub.id = uuid.NewString()
 	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
-	id := uuid.NewString()
-	if a.state.NextPreset != "" {
-		a.state.ModeSubmissionID = id
+	if sub.preset != "" {
+		a.state.ModeSubmissionID = sub.id
 	}
-	return submitCmd(a.ctx, a.cl, id, line, a.state.NextPreset, a.quickSelection.selected(profiles))
+	return submitCmd(a.ctx, a.cl, sub, a.onSubmitRequest)
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -514,8 +531,12 @@ func (a *App) ensureTurnInfo() {
 }
 
 func (a *App) onSubmit(msg submitMsg) tea.Cmd {
-	if msg.refusal != "" {
-		a.refusal = msg.refusal
+	var we *wire.Error
+	if errors.As(msg.err, &we) && we.Code == wire.ErrorCodeProvisional && !msg.sub.allowProvisional {
+		return a.onProvisional(msg.sub)
+	}
+	if msg.err != nil {
+		a.refusal = formatRefusal(msg.err)
 		return nil
 	}
 	a.input.SetValue("")
@@ -581,17 +602,13 @@ func (a *App) updateQuickProfileState() {
 		}
 	}
 	if def == nil {
-		if a.approval != nil {
-			a.cancelApproval("") // an absent profile cannot be approved
-		}
+		a.cancelApproval() // an absent profile cannot be approved
 		msg := qs.ProjectProfile + " (engine has no such profile)"
 		a.state.UnapprovedProfile = &msg
 		return
 	}
 	if qs.approvedFor(def.DefinitionSHA256) {
-		if a.approval != nil {
-			a.cancelApproval("")
-		}
+		a.cancelApproval()
 		return
 	}
 	a.state.UnapprovedProfile = &qs.ProjectProfile
@@ -601,13 +618,17 @@ func (a *App) updateQuickProfileState() {
 	a.requestApproval(*def)
 }
 
-// requestApproval shows the file, the profile and its effect and asks yes or no.
+// requestApproval shows the file, the profile and its effect and asks yes or
+// no. An approval already pending for another state is replaced.
 func (a *App) requestApproval(def wire.QuickProfile) {
 	qs := a.quickSelection
-	if a.confirm != nil || (a.approval != nil && a.approval.definitionSHA256 == def.DefinitionSHA256 && a.approval.fileSHA256 == qs.ProjectFileSHA) {
-		return
+	if ap := a.pendingApproval(); ap != nil {
+		if ap.definitionSHA256 == def.DefinitionSHA256 && ap.fileSHA256 == qs.ProjectFileSHA {
+			return
+		}
+		a.cancelApproval()
 	}
-	a.approval = &approvalPrompt{
+	ap := &approvalPrompt{
 		filePath:         qs.ProjectFilePath,
 		profileName:      qs.ProjectProfile,
 		fileSHA256:       qs.ProjectFileSHA,
@@ -619,7 +640,7 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 			budgets = string(b)
 		}
 	}
-	a.panel = []string{
+	a.ask(&question{approval: ap, yes: approvalYes(ap), no: approvalNo(ap), lines: []string{
 		"Project file: " + qs.ProjectFilePath,
 		fmt.Sprintf("selects quick profile %q:", qs.ProjectProfile),
 		"",
@@ -628,9 +649,7 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 		"  budgets: " + budgets,
 		"",
 		"Approve this selection? (y/n)",
-	}
-	a.input.Prompt = ""
-	a.refusal = ""
+	}})
 }
 
 // onFrame applies a frame. Any stream error, including the engine's stopping
