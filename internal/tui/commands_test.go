@@ -162,6 +162,41 @@ func TestWhyBlock(t *testing.T) {
 	untilView(t, r, "reason: block:", "[medium]", "  evidence: line 3 divides by zero", "  remedy: guard the divisor", "reviewer reason (reviewer): unsafe")
 }
 
+// TestWhyBlockReasonOnce asks /why after the reviewer's terminal delivery is
+// recorded, so the reviewer has two attempts and still one verdict.
+func TestWhyBlockReasonOnce(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	id := turnIn(t, r, "incomplete")
+	cl := dial(t, r.paths)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		tr, err := cl.Turn(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, at := range tr.Attempts {
+			if at.Participant == "reviewer" {
+				n++
+			}
+		}
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reviewer has %d attempts, want a review and a terminal delivery", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.typeLine("/why")
+	v := untilView(t, r, "reviewer reason (reviewer): unsafe")
+	if n := strings.Count(v, "reviewer reason (reviewer): unsafe"); n != 1 {
+		t.Fatalf("reviewer reason shown %d times, want once:\n%s", n, v)
+	}
+}
+
 func TestWhyMalformedTwice(t *testing.T) {
 	prose := enginetest.Reply(fake.VerdictProseApprove())
 	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{

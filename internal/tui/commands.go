@@ -328,8 +328,6 @@ func figure(n *int64) string {
 
 // whyLines says why a finished turn ended, from its record: the terminal
 // reason verbatim, and the gate, parser, reviewer or budget detail behind it.
-// The turn record carries a verdict's classification but not its free-text
-// reason, so for a reviewer's own words the transcript tab is the source.
 func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 	reason := deref(tr.TerminalReason)
 	lines := []string{fmt.Sprintf("turn %s: %s", id, tr.State), "reason: " + reason}
@@ -390,8 +388,10 @@ func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 		for _, b := range tr.OpenBlocks {
 			lines = append(lines, fmt.Sprintf("block %s [%s]", b.ID, b.Severity), "  evidence: "+b.Evidence, "  remedy: "+b.Remedy)
 		}
-		for _, at := range tr.Attempts {
-			reasons(at.Participant)
+		for _, v := range tr.Verdicts {
+			if v.Reason != "" {
+				lines = append(lines, "reviewer reason ("+participantOf[v.AttemptID]+"): "+v.Reason)
+			}
 		}
 	case strings.HasPrefix(reason, "budget:"):
 		name := reason
