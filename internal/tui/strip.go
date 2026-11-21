@@ -133,6 +133,8 @@ func formatDuration(d time.Duration) string {
 
 // renderBanners returns the banners to display above the strip.
 // Order: deadlines: provisional, roster file changed, engine: reconnecting, quick: unapproved.
+// If height constraint would leave the tab area with fewer than 5 lines (height - banners - strip - input),
+// only the first banner is shown with a "+N more" marker.
 func renderBanners(s State) []string {
 	var banners []string
 
@@ -157,4 +159,24 @@ func renderBanners(s State) []string {
 	}
 
 	return banners
+}
+
+// bannerHeightDivisor sets how much of the screen banners may take: at most
+// height/bannerHeightDivisor lines, which is three at 24 rows. A fourth banner
+// at 80x24 therefore collapses the list, so the strip, tab and input keep
+// their room however many conditions are active.
+const bannerHeightDivisor = 8
+
+// capBannersForHeight returns the banners that fit above the strip. When they
+// exceed the allowance of height/bannerHeightDivisor lines, or would leave the
+// tab area fewer than minTabHeight lines, only the first banner shows,
+// followed by a "+N more" marker.
+func capBannersForHeight(banners []string, height, minTabHeight int) []string {
+	const stripHeight = 1
+	room := height - stripHeight - inputHeight - minTabHeight
+	allowed := min(room, height/bannerHeightDivisor)
+	if len(banners) <= 1 || len(banners) <= allowed {
+		return banners
+	}
+	return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
 }

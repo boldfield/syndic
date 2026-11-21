@@ -13,6 +13,7 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 )
 
@@ -57,14 +58,15 @@ type App struct {
 	onSubmitRequest      func(wire.SubmitRequest)
 	allowProvisional     bool // the user accepted provisional deadlines for this process
 
-	content           *ContentCache
-	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
-	quickSelection    *QuickSelection // quick profile state
-	workDir           string          // where the quick profile search starts; the process directory when empty
-	answerScrollRow   int             // first visible line of the answer tab
-	candidateIDByTurn map[string]string
-	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
-	overrideReasons   map[string]string           // the reason of each override event
+	content              *ContentCache
+	drafts               *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection       *QuickSelection // quick profile state
+	workDir              string          // where the quick profile search starts; the process directory when empty
+	answerScrollRow      int             // first visible line of the answer tab
+	candidateIDByTurn    map[string]string
+	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons      map[string]string           // the reason of each override event
+	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -102,6 +104,11 @@ func WithSubmitObserver(f func(wire.SubmitRequest)) Option {
 // WithWorkDir starts the quick profile search in dir rather than the process's working directory.
 func WithWorkDir(dir string) Option {
 	return func(a *App) { a.workDir = dir }
+}
+
+// WithTerminalCapabilities sets the terminal rendering capabilities.
+func WithTerminalCapabilities(caps TerminalCapabilities) Option {
+	return func(a *App) { a.terminalCapabilities = caps }
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -172,6 +179,7 @@ func (a *App) answerIn(turnID string) answerInput {
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
+		plainMode:      !a.terminalCapabilities.Color,
 	}
 }
 
@@ -861,7 +869,14 @@ func (a *App) quit() tea.Cmd {
 
 // bodyHeight is the number of lines left for the active tab.
 func (a *App) bodyHeight() int {
-	return max(a.height-len(renderBanners(a.state))-1-inputHeight, 0)
+	banners := renderBanners(a.state)
+	banners = capBannersForHeight(banners, a.height, 5)
+	return max(a.height-len(banners)-1-inputHeight, 0)
+}
+
+// isTerminalTooSmall reports whether the terminal is below the minimum size (40×10).
+func (a *App) isTerminalTooSmall() bool {
+	return a.width < 40 || a.height < 10
 }
 
 // answerLineCount is the length of the unclipped answer tab.
@@ -880,9 +895,26 @@ func (a *App) scrollAnswer(delta int) {
 func (a *App) View() string {
 	w := a.width
 
-	// Get banners and strip.
+	// When the terminal is too small, show a resize message
+	if a.isTerminalTooSmall() {
+		msg := "Terminal too small. Resize to 40×10."
+		if ansi.StringWidth(msg) > w {
+			msg = "Terminal too small."
+		}
+		return ansi.Truncate(msg, w, "")
+	}
+
+	// Get banners and strip, limiting banners to leave at least 5 lines for the tab area
 	banners := renderBanners(a.state)
+	banners = capBannersForHeight(banners, a.height, 5)
+
+	// Clip all banners to width
+	for i, banner := range banners {
+		banners[i] = ansi.Truncate(banner, w, "")
+	}
+
 	strip := renderStrip(a.state, w, a.now())
+	strip = ansi.Truncate(strip, w, "")
 
 	bodyHeight := a.bodyHeight()
 
@@ -917,12 +949,25 @@ func (a *App) View() string {
 	}
 	lines = lines[:bodyHeight]
 
+	// Clip all lines to width to handle wide characters and ANSI sequences
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, w, "")
+	}
+
+	// Clip input lines to width
+	inputLines := renderInput(a.input, a.refusal, w)
+	inputLinesList := strings.Split(inputLines, "\n")
+	for i, line := range inputLinesList {
+		inputLinesList[i] = ansi.Truncate(line, w, "")
+	}
+	inputLines = strings.Join(inputLinesList, "\n")
+
 	// Build output: banners, strip, body, input.
 	var output []string
 	output = append(output, banners...)
 	output = append(output, strip)
 	output = append(output, lines...)
-	output = append(output, renderInput(a.input, a.refusal, w))
+	output = append(output, inputLines)
 	return strings.Join(output, "\n")
 }
 
@@ -959,4 +1004,13 @@ func ExitMessage(a *App) string {
 		return "turn " + id + " is still running and will continue"
 	}
 	return ""
+}
+
+// clipToWidth clips a line to a maximum display width, accounting for wide characters and ANSI sequences.
+// This function handles ANSI escape sequences properly without breaking them or counting them as visible width.
+func clipToWidth(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return ansi.Truncate(line, width, "")
 }
