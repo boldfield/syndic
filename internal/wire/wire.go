@@ -11,9 +11,13 @@ import (
 )
 
 const (
-	ProtocolVersion         = 1
-	MaxFrameBytes           = 1 << 20 // 1 MiB
-	MaxContentPageBytes     = 262144  // 256 KiB
+	ProtocolVersion     = 1
+	MaxFrameBytes       = 1 << 20 // 1 MiB
+	MaxContentPageBytes = 262144  // 256 KiB
+	// MaxConversationListSize is the maximum number of conversation summaries returned per page
+	// in a ConversationsReply. When a ConversationsRequest omits Limit, the server defaults to 200.
+	// A client may request a larger limit, which the server clamps to this maximum to prevent
+	// exceeding MaxFrameBytes with long workspace paths. See acceptance tests for the clamping behavior.
 	MaxConversationListSize = 200
 )
 
@@ -511,6 +515,9 @@ type ConversationTurnSummary struct {
 type ConversationReply struct {
 	ID    string                    `json:"id"`
 	Turns []ConversationTurnSummary `json:"turns"`
+	// Turns is the complete turn list; paging for the turn list is not specified in the design.
+	// The frame cap (MaxFrameBytes) bounds the reply size; a turn list that does not fit
+	// is refused with error{code: "frame"} as specified in section 3 of the protocol.
 }
 
 // Event body types

@@ -710,6 +710,51 @@ func TestHelloReplyJSON(t *testing.T) {
 	}
 }
 
+func TestHelloReplyNullManifestHashRoundTrip(t *testing.T) {
+	// Test typed roundtrip of HelloReply with null manifest_hash (probing state)
+	reply := HelloReply{
+		EngineVersion: "1.0.0",
+		Protocol:      1,
+		RunID:         "run-123",
+		RunFirstSeq:   100,
+		RosterHash:    "abc123",
+		ManifestHash:  nil, // null during probing
+		State:         "probing",
+	}
+
+	f, err := NewReply("hello-id", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	r := NewReader(&buf)
+	f2, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	var reply2 HelloReply
+	if err := json.Unmarshal(f2.Body, &reply2); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if reply2.ManifestHash != nil {
+		t.Errorf("ManifestHash should be null, got %v", reply2.ManifestHash)
+	}
+	if reply2.State != "probing" {
+		t.Errorf("State mismatch: expected probing, got %s", reply2.State)
+	}
+	if reply2.RunFirstSeq != 100 {
+		t.Errorf("RunFirstSeq mismatch: expected 100, got %d", reply2.RunFirstSeq)
+	}
+}
+
 func TestEvEngineStartedJSON(t *testing.T) {
 	ev := EvEngineStarted{
 		RunID:             "run-123",
@@ -1457,26 +1502,32 @@ func TestErrorWithRoute(t *testing.T) {
 	}
 }
 
-func TestFrameWithConversationsReplyNearMaxSize(t *testing.T) {
-	// Test that a conversations reply near MaxFrameBytes is properly handled
-	// Create many conversation summaries to get close to the limit
-	conversations := make([]ConversationSummary, 0)
-	for i := 0; i < 100; i++ {
-		ws := "/home/user" + strconv.Itoa(i%10)
-		conversations = append(conversations, ConversationSummary{
-			ID:              fmt.Sprintf("conv-%d", i),
+func TestConversationsReplyRoundTrip(t *testing.T) {
+	// Test typed roundtrip of ConversationsReply with null workspace and present cursor
+	conversations := []ConversationSummary{
+		{
+			ID:              "conv-1",
 			CreatedAt:       "2026-11-21T10:00:00Z",
-			Workspace:       &ws,
+			Workspace:       ptrString("/home/user1"),
 			LastSubmittedAt: "2026-11-21T11:00:00Z",
 			TurnCount:       3,
 			Running:         false,
-			Preview:         "What is this conversation about?",
-		})
+			Preview:         "First conversation",
+		},
+		{
+			ID:              "conv-2",
+			CreatedAt:       "2026-11-21T09:00:00Z",
+			Workspace:       nil, // null workspace for pre-migration conversations
+			LastSubmittedAt: "2026-11-21T10:00:00Z",
+			TurnCount:       1,
+			Running:         false,
+			Preview:         "Second conversation",
+		},
 	}
 
 	reply := ConversationsReply{
 		Items:      conversations,
-		NextCursor: ptrString("cursor-next-page"),
+		NextCursor: ptrString("cursor-123"),
 	}
 
 	f, err := NewReply("test-id", reply)
@@ -1484,38 +1535,164 @@ func TestFrameWithConversationsReplyNearMaxSize(t *testing.T) {
 		t.Fatalf("NewReply failed: %v", err)
 	}
 
-	data, err := json.Marshal(f)
-	if err != nil {
-		t.Fatalf("Failed to marshal frame: %v", err)
-	}
-	data = append(data, '\n')
-
-	// Verify frame doesn't exceed MaxFrameBytes
-	if len(data) > MaxFrameBytes {
-		t.Errorf("Frame size %d exceeds MaxFrameBytes %d", len(data), MaxFrameBytes)
-	}
-
-	// Verify it round-trips through Writer/Reader
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	if err := w.Write(f); err != nil {
-		t.Fatalf("Failed to write frame: %v", err)
+		t.Fatalf("Write failed: %v", err)
 	}
 
 	r := NewReader(&buf)
 	f2, err := r.Read()
 	if err != nil {
-		t.Fatalf("Failed to read frame: %v", err)
+		t.Fatalf("Read failed: %v", err)
 	}
 
-	// Verify the reply round-trips
 	var reply2 ConversationsReply
 	if err := json.Unmarshal(f2.Body, &reply2); err != nil {
-		t.Fatalf("Failed to unmarshal reply: %v", err)
+		t.Fatalf("Unmarshal failed: %v", err)
 	}
 
-	if len(reply2.Items) != len(reply.Items) {
-		t.Errorf("Item count mismatch: %d vs %d", len(reply2.Items), len(reply.Items))
+	if len(reply2.Items) != 2 || reply2.Items[1].Workspace != nil {
+		t.Errorf("Null workspace not preserved in roundtrip")
+	}
+	if reply2.NextCursor == nil || *reply2.NextCursor != "cursor-123" {
+		t.Errorf("NextCursor not preserved: %v", reply2.NextCursor)
+	}
+}
+
+func TestConversationsReplyWithoutCursor(t *testing.T) {
+	// Test ConversationsReply with no next cursor (last page)
+	reply := ConversationsReply{
+		Items: []ConversationSummary{
+			{
+				ID:              "conv-1",
+				CreatedAt:       "2026-11-21T10:00:00Z",
+				Workspace:       ptrString("/home/user"),
+				LastSubmittedAt: "2026-11-21T11:00:00Z",
+				TurnCount:       1,
+				Running:         false,
+				Preview:         "Only conversation",
+			},
+		},
+		NextCursor: nil, // absent when there are no more pages
+	}
+
+	f, err := NewReply("test-id", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	r := NewReader(&buf)
+	f2, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	var reply2 ConversationsReply
+	if err := json.Unmarshal(f2.Body, &reply2); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if reply2.NextCursor != nil {
+		t.Errorf("NextCursor should be omitted, got %v", reply2.NextCursor)
+	}
+}
+
+func TestFrameWithConversationsReplyExceedsMaxSize(t *testing.T) {
+	// Test that a conversations reply exceeding MaxFrameBytes is refused with ErrFrameTooLarge
+	// Build a reply large enough to exceed the frame cap
+	conversations := make([]ConversationSummary, 0)
+
+	// Each summary with a long workspace path grows the reply size
+	longWorkspace := strings.Repeat("/very/long/workspace/path/", 50) // ~1500 chars per item
+	for i := 0; i < 1000; i++ {
+		ws := longWorkspace + fmt.Sprintf("-%d", i)
+		conversations = append(conversations, ConversationSummary{
+			ID:              fmt.Sprintf("conv-%d", i),
+			CreatedAt:       "2026-11-21T10:00:00Z",
+			Workspace:       &ws,
+			LastSubmittedAt: "2026-11-21T11:00:00Z",
+			TurnCount:       999,
+			Running:         false,
+			Preview:         strings.Repeat("x", 500), // long preview
+		})
+	}
+
+	reply := ConversationsReply{
+		Items:      conversations,
+		NextCursor: ptrString("cursor-" + strings.Repeat("x", 1000)),
+	}
+
+	f, err := NewReply("test-id", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	err = w.Write(f)
+	if err != ErrFrameTooLarge {
+		t.Errorf("Expected ErrFrameTooLarge, got %v", err)
+	}
+
+	// Verify that Reader also detects oversized frames
+	oversizeData := make([]byte, MaxFrameBytes+100)
+	for i := range oversizeData {
+		oversizeData[i] = 'x'
+	}
+	oversizeData[len(oversizeData)-1] = '\n'
+
+	r := NewReader(bytes.NewReader(oversizeData))
+	_, err = r.Read()
+	if err != ErrFrameTooLarge {
+		t.Errorf("Reader should refuse oversized frame, got %v", err)
+	}
+}
+
+func TestConversationReplyRoundTrip(t *testing.T) {
+	// Test typed roundtrip of ConversationReply
+	reply := ConversationReply{
+		ID: "conv-123",
+		Turns: []ConversationTurnSummary{
+			{ID: "turn-1", State: "approved"},
+			{ID: "turn-2", State: "incomplete"},
+			{ID: "turn-3", State: "running"},
+		},
+	}
+
+	f, err := NewReply("test-id", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	r := NewReader(&buf)
+	f2, err := r.Read()
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+
+	var reply2 ConversationReply
+	if err := json.Unmarshal(f2.Body, &reply2); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if reply2.ID != "conv-123" || len(reply2.Turns) != 3 {
+		t.Errorf("ConversationReply roundtrip failed: %+v", reply2)
+	}
+	if reply2.Turns[1].State != "incomplete" {
+		t.Errorf("Turn state not preserved: %s", reply2.Turns[1].State)
 	}
 }
 
