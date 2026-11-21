@@ -208,6 +208,19 @@ type ProbeOptions struct {
 	DisableOverLength  bool
 	DisableCalibration bool
 	AssumedContextLen  int
+	// BeforeSend is an optional callback invoked before each probe HTTP request.
+	// It allows the engine to journal the probe request before dispatch and distinguish
+	// ErrNotSent (pre-send failures) from other errors. The callback receives the
+	// probe request details and should return an error if the probe cannot proceed;
+	// in that case, ProbeWithOptions may abort the probe step and return ErrNotSent.
+	BeforeSend func(*ProbeRequest) error
+}
+
+// ProbeRequest contains details passed to BeforeSend callbacks during probing.
+type ProbeRequest struct {
+	Model   string
+	Step    string // e.g., "max_tokens", "system_role", "over_length"
+	Timeout time.Duration
 }
 
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
@@ -285,11 +298,11 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	probeFinishReasons := make(map[string]transport.CompletionStatus)
 	rawSteps := make(map[string]any)
 
-	if err := a.probeModels(probeCtx, baseURL, &record, &resolvedSecrets, rawSteps, opts.Timeout); err != nil {
+	if err := a.probeModels(probeCtx, baseURL, &record, &resolvedSecrets, rawSteps, opts); err != nil {
 		return record, err
 	}
 
-	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout)
+	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts)
 	if step2ServerVersion != "" {
 		serverVersion = step2ServerVersion
 	}
@@ -328,16 +341,16 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		}
 	}
 
-	if err := a.probeSystemRole(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, probeFinishReasons); err != nil {
+	if err := a.probeSystemRole(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts, probeFinishReasons); err != nil {
 		return record, err
 	}
 
 	if !opts.DisableCalibration {
-		a.probeCalibration(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout)
+		a.probeCalibration(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts)
 	}
 
 	if !opts.DisableOverLength {
-		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen)
+		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts)
 	}
 
 	if len(probeFinishReasons) > 0 {
@@ -489,6 +502,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	if req.BeforeSend != nil {
 		if err := req.BeforeSend(&req); err != nil {
+			result.TransportStatus = "not_sent"
 			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 		}
 	}
@@ -774,10 +788,10 @@ func mapFinishReason(reason string) transport.CompletionStatus {
 	}
 }
 
-func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, secrets *[]string, rawSteps map[string]any, timeout time.Duration) error {
+func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, secrets *[]string, rawSteps map[string]any, opts ProbeOptions) error {
 	modelsURL := baseURL.JoinPath("/models")
 
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, "GET", modelsURL.String(), nil)
@@ -787,6 +801,16 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 
 	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return err
+	}
+
+	if opts.BeforeSend != nil {
+		if err := opts.BeforeSend(&ProbeRequest{
+			Model:   record.Model,
+			Step:    "models",
+			Timeout: opts.Timeout,
+		}); err != nil {
+			return fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
 	}
 
 	httpResp, err := a.client.Do(httpReq)
@@ -841,7 +865,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	return nil
 }
 
-func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration) (*ResponseBody, int, string, error) {
+func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts ProbeOptions) (*ResponseBody, int, string, error) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	var maxTokensBody *ResponseBody
@@ -849,7 +873,7 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 	var serverVersion string
 
 	for idx, field := range []string{"max_tokens", "max_completion_tokens"} {
-		reqCtx, cancel := context.WithTimeout(ctx, timeout)
+		reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 
 		messages := []MessageInput{
 			{Role: "user", Content: "test"},
@@ -874,6 +898,18 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		if err := a.addProbeAuth(httpReq, secrets); err != nil {
 			cancel()
 			return nil, 0, "", err
+		}
+
+		if opts.BeforeSend != nil {
+			stepName := field
+			if err := opts.BeforeSend(&ProbeRequest{
+				Model:   model,
+				Step:    stepName,
+				Timeout: opts.Timeout,
+			}); err != nil {
+				cancel()
+				return nil, 0, "", fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			}
 		}
 
 		startTime := time.Now()
@@ -945,10 +981,10 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 	return maxTokensBody, latency, serverVersion, nil
 }
 
-func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, finishReasons map[string]transport.CompletionStatus) error {
+func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts ProbeOptions, finishReasons map[string]transport.CompletionStatus) error {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	messages := []MessageInput{
@@ -978,6 +1014,16 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	httpReq.Header.Set("Content-Type", "application/json")
 	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return err
+	}
+
+	if opts.BeforeSend != nil {
+		if err := opts.BeforeSend(&ProbeRequest{
+			Model:   model,
+			Step:    "system_role",
+			Timeout: opts.Timeout,
+		}); err != nil {
+			return fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
 	}
 
 	httpResp, err := a.client.Do(httpReq)
@@ -1043,10 +1089,10 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 	return "rejected:other", "unknown error"
 }
 
-func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int) {
+func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts ProbeOptions) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	// Always set the classification rule for consistency
@@ -1058,7 +1104,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return
 	}
 
-	if assumedContextLen <= 0 {
+	if opts.AssumedContextLen <= 0 {
 		record.OverLength = "not_run:no_context"
 		return
 	}
@@ -1078,7 +1124,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	tailMarker := hex.EncodeToString(tailMarkerBytes)
 
 	// Calculate filler size: 1.5 * assumed_context * bytes_per_token
-	fillerSizeBytes := int(1.5 * float64(assumedContextLen) * record.Calibration.BytesPerToken)
+	fillerSizeBytes := int(1.5 * float64(opts.AssumedContextLen) * record.Calibration.BytesPerToken)
 	if fillerSizeBytes < 0 {
 		fillerSizeBytes = 0
 	}
@@ -1121,6 +1167,17 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		record.OverLength = "errored"
 		return
+	}
+
+	if opts.BeforeSend != nil {
+		if err := opts.BeforeSend(&ProbeRequest{
+			Model:   model,
+			Step:    "over_length",
+			Timeout: opts.Timeout,
+		}); err != nil {
+			record.OverLength = "errored"
+			return
+		}
 	}
 
 	httpResp, err := a.client.Do(httpReq)
@@ -1170,7 +1227,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 }
 
-func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration) {
+func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts ProbeOptions) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	maxTokensField := record.MaxTokensField
@@ -1178,10 +1235,10 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		maxTokensField = "max_tokens"
 	}
 
-	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, timeout, secrets)
+	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody)
 
-	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, timeout, secrets)
+	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
 
 	if baselineErr != nil || calibrationErr != nil || baselineStatusCode == 0 || calibrationStatusCode == 0 {
@@ -1225,8 +1282,8 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	record.Calibration.BytesPerToken = float64(len([]byte(calibrationText))) / float64(calibrationTokens-baselineTokens)
 }
 
-func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, timeout time.Duration, secrets *[]string) (int, http.Header, []byte, []byte, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, opts ProbeOptions, secrets *[]string) (int, http.Header, []byte, []byte, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	messages := []MessageInput{
@@ -1250,6 +1307,20 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 	httpReq.Header.Set("Content-Type", "application/json")
 	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return 0, nil, nil, nil, err
+	}
+
+	if opts.BeforeSend != nil {
+		stepName := "calibration"
+		if messageContent == "" {
+			stepName = "calibration_baseline"
+		}
+		if err := opts.BeforeSend(&ProbeRequest{
+			Model:   model,
+			Step:    stepName,
+			Timeout: opts.Timeout,
+		}); err != nil {
+			return 0, nil, nil, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
 	}
 
 	httpResp, err := a.client.Do(httpReq)
