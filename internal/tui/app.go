@@ -13,8 +13,8 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
-	"github.com/mattn/go-runewidth"
 )
 
 type tab int
@@ -898,16 +898,23 @@ func (a *App) View() string {
 	// When the terminal is too small, show a resize message
 	if a.isTerminalTooSmall() {
 		msg := "Terminal too small. Resize to 40×10."
-		if runewidth.StringWidth(msg) > w {
+		if ansi.StringWidth(msg) > w {
 			msg = "Terminal too small."
 		}
-		return msg
+		return ansi.Truncate(msg, w, "")
 	}
 
 	// Get banners and strip, limiting banners to leave at least 5 lines for the tab area
 	banners := renderBanners(a.state)
 	banners = capBannersForHeight(banners, a.height, 5)
+
+	// Clip all banners to width
+	for i, banner := range banners {
+		banners[i] = ansi.Truncate(banner, w, "")
+	}
+
 	strip := renderStrip(a.state, w, a.now())
+	strip = ansi.Truncate(strip, w, "")
 
 	bodyHeight := a.bodyHeight()
 
@@ -942,17 +949,25 @@ func (a *App) View() string {
 	}
 	lines = lines[:bodyHeight]
 
-	// Clip all lines to width to handle wide characters
+	// Clip all lines to width to handle wide characters and ANSI sequences
 	for i, line := range lines {
-		lines[i] = clipToWidth(line, w)
+		lines[i] = ansi.Truncate(line, w, "")
 	}
+
+	// Clip input lines to width
+	inputLines := renderInput(a.input, a.refusal, w)
+	inputLinesList := strings.Split(inputLines, "\n")
+	for i, line := range inputLinesList {
+		inputLinesList[i] = ansi.Truncate(line, w, "")
+	}
+	inputLines = strings.Join(inputLinesList, "\n")
 
 	// Build output: banners, strip, body, input.
 	var output []string
 	output = append(output, banners...)
 	output = append(output, strip)
 	output = append(output, lines...)
-	output = append(output, renderInput(a.input, a.refusal, w))
+	output = append(output, inputLines)
 	return strings.Join(output, "\n")
 }
 
@@ -991,23 +1006,11 @@ func ExitMessage(a *App) string {
 	return ""
 }
 
-// clipToWidth clips a line to a maximum display width, accounting for wide characters.
+// clipToWidth clips a line to a maximum display width, accounting for wide characters and ANSI sequences.
+// This function handles ANSI escape sequences properly without breaking them or counting them as visible width.
 func clipToWidth(line string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	var result []rune
-	w := 0
-	for _, r := range line {
-		rw := runewidth.RuneWidth(r)
-		if rw < 0 {
-			rw = 1
-		}
-		if w+rw > width {
-			break
-		}
-		result = append(result, r)
-		w += rw
-	}
-	return string(result)
+	return ansi.Truncate(line, width, "")
 }
