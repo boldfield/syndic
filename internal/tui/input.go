@@ -10,6 +10,7 @@ import (
 const (
 	defaultPrompt = "> "
 	reasonPrompt  = "reason> " // while a confirmation waits for its answer
+	yesNoPrompt   = "(y/n)> "  // while a question waits for y or n
 )
 
 func newInput() textinput.Model {

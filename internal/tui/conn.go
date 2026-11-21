@@ -34,10 +34,12 @@ type eventMsg struct {
 	err   error
 }
 
-// submitMsg is the outcome of a submit.
+// submitMsg is the outcome of a submit: the accepted turn, or the refusal.
+// It carries the submission so a provisional refusal can be resent as it was.
 type submitMsg struct {
-	turnID  string
-	refusal string
+	sub    submission
+	turnID string
+	err    error
 }
 
 // tickMsg is sent every second for elapsed time updates.
@@ -87,21 +89,34 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
-// submitCmd submits input under the submission id, with the preset and quick profile, if any.
-func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, preset string, quickProfile *string) tea.Cmd {
+// submission is a submit as the user made it: the input, with the preset, quick profile and provisional flag, if any.
+type submission struct {
+	id               string
+	input            string
+	preset           string
+	quickProfile     *string
+	allowProvisional bool
+}
+
+// submitCmd sends the submission, first showing the request to observe if it is set.
+func submitCmd(ctx context.Context, cl *client.Client, sub submission, observe func(wire.SubmitRequest)) tea.Cmd {
 	return func() tea.Msg {
-		req := wire.SubmitRequest{SubmissionID: submissionID, Input: input}
-		if preset != "" {
-			req.Preset = &preset
+		req := wire.SubmitRequest{SubmissionID: sub.id, Input: sub.input, QuickProfile: sub.quickProfile}
+		if sub.preset != "" {
+			req.Preset = &sub.preset
 		}
-		if quickProfile != nil {
-			req.QuickProfile = quickProfile
+		if sub.allowProvisional {
+			allow := true
+			req.AllowProvisional = &allow
+		}
+		if observe != nil {
+			observe(req)
 		}
 		reply, err := cl.Submit(ctx, req)
 		if err != nil {
-			return submitMsg{refusal: formatRefusal(err)}
+			return submitMsg{sub: sub, err: err}
 		}
-		return submitMsg{turnID: reply.TurnID}
+		return submitMsg{sub: sub, turnID: reply.TurnID}
 	}
 }
 
