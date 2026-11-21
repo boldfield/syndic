@@ -122,12 +122,15 @@ func poolName(p config.Participant) string {
 
 func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	mp := e.built.Participants[p.ID]
+	ep := e.endpoint(p.Endpoint)
 	ws := wire.Participant{
 		ID:                       p.ID,
 		Model:                    p.Model,
+		Endpoint:                 p.Endpoint,
 		Pool:                     poolName(p),
 		EligibleRoles:            make([]string, 0, len(p.EligibleRoles)),
-		DeclaredBilling:          e.endpoint(p.Endpoint).DeclaredBilling,
+		DeclaredBilling:          ep.DeclaredBilling,
+		SpendingControl:          ep.SpendingControl,
 		BytesPerTokenSource:      mp.BytesPerTokenSource,
 		ContextSource:            mp.ContextSource,
 		EligibleRequiredReviewer: string(transport.TriUnknown),

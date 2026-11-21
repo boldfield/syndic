@@ -3151,3 +3151,311 @@ required_reviewers = ["reviewer"]
 		}
 	}()
 }
+
+func TestProbeMeteredEndpointWithoutSpendingControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	// Create roster with metered endpoint but no spending control
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "metered-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "metered-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "metered"
+network_dependency = "other"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "metered-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command
+	var stderr bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "metered-endpoint",
+		"--model", "test-model",
+		"--raw-dir", filepath.Join(tmpDir, "raw"),
+		"--export-dir", filepath.Join(tmpDir, "export"),
+		"--journal", filepath.Join(tmpDir, "journal.sqlite"),
+		"--secrets-dir", filepath.Join(tmpDir, "secrets"),
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stderr = oldStderr
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("failed to copy from pipe: %v", err)
+	}
+
+	// Should fail with exit code 2 because metered endpoint lacks external spending control
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2, got %d\nStderr: %s", exitCode, stderr.String())
+	}
+
+	output := stderr.String()
+	if !strings.Contains(output, "metered") || !strings.Contains(output, "spending ceiling") {
+		t.Fatalf("expected error message about metered billing and spending ceiling, got: %s", output)
+	}
+}
+
+func TestProbeMeteredEndpointWithExternalSpendingControl(t *testing.T) {
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	rawDir := filepath.Join(tmpDir, "raw")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "test-model", "object": "model"},
+				},
+			}); err != nil {
+				t.Logf("failed to encode models response: %v", err)
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+				msgs, _ := body["messages"].([]interface{})
+				var userMsg string
+				for _, m := range msgs {
+					mm, ok := m.(map[string]interface{})
+					if ok && mm["role"] == "user" {
+						userMsg, _ = mm["content"].(string)
+						break
+					}
+				}
+
+				isBaseline := userMsg == ""
+				isCalibrationText := len(userMsg) == 4096
+
+				if isBaseline {
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": ""}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode baseline response: %v", err)
+					}
+					return
+				} else if isCalibrationText {
+					if err := json.NewEncoder(w).Encode(map[string]interface{}{
+						"model":   "test-model",
+						"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+						"usage":   map[string]int{"prompt_tokens": 1034, "completion_tokens": 1},
+					}); err != nil {
+						t.Logf("failed to encode calibration text response: %v", err)
+					}
+					return
+				}
+			}
+
+			if err := json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "chatcmpl-123",
+				"object":  "chat.completion",
+				"model":   "test-model",
+				"choices": []map[string]interface{}{{"message": map[string]string{"role": "assistant", "content": "test"}, "finish_reason": "stop"}},
+				"usage":   map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			}); err != nil {
+				t.Logf("failed to encode completion response: %v", err)
+			}
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// Create roster with metered endpoint and external spending control
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "metered-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "metered-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "metered"
+spending_control = "external"
+network_dependency = "other"
+max_tokens_field = "max_tokens"
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "metered-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	// Run the probe command with output draining in a goroutine to prevent deadlock
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	os.Stderr = w
+
+	var outputStr string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		output, _ := io.ReadAll(r)
+		outputStr = string(output)
+	}()
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "metered-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if err := w.Close(); err != nil {
+		t.Logf("failed to close pipe writer: %v", err)
+	}
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+	<-done
+
+	// Should succeed with exit code 0
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
+	}
+
+	// Verify files were written
+	rawFiles, err := os.ReadDir(rawDir)
+	if err != nil {
+		t.Fatalf("failed to read raw dir: %v", err)
+	}
+	if len(rawFiles) != 1 {
+		t.Fatalf("expected 1 raw file, got %d", len(rawFiles))
+	}
+
+	exportFiles, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("failed to read export dir: %v", err)
+	}
+	if len(exportFiles) != 1 {
+		t.Fatalf("expected 1 export file, got %d", len(exportFiles))
+	}
+
+	// Verify export file is valid JSON and declares metered billing truthfully
+	exportPath := filepath.Join(exportDir, exportFiles[0].Name())
+	exportData, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("failed to read export: %v", err)
+	}
+
+	var exp evidence.Export
+	if err := json.Unmarshal(exportData, &exp); err != nil {
+		t.Fatalf("failed to parse export JSON: %v", err)
+	}
+
+	if exp.DeclaredBilling != "metered" {
+		t.Fatalf("expected declared_billing 'metered', got %q", exp.DeclaredBilling)
+	}
+
+	// Verify the probe manifest was written with fingerprint
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatalf("failed to open journal: %v", err)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Logf("failed to close journal: %v", err)
+		}
+	}()
+
+	var runManifest sql.NullString
+	if err := db.Conn().QueryRow("SELECT manifest FROM runs").Scan(&runManifest); err != nil {
+		t.Fatalf("failed to query run manifest: %v", err)
+	}
+
+	// Parse the probe manifest to verify it's valid
+	probeManifest, hasFingerprint, err := evidence.ParseProbeManifest([]byte(runManifest.String))
+	if err != nil {
+		t.Fatalf("failed to parse probe manifest: %v", err)
+	}
+
+	if !hasFingerprint {
+		t.Fatalf("probe manifest should have fingerprint")
+	}
+
+	if probeManifest.ConfigFingerprint == "" {
+		t.Fatalf("probe manifest should have non-empty config_fingerprint")
+	}
+}
