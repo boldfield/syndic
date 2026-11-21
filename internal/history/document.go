@@ -9,11 +9,22 @@ import (
 	"io"
 	"strconv"
 	"strings"
-
-	"github.com/boldfield/syndic/internal/prompt"
 )
 
 const preamble = "syndic-history/v1\n"
+
+// ErrDelimiterCollision is returned when a delimiter appears in a document.
+var ErrDelimiterCollision = errors.New("delimiter appears in content")
+
+// NewDelimiter reads 16 bytes from rand and returns them as 32 lowercase hex characters.
+func NewDelimiter(rand io.Reader) (string, error) {
+	b := make([]byte, 16)
+	_, err := io.ReadFull(rand, b)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // Change outcomes carried by one `change` field (design section 6).
 const (
@@ -377,16 +388,16 @@ func (d *Document) RenderForAuthor() []Message {
 }
 
 // RenderForReviewer renders the whole canonical document as one block
-// delimited as the v4 candidate is: a random delimiter from rand, with
-// prompt.ErrDelimiterCollision if it appears in the document.
+// delimited by a random delimiter from rand, returning ErrDelimiterCollision if
+// it appears in the document.
 func (d *Document) RenderForReviewer(rand io.Reader) (string, error) {
-	delim, err := prompt.NewDelimiter(rand)
+	delim, err := NewDelimiter(rand)
 	if err != nil {
 		return "", err
 	}
 	doc := d.Bytes()
 	if bytes.Contains(doc, []byte(delim)) {
-		return "", prompt.ErrDelimiterCollision
+		return "", ErrDelimiterCollision
 	}
 	return fmt.Sprintf("===== %s BEGIN HISTORY =====\n%s===== %s END HISTORY =====\n", delim, doc, delim), nil
 }
