@@ -14,7 +14,7 @@ type stubAdapter struct {
 	cse Case
 }
 
-func (a *stubAdapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
+func (a *stubAdapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
 	return transport.CapabilityRecord{}, transport.ErrNotImplemented
 }
 
