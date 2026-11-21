@@ -3,6 +3,9 @@ package tui
 import (
 	"os"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,4 +55,24 @@ func IsStdoutTTY() bool {
 func isatty(fd uintptr) bool {
 	_, err := unix.IoctlGetWinsize(int(fd), unix.TIOCGWINSZ)
 	return err == nil
+}
+
+// ProgramOptions returns the Bubble Tea options the capabilities allow. The
+// alternate screen is used only when the terminal has one; mouse reporting is
+// never enabled.
+func ProgramOptions(caps TerminalCapabilities) []tea.ProgramOption {
+	var opts []tea.ProgramOption
+	if caps.AltScreen {
+		opts = append(opts, tea.WithAltScreen())
+	}
+	return opts
+}
+
+// ApplyTerminalCapabilities makes every style render without colour or other
+// escape sequences when the terminal has no colour, whatever lipgloss would
+// have detected on its own.
+func ApplyTerminalCapabilities(caps TerminalCapabilities) {
+	if !caps.Color {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 }

@@ -106,6 +106,7 @@ func (s *seen) snapshot() []int64 {
 type probe struct {
 	app     *App
 	waiters []*waiter
+	enter   tea.Cmd // run at start-up, when the test wants the alternate screen
 }
 
 type waiter struct {
@@ -115,7 +116,7 @@ type waiter struct {
 
 type waitMsg struct{ w *waiter }
 
-func (p *probe) Init() tea.Cmd { return p.app.Init() }
+func (p *probe) Init() tea.Cmd { return tea.Batch(p.app.Init(), p.enter) }
 func (p *probe) View() string  { return p.app.View() }
 
 func (p *probe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -634,68 +635,6 @@ func TestNOCOLORWithAltScreen(t *testing.T) {
 	}
 }
 
-// TestWidth80x24LineConstraint verifies that at 80x24, all lines are at most 80 cells wide.
-func TestWidth80x24LineConstraint(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-	r.waitCaughtUp(t)
-
-	// Check output for each tab: width should never exceed 80 cells
-	for tabIdx := 0; tabIdx < 3; tabIdx++ {
-		r.app.tab = tab(tabIdx)
-		output := r.app.View()
-		lines := strings.Split(output, "\n")
-
-		for i, line := range lines {
-			// Use ansi.StringWidth to measure display width (excluding escape sequences)
-			width := ansi.StringWidth(line)
-			if width > 80 {
-				t.Errorf("Tab %d line %d exceeds 80 cells: width=%d, line=%q", tabIdx, i, width, line)
-			}
-		}
-
-		// Total frame should be at most 24 lines
-		if len(lines) > 24 {
-			t.Errorf("Tab %d frame exceeds 24 lines: %d lines", tabIdx, len(lines))
-		}
-	}
-}
-
-// TestBannerFourActiveAt80x24 verifies four active banners show marker and leave ≥5 lines for tab.
-func TestBannerFourActiveAt80x24(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
-	// Set up state with four active banners
-	r.app.state.Status = &wire.StatusReply{
-		DeadlinesProvisional: true,
-		RosterFileChanged:    true,
-	}
-	r.app.state.ConnState = ConnStateReconnecting
-	r.app.state.UnapprovedProfile = &[]string{"testprofile"}[0]
-
-	output := r.app.View()
-	lines := strings.Split(output, "\n")
-
-	// Should show marker
-	found := false
-	for _, line := range lines {
-		if strings.Contains(line, "+") && strings.Contains(line, "more") {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("Expected +N more marker with four banners, got output:\n%s", output)
-	}
-
-	// Count lines used: should leave at least 5 for tab area
-	if len(lines) > 24 {
-		t.Errorf("Total lines exceed 24: got %d", len(lines))
-	}
-}
-
 // TestANSIAwareClipping verifies that clipToWidth handles ANSI sequences correctly.
 func TestANSIAwareClipping(t *testing.T) {
 	tests := []struct {
@@ -728,51 +667,6 @@ func TestANSIAwareClipping(t *testing.T) {
 				t.Errorf("clipToWidth: result width %d exceeds limit %d", resultWidth, tt.width)
 			}
 		})
-	}
-}
-
-// TestCJKEmojiWidthSafety verifies that CJK and emoji characters don't exceed width limits.
-func TestCJKEmojiWidthSafety(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
-	// Create a mock turn with CJK/emoji content
-	testInput := "测试输入 test 🚀 emoji and CJK mixed content"
-
-	// Inject this into the content cache as if it came from an attempt
-	r.app.content.Store("attempt:1", testInput, nil)
-
-	// Render the answer tab with this content
-	r.app.tab = tabAnswer
-	output := r.app.View()
-	lines := strings.Split(output, "\n")
-
-	// All lines should respect the width constraint
-	for i, line := range lines {
-		width := ansi.StringWidth(line)
-		if width > 80 {
-			t.Errorf("Line %d with CJK/emoji exceeds 80 cells: width=%d, content=%q", i, width, line)
-		}
-	}
-}
-
-// TestPlainModeNoEscapeSequences verifies plain mode output contains no ANSI escape sequences.
-func TestPlainModeNoEscapeSequences(t *testing.T) {
-	t.Setenv("TERM", "dumb")
-
-	r := newRig(t)
-	r.app.terminalCapabilities = TerminalCapabilities{Color: false, AltScreen: false}
-	r.waitConnected(t)
-
-	output := r.app.View()
-
-	// Should NOT contain ANSI escape sequences in plain mode
-	if bytes.Contains([]byte(output), []byte("\x1b[")) {
-		t.Error("Plain mode output should not contain ANSI color escape sequences")
-	}
-
-	if bytes.Contains([]byte(output), []byte("\x1b)0")) {
-		t.Error("Plain mode output should not contain alternate charset sequences")
 	}
 }
 

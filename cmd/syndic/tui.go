@@ -46,14 +46,10 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 
 	app := tui.NewApp(ctx, paths.Socket, tui.WithTerminalCapabilities(caps))
 
-	// Choose Bubble Tea options based on capabilities
-	opts := []tea.ProgramOption{}
-	if caps.AltScreen {
-		opts = append(opts, tea.WithAltScreen())
-	}
+	tui.ApplyTerminalCapabilities(caps)
 
 	// Run Bubble Tea
-	p := tea.NewProgram(app, opts...)
+	p := tea.NewProgram(app, tui.ProgramOptions(caps)...)
 	finalModel, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: TUI error: %v\n", err)

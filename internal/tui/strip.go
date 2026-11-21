@@ -161,32 +161,22 @@ func renderBanners(s State) []string {
 	return banners
 }
 
-// capBannersForHeight returns banners, limiting them to leave at least minTabHeight lines for the tab area.
-// At the minimum supported height (80×24), shows only the first banner plus a "+N more" marker.
-// height: total terminal height
-// minTabHeight: minimum lines to reserve for the tab content (usually 5)
-// strip takes 1 line, input takes 2 lines (refusal + input)
+// bannerHeightDivisor sets how much of the screen banners may take: at most
+// height/bannerHeightDivisor lines, which is three at 24 rows. A fourth banner
+// at 80x24 therefore collapses the list, so the strip, tab and input keep
+// their room however many conditions are active.
+const bannerHeightDivisor = 8
+
+// capBannersForHeight returns the banners that fit above the strip. When they
+// exceed the allowance of height/bannerHeightDivisor lines, or would leave the
+// tab area fewer than minTabHeight lines, only the first banner shows,
+// followed by a "+N more" marker.
 func capBannersForHeight(banners []string, height, minTabHeight int) []string {
-	stripHeight := 1
-	// inputHeight is a package constant (see line 30)
-
-	// Calculate how many banners can fit while maintaining minTabHeight
-	maxBannerLines := max(height-stripHeight-inputHeight-minTabHeight, 0)
-
-	// At the minimum supported terminal height (24 rows), limit to 1 banner + marker
-	// to ensure consistent, predictable layout. At larger heights, show all banners
-	// that fit within the calculated space.
-	if height <= 24 && len(banners) > 1 {
-		return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
-	}
-
-	if len(banners) <= maxBannerLines {
+	const stripHeight = 1
+	room := height - stripHeight - inputHeight - minTabHeight
+	allowed := min(room, height/bannerHeightDivisor)
+	if len(banners) <= 1 || len(banners) <= allowed {
 		return banners
 	}
-
-	// If not all fit in the calculated space, show first + marker
-	if len(banners) > 1 {
-		return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
-	}
-	return banners
+	return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
 }
