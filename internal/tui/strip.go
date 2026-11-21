@@ -169,20 +169,13 @@ func renderBanners(s State) []string {
 func capBannersForHeight(banners []string, height, minTabHeight int) []string {
 	const stripHeight = 1
 	const inputHeight = 2
-	maxBannerLines := max(height-stripHeight-inputHeight-minTabHeight, 0)
+	const contentBuffer = 13
+	maxBannerLines := max(height-stripHeight-inputHeight-minTabHeight-contentBuffer, 0)
 	if len(banners) <= maxBannerLines {
 		return banners
 	}
-	if maxBannerLines == 0 {
-		return banners
+	if len(banners) > 1 {
+		return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
 	}
-	if maxBannerLines == 1 {
-		remaining := len(banners) - 1
-		if remaining > 0 {
-			return []string{banners[0], fmt.Sprintf("+%d more", remaining)}
-		}
-		return []string{banners[0]}
-	}
-	remaining := len(banners) - 1
-	return []string{banners[0], fmt.Sprintf("+%d more", remaining)}
+	return banners
 }

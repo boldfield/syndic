@@ -20,7 +20,6 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			want: TerminalCapabilities{
 				Color:     false,
 				AltScreen: false,
-				Mouse:     false,
 			},
 		},
 		{
@@ -30,7 +29,6 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			want: TerminalCapabilities{
 				Color:     false,
 				AltScreen: false,
-				Mouse:     false,
 			},
 		},
 		{
@@ -40,7 +38,6 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			want: TerminalCapabilities{
 				Color:     false,
 				AltScreen: true,
-				Mouse:     true,
 			},
 		},
 		{
@@ -50,7 +47,6 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 			want: TerminalCapabilities{
 				Color:     true,
 				AltScreen: true,
-				Mouse:     true,
 			},
 		},
 	}
@@ -75,7 +71,7 @@ func TestDetectTerminalCapabilities(t *testing.T) {
 func TestAppTerminalCapabilities(t *testing.T) {
 	ctx := context.Background()
 
-	caps := TerminalCapabilities{Color: false, AltScreen: true, Mouse: true}
+	caps := TerminalCapabilities{Color: false, AltScreen: true}
 	app := NewApp(ctx, "/tmp/test.sock", WithTerminalCapabilities(caps))
 	if app.terminalCapabilities != caps {
 		t.Errorf("Expected %v, got %v", caps, app.terminalCapabilities)

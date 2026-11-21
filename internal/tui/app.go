@@ -942,6 +942,11 @@ func (a *App) View() string {
 	}
 	lines = lines[:bodyHeight]
 
+	// Clip all lines to width to handle wide characters
+	for i, line := range lines {
+		lines[i] = clipToWidth(line, w)
+	}
+
 	// Build output: banners, strip, body, input.
 	var output []string
 	output = append(output, banners...)
@@ -984,4 +989,25 @@ func ExitMessage(a *App) string {
 		return "turn " + id + " is still running and will continue"
 	}
 	return ""
+}
+
+// clipToWidth clips a line to a maximum display width, accounting for wide characters.
+func clipToWidth(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	var result []rune
+	w := 0
+	for _, r := range line {
+		rw := runewidth.RuneWidth(r)
+		if rw < 0 {
+			rw = 1
+		}
+		if w+rw > width {
+			break
+		}
+		result = append(result, r)
+		w += rw
+	}
+	return string(result)
 }
