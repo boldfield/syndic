@@ -410,7 +410,30 @@ func (e *Engine) Start() error {
 	var runID, manifestHash string
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
-		runID, manifestHash, err = tx.CreateEngineRun(built.JSON)
+
+		// Allocate run in probing state
+		runID, err = tx.AllocateEngineRun()
+		if err != nil {
+			return err
+		}
+
+		// Emit run_opened event
+		body, err := json.Marshal(wire.EvRunOpened{
+			RunID:      runID,
+			RosterHash: built.RosterHash,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal run_opened: %w", err)
+		}
+		if _, err := tx.Emit("", wire.EventKindRunOpened, body); err != nil {
+			return fmt.Errorf("emit run_opened: %w", err)
+		}
+
+		// TODO: Probing would happen here before finalization
+		// For now, finalize immediately
+
+		// Finalize manifest after probing
+		manifestHash, err = tx.FinalizeEngineRunManifest(runID, built.JSON)
 		if err != nil {
 			return err
 		}
