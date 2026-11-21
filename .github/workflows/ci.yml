@@ -10,9 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Check design document immutability
+        run: bash scripts/check-design-immutability.sh
       - run: make fmt-check
       - run: go build ./...
       - run: go vet ./...
