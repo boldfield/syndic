@@ -458,7 +458,7 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("engine: write run: %w", err)
 	}
 
-	firstSeq, err := e.findEngineStarted(before, runID)
+	firstSeq, err := e.findRunOpened(before, runID)
 	if err != nil {
 		return err
 	}
@@ -484,24 +484,24 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-// findEngineStarted returns the seq of the engine_started event for runID.
+// findRunOpened returns the seq of the run_opened event for runID.
 // The run id in the payload identifies it exactly, whatever else was written
 // to the journal meanwhile.
-func (e *Engine) findEngineStarted(since int64, runID string) (int64, error) {
+func (e *Engine) findRunOpened(since int64, runID string) (int64, error) {
 	for {
 		events, err := e.store.EventsSince(since, 256)
 		if err != nil {
 			return 0, fmt.Errorf("engine: read journal: %w", err)
 		}
 		if len(events) == 0 {
-			return 0, errors.New("engine: engine_started event not found")
+			return 0, errors.New("engine: run_opened event not found")
 		}
 		for _, ev := range events {
 			since = ev.Seq
-			if ev.Kind != wire.EventKindEngineStarted {
+			if ev.Kind != wire.EventKindRunOpened {
 				continue
 			}
-			var body wire.EvEngineStarted
+			var body wire.EvRunOpened
 			if err := json.Unmarshal(ev.Data, &body); err == nil && body.RunID == runID {
 				return ev.Seq, nil
 			}

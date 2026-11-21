@@ -79,6 +79,40 @@ func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) 
 	return manifestHash, nil
 }
 
+// CreateProbeRun creates a new run of kind 'probe' with the given manifest, returning the run ID and manifest hash.
+// The manifest must be valid JSON; the hash is computed by the store.
+func (s *Store) CreateProbeRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		runID, manifestHash, txErr = tx.CreateProbeRun(manifest)
+		return txErr
+	})
+	return runID, manifestHash, err
+}
+
+// CreateProbeRun creates a new run of kind 'probe' with the given manifest, returning the run ID and manifest hash.
+func (tx *Tx) CreateProbeRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
+	if !json.Valid(manifest) {
+		return "", "", fmt.Errorf("invalid JSON manifest")
+	}
+
+	runID, err = generateID()
+	if err != nil {
+		return "", "", err
+	}
+
+	manifestHash = computeSHA256(manifest)
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, ?, ?, 'probe', 'started')
+	`, runID, string(manifest), manifestHash); err != nil {
+		return "", "", fmt.Errorf("insert probe run: %w", err)
+	}
+
+	return runID, manifestHash, nil
+}
+
 // CreateEngineRun creates a new run of kind 'engine' with the given manifest, returning the run ID and manifest hash.
 // The manifest must be valid JSON; the hash is computed by the store.
 // This is the legacy method that combines allocation and finalization; new code should use AllocateEngineRun + FinalizeEngineRunManifest.

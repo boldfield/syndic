@@ -54,18 +54,26 @@ func TestStartHelloAndSecondStart(t *testing.T) {
 		t.Fatalf("hello = %+v", hello)
 	}
 
+	var runOpened *enginetest.Event
 	var started *enginetest.Event
 	for _, ev := range h.Events() {
+		if ev.Kind == wire.EventKindRunOpened {
+			ev := ev
+			runOpened = &ev
+		}
 		if ev.Kind == wire.EventKindEngineStarted {
 			ev := ev
 			started = &ev
 		}
 	}
+	if runOpened == nil {
+		t.Fatal("no run_opened event")
+	}
 	if started == nil {
 		t.Fatal("no engine_started event")
 	}
-	if hello.RunFirstSeq != started.Seq {
-		t.Fatalf("RunFirstSeq %d != engine_started seq %d", hello.RunFirstSeq, started.Seq)
+	if hello.RunFirstSeq != runOpened.Seq {
+		t.Fatalf("RunFirstSeq %d != run_opened seq %d", hello.RunFirstSeq, runOpened.Seq)
 	}
 	body := started.Payload.(*wire.EvEngineStarted)
 	var helloHash string
@@ -109,7 +117,7 @@ func TestStartHelloAndSecondStart(t *testing.T) {
 		t.Fatalf("second RunFirstSeq %d not after first %d", hello2.RunFirstSeq, hello.RunFirstSeq)
 	}
 	events, err := h.Store.EventsSince(hello2.RunFirstSeq-1, 1)
-	if err != nil || len(events) != 1 || events[0].Kind != wire.EventKindEngineStarted {
+	if err != nil || len(events) != 1 || events[0].Kind != wire.EventKindRunOpened {
 		t.Fatalf("event at RunFirstSeq = %+v, err %v", events, err)
 	}
 }

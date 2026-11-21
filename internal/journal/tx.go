@@ -75,8 +75,8 @@ func (tx *Tx) CreateRun(manifest json.RawMessage) (runID, manifestHash string, e
 	manifestHash = computeSHA256(manifest)
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO runs (id, manifest, manifest_hash)
-		VALUES (?, ?, ?)
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, ?, ?, 'probe', 'started')
 	`, runID, string(manifest), manifestHash); err != nil {
 		return "", "", fmt.Errorf("insert run: %w", err)
 	}

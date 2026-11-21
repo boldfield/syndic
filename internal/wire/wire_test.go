@@ -674,6 +674,7 @@ func TestHelloReplyJSON(t *testing.T) {
 		"run_first_seq":  true,
 		"roster_hash":    true,
 		"manifest_hash":  true,
+		"state":          true,
 	}
 
 	// Check exact key set
