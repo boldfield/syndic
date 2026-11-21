@@ -583,9 +583,11 @@ func TestSubmitReplyJSON(t *testing.T) {
 
 func TestSubmitRequestWithoutPreset(t *testing.T) {
 	// Test that SubmitRequest without preset marshals without the preset field
+	// but includes the required workspace field
 	req := SubmitRequest{
 		SubmissionID: "sub-123",
 		Input:        "test input",
+		Workspace:    "/home/user",
 		// Preset is nil
 	}
 
@@ -607,6 +609,7 @@ func TestSubmitRequestWithoutPreset(t *testing.T) {
 	expectedKeys := map[string]bool{
 		"submission_id": true,
 		"input":         true,
+		"workspace":     true,
 	}
 
 	if len(m) != len(expectedKeys) {
@@ -623,6 +626,7 @@ func TestStatusReplyJSON(t *testing.T) {
 	reply := StatusReply{
 		RunID:         "run-123",
 		DefaultPreset: "review",
+		Revision:      Revision{Default: 2, Ceiling: 5},
 	}
 
 	data, err := json.Marshal(reply)
@@ -650,6 +654,7 @@ func TestStatusReplyJSON(t *testing.T) {
 		"quick_profiles":        true,
 		"turns_open":            true,
 		"engine_started_at":     true,
+		"revision":              true,
 	}
 
 	// Check exact key set
@@ -991,7 +996,7 @@ func TestSubmitRequestWithConversation(t *testing.T) {
 	req := SubmitRequest{
 		SubmissionID:    "sub-123",
 		Input:           "test input",
-		Workspace:       ptrString("/home/user"),
+		Workspace:       "/home/user",
 		ConversationID:  ptrString("conv-456"),
 		ContextFromTurn: ptrString("turn-789"),
 		MaxRounds:       ptrInt(2),
@@ -1171,7 +1176,7 @@ func TestEvTurnSubmittedWithConversationJSON(t *testing.T) {
 }
 
 func TestStatusReplyWithRevisionJSON(t *testing.T) {
-	revision := &Revision{Default: 2, Ceiling: 5}
+	revision := Revision{Default: 2, Ceiling: 5}
 	reply := StatusReply{
 		RunID:                "run-123",
 		DefaultPreset:        "review",
@@ -1224,6 +1229,305 @@ func TestStatusReplyWithRevisionJSON(t *testing.T) {
 
 func ptrInt(i int) *int {
 	return &i
+}
+
+func TestSubmitReplyRoundtrip(t *testing.T) {
+	// Test typed roundtrip of SubmitReply
+	original := SubmitReply{
+		TurnID:          "turn-123",
+		Preset:          "review",
+		QuickProfile:    ptrString("fast"),
+		EstimatedTokens: 50000,
+		ConversationID:  "conv-456",
+		ContextHash:     "ctx-abc123",
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	// Unmarshal back to struct
+	var roundtripped SubmitReply
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	// Verify field equality (not pointer equality)
+	if roundtripped.TurnID != original.TurnID ||
+		roundtripped.Preset != original.Preset ||
+		(roundtripped.QuickProfile == nil || *roundtripped.QuickProfile != *original.QuickProfile) ||
+		roundtripped.EstimatedTokens != original.EstimatedTokens ||
+		roundtripped.ConversationID != original.ConversationID ||
+		roundtripped.ContextHash != original.ContextHash {
+		t.Errorf("Roundtrip failed: %+v != %+v", original, roundtripped)
+	}
+}
+
+func TestSubmitRequestRoundtrip(t *testing.T) {
+	// Test typed roundtrip of SubmitRequest with all fields
+	original := SubmitRequest{
+		SubmissionID:     "sub-123",
+		Input:            "test input",
+		Preset:           ptrString("review"),
+		QuickProfile:     ptrString("fast"),
+		AllowProvisional: ptrBool(true),
+		Workspace:        "/home/user",
+		ConversationID:   ptrString("conv-456"),
+		ContextFromTurn:  ptrString("turn-789"),
+		MaxRounds:        ptrInt(2),
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var roundtripped SubmitRequest
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	// Verify field equality (not pointer equality)
+	if roundtripped.SubmissionID != original.SubmissionID ||
+		roundtripped.Input != original.Input ||
+		(roundtripped.Preset == nil || *roundtripped.Preset != *original.Preset) ||
+		(roundtripped.QuickProfile == nil || *roundtripped.QuickProfile != *original.QuickProfile) ||
+		(roundtripped.AllowProvisional == nil || *roundtripped.AllowProvisional != *original.AllowProvisional) ||
+		roundtripped.Workspace != original.Workspace ||
+		(roundtripped.ConversationID == nil || *roundtripped.ConversationID != *original.ConversationID) ||
+		(roundtripped.ContextFromTurn == nil || *roundtripped.ContextFromTurn != *original.ContextFromTurn) ||
+		(roundtripped.MaxRounds == nil || *roundtripped.MaxRounds != *original.MaxRounds) {
+		t.Errorf("Roundtrip failed: %+v != %+v", original, roundtripped)
+	}
+}
+
+func TestConversationSummaryWithNullWorkspace(t *testing.T) {
+	// Test that ConversationSummary can be created with null workspace
+	// (pre-migration conversations)
+	summary := ConversationSummary{
+		ID:              "conv-123",
+		CreatedAt:       "2026-11-21T10:00:00Z",
+		Workspace:       nil, // null workspace for pre-migration conversations
+		LastSubmittedAt: "2026-11-21T11:00:00Z",
+		TurnCount:       1,
+		Running:         false,
+		Preview:         "first turn",
+	}
+
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal to map: %v", err)
+	}
+
+	// Verify workspace is null in JSON
+	if wsVal, ok := m["workspace"]; !ok {
+		t.Error("workspace key should be present (even if null)")
+	} else if wsVal != nil {
+		t.Errorf("workspace should be null, got %v", wsVal)
+	}
+
+	// Now roundtrip to struct
+	var roundtripped ConversationSummary
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal to struct: %v", err)
+	}
+
+	if roundtripped != summary {
+		t.Errorf("Roundtrip failed: %+v != %+v", summary, roundtripped)
+	}
+}
+
+func TestConversationsRequestRoundtrip(t *testing.T) {
+	// Test typed roundtrip of ConversationsRequest with optional fields absent
+	original := ConversationsRequest{
+		Workspace: ptrString("/home/user"),
+		Cursor:    ptrString("cursor-abc"),
+		Limit:     ptrInt(50),
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var roundtripped ConversationsRequest
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	// Verify field equality (not pointer equality)
+	if (roundtripped.Workspace == nil || *roundtripped.Workspace != *original.Workspace) ||
+		(roundtripped.Cursor == nil || *roundtripped.Cursor != *original.Cursor) ||
+		(roundtripped.Limit == nil || *roundtripped.Limit != *original.Limit) {
+		t.Errorf("Roundtrip failed: %+v != %+v", original, roundtripped)
+	}
+}
+
+func TestConversationsRequestRoundtripMinimal(t *testing.T) {
+	// Test roundtrip with no optional fields
+	original := ConversationsRequest{}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var roundtripped ConversationsRequest
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if roundtripped != original {
+		t.Errorf("Roundtrip failed: %+v != %+v", original, roundtripped)
+	}
+}
+
+func TestConversationRequestRoundtrip(t *testing.T) {
+	original := ConversationRequest{
+		ID: "conv-123",
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var roundtripped ConversationRequest
+	if err := json.Unmarshal(data, &roundtripped); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if roundtripped != original {
+		t.Errorf("Roundtrip failed: %+v != %+v", original, roundtripped)
+	}
+}
+
+func TestErrorWithCeilingAndRoute(t *testing.T) {
+	// Test Error with new Ceiling field (for max_rounds error)
+	ceiling := 5
+	err := Error{
+		Code:    ErrorCodeMaxRounds,
+		Ceiling: &ceiling,
+	}
+
+	data, json_err := json.Marshal(err)
+	if json_err != nil {
+		t.Fatalf("Failed to marshal: %v", json_err)
+	}
+
+	var roundtripped Error
+	if json_err := json.Unmarshal(data, &roundtripped); json_err != nil {
+		t.Fatalf("Failed to unmarshal: %v", json_err)
+	}
+
+	if roundtripped.Code != err.Code || (roundtripped.Ceiling == nil || *roundtripped.Ceiling != ceiling) {
+		t.Errorf("Roundtrip failed: %+v != %+v", err, roundtripped)
+	}
+}
+
+func TestErrorWithRoute(t *testing.T) {
+	// Test Error with new Route field (for egress error)
+	route := "history"
+	participant := "reviewer-1"
+	err := Error{
+		Code:        ErrorCodeEgress,
+		Route:       &route,
+		Participant: &participant,
+	}
+
+	data, json_err := json.Marshal(err)
+	if json_err != nil {
+		t.Fatalf("Failed to marshal: %v", json_err)
+	}
+
+	var roundtripped Error
+	if json_err := json.Unmarshal(data, &roundtripped); json_err != nil {
+		t.Fatalf("Failed to unmarshal: %v", json_err)
+	}
+
+	if roundtripped.Code != err.Code || (roundtripped.Route == nil || *roundtripped.Route != route) {
+		t.Errorf("Roundtrip failed: %+v != %+v", err, roundtripped)
+	}
+}
+
+func TestFrameWithConversationsReplyNearMaxSize(t *testing.T) {
+	// Test that a conversations reply near MaxFrameBytes is properly handled
+	// Create many conversation summaries to get close to the limit
+	conversations := make([]ConversationSummary, 0)
+	for i := 0; i < 100; i++ {
+		ws := "/home/user" + strconv.Itoa(i%10)
+		conversations = append(conversations, ConversationSummary{
+			ID:              fmt.Sprintf("conv-%d", i),
+			CreatedAt:       "2026-11-21T10:00:00Z",
+			Workspace:       &ws,
+			LastSubmittedAt: "2026-11-21T11:00:00Z",
+			TurnCount:       3,
+			Running:         false,
+			Preview:         "What is this conversation about?",
+		})
+	}
+
+	reply := ConversationsReply{
+		Items:      conversations,
+		NextCursor: ptrString("cursor-next-page"),
+	}
+
+	f, err := NewReply("test-id", reply)
+	if err != nil {
+		t.Fatalf("NewReply failed: %v", err)
+	}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Failed to marshal frame: %v", err)
+	}
+	data = append(data, '\n')
+
+	// Verify frame doesn't exceed MaxFrameBytes
+	if len(data) > MaxFrameBytes {
+		t.Errorf("Frame size %d exceeds MaxFrameBytes %d", len(data), MaxFrameBytes)
+	}
+
+	// Verify it round-trips through Writer/Reader
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(f); err != nil {
+		t.Fatalf("Failed to write frame: %v", err)
+	}
+
+	r := NewReader(&buf)
+	f2, err := r.Read()
+	if err != nil {
+		t.Fatalf("Failed to read frame: %v", err)
+	}
+
+	// Verify the reply round-trips
+	var reply2 ConversationsReply
+	if err := json.Unmarshal(f2.Body, &reply2); err != nil {
+		t.Fatalf("Failed to unmarshal reply: %v", err)
+	}
+
+	if len(reply2.Items) != len(reply.Items) {
+		t.Errorf("Item count mismatch: %d vs %d", len(reply2.Items), len(reply.Items))
+	}
+}
+
+func TestMaxConversationListSizeConstant(t *testing.T) {
+	// Verify that MaxConversationListSize is defined and is 200
+	if MaxConversationListSize != 200 {
+		t.Errorf("MaxConversationListSize should be 200, got %d", MaxConversationListSize)
+	}
+}
+
+func ptrBool(b bool) *bool {
+	return &b
 }
 
 // buildExactFrame returns a frame whose encoded line, including the newline,

@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	ProtocolVersion     = 1
-	MaxFrameBytes       = 1 << 20 // 1 MiB
-	MaxContentPageBytes = 262144  // 256 KiB
+	ProtocolVersion         = 1
+	MaxFrameBytes           = 1 << 20 // 1 MiB
+	MaxContentPageBytes     = 262144  // 256 KiB
+	MaxConversationListSize = 200
 )
 
 var ErrFrameTooLarge = errors.New("frame exceeds 1 MiB")
@@ -138,6 +139,8 @@ type Error struct {
 	Pool         *string         `json:"pool,omitempty"`
 	AttemptID    *string         `json:"attempt_id,omitempty"`
 	LastSeq      *int64          `json:"last_seq,omitempty"`
+	Ceiling      *int            `json:"ceiling,omitempty"`
+	Route        *string         `json:"route,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -305,7 +308,7 @@ type StatusReply struct {
 	QuickProfiles        []QuickProfile `json:"quick_profiles"`
 	TurnsOpen            []string       `json:"turns_open"`
 	EngineStartedAt      string         `json:"engine_started_at"`
-	Revision             *Revision      `json:"revision,omitempty"`
+	Revision             Revision       `json:"revision"`
 }
 
 type SubmitRequest struct {
@@ -314,7 +317,7 @@ type SubmitRequest struct {
 	Preset           *string `json:"preset,omitempty"`
 	QuickProfile     *string `json:"quick_profile,omitempty"`
 	AllowProvisional *bool   `json:"allow_provisional,omitempty"`
-	Workspace        *string `json:"workspace,omitempty"`
+	Workspace        string  `json:"workspace"`
 	ConversationID   *string `json:"conversation_id,omitempty"`
 	ContextFromTurn  *string `json:"context_from_turn,omitempty"`
 	MaxRounds        *int    `json:"max_rounds,omitempty"`
