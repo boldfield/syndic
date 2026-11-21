@@ -338,6 +338,9 @@ func TestDecodePageRandomBytes(t *testing.T) {
 func TestEventKindsConstant(t *testing.T) {
 	// All event kinds from design should be present - literal design strings
 	expectedKinds := []string{
+		"run_opened",
+		"probe_started",
+		"probe_finished",
 		"engine_started",
 		"engine_stopping",
 		"turn_submitted",

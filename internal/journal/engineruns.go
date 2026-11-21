@@ -11,8 +11,67 @@ import (
 
 var ErrDuplicateSubmission = errors.New("duplicate submission_id")
 
+// AllocateEngineRun allocates a new engine run without a manifest, in "probing" state.
+// The manifest is finalized later with FinalizeEngineRunManifest.
+// Returns the run ID.
+func (s *Store) AllocateEngineRun() (runID string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		runID, txErr = tx.AllocateEngineRun()
+		return txErr
+	})
+	return runID, err
+}
+
+// AllocateEngineRun allocates a new engine run without a manifest, in "probing" state.
+// Uses an empty string for manifest and manifest_hash as placeholders.
+func (tx *Tx) AllocateEngineRun() (runID string, err error) {
+	runID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, '', '', 'engine', 'probing')
+	`, runID); err != nil {
+		return "", fmt.Errorf("insert allocated engine run: %w", err)
+	}
+
+	return runID, nil
+}
+
+// FinalizeEngineRunManifest writes the manifest to an allocated engine run and transitions it to "started" state.
+// The manifest must be valid JSON; the hash is computed by the store.
+func (s *Store) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) (manifestHash string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		manifestHash, txErr = tx.FinalizeEngineRunManifest(runID, manifest)
+		return txErr
+	})
+	return manifestHash, err
+}
+
+// FinalizeEngineRunManifest writes the manifest to an allocated engine run and transitions it to "started" state.
+func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) (manifestHash string, err error) {
+	if !json.Valid(manifest) {
+		return "", fmt.Errorf("invalid JSON manifest")
+	}
+
+	manifestHash = computeSHA256(manifest)
+
+	if _, err := tx.tx.Exec(`
+		UPDATE runs SET manifest = ?, manifest_hash = ?, state = 'started' WHERE id = ?
+	`, string(manifest), manifestHash, runID); err != nil {
+		return "", fmt.Errorf("finalize engine run manifest: %w", err)
+	}
+
+	return manifestHash, nil
+}
+
 // CreateEngineRun creates a new run of kind 'engine' with the given manifest, returning the run ID and manifest hash.
 // The manifest must be valid JSON; the hash is computed by the store.
+// This is the legacy method that combines allocation and finalization; new code should use AllocateEngineRun + FinalizeEngineRunManifest.
 func (s *Store) CreateEngineRun(manifest json.RawMessage) (runID, manifestHash string, err error) {
 	err = s.Tx(func(tx *Tx) error {
 		var txErr error
@@ -36,8 +95,8 @@ func (tx *Tx) CreateEngineRun(manifest json.RawMessage) (runID, manifestHash str
 	manifestHash = computeSHA256(manifest)
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO runs (id, manifest, manifest_hash, kind)
-		VALUES (?, ?, ?, 'engine')
+		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
+		VALUES (?, ?, ?, 'engine', 'started')
 	`, runID, string(manifest), manifestHash); err != nil {
 		return "", "", fmt.Errorf("insert engine run: %w", err)
 	}

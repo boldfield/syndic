@@ -464,6 +464,21 @@ type UnsubscribeReply struct {
 
 // Event body types
 
+type EvRunOpened struct {
+	RunID      string `json:"run_id"`
+	RosterHash string `json:"roster_hash"`
+}
+
+type EvProbeStarted struct {
+	Participant string `json:"participant"`
+}
+
+type EvProbeFinished struct {
+	Participant string  `json:"participant"`
+	Outcome     string  `json:"outcome"`
+	Detail      *string `json:"detail,omitempty"`
+}
+
 type EvEngineStarted struct {
 	RunID             string   `json:"run_id"`
 	ManifestHash      string   `json:"manifest_hash"`
@@ -642,6 +657,9 @@ const (
 
 // String constants for event kinds
 const (
+	EventKindRunOpened              = "run_opened"
+	EventKindProbeStarted           = "probe_started"
+	EventKindProbeFinished          = "probe_finished"
 	EventKindEngineStarted          = "engine_started"
 	EventKindEngineStopping         = "engine_stopping"
 	EventKindTurnSubmitted          = "turn_submitted"
@@ -665,6 +683,9 @@ const (
 )
 
 var EventKinds = []string{
+	EventKindRunOpened,
+	EventKindProbeStarted,
+	EventKindProbeFinished,
 	EventKindEngineStarted,
 	EventKindEngineStopping,
 	EventKindTurnSubmitted,
