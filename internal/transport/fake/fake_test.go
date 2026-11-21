@@ -1425,3 +1425,216 @@ func TestReplyWithoutUsage(t *testing.T) {
 		t.Errorf("result.Usage is not nil: %v", result.Usage)
 	}
 }
+
+// TestBeforeSendCalled verifies BeforeSend callback is invoked before the reply.
+func TestBeforeSendCalled(t *testing.T) {
+	callCount := 0
+	callback := func(req *transport.CompleteRequest) error {
+		callCount++
+		return nil
+	}
+
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("BeforeSend call count: %d, want 1", callCount)
+	}
+	if result.Text != "Response" {
+		t.Errorf("result text: %q, want Response", result.Text)
+	}
+}
+
+// TestBeforeSendError verifies BeforeSend error is wrapped in ErrNotSent.
+func TestBeforeSendError(t *testing.T) {
+	callErr := errors.New("journaling failed")
+	callback := func(req *transport.CompleteRequest) error {
+		return callErr
+	}
+
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      callback,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("error not wrapped with ErrNotSent: %v", err)
+	}
+	if !errors.Is(err, callErr) {
+		t.Errorf("original error lost: %v", err)
+	}
+	if result.TransportStatus != "not_sent" {
+		t.Errorf("transport status: %q, want not_sent", result.TransportStatus)
+	}
+}
+
+// TestBeforeSendNil verifies nil BeforeSend callback is handled gracefully.
+func TestBeforeSendNil(t *testing.T) {
+	script := []Step{
+		{
+			Kind:            StepKindReply,
+			Text:            "Response",
+			Status:          transport.StatusComplete,
+			TransportStatus: transport.TransportStatusOK,
+		},
+	}
+	adapter := New(script, Options{})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "test",
+			Phase:         "test",
+			Epoch:         1,
+			AttemptID:     "test",
+			CandidateHash: "test",
+		},
+		Model:           "test",
+		Messages:        []transport.Message{{Role: "user", Content: "test"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+		BeforeSend:      nil,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("complete with nil callback: %v", err)
+	}
+	if result.Text != "Response" {
+		t.Errorf("result text: %q, want Response", result.Text)
+	}
+}
+
+func probeSteps(t *testing.T, a *Adapter, opts transport.ProbeOptions) ([]string, error) {
+	t.Helper()
+	var steps []string
+	opts.BeforeSend = func(r *transport.ProbeRequest) error {
+		steps = append(steps, r.Step)
+		return nil
+	}
+	_, err := a.Probe(context.Background(), "ep", "m", opts)
+	return steps, err
+}
+
+func TestProbeSequenceMatchesRealAdapter(t *testing.T) {
+	cal := transport.Calibration{Available: true}
+	cases := []struct {
+		name string
+		cap  transport.CapabilityRecord
+		opts transport.ProbeOptions
+		want []string
+	}{
+		{"no calibration data skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens"}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"max_completion_tokens adds a request", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_completion_tokens", Calibration: cal}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration", "over_length"}},
+		{"no context length skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{},
+			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"no working max field sends both and is incomplete", transport.CapabilityRecord{ReportedModel: "m"}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"calibration disabled skips over_length", transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{DisableCalibration: true, AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "system_role"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := probeSteps(t, New(nil, Options{Capability: tc.cap}), tc.opts)
+			if tc.cap.MaxTokensField == "" {
+				if !errors.Is(err, transport.ErrIncompleteProbe) {
+					t.Fatalf("err = %v, want ErrIncompleteProbe", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("steps = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProbeUncertainStepAfterSend(t *testing.T) {
+	a := New(nil, Options{Capability: transport.CapabilityRecord{ReportedModel: "m", MaxTokensField: "max_tokens"}, ProbeUncertainStep: "system_role"})
+	steps, err := probeSteps(t, a, transport.ProbeOptions{})
+	if !errors.Is(err, transport.ErrUncertain) || errors.Is(err, transport.ErrNotSent) {
+		t.Fatalf("err = %v, want ErrUncertain only", err)
+	}
+	if strings.Join(steps, ",") != "models,max_tokens,system_role" {
+		t.Fatalf("steps = %v", steps)
+	}
+}
+
+func TestProbeHookFailureIsNotSent(t *testing.T) {
+	a := New(nil, Options{})
+	_, err := a.Probe(context.Background(), "ep", "m", transport.ProbeOptions{BeforeSend: func(*transport.ProbeRequest) error { return errors.New("no slot") }})
+	if !errors.Is(err, transport.ErrNotSent) || errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("err = %v, want ErrNotSent only", err)
+	}
+}
+
+func TestProbeMissingModelIsIncomplete(t *testing.T) {
+	a := New(nil, Options{Capability: transport.CapabilityRecord{MaxTokensField: "max_tokens"}})
+	if _, err := a.Probe(context.Background(), "ep", "m", transport.ProbeOptions{}); !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Fatalf("err = %v, want ErrIncompleteProbe", err)
+	}
+}
