@@ -308,6 +308,17 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
 				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: disableCalibration, AssumedContextLen: 131072,
 			})
+			// "both_rejected" and "server_error_no_followup" have incomplete probes (no MaxTokensField)
+			// per design v5 delta 1a: incomplete probes return ErrNotSent
+			if tt.name == "both_rejected" || tt.name == "server_error_no_followup" {
+				if err == nil {
+					t.Fatalf("expected incomplete probe error, got nil")
+				}
+				if !errors.Is(err, transport.ErrNotSent) {
+					t.Errorf("expected ErrNotSent, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -342,7 +353,8 @@ func TestProbeModelsVariants(t *testing.T) {
 		t.Errorf("404: ModelsEndpoint %v", rec.ModelsEndpoint)
 	}
 
-	// 2xx without a parseable list stays unknown.
+	// 2xx without a parseable list stays unknown, and response without model field
+	// makes this an incomplete probe, which should return ErrNotSent per design v5 delta 1a.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
 	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
@@ -352,9 +364,13 @@ func TestProbeModelsVariants(t *testing.T) {
 	defer s2.Close()
 	a2 := New(config.EndpointProfile{Name: "test", BaseURL: s2.URL}, &mockResolver{})
 	rec, err = a2.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{DisableOverLength: true, DisableCalibration: true})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected incomplete probe error (missing model field)")
 	}
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("expected ErrNotSent, got %v", err)
+	}
+	return
 	if rec.ModelsEndpoint != transport.TriUnknown || rec.ModelListed != transport.TriUnknown {
 		t.Errorf("unparseable list: %v %v", rec.ModelsEndpoint, rec.ModelListed)
 	}

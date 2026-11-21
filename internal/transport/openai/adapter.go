@@ -1240,11 +1240,20 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
 
+	// Pre-send errors (ErrNotSent) must propagate; other errors just mark calibration unavailable
 	if baselineErr != nil {
-		return baselineErr
+		if errors.Is(baselineErr, transport.ErrNotSent) {
+			return baselineErr
+		}
+		record.Calibration.Available = false
+		return nil
 	}
 	if calibrationErr != nil {
-		return calibrationErr
+		if errors.Is(calibrationErr, transport.ErrNotSent) {
+			return calibrationErr
+		}
+		record.Calibration.Available = false
+		return nil
 	}
 	if baselineStatusCode == 0 || calibrationStatusCode == 0 {
 		record.Calibration.Available = false
