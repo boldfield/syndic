@@ -1437,3 +1437,143 @@ func TestCalibrationRecordRejectNonIntegralTokenCounts(t *testing.T) {
 		})
 	}
 }
+
+// TestOverLengthClassifierExported verifies that OverLengthClassifier is exported
+// in the redacted export.
+func TestOverLengthClassifierExported(t *testing.T) {
+	record := transport.CapabilityRecord{
+		Endpoint:             "test-endpoint",
+		Model:                "test-model",
+		AuthMode:             "api-key",
+		Identity:             transport.NewUnknownIdentity(),
+		ReportedModel:        "test-model",
+		OverLength:           "rejected:context",
+		OverLengthClassifier: "status 400 or 413 with body containing context signals",
+		AdapterVersion:       "1.0.0",
+		ObservedAt:           time.Now(),
+	}
+
+	profile := config.EndpointProfile{
+		Name:             "test-endpoint",
+		BaseURL:          "http://localhost:8000",
+		DeclaredLocation: "local",
+	}
+
+	export, err := Redact(record, profile)
+	if err != nil {
+		t.Fatalf("Redact failed: %v", err)
+	}
+
+	if export.OverLengthClassifier == "" {
+		t.Errorf("OverLengthClassifier should not be empty in export")
+	}
+	if export.OverLengthClassifier != record.OverLengthClassifier {
+		t.Errorf("OverLengthClassifier mismatch: expected %q, got %q", record.OverLengthClassifier, export.OverLengthClassifier)
+	}
+
+	// Marshal export to JSON and verify classifier is there
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	exportStr := string(data)
+	if !strings.Contains(exportStr, "over_length_classifier") {
+		t.Errorf("Export JSON does not contain over_length_classifier field")
+	}
+}
+
+// TestOverLengthFinishReasonExported verifies that OverLengthFinishReason is exported
+// in the redacted export.
+func TestOverLengthFinishReasonExported(t *testing.T) {
+	record := transport.CapabilityRecord{
+		Endpoint:               "test-endpoint",
+		Model:                  "test-model",
+		AuthMode:               "api-key",
+		Identity:               transport.NewUnknownIdentity(),
+		ReportedModel:          "test-model",
+		OverLength:             "accepted_whole",
+		OverLengthClassifier:   "classification rule",
+		OverLengthFinishReason: "stop",
+		AdapterVersion:         "1.0.0",
+		ObservedAt:             time.Now(),
+	}
+
+	profile := config.EndpointProfile{
+		Name:             "test-endpoint",
+		BaseURL:          "http://localhost:8000",
+		DeclaredLocation: "local",
+	}
+
+	export, err := Redact(record, profile)
+	if err != nil {
+		t.Fatalf("Redact failed: %v", err)
+	}
+
+	if export.OverLengthFinishReason != record.OverLengthFinishReason {
+		t.Errorf("OverLengthFinishReason mismatch: expected %q, got %q", record.OverLengthFinishReason, export.OverLengthFinishReason)
+	}
+
+	// Marshal export to JSON and verify finish reason is there
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	exportStr := string(data)
+	if !strings.Contains(exportStr, "over_length_finish_reason") {
+		t.Errorf("Export JSON does not contain over_length_finish_reason field")
+	}
+	if !strings.Contains(exportStr, "stop") {
+		t.Errorf("Export JSON does not contain finish reason value")
+	}
+}
+
+// TestOverLengthFinishReasonEmpty verifies that OverLengthFinishReason can be empty
+// and still marshals correctly.
+func TestOverLengthFinishReasonEmpty(t *testing.T) {
+	record := transport.CapabilityRecord{
+		Endpoint:               "test-endpoint",
+		Model:                  "test-model",
+		AuthMode:               "api-key",
+		Identity:               transport.NewUnknownIdentity(),
+		ReportedModel:          "test-model",
+		OverLength:             "rejected:context",
+		OverLengthClassifier:   "classification rule",
+		OverLengthFinishReason: "",
+		AdapterVersion:         "1.0.0",
+		ObservedAt:             time.Now(),
+	}
+
+	profile := config.EndpointProfile{
+		Name:             "test-endpoint",
+		BaseURL:          "http://localhost:8000",
+		DeclaredLocation: "local",
+	}
+
+	export, err := Redact(record, profile)
+	if err != nil {
+		t.Fatalf("Redact failed: %v", err)
+	}
+
+	if export.OverLengthFinishReason != "" {
+		t.Errorf("OverLengthFinishReason should be empty, got %q", export.OverLengthFinishReason)
+	}
+
+	// Marshal export to JSON - it should omit the field when empty
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	// The field should be in the JSON (but with null or omitted)
+	var exportObj map[string]interface{}
+	if err := json.Unmarshal(data, &exportObj); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	// The field should either be omitted or null
+	if val, ok := exportObj["over_length_finish_reason"]; ok && val != nil {
+		t.Errorf("OverLengthFinishReason should be null or omitted when empty, got %v", val)
+	}
+}
