@@ -39,7 +39,9 @@ type App struct {
 	state         State
 	tab           tab
 	input         textinput.Model
-	refusal       string
+	refusal       string         // the one-line message under the body: a refusal, or what a command did
+	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
@@ -300,6 +302,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStatusRefresh(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case commandMsg:
+		return a.onCommand(msg)
+	case whyMsg:
+		return a.onWhy(msg)
 	case contentMsg:
 		return a.onContent(msg)
 	case transcriptMsg:
@@ -315,14 +321,34 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.confirm != nil {
+		// A confirmation owns the keyboard: the line is its answer.
+		switch msg.String() {
+		case "ctrl+c":
+			return a, a.quit()
+		case "esc":
+			a.cancelConfirm("release cancelled; nothing sent")
+			return a, nil
+		case "enter":
+			return a, a.confirmEnter()
+		}
+		var cmd tea.Cmd
+		a.input, cmd = a.input.Update(msg)
+		return a, cmd
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return a, a.quit()
+	case "esc":
+		a.panel, a.refusal = nil, ""
+		return a, nil
 	case "tab":
+		a.panel = nil
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow = 0
 		return a, nil
 	case "shift+tab":
+		a.panel = nil
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow = 0
 		return a, nil
@@ -392,11 +418,14 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // enter runs a command or submits the line. A command clears the line; a
 // submit clears it only once the engine accepts it.
 func (a *App) enter() tea.Cmd {
+	if a.confirm != nil {
+		return a.confirmEnter()
+	}
 	line := a.input.Value()
 	if strings.TrimSpace(line) == "" {
 		return nil
 	}
-	a.refusal = ""
+	a.refusal, a.panel = "", nil
 	if isCommand(line) {
 		a.input.SetValue("")
 		return dispatch(a, line)
@@ -405,7 +434,7 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	return submitCmd(a.ctx, a.cl, line)
+	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset)
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -441,6 +470,7 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		return nil
 	}
 	a.input.SetValue("")
+	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
 	}
@@ -728,9 +758,12 @@ func (a *App) View() string {
 			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
 		}
 	}
+	if len(a.panel) > 0 {
+		tabView = renderPanel(a.panel, w)
+	}
 	lines := strings.Split(tabView, "\n")
 
-	if a.tab == tabAnswer {
+	if a.tab == tabAnswer && len(a.panel) == 0 {
 		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
 		lines = lines[start:]
 	}

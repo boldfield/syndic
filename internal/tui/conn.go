@@ -2,7 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/client"
@@ -85,10 +88,14 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
-// submitCmd submits input with a fresh submission id and no preset.
-func submitCmd(ctx context.Context, cl *client.Client, input string) tea.Cmd {
+// submitCmd submits input with a fresh submission id and the preset, if any.
+func submitCmd(ctx context.Context, cl *client.Client, input, preset string) tea.Cmd {
 	return func() tea.Msg {
-		reply, err := cl.Submit(ctx, wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input})
+		req := wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input}
+		if preset != "" {
+			req.Preset = &preset
+		}
+		reply, err := cl.Submit(ctx, req)
 		if err != nil {
 			return submitMsg{refusal: formatRefusal(err)}
 		}
@@ -137,16 +144,51 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-// formatRefusal renders a refusal as its code and detail on one line.
+// formatRefusal renders a refusal as its code and detail, then every member
+// the engine sent with it, on one line.
 func formatRefusal(err error) string {
 	var we *wire.Error
-	if errors.As(err, &we) {
-		if we.Detail != nil && *we.Detail != "" {
-			return we.Code + ": " + *we.Detail
-		}
-		return we.Code
+	if !errors.As(err, &we) {
+		return err.Error()
 	}
-	return err.Error()
+	line := we.Code
+	if we.Detail != nil && *we.Detail != "" {
+		line += ": " + *we.Detail
+	}
+	var members []string
+	str := func(k string, v *string) {
+		if v != nil {
+			members = append(members, k+"="+*v)
+		}
+	}
+	num := func(k string, v *int64) {
+		if v != nil {
+			members = append(members, fmt.Sprintf("%s=%d", k, *v))
+		}
+	}
+	str("turn_id", we.TurnID)
+	str("participant", we.Participant)
+	str("quick_profile", we.QuickProfile)
+	str("budget", we.Budget)
+	num("admission", we.Admission)
+	num("estimated", we.Estimated)
+	num("limit", we.Limit)
+	str("missing", we.Missing)
+	str("pool", we.Pool)
+	str("attempt_id", we.AttemptID)
+	if len(we.Holds) > 0 {
+		var ids []string
+		if json.Unmarshal(we.Holds, &ids) == nil {
+			members = append(members, "holds=["+strings.Join(ids, " ")+"]")
+		} else {
+			members = append(members, "holds="+string(we.Holds))
+		}
+	}
+	num("last_seq", we.LastSeq)
+	if len(members) > 0 {
+		line += " [" + strings.Join(members, " ") + "]"
+	}
+	return line
 }
 
 // transcriptPageSize is the page size asked of the engine, its maximum.

@@ -149,6 +149,7 @@ type State struct {
 	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
 	UnapprovedProfile   *string
+	NextPreset          string // set by /mode: the preset of the next submit only
 }
 
 // NewState returns a fresh State.
