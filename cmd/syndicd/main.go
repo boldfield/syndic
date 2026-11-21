@@ -39,8 +39,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	journalPath := fs.String("journal", "", "path to journal database")
 	secretsDir := fs.String("secrets-dir", "", "directory for file secret references")
 	probeMissing := fs.Bool("probe-missing", false, "at start, also probe participants on endpoints declared metered or unknown that have no usable record")
-	probeRawDir := fs.String("probe-raw-dir", "", "directory for raw records of start-time probes (default: not written)")
-	probeExportDir := fs.String("probe-export-dir", "", "directory for redacted exports of start-time probes (default: not written)")
+	probeRawDir := fs.String("probe-raw-dir", "", "directory for raw records of start-time probes (default: $XDG_DATA_HOME/syndic/evidence-raw)")
+	probeExportDir := fs.String("probe-export-dir", "", "directory for redacted exports of start-time probes (default: ./docs/evidence)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -62,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	if *secretsDir == "" {
 		*secretsDir = resolveSecretsDir(*secretsDir)
 	}
+	*probeRawDir = resolveProbeRawDir(*probeRawDir)
+	*probeExportDir = resolveProbeExportDir(*probeExportDir)
 
 	// Get XDG dirs for lockfile resolution
 	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -359,4 +361,24 @@ func resolveSecretsDir(custom string) string {
 		xdgConfig = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 	return filepath.Join(xdgConfig, "syndic", "secrets")
+}
+
+// resolveProbeRawDir and resolveProbeExportDir default the start-time probe
+// evidence directories to those of `syndic probe`.
+func resolveProbeRawDir(custom string) string {
+	if custom != "" {
+		return custom
+	}
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		xdgData = filepath.Join(os.Getenv("HOME"), ".local", "share")
+	}
+	return filepath.Join(xdgData, "syndic", "evidence-raw")
+}
+
+func resolveProbeExportDir(custom string) string {
+	if custom != "" {
+		return custom
+	}
+	return "./docs/evidence"
 }

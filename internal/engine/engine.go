@@ -119,7 +119,9 @@ type Options struct {
 	// ProbeTimeout is the timeout of each probe request; zero means 60s.
 	ProbeTimeout time.Duration
 	// ProbeRawDir and ProbeExportDir, when set, receive the raw record and
-	// the redacted export of every start-time probe, as for `syndic probe`.
+	// the redacted export of every start-time probe, as for `syndic probe`;
+	// a raw dir inside a git worktree, or a failed write, fails the probe.
+	// The daemon always sets both; empty, used only by tests, writes none.
 	ProbeRawDir    string
 	ProbeExportDir string
 	// NoStartupProbes turns start-time probing off, leaving every participant

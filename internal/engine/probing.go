@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -455,13 +454,12 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 
 	// A probe that captured no reported model or no working max-tokens field
 	// is a failed probe: raw record and export for diagnosis, no usable record.
+	// Evidence that could not be written leaves no usable record either.
 	exp, expErr := e.writeProbeEvidence(record, t.endpoint)
-	if incomplete || record.ReportedModel == "" || record.MaxTokensField == "" {
-		fail(probeReasonIncomplete)
-		return
-	}
 	if expErr != nil {
 		log.Printf("engine: probe evidence for %s/%s: %v", t.endpoint.Name, t.model, expErr)
+	}
+	if incomplete || record.ReportedModel == "" || record.MaxTokensField == "" || expErr != nil {
 		fail(probeReasonIncomplete)
 		return
 	}
@@ -496,30 +494,30 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	res.wrote = true
 }
 
-// writeProbeEvidence redacts the record into its export and, when the engine
-// has directories for them, writes the raw record and the export as
-// `syndic probe` does. A write failure is returned but the export is still
-// usable.
+// writeProbeEvidence redacts the record into its export and writes the raw
+// record and the export where the engine has directories for them, as
+// `syndic probe` does: a raw directory inside a git worktree is refused. A
+// refusal or write failure is returned with the export, and a probe whose
+// evidence was not written leaves no usable record.
 func (e *Engine) writeProbeEvidence(record transport.CapabilityRecord, ep config.EndpointProfile) (evidence.Export, error) {
 	exp, err := evidence.Redact(record, ep)
 	if err != nil {
 		return evidence.Export{}, err
 	}
-	var errs []string
+	var errs []error
 	if e.probeRawDir != "" {
-		if _, err := evidence.WriteRaw(record, e.probeRawDir); err != nil {
-			errs = append(errs, err.Error())
+		if evidence.InsideGitWorktree(e.probeRawDir) {
+			errs = append(errs, fmt.Errorf("raw record dir %s is inside a git worktree", e.probeRawDir))
+		} else if _, err := evidence.WriteRaw(record, e.probeRawDir); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if e.probeExportDir != "" {
 		if _, err := evidence.WriteExport(exp, e.probeExportDir); err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 		}
 	}
-	if len(errs) > 0 {
-		log.Printf("engine: write probe evidence: %s", strings.Join(errs, "; "))
-	}
-	return exp, nil
+	return exp, errors.Join(errs...)
 }
 
 // probeFailureReason is the reason a probe error leaves in probe_failed:<reason>.

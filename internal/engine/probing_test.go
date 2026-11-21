@@ -812,17 +812,80 @@ func TestStartupProbeHelloAndSubmitDuringProbing(t *testing.T) {
 	}
 }
 
-func TestStartupProbeWritesRawRecordAndExport(t *testing.T) {
-	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
-	raw, export := t.TempDir(), t.TempDir()
-	env.start(func(o *engine.Options) { o.ProbeRawDir, o.ProbeExportDir = raw, export })
-	for name, dir := range map[string]string{"raw": raw, "export": export} {
-		entries, err := os.ReadDir(dir)
-		if err != nil || len(entries) == 0 {
-			t.Fatalf("%s dir has %d entries, err %v; want the probes' evidence", name, len(entries), err)
+// TestStartupProbeEvidence covers the raw record and export a start-time
+// probe writes, as `syndic probe` does: an incomplete probe still writes both
+// for diagnosis, and evidence that cannot be written, or a raw dir inside a
+// git worktree, leaves the participant unprobed with the engine started.
+func TestStartupProbeEvidence(t *testing.T) {
+	incomplete := goodCapability()
+	incomplete.ReportedModel = ""
+	notDir := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
 		}
+		return path
+	}
+	worktree := func(t *testing.T) string {
+		repo := t.TempDir()
+		if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(repo, "raw")
+	}
+	cases := []struct {
+		name       string
+		capability transport.CapabilityRecord
+		raw        func(t *testing.T) string
+		export     func(t *testing.T) string
+		wantDetail string // "" means usable
+		wantRaw    bool
+		wantExport bool
+	}{
+		{"usable", goodCapability(), tempDir, tempDir, "", true, true},
+		{"incomplete written for diagnosis", incomplete, tempDir, tempDir, "probe_failed:incomplete", true, true},
+		{"raw write fails", goodCapability(), notDir, tempDir, "probe_failed:incomplete", false, true},
+		{"export write fails", goodCapability(), tempDir, notDir, "probe_failed:incomplete", true, false},
+		{"raw dir inside git worktree", goodCapability(), worktree, tempDir, "probe_failed:incomplete", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newProbeEnv(t, probeRoster("flat"), tc.capability, "")
+			raw, export := tc.raw(t), tc.export(t)
+			eng := env.start(func(o *engine.Options) { o.ProbeRawDir, o.ProbeExportDir = raw, export })
+
+			if hello := eng.Hello(); hello.State != "started" {
+				t.Fatalf("hello state %q, want started", hello.State)
+			}
+			for _, id := range []string{"author", "reviewer"} {
+				state, detail := participantDetail(t, eng, id)
+				if tc.wantDetail == "" && (state == engine.ParticipantUnprobed || detail != "") {
+					t.Fatalf("%s state %q detail %q, want usable", id, state, detail)
+				}
+				if tc.wantDetail != "" && (state != engine.ParticipantUnprobed || detail != tc.wantDetail) {
+					t.Fatalf("%s state %q detail %q, want unprobed %s", id, state, detail, tc.wantDetail)
+				}
+			}
+			if wantRuns := map[bool]int{true: 2, false: 0}[tc.wantDetail == ""]; env.count(`SELECT COUNT(*) FROM runs WHERE kind = 'probe'`) != wantRuns {
+				t.Fatalf("probe runs = %d, want %d", env.count(`SELECT COUNT(*) FROM runs WHERE kind = 'probe'`), wantRuns)
+			}
+			for name, c := range map[string]struct {
+				dir  string
+				want bool
+			}{"raw": {raw, tc.wantRaw}, "export": {export, tc.wantExport}} {
+				entries, _ := os.ReadDir(c.dir)
+				if got := len(entries) == 2; got != c.want {
+					t.Fatalf("%s dir %s has %d entries, want evidence for both probes: %v", name, c.dir, len(entries), c.want)
+				}
+			}
+		})
 	}
 }
+
+func tempDir(t *testing.T) string { return t.TempDir() }
 
 func TestStartupOnRunOpenedRunsBeforeProbes(t *testing.T) {
 	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
