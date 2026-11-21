@@ -227,9 +227,6 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	if opts.Timeout <= 0 {
 		opts.Timeout = 60 * time.Second
 	}
-	if opts.AssumedContextLen <= 0 {
-		opts.AssumedContextLen = 131072
-	}
 
 	record := transport.CapabilityRecord{
 		Endpoint:                 endpoint,
@@ -1023,9 +1020,7 @@ func classifyRejectionError(statusCode int, body []byte) string {
 	if statusCode == 400 || statusCode == 413 {
 		bodyStr := string(body)
 		if strings.Contains(bodyStr, "context_length_exceeded") ||
-			strings.Contains(bodyStr, "max_tokens") ||
-			strings.Contains(bodyStr, "token") ||
-			strings.Contains(bodyStr, "length") {
+			strings.Contains(bodyStr, "maximum context length") {
 			return "rejected:context"
 		}
 		return "rejected:other"
@@ -1081,7 +1076,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		fillerBytes = fillerBytes[:fillerSizeBytes]
 	}
 
-	promptContent := headMarker + string(fillerBytes) + tailMarker
+	promptContent := headMarker + "\n" + string(fillerBytes) + "\n" + tailMarker
 
 	messages := []MessageInput{
 		{Role: "user", Content: promptContent},
@@ -1141,15 +1136,14 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	content := respData.Choices[0].Message.Content
-
-	// Check for markers (hex values must appear without requiring surrounding delimiters)
-	hasHeadMarker := strings.Contains(content, headMarker)
-	hasTailMarker := strings.Contains(content, tailMarker)
-
 	finishReason := respData.Choices[0].FinishReason
 	if finishReason != "" {
 		finishReasons[finishReason] = mapFinishReason(finishReason)
 	}
+
+	// Check for markers (hex values must appear without requiring surrounding delimiters)
+	hasHeadMarker := strings.Contains(content, headMarker)
+	hasTailMarker := strings.Contains(content, tailMarker)
 
 	if hasHeadMarker && hasTailMarker {
 		record.OverLength = "accepted_whole"

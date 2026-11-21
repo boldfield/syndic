@@ -687,3 +687,165 @@ func TestCalibrationResponseReadFailure(t *testing.T) {
 		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)
 	}
 }
+
+func TestProbeOverLengthNoContext(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "not_run:no_context" {
+		t.Errorf("OverLength: got %q, want not_run:no_context", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriUnknown {
+		t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthNoCalibration(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 100, calibrationObserved: 100}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "not_run:no_calibration" {
+		t.Errorf("OverLength: got %q, want not_run:no_calibration", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriUnknown {
+		t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthMarkerEmbedded(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		overLength:          "both",
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "accepted_whole" {
+		t.Errorf("OverLength: got %q, want accepted_whole (markers without delimiters)", rec.OverLength)
+	}
+}
+
+func TestProbeOverLengthContextRejection(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		overLength:          "error:context",
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "rejected:context" {
+		t.Errorf("OverLength: got %q, want rejected:context", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriYes {
+		t.Errorf("EligibleRequiredReviewer: got %v, want yes", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthOtherRejections(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantElig   transport.Tri
+	}{
+		{"auth_401", 401, `{"error":"invalid api token"}`, transport.TriUnknown},
+		{"forbidden_403", 403, `{"error":"forbidden"}`, transport.TriUnknown},
+		{"rate_limit_429", 429, `{"error":"too many requests"}`, transport.TriUnknown},
+		{"policy_error_400", 400, `{"error":"content policy violation, max_tokens not allowed"}`, transport.TriUnknown},
+		{"generic_400", 400, `{"error":"bad request"}`, transport.TriUnknown},
+		{"generic_413", 413, `{"error":"payload too large"}`, transport.TriUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+			})
+			mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				body, _ := io.ReadAll(r.Body)
+				var req map[string]any
+				_ = json.Unmarshal(body, &req)
+				msgs, _ := req["messages"].([]any)
+				var user string
+				for _, m := range msgs {
+					mm := m.(map[string]any)
+					if mm["role"] != "system" {
+						user, _ = mm["content"].(string)
+					}
+				}
+
+				if len(user) > 100000 {
+					w.WriteHeader(tt.statusCode)
+					_, _ = w.Write([]byte(tt.body))
+					return
+				}
+
+				promptTokens := 1
+				if user == "" {
+					promptTokens = 10
+				} else if len(user) == 4096 {
+					promptTokens = 100
+				}
+
+				resp := map[string]any{
+					"model": "m1",
+					"choices": []any{map[string]any{
+						"message":       map[string]any{"role": "assistant", "content": "ok"},
+						"finish_reason": "stop",
+					}},
+					"usage": map[string]any{
+						"prompt_tokens":     promptTokens,
+						"completion_tokens": 1,
+					},
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+			})
+			s := httptest.NewServer(mux)
+			defer s.Close()
+			a := New(config.EndpointProfile{Name: "test", BaseURL: s.URL}, &mockResolver{})
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
+			if err != nil {
+				t.Fatalf("probe failed: %v", err)
+			}
+			if rec.OverLength != "rejected:other" {
+				t.Errorf("OverLength: got %q, want rejected:other", rec.OverLength)
+			}
+			if rec.EligibleRequiredReviewer != transport.TriUnknown {
+				t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+			}
+		})
+	}
+}
