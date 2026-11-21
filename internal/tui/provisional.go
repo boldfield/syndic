@@ -13,9 +13,7 @@ type yesNoPrompt struct {
 }
 
 // provisionalPrompt is a provisional deadline confirmation waiting for yes or no.
-type provisionalPrompt struct {
-	rosterPath string
-}
+type provisionalPrompt struct{}
 
 // closeProvisional drops the provisional prompt and gives the input line back.
 func (a *App) closeProvisional() {
@@ -60,7 +58,7 @@ func (a *App) showProvisionalPrompt(status *wire.StatusReply) {
 		lines = append(lines, "Configured at: "+rosterPath)
 	}
 	lines = append(lines, "", "Type y to proceed with this submit, or n/esc to cancel.")
-	a.provisional = &provisionalPrompt{rosterPath: rosterPath}
+	a.provisional = &provisionalPrompt{}
 	a.yesNo = &yesNoPrompt{yes: a.provisionalYes, no: a.provisionalNo}
 	a.panel = lines
 	a.input.Prompt = provisionalDeadlinePrompt

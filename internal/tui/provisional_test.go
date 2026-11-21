@@ -73,14 +73,18 @@ func TestProvisionalFirstSubmitPromptsCreatesNoTurn(t *testing.T) {
 	r.typeLine("question")
 
 	// Wait until the view contains the provisional prompt
+	// Turns and input are read on the event loop, not from this goroutine.
+	var turns int
+	var input string
 	v := r.until(t, "provisional prompt shown", func(a *App) (string, bool) {
 		view := a.View()
+		turns, input = len(a.state.Turns), a.input.Value()
 		return view, a.provisional != nil && strings.Contains(view, "Provisional deadlines")
 	})
 
 	// Verify no turn was created yet
-	if len(r.app.state.Turns) != 0 {
-		t.Fatalf("turn created before confirmation: %d turns exist", len(r.app.state.Turns))
+	if turns != 0 {
+		t.Fatalf("turn created before confirmation: %d turns exist", turns)
 	}
 
 	if got := reqs(); len(got) != 1 || got[0].AllowProvisional != nil {
@@ -88,8 +92,8 @@ func TestProvisionalFirstSubmitPromptsCreatesNoTurn(t *testing.T) {
 	}
 
 	// Verify the input is still present
-	if r.app.input.Value() != "question" {
-		t.Errorf("input cleared: got %q, want 'question'", r.app.input.Value())
+	if input != "question" {
+		t.Errorf("input cleared: got %q, want 'question'", input)
 	}
 
 	// Verify the prompt text is in the view, including the input prompt
@@ -403,6 +407,9 @@ func TestProvisionalAndApprovalNeverOpenTogether(t *testing.T) {
 	if a.yesNo != nil || a.approval != nil {
 		t.Fatalf("prompts left open: %+v %+v", a.yesNo, a.approval)
 	}
+	if a.input.Value() != "my question" {
+		t.Errorf("input lost after the queued approval was declined: %q", a.input.Value())
+	}
 
 	// Approval first: the provisional refusal does not replace its panel, and keeps the input.
 	a = newApp()
@@ -420,4 +427,21 @@ func TestProvisionalAndApprovalNeverOpenTogether(t *testing.T) {
 	if a.yesNo != nil || a.provisional != nil {
 		t.Fatalf("prompt left open after y: %+v", a.yesNo)
 	}
+	if a.input.Value() != "my question" {
+		t.Errorf("input lost after approval: %q", a.input.Value())
+	}
+
+	// Queued approval answered yes (last: it saves the approval to the project file).
+	_, project = quickEnv(t)
+	writeQuickFile(t, project, `profile = "fast"`)
+	a = newApp()
+	a.input.SetValue("my question")
+	a.showProvisionalPrompt(a.state.Status)
+	a.updateQuickProfileState()
+	pressAppKey(a, "n")
+	pressAppKey(a, "y")
+	if a.yesNo != nil || a.approval != nil || a.input.Value() != "my question" {
+		t.Fatalf("after approval yes: prompts %+v %+v, input %q", a.yesNo, a.approval, a.input.Value())
+	}
+
 }

@@ -309,7 +309,6 @@ func (a *App) cancelApproval(why string) {
 	a.approval, a.yesNo = nil, nil
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
-	a.input.SetValue("")
 	a.refusal = why
 }
 
