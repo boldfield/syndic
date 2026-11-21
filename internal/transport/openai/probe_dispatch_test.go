@@ -222,3 +222,43 @@ func TestProbeTruncatedBodyIsUncertainOnEveryStep(t *testing.T) {
 		})
 	}
 }
+
+// closeFailingTransport fails Body.Close on the nth (1-based) round trip after
+// the body has been delivered intact.
+type closeFailingTransport struct {
+	failAt int
+	calls  atomic.Int32
+}
+
+type closeFailBody struct{ io.ReadCloser }
+
+func (b closeFailBody) Close() error {
+	_ = b.ReadCloser.Close()
+	return errors.New("close failed after dispatch")
+}
+
+func (c *closeFailingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err == nil && int(c.calls.Add(1)) == c.failAt {
+		resp.Body = closeFailBody{resp.Body}
+	}
+	return resp, err
+}
+
+func TestProbeBodyCloseFailureIsUncertainOnEveryStep(t *testing.T) {
+	for idx, step := range allProbeSteps {
+		t.Run(step, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := newDispatchServer(t, &hits, false)
+			a := newDispatchAdapter(srv)
+			a.client = &http.Client{Transport: &closeFailingTransport{failAt: idx + 1}}
+			_, err := a.ProbeWithOptions(context.Background(), "test", "m", dispatchProbeOpts(func(*transport.ProbeRequest) error { return nil }))
+			if !errors.Is(err, transport.ErrUncertain) {
+				t.Fatalf("err = %v, want ErrUncertain", err)
+			}
+			if errors.Is(err, transport.ErrNotSent) {
+				t.Fatalf("post-send failure must not be ErrNotSent: %v", err)
+			}
+		})
+	}
+}

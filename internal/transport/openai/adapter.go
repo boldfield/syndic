@@ -1370,11 +1370,13 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		return 0, nil, nil, nil, uncertainErr(err)
 	}
 
-	defer func() { _ = httpResp.Body.Close() }()
-
 	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
+	closeErr := httpResp.Body.Close()
 	if err != nil {
 		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(err)
+	}
+	if closeErr != nil {
+		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(closeErr)
 	}
 
 	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil
