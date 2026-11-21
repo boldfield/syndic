@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -15,12 +17,13 @@ import (
 
 // QuickSelection holds the current quick profile selection state.
 type QuickSelection struct {
-	ProjectProfile    *string // name from .syndic/quick.toml, if found and parsed
-	ProjectFilePath   string  // path to the .syndic/quick.toml file
-	ProjectFileData   []byte  // bytes of the .syndic/quick.toml file
-	ProjectParseError *string // error from parsing project file, if any
-	SessionOverride   *string // set by /quick command; "off" means send nothing
-	ApprovedProfiles  map[string]ApprovedProfile
+	ProjectProfile      *string // name from .syndic/quick.toml, if found and parsed
+	ProjectFilePath     string  // path to the .syndic/quick.toml file
+	ProjectFileData     []byte  // bytes of the .syndic/quick.toml file
+	ProjectParseError   *string // error from parsing project file, if any (includes path)
+	SessionOverride     *string // set by /quick command; "off" means send nothing
+	ApprovedProfiles    map[string]ApprovedProfile
+	DeclinedThisProcess map[string]bool // tracks declined approvals to ask once per process
 }
 
 // ApprovedProfile holds one approved quick profile record.
@@ -62,13 +65,18 @@ func (qs *QuickSelection) IsUnapproved() *string {
 }
 
 // isProjectProfileApproved checks if the project profile is approved.
+// It validates all four values: file path, file SHA256, profile name, and definition SHA256.
 func (qs *QuickSelection) isProjectProfileApproved() bool {
-	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" {
+	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" || qs.ProjectFileData == nil {
 		return false
 	}
+	fileSHA := fmt.Sprintf("%x", sha256.Sum256(qs.ProjectFileData))
 	key := qs.ProjectFilePath + ":" + *qs.ProjectProfile
-	_, ok := qs.ApprovedProfiles[key]
-	return ok
+	ap, ok := qs.ApprovedProfiles[key]
+	if !ok {
+		return false
+	}
+	return ap.FileSHA256 == fileSHA
 }
 
 // quickTomlFile holds the parsed .syndic/quick.toml structure.
@@ -134,28 +142,29 @@ func getDevID(fi os.FileInfo) uint64 {
 }
 
 // parseQuickToml parses .syndic/quick.toml. Returns the profile name, an error string if invalid, or ("", "").
-func parseQuickToml(data []byte) (string, string) {
+// The error includes the file path.
+func parseQuickToml(data []byte, path string) (string, string) {
 	// First, check for extra keys by unmarshaling to a map
 	var m map[string]interface{}
 	if err := toml.Unmarshal(data, &m); err != nil {
-		return "", fmt.Sprintf("quick: invalid: %v", err)
+		return "", fmt.Sprintf("quick: invalid %s", path)
 	}
 
 	// Check for any keys other than "profile"
 	for key := range m {
 		if key != "profile" {
-			return "", "quick: invalid: extra keys not allowed"
+			return "", fmt.Sprintf("quick: invalid %s", path)
 		}
 	}
 
 	// Now unmarshal to the struct
 	var file quickTomlFile
 	if err := toml.Unmarshal(data, &file); err != nil {
-		return "", fmt.Sprintf("quick: invalid: %v", err)
+		return "", fmt.Sprintf("quick: invalid %s", path)
 	}
 
 	if file.Profile == nil || *file.Profile == "" {
-		return "", "quick: invalid: missing profile key"
+		return "", fmt.Sprintf("quick: invalid %s", path)
 	}
 	return *file.Profile, ""
 }
@@ -233,8 +242,16 @@ func writeApproval(filePath, profileName, fileSHA256, definitionSHA256 string) e
 		ProfileDefinitionSHA256: definitionSHA256,
 	}
 
+	// Sort keys for deterministic output
+	keys := make([]string, 0, len(approvals))
+	for k := range approvals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var lines []string
-	for _, ap := range approvals {
+	for _, k := range keys {
+		ap := approvals[k]
 		if data, err := json.Marshal(ap); err == nil {
 			lines = append(lines, string(data))
 		}
@@ -260,7 +277,8 @@ func writeApproval(filePath, profileName, fileSHA256, definitionSHA256 string) e
 // NewQuickSelection creates a fresh QuickSelection, discovering and approving as needed.
 func NewQuickSelection(wd string) (*QuickSelection, error) {
 	qs := &QuickSelection{
-		ApprovedProfiles: make(map[string]ApprovedProfile),
+		ApprovedProfiles:    make(map[string]ApprovedProfile),
+		DeclinedThisProcess: make(map[string]bool),
 	}
 
 	approvals, err := readApprovals()
@@ -278,7 +296,7 @@ func NewQuickSelection(wd string) (*QuickSelection, error) {
 	}
 
 	if data != nil {
-		profile, parseErr := parseQuickToml(data)
+		profile, parseErr := parseQuickToml(data, path)
 		if parseErr != "" {
 			qs.ProjectParseError = &parseErr
 		} else if profile != "" {

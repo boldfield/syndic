@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,9 +94,10 @@ func TestParseQuickToml(t *testing.T) {
 		{"invalid toml", `{invalid`, "", true},
 	}
 
+	filePath := "/home/user/project/.syndic/quick.toml"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			name, errStr := parseQuickToml([]byte(tt.data))
+			name, errStr := parseQuickToml([]byte(tt.data), filePath)
 			if tt.expectedError {
 				if errStr == "" {
 					t.Errorf("expected error, got none")
@@ -235,19 +238,23 @@ func TestSelectedProfile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			filePath := "/path/.syndic/quick.toml"
+			fileData := []byte(`profile = "solo"`)
 			qs := &QuickSelection{
-				ProjectProfile:   tt.projectProfile,
-				ProjectFilePath:  filePath,
-				SessionOverride:  tt.sessionOverride,
-				ApprovedProfiles: make(map[string]ApprovedProfile),
+				ProjectProfile:      tt.projectProfile,
+				ProjectFilePath:     filePath,
+				ProjectFileData:     fileData,
+				SessionOverride:     tt.sessionOverride,
+				ApprovedProfiles:    make(map[string]ApprovedProfile),
+				DeclinedThisProcess: make(map[string]bool),
 			}
 
 			if tt.isApproved && tt.projectProfile != nil {
 				key := filePath + ":" + *tt.projectProfile
+				fileSHA := fmt.Sprintf("%x", sha256.Sum256(fileData))
 				qs.ApprovedProfiles[key] = ApprovedProfile{
 					FilePath:                filePath,
 					ProfileName:             *tt.projectProfile,
-					FileSHA256:              "sha1",
+					FileSHA256:              fileSHA,
 					ProfileDefinitionSHA256: "sha2",
 				}
 			}

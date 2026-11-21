@@ -53,13 +53,14 @@ type App struct {
 	tickRunning          bool
 	onEvent              func(wire.Frame)
 
-	content           *ContentCache
-	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
-	quickSelection    *QuickSelection // quick profile state
-	answerScrollRow   int             // first visible line of the answer tab
-	candidateIDByTurn map[string]string
-	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
-	overrideReasons   map[string]string           // the reason of each override event
+	content                   *ContentCache
+	drafts                    *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection            *QuickSelection // quick profile state
+	nextSubmitHasModeOverride bool            // /mode was used for the next submit
+	answerScrollRow           int             // first visible line of the answer tab
+	candidateIDByTurn         map[string]string
+	openBlocksByTurn          map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons           map[string]string           // the reason of each override event
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -458,6 +459,11 @@ func (a *App) enter() tea.Cmd {
 	if a.quickSelection != nil {
 		quickProfile = a.quickSelection.SelectedProfile()
 	}
+	// Mark that /mode will apply to this submit so ModeOverride is set correctly
+	// even if turn_submitted event arrives before submit reply
+	if a.state.NextPreset != "" {
+		a.nextSubmitHasModeOverride = true
+	}
 	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset, quickProfile)
 }
 
@@ -491,6 +497,7 @@ func (a *App) ensureTurnInfo() {
 func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if msg.refusal != "" {
 		a.refusal = msg.refusal
+		a.nextSubmitHasModeOverride = false
 		return nil
 	}
 	a.input.SetValue("")
@@ -499,6 +506,7 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		a.state.ModeOverrideTurn = msg.turnID
 	}
 	a.state.NextPreset = "" // /mode applies to one submit
+	a.nextSubmitHasModeOverride = false
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
 	}
@@ -540,37 +548,25 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // updateQuickProfileState checks if the project's quick profile is approved
 // and sets the UnapprovedProfile state accordingly. It may also trigger an approval prompt.
 func (a *App) updateQuickProfileState() {
-	if a.quickSelection == nil || a.quickSelection.ProjectProfile == nil {
+	if a.quickSelection == nil {
 		a.state.UnapprovedProfile = nil
 		return
 	}
 
-	profileName := *a.quickSelection.ProjectProfile
-	if a.state.Status == nil {
-		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
-		return
-	}
-
-	var qp *wire.QuickProfile
-	for i := range a.state.Status.QuickProfiles {
-		if a.state.Status.QuickProfiles[i].Name == profileName {
-			qp = &a.state.Status.QuickProfiles[i]
-			break
-		}
-	}
-
-	if qp == nil {
-		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
-		return
-	}
-
-	if a.quickSelection.SelectedProfile() != nil {
+	// If SessionOverride is set to "off", explicitly disable the profile
+	if a.quickSelection.SessionOverride != nil && *a.quickSelection.SessionOverride == "off" {
 		a.state.UnapprovedProfile = nil
 		return
 	}
 
-	// Profile is not approved; show approval prompt if not already shown
-	a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+	// Check if there's an unapproved profile (parse error or unapproved name)
+	unapp := a.quickSelection.IsUnapproved()
+	if unapp == nil {
+		a.state.UnapprovedProfile = nil
+		return
+	}
+
+	a.state.UnapprovedProfile = unapp
 	a.requestApprovalIfNeeded()
 }
 
@@ -580,7 +576,21 @@ func (a *App) requestApprovalIfNeeded() {
 		// Already showing a prompt
 		return
 	}
-	if a.quickSelection == nil || a.quickSelection.ProjectProfile == nil || a.state.Status == nil {
+	if a.quickSelection == nil || a.state.Status == nil {
+		return
+	}
+
+	// If session override is set, don't ask
+	if a.quickSelection.SessionOverride != nil {
+		return
+	}
+
+	// If there's a parse error, don't ask (can't approve invalid files)
+	if a.quickSelection.ProjectParseError != nil {
+		return
+	}
+
+	if a.quickSelection.ProjectProfile == nil {
 		return
 	}
 
@@ -588,8 +598,13 @@ func (a *App) requestApprovalIfNeeded() {
 	filePath := a.quickSelection.ProjectFilePath
 	fileData := a.quickSelection.ProjectFileData
 
-	// Don't ask again if already approved or already asked this process
+	// Don't ask again if already approved or already declined this process
 	if a.quickSelection.SelectedProfile() != nil {
+		return
+	}
+
+	declineKey := filePath + ":" + profileName
+	if a.quickSelection.DeclinedThisProcess[declineKey] {
 		return
 	}
 
@@ -602,6 +617,7 @@ func (a *App) requestApprovalIfNeeded() {
 		}
 	}
 	if qp == nil {
+		// Profile not found in status; don't ask (will be shown as unapproved with engine note)
 		return
 	}
 
@@ -672,6 +688,16 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	case wire.EventKindTurnSubmitted:
 		var body wire.EvTurnSubmitted
 		if json.Unmarshal(msg.frame.Body, &body) == nil {
+			// Fix ModeOverride flag if /mode was used for this submit
+			if a.nextSubmitHasModeOverride {
+				turns := copyMap(a.state.Turns)
+				if ti, ok := turns[body.TurnID]; ok {
+					ti.ModeOverride = true
+					turns[body.TurnID] = ti
+					a.state.Turns = turns
+				}
+				a.nextSubmitHasModeOverride = false
+			}
 			// The record carries the configured turn deadline and token limit.
 			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
 		}

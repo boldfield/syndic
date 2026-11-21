@@ -338,13 +338,28 @@ func (a *App) approvalYes() tea.Cmd {
 		a.refusal = fmt.Sprintf("cannot save approval: %v", err)
 		return nil
 	}
+	// Update in-memory map so SelectedProfile() returns the profile for this process
+	key := ap.filePath + ":" + ap.profileName
+	a.quickSelection.ApprovedProfiles[key] = ApprovedProfile{
+		FilePath:                ap.filePath,
+		FileSHA256:              ap.fileSHA256,
+		ProfileName:             ap.profileName,
+		ProfileDefinitionSHA256: ap.definitionSHA256,
+	}
+	a.updateQuickProfileState()
 	a.refusal = fmt.Sprintf("quick profile %s approved for this project", ap.profileName)
 	return nil
 }
 
 // approvalNo rejects the pending quick profile approval.
 func (a *App) approvalNo() tea.Cmd {
+	ap := a.approval
 	a.cancelApproval("quick profile approval rejected; it will not be sent")
+	if a.quickSelection != nil && ap != nil {
+		// Mark as declined this process so we don't ask again
+		declineKey := ap.filePath + ":" + ap.profileName
+		a.quickSelection.DeclinedThisProcess[declineKey] = true
+	}
 	return nil
 }
 
