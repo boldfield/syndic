@@ -103,6 +103,7 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "pr"
+accept_unknown_truncation = true
 ` + c.reviewerKeys + "\n")
 	if c.second {
 		b.WriteString(`
@@ -113,6 +114,7 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "pr2"
+accept_unknown_truncation = true
 `)
 	}
 	billing := c.billing
