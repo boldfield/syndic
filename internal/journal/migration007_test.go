@@ -221,9 +221,9 @@ func TestSetLatestCandidateWithRound(t *testing.T) {
 	conn := db.Conn()
 	store := journal.NewStore(db)
 
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
-	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 
 	candID1, err := store.SetLatestCandidate("t1", "content1", "hash1", 0, "")
 	if err != nil {
@@ -279,9 +279,9 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 	conn := db.Conn()
 	store := journal.NewStore(db)
 
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
-	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 
 	cand1ID, _ := store.SetLatestCandidate("t1", "content1", "hash1", 0, "")
 
