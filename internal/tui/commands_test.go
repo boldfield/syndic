@@ -159,7 +159,7 @@ func TestWhyBlock(t *testing.T) {
 	r.typeLine("question")
 	turnIn(t, r, "incomplete")
 	r.typeLine("/why")
-	untilView(t, r, "reason: block:", "[medium]", "  evidence: line 3 divides by zero", "  remedy: guard the divisor")
+	untilView(t, r, "reason: block:", "[medium]", "  evidence: line 3 divides by zero", "  remedy: guard the divisor", "reviewer reason (reviewer): unsafe")
 }
 
 func TestWhyMalformedTwice(t *testing.T) {

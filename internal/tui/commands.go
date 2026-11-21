@@ -78,24 +78,12 @@ func cmdParticipants(a *App, _ []string) tea.Cmd {
 	return nil
 }
 
-// knownPresets is what status says the engine has: the default preset and the
-// presets its quick profiles name, plus any a turn already ran with.
+// knownPresets is the preset list status reports for the current roster.
 func knownPresets(s State) []string {
-	set := map[string]bool{}
-	if s.Status != nil {
-		set[s.Status.DefaultPreset] = true
+	if s.Status == nil {
+		return nil
 	}
-	for _, q := range s.QuickProfiles {
-		set[q.Preset] = true
-	}
-	for _, ti := range s.Turns {
-		set[ti.Preset] = true
-	}
-	delete(set, "")
-	out := make([]string, 0, len(set))
-	for p := range set {
-		out = append(out, p)
-	}
+	out := append([]string(nil), s.Status.Presets...)
 	sort.Strings(out)
 	return out
 }
@@ -350,6 +338,13 @@ func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 	for _, at := range tr.Attempts {
 		participantOf[at.ID] = at.Participant
 	}
+	reasons := func(p string) {
+		for _, v := range tr.Verdicts {
+			if participantOf[v.AttemptID] == p && v.Reason != "" {
+				lines = append(lines, "reviewer reason ("+p+"): "+v.Reason)
+			}
+		}
+	}
 	classes := func(p string) string {
 		var out []string
 		for _, v := range tr.Verdicts {
@@ -390,9 +385,13 @@ func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 	case strings.HasPrefix(reason, "malformed_twice:"), strings.HasPrefix(reason, "revision_request:"):
 		_, p, _ := strings.Cut(reason, ":")
 		lines = append(lines, "parser classification ("+p+"): "+classes(p))
+		reasons(p)
 	case strings.HasPrefix(reason, "block:"):
 		for _, b := range tr.OpenBlocks {
 			lines = append(lines, fmt.Sprintf("block %s [%s]", b.ID, b.Severity), "  evidence: "+b.Evidence, "  remedy: "+b.Remedy)
+		}
+		for _, at := range tr.Attempts {
+			reasons(at.Participant)
 		}
 	case strings.HasPrefix(reason, "budget:"):
 		name := reason

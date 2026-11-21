@@ -213,6 +213,7 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			AttemptID:        v.AttemptID,
 			Parsed:           v.ValidationStatus != string(verdict.Malformed),
 			ValidationStatus: v.ValidationStatus,
+			Reason:           v.Reason,
 		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}

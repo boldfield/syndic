@@ -85,7 +85,8 @@ func turnIn(t *testing.T, r *rig, state string) string {
 	t.Helper()
 	return r.until(t, "a turn in "+state, func(a *App) (string, bool) {
 		id := answerTurn(a.state)
-		return id, id != "" && a.state.Turns[id].State == state
+		// The submit reply clears the input; a following typeLine must not append to the question.
+		return id, id != "" && a.state.Turns[id].State == state && a.input.Value() == ""
 	})
 }
 
