@@ -85,7 +85,14 @@ func (tx *Tx) CreateRun(manifest json.RawMessage) (runID, manifestHash string, e
 }
 
 // CreateTurn creates a new turn for the given run, returning the turn ID.
+// If conversationID is empty, a new conversation with NULL workspace is created.
 func (tx *Tx) CreateTurn(runID, mode string, deadline *time.Time) (turnID string, err error) {
+	return tx.CreateTurnWithConversation(runID, mode, deadline, "")
+}
+
+// CreateTurnWithConversation creates a new turn for the given run with an explicit conversation ID.
+// If conversationID is empty, a new conversation with NULL workspace is created.
+func (tx *Tx) CreateTurnWithConversation(runID, mode string, deadline *time.Time, conversationID string) (turnID string, err error) {
 	turnID, err = generateID()
 	if err != nil {
 		return "", err
@@ -97,10 +104,24 @@ func (tx *Tx) CreateTurn(runID, mode string, deadline *time.Time) (turnID string
 		deadlineStr = &ds
 	}
 
+	// If no conversation ID provided, create a new one
+	if conversationID == "" {
+		conversationID, err = generateID()
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.tx.Exec(`
+			INSERT INTO conversations (id, workspace)
+			VALUES (?, NULL)
+		`, conversationID); err != nil {
+			return "", fmt.Errorf("insert conversation: %w", err)
+		}
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline)
-		VALUES (?, ?, ?, ?)
-	`, turnID, runID, mode, deadlineStr); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, conversation_id)
+		VALUES (?, ?, ?, ?, ?)
+	`, turnID, runID, mode, deadlineStr, conversationID); err != nil {
 		return "", fmt.Errorf("insert turn: %w", err)
 	}
 

@@ -242,6 +242,8 @@ type CandidateRow struct {
 	TurnID      string
 	ContentHash string
 	ByteLen     int64
+	Round       int
+	Supersedes  *string
 }
 
 // GetCandidate returns a candidate by ID.
@@ -258,14 +260,18 @@ func (s *Store) GetCandidate(candidateID string) (*CandidateRow, error) {
 // GetCandidate returns a candidate by ID.
 func (tx *Tx) GetCandidate(candidateID string) (*CandidateRow, error) {
 	var row CandidateRow
+	var supersedes sql.NullString
 	if err := tx.tx.QueryRow(`
-		SELECT id, turn_id, content_hash, LENGTH(CAST(content AS BLOB))
+		SELECT id, turn_id, content_hash, LENGTH(CAST(content AS BLOB)), round, supersedes
 		FROM candidates WHERE id = ?
-	`, candidateID).Scan(&row.ID, &row.TurnID, &row.ContentHash, &row.ByteLen); err != nil {
+	`, candidateID).Scan(&row.ID, &row.TurnID, &row.ContentHash, &row.ByteLen, &row.Round, &supersedes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("candidate not found: %w", ErrNoSuchContent)
 		}
 		return nil, fmt.Errorf("query candidate: %w", err)
+	}
+	if supersedes.Valid {
+		row.Supersedes = &supersedes.String
 	}
 	return &row, nil
 }

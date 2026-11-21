@@ -265,13 +265,14 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 	var maxRoundsInEffect sql.NullInt64
 	var maxRoundsCeiling sql.NullInt64
 	var contextHash sql.NullString
+	var conversationID sql.NullString
 	var fileTainted bool
 
 	if err := tx.tx.QueryRow(`
 		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted
 		FROM turns WHERE id = ?
 	`, turnID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &row.ConversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &conversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
 	); err != nil {
 		return nil, err
 	}
@@ -314,6 +315,10 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 
 	if candidateID.Valid {
 		row.CandidateID = candidateID.String
+	}
+
+	if conversationID.Valid {
+		row.ConversationID = conversationID.String
 	}
 
 	if attemptDeadlineMS.Valid {

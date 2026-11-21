@@ -295,6 +295,12 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var roundBefore int
+	if err := conn.QueryRow(`SELECT round FROM candidates WHERE id = ?`, cand1ID).Scan(&roundBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test that SetLatestCandidate fails and rolls back
 	_, err := store.SetLatestCandidate("t1", "content2", "hash2", 1, "nonexistent_candidate")
 
 	if err == nil {
@@ -311,12 +317,21 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var roundAfter int
+	if err := conn.QueryRow(`SELECT round FROM candidates WHERE id = ?`, cand1ID).Scan(&roundAfter); err != nil {
+		t.Fatal(err)
+	}
+
 	if countAfter > countBefore {
 		t.Errorf("candidate count changed: before=%d, after=%d (transaction should have rolled back)", countBefore, countAfter)
 	}
 
 	if latestIDAfter != latestIDBefore || latestIDAfter != cand1ID {
 		t.Errorf("candidate_id changed: before=%q, after=%q, cand1=%q (should be unchanged)", latestIDBefore, latestIDAfter, cand1ID)
+	}
+
+	if roundAfter != roundBefore {
+		t.Errorf("candidate round changed: before=%d, after=%d (should be unchanged)", roundBefore, roundAfter)
 	}
 }
 
@@ -346,8 +361,11 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash, kind) VALUES ('r1', '{}', 'h', 'engine')`)
 
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES ('t1', 'r1', 'solo')`)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES ('t2', 'r1', 'review')`)
+	// Seed v6 turns with full data
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, submission_id, submission_hash, epoch, whole_turn_deadline, attempt_deadline_ms, turn_deadline_ms, budget_json, terminal_state, terminal_reason)
+		VALUES ('t1', 'r1', 'solo', 'sub1', 'subhash1', 1, '2026-11-21T20:00:00Z', 300000, 600000, '{}', 'approved', NULL)`)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, submission_id, submission_hash, epoch, whole_turn_deadline, attempt_deadline_ms, turn_deadline_ms, budget_json, terminal_state, terminal_reason)
+		VALUES ('t2', 'r1', 'review', 'sub2', 'subhash2', 2, '2026-11-21T21:00:00Z', 300000, 600000, '{"tokens": 10000}', 'incomplete', 'budget:turn')`)
 
 	mustExec(t, conn, `INSERT INTO candidates (id, turn_id, content, content_hash) VALUES ('c1', 't1', 'old content 1', 'oldhash1')`)
 	mustExec(t, conn, `INSERT INTO candidates (id, turn_id, content, content_hash) VALUES ('c2', 't2', 'old content 2', 'oldhash2')`)
@@ -357,9 +375,44 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 
 	mustExec(t, conn, `INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, journal_seq)
 		VALUES ('m1', 't1', 'author', 'user', '[]', 1, 'message content', 'msghash', 15, 1)`)
+	mustExec(t, conn, `INSERT INTO messages (id, turn_id, phase, sender, recipient_set, sequence, content, content_hash, byte_length, journal_seq)
+		VALUES ('m2', 't2', 'reviewers', 'assistant', '["r1"]', 2, 'review message', 'revhash', 14, 2)`)
 
-	var journalSeqBefore int64
-	if err := conn.QueryRow(`SELECT MAX(journal_seq) FROM messages WHERE turn_id = 't1'`).Scan(&journalSeqBefore); err != nil {
+	mustExec(t, conn, `INSERT INTO events (turn_id, event_type, data) VALUES ('t1', 'test_event', '{"event": "test"}')`)
+	mustExec(t, conn, `INSERT INTO events (turn_id, event_type, data) VALUES ('t2', 'review_event', '{"event": "review"}')`)
+
+	// Capture data before migration
+	var t1Before struct {
+		ID, RunID, Mode, SubmissionID, SubmissionHash, BudgetJSON, TerminalState, TerminalReason sql.NullString
+		Epoch, AttemptDeadlineMS, TurnDeadlineMS                                                 sql.NullInt64
+	}
+	var t2Before struct {
+		ID, RunID, Mode, SubmissionID, SubmissionHash, BudgetJSON, TerminalState, TerminalReason sql.NullString
+		Epoch, AttemptDeadlineMS, TurnDeadlineMS                                                 sql.NullInt64
+	}
+
+	if err := conn.QueryRow(`SELECT id, run_id, mode, submission_id, submission_hash, epoch, attempt_deadline_ms, turn_deadline_ms, budget_json, terminal_state, terminal_reason FROM turns WHERE id = 't1'`).
+		Scan(&t1Before.ID, &t1Before.RunID, &t1Before.Mode, &t1Before.SubmissionID, &t1Before.SubmissionHash, &t1Before.Epoch, &t1Before.AttemptDeadlineMS, &t1Before.TurnDeadlineMS, &t1Before.BudgetJSON, &t1Before.TerminalState, &t1Before.TerminalReason); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(`SELECT id, run_id, mode, submission_id, submission_hash, epoch, attempt_deadline_ms, turn_deadline_ms, budget_json, terminal_state, terminal_reason FROM turns WHERE id = 't2'`).
+		Scan(&t2Before.ID, &t2Before.RunID, &t2Before.Mode, &t2Before.SubmissionID, &t2Before.SubmissionHash, &t2Before.Epoch, &t2Before.AttemptDeadlineMS, &t2Before.TurnDeadlineMS, &t2Before.BudgetJSON, &t2Before.TerminalState, &t2Before.TerminalReason); err != nil {
+		t.Fatal(err)
+	}
+
+	var journalSeqs []int64
+	rows, err := conn.Query(`SELECT journal_seq FROM messages WHERE turn_id IN ('t1', 't2') ORDER BY journal_seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		journalSeqs = append(journalSeqs, seq)
+	}
+	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -377,6 +430,7 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 		}
 	}()
 
+	// Verify candidate content unchanged
 	var candContent1 string
 	if err := db.Conn().QueryRow(`SELECT content FROM candidates WHERE id = ?`, "c1").Scan(&candContent1); err != nil {
 		t.Fatal(err)
@@ -385,14 +439,33 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 		t.Errorf("candidate content changed: got %q, want %q", candContent1, "old content 1")
 	}
 
-	var journalSeqAfter int64
-	if err := db.Conn().QueryRow(`SELECT journal_seq FROM messages WHERE id = 'm1'`).Scan(&journalSeqAfter); err != nil {
+	// Verify journal sequences unchanged
+	var journalSeqsAfter []int64
+	rows, err = db.Conn().Query(`SELECT journal_seq FROM messages WHERE turn_id IN ('t1', 't2') ORDER BY journal_seq`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if journalSeqAfter != journalSeqBefore {
-		t.Errorf("journal_seq changed: got %d, want %d", journalSeqAfter, journalSeqBefore)
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		journalSeqsAfter = append(journalSeqsAfter, seq)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(journalSeqs) != len(journalSeqsAfter) {
+		t.Errorf("journal_seq count changed: before=%d, after=%d", len(journalSeqs), len(journalSeqsAfter))
+	}
+	for i, seq := range journalSeqs {
+		if i >= len(journalSeqsAfter) || seq != journalSeqsAfter[i] {
+			t.Errorf("journal_seq[%d] changed: before=%d, after=%v", i, seq, journalSeqsAfter)
+			break
+		}
 	}
 
+	// Verify turns got separate conversations
 	var t1ConvID, t2ConvID string
 	if err := db.Conn().QueryRow(`SELECT conversation_id FROM turns WHERE id = ?`, "t1").Scan(&t1ConvID); err != nil {
 		t.Fatal(err)
@@ -402,6 +475,21 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 	}
 	if t1ConvID == t2ConvID {
 		t.Errorf("legacy turns should have different conversations, both got %q", t1ConvID)
+	}
+
+	// Verify GetTurn works on migrated turn
+	turn1, err := journal.NewStore(db).GetTurn("t1")
+	if err != nil {
+		t.Fatalf("GetTurn failed: %v", err)
+	}
+	if turn1.ConversationID != t1ConvID {
+		t.Errorf("GetTurn conversation_id mismatch: got %q, want %q", turn1.ConversationID, t1ConvID)
+	}
+	if turn1.SubmissionID != "sub1" {
+		t.Errorf("GetTurn submission_id changed: got %q, want %q", turn1.SubmissionID, "sub1")
+	}
+	if turn1.TerminalState != "approved" {
+		t.Errorf("GetTurn terminal_state changed: got %q, want %q", turn1.TerminalState, "approved")
 	}
 }
 
@@ -453,27 +541,62 @@ func TestMigration007FreshAndUpgradeConverge(t *testing.T) {
 		}
 	}()
 
-	freshCols := tableColumns(t, dbFresh.Conn(), "conversations")
-	upgradeCols := tableColumns(t, dbUpgrade.Conn(), "conversations")
-	for col := range freshCols {
-		if !upgradeCols[col] {
-			t.Errorf("upgrade missing column %s in conversations table", col)
-		}
-	}
+	// Compare full schema for conversations table
+	compareTableSchema(t, dbFresh.Conn(), dbUpgrade.Conn(), "conversations")
+	compareTableSchema(t, dbFresh.Conn(), dbUpgrade.Conn(), "turns")
+	compareTableSchema(t, dbFresh.Conn(), dbUpgrade.Conn(), "candidates")
 
-	freshTurnCols := tableColumns(t, dbFresh.Conn(), "turns")
-	upgradeTurnCols := tableColumns(t, dbUpgrade.Conn(), "turns")
-	for col := range freshTurnCols {
-		if !upgradeTurnCols[col] {
-			t.Errorf("upgrade missing column %s in turns table", col)
-		}
-	}
+	// Also check in reverse direction
+	compareTableSchema(t, dbUpgrade.Conn(), dbFresh.Conn(), "conversations")
+	compareTableSchema(t, dbUpgrade.Conn(), dbFresh.Conn(), "turns")
+	compareTableSchema(t, dbUpgrade.Conn(), dbFresh.Conn(), "candidates")
+}
 
-	freshCandCols := tableColumns(t, dbFresh.Conn(), "candidates")
-	upgradeCandCols := tableColumns(t, dbUpgrade.Conn(), "candidates")
-	for col := range freshCandCols {
-		if !upgradeCandCols[col] {
-			t.Errorf("upgrade missing column %s in candidates table", col)
+func compareTableSchema(t *testing.T, expected *sql.DB, actual *sql.DB, table string) {
+	t.Helper()
+
+	// Compare column info
+	expectedCols := getTableInfo(t, expected, table)
+	actualCols := getTableInfo(t, actual, table)
+
+	for i, col := range expectedCols {
+		if i >= len(actualCols) {
+			t.Errorf("%s: missing column at index %d: %v", table, i, col)
+			continue
+		}
+		if col != actualCols[i] {
+			t.Errorf("%s: column %d differs: expected %q, got %q", table, i, col, actualCols[i])
 		}
 	}
+	if len(actualCols) > len(expectedCols) {
+		t.Errorf("%s: extra columns in actual: %v", table, actualCols[len(expectedCols):])
+	}
+}
+
+func getTableInfo(t *testing.T, conn *sql.DB, table string) []string {
+	t.Helper()
+	query := `PRAGMA table_info(` + table + `)`
+	rows, err := conn.Query(query)
+	if err != nil {
+		t.Fatalf("pragma table_info %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var info []string
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		info = append(info, name+":"+typ)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return info
 }
