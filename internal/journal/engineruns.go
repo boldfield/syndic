@@ -24,7 +24,7 @@ func (s *Store) AllocateEngineRun() (runID string, err error) {
 }
 
 // AllocateEngineRun allocates a new engine run without a manifest, in "probing" state.
-// Uses an empty string for manifest and manifest_hash as placeholders.
+// Manifest and manifest_hash are NULL until finalization.
 func (tx *Tx) AllocateEngineRun() (runID string, err error) {
 	runID, err = generateID()
 	if err != nil {
@@ -33,7 +33,7 @@ func (tx *Tx) AllocateEngineRun() (runID string, err error) {
 
 	if _, err := tx.tx.Exec(`
 		INSERT INTO runs (id, manifest, manifest_hash, kind, state)
-		VALUES (?, '', '', 'engine', 'probing')
+		VALUES (?, NULL, NULL, 'engine', 'probing')
 	`, runID); err != nil {
 		return "", fmt.Errorf("insert allocated engine run: %w", err)
 	}
@@ -53,6 +53,7 @@ func (s *Store) FinalizeEngineRunManifest(runID string, manifest json.RawMessage
 }
 
 // FinalizeEngineRunManifest writes the manifest to an allocated engine run and transitions it to "started" state.
+// Only succeeds if the run is in "probing" state. Returns error if no row is updated or run is already started.
 func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) (manifestHash string, err error) {
 	if !json.Valid(manifest) {
 		return "", fmt.Errorf("invalid JSON manifest")
@@ -60,10 +61,19 @@ func (tx *Tx) FinalizeEngineRunManifest(runID string, manifest json.RawMessage) 
 
 	manifestHash = computeSHA256(manifest)
 
-	if _, err := tx.tx.Exec(`
-		UPDATE runs SET manifest = ?, manifest_hash = ?, state = 'started' WHERE id = ?
-	`, string(manifest), manifestHash, runID); err != nil {
+	result, err := tx.tx.Exec(`
+		UPDATE runs SET manifest = ?, manifest_hash = ?, state = 'started' WHERE id = ? AND state = 'probing'
+	`, string(manifest), manifestHash, runID)
+	if err != nil {
 		return "", fmt.Errorf("finalize engine run manifest: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("get rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return "", fmt.Errorf("finalize failed: run not in probing state or run does not exist")
 	}
 
 	return manifestHash, nil

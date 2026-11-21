@@ -68,7 +68,11 @@ func TestStartHelloAndSecondStart(t *testing.T) {
 		t.Fatalf("RunFirstSeq %d != engine_started seq %d", hello.RunFirstSeq, started.Seq)
 	}
 	body := started.Payload.(*wire.EvEngineStarted)
-	if body.RunID != hello.RunID || body.ManifestHash != hello.ManifestHash || body.RosterHash != hello.RosterHash {
+	var helloHash string
+	if hello.ManifestHash != nil {
+		helloHash = *hello.ManifestHash
+	}
+	if body.RunID != hello.RunID || body.ManifestHash != helloHash || body.RosterHash != hello.RosterHash {
 		t.Fatalf("engine_started %+v does not match hello %+v", body, hello)
 	}
 

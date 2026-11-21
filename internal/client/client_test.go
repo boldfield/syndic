@@ -17,6 +17,10 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
+func ptrString(s string) *string {
+	return &s
+}
+
 func TestDialSuccess(t *testing.T) {
 	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
 		frame, _ := r.Read()
@@ -30,7 +34,8 @@ func TestDialSuccess(t *testing.T) {
 			RunID:         "run-1",
 			RunFirstSeq:   0,
 			RosterHash:    "hash1",
-			ManifestHash:  "hash2",
+			ManifestHash:  ptrString("hash2"),
+			State:         "started",
 		})
 		_ = w.Write(reply)
 	})
@@ -85,7 +90,8 @@ func TestDialContextCancellation(t *testing.T) {
 				RunID:         "run-1",
 				RunFirstSeq:   0,
 				RosterHash:    "hash1",
-				ManifestHash:  "hash2",
+				ManifestHash:  ptrString("hash2"),
+				State:         "started",
 			})
 			_ = w.Write(reply)
 		}
@@ -137,7 +143,8 @@ func TestConcurrentRequests(t *testing.T) {
 				RunID:         "run-1",
 				RunFirstSeq:   0,
 				RosterHash:    "hash1",
-				ManifestHash:  "hash2",
+				ManifestHash:  ptrString("hash2"),
+				State:         "started",
 			})
 			_ = w.Write(reply)
 		}
@@ -216,7 +223,8 @@ func TestErrorReply(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -280,7 +288,8 @@ func TestContent(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -352,7 +361,8 @@ func TestContentSHA256Mismatch(t *testing.T) {
 				RunID:         "run-1",
 				RunFirstSeq:   0,
 				RosterHash:    "hash1",
-				ManifestHash:  "hash2",
+				ManifestHash:  ptrString("hash2"),
+				State:         "started",
 			})
 			_ = w.Write(reply)
 			return
@@ -398,7 +408,8 @@ func TestContentShortFinalPage(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -456,7 +467,8 @@ func TestSubscribeAndNextEvent(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -535,7 +547,8 @@ func TestEventBetweenRequestAndReply(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -621,7 +634,8 @@ func TestErrorFrameWithNoID(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -718,7 +732,8 @@ func TestConnectionCloseWithWaitingRequest(t *testing.T) {
 				RunID:         "run-1",
 				RunFirstSeq:   0,
 				RosterHash:    "hash1",
-				ManifestHash:  "hash2",
+				ManifestHash:  ptrString("hash2"),
+				State:         "started",
 			})
 			_ = w.Write(reply)
 		}
@@ -853,7 +868,8 @@ func TestContextCancellation(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -900,7 +916,8 @@ func TestAlreadyCancelledContextThenSuccessfulRequest(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue
@@ -954,7 +971,8 @@ func TestUnknownEventKind(t *testing.T) {
 					RunID:         "run-1",
 					RunFirstSeq:   0,
 					RosterHash:    "hash1",
-					ManifestHash:  "hash2",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
 				})
 				_ = w.Write(reply)
 				continue

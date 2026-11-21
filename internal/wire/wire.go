@@ -227,12 +227,13 @@ type HelloRequest struct {
 }
 
 type HelloReply struct {
-	EngineVersion string `json:"engine_version"`
-	Protocol      int    `json:"protocol"`
-	RunID         string `json:"run_id"`
-	RunFirstSeq   int64  `json:"run_first_seq"`
-	RosterHash    string `json:"roster_hash"`
-	ManifestHash  string `json:"manifest_hash"`
+	EngineVersion string  `json:"engine_version"`
+	Protocol      int     `json:"protocol"`
+	RunID         string  `json:"run_id"`
+	RunFirstSeq   int64   `json:"run_first_seq"`
+	RosterHash    string  `json:"roster_hash"`
+	ManifestHash  *string `json:"manifest_hash"`
+	State         string  `json:"state"`
 }
 
 type StatusRequest struct{}

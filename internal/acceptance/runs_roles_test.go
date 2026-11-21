@@ -287,8 +287,12 @@ func TestRunsManifest_EngineRunKindAndHash(t *testing.T) {
 	if want := hex.EncodeToString(sum[:]); run.Hash != want {
 		t.Fatalf("stored manifest_hash = %s, want SHA-256 of the stored bytes %s", run.Hash, want)
 	}
-	if hello.ManifestHash != run.Hash {
-		t.Fatalf("hello.manifest_hash = %s, want %s", hello.ManifestHash, run.Hash)
+	if hello.ManifestHash == nil || *hello.ManifestHash != run.Hash {
+		var got string
+		if hello.ManifestHash != nil {
+			got = *hello.ManifestHash
+		}
+		t.Fatalf("hello.manifest_hash = %s, want %s", got, run.Hash)
 	}
 	started := s.WaitEvent(func(ev event) bool { return ev.Kind == wire.EventKindEngineStarted && ev.Seq == hello.RunFirstSeq })
 	if es, _ := body[wire.EvEngineStarted](started, wire.EventKindEngineStarted); es.ManifestHash != run.Hash || es.RunID != hello.RunID {

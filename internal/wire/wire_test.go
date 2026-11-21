@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+func ptrString(s string) *string {
+	return &s
+}
+
 func TestFrameRoundTrip(t *testing.T) {
 	f := Frame{
 		V:    1,
@@ -649,7 +653,8 @@ func TestHelloReplyJSON(t *testing.T) {
 		RunID:         "run-123",
 		RunFirstSeq:   100,
 		RosterHash:    "abc123",
-		ManifestHash:  "def456",
+		ManifestHash:  ptrString("def456"),
+		State:         "started",
 	}
 
 	data, err := json.Marshal(reply)

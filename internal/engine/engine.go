@@ -144,6 +144,7 @@ type Engine struct {
 	adapters      map[string]transport.Adapter
 	built         manifest.Built
 	runID         string
+	runState      string // "probing" or "started"
 	manifestHash  string
 	runFirstSeq   int64
 	startedAt     time.Time
@@ -445,6 +446,7 @@ func (e *Engine) Start() error {
 	e.adapters = adapters
 	e.built = built
 	e.runID = runID
+	e.runState = "started"
 	e.manifestHash = manifestHash
 	e.runFirstSeq = firstSeq
 	e.startedAt = startedAt
@@ -488,13 +490,18 @@ func (e *Engine) findEngineStarted(since int64, runID string) (int64, error) {
 func (e *Engine) Hello() wire.HelloReply {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	var manifestHash *string
+	if e.manifestHash != "" {
+		manifestHash = &e.manifestHash
+	}
 	return wire.HelloReply{
 		EngineVersion: e.version,
 		Protocol:      wire.ProtocolVersion,
 		RunID:         e.runID,
 		RunFirstSeq:   e.runFirstSeq,
 		RosterHash:    e.built.RosterHash,
-		ManifestHash:  e.manifestHash,
+		ManifestHash:  manifestHash,
+		State:         e.runState,
 	}
 }
 
