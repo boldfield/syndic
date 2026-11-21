@@ -1991,3 +1991,210 @@ func TestApplyDefaultsRevision(t *testing.T) {
 		t.Errorf("Revision.MaxRoundsCeiling = %v, want 5", r.Revision.MaxRoundsCeiling)
 	}
 }
+
+func TestResolveRevisionMaxRoundsOnlyOverride(t *testing.T) {
+	mr := 1
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+				Revision: &Revision{MaxRounds: &mr}},
+		},
+	}
+	r.ApplyDefaults()
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 1 {
+		t.Errorf("MaxRounds = %v, want 1 (preset override)", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 5 {
+		t.Errorf("MaxRoundsCeiling = %v, want 5 (default)", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestLoadRevisionFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.toml")
+
+	content := `default_preset = "review"
+
+[deadlines]
+attempt = "300s"
+turn = "900s"
+delivery = "60s"
+provisional = false
+
+[revision]
+max_rounds = 3
+max_rounds_ceiling = 4
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if err = r.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	if r.Revision.MaxRounds == nil || *r.Revision.MaxRounds != 3 {
+		t.Errorf("Roster revision MaxRounds = %v, want 3", r.Revision.MaxRounds)
+	}
+	if r.Revision.MaxRoundsCeiling == nil || *r.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Roster revision MaxRoundsCeiling = %v, want 4", r.Revision.MaxRoundsCeiling)
+	}
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 3 {
+		t.Errorf("Effective revision MaxRounds = %v, want 3", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestLoadRevisionPresetOverrideFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.toml")
+
+	content := `default_preset = "review"
+
+[deadlines]
+attempt = "300s"
+turn = "900s"
+delivery = "60s"
+provisional = false
+
+[revision]
+max_rounds = 3
+max_rounds_ceiling = 4
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.review.revision]
+max_rounds = 1
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if err = r.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 1 {
+		t.Errorf("Effective revision MaxRounds = %v, want 1 (preset override)", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4 (roster default)", eff.Revision.MaxRoundsCeiling)
+	}
+}
