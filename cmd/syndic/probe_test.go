@@ -3461,3 +3461,87 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("probe manifest should have non-empty config_fingerprint")
 	}
 }
+
+func TestProbeIncompleteWritesDiagnosisAndFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	exportDir := filepath.Join(tmpDir, "export")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
+
+	// The server never reports a model, so the probe is incomplete.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = io.WriteString(w, `{"object":"list","data":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"test"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10}}`)
+	}))
+	defer server.Close()
+
+	roster := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+	if err := os.WriteFile(rosterPath, []byte(roster), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath, "--endpoint", "test-endpoint", "--model", "test-model",
+		"--raw-dir", rawDir, "--export-dir", exportDir, "--journal", journalPath, "--secrets-dir", secretsDir,
+	})
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1 for an incomplete probe", exitCode)
+	}
+	for _, dir := range []string{rawDir, exportDir} {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("expected diagnosis artefacts in %s (err=%v)", dir, err)
+		}
+	}
+	if _, err := os.Stat(journalPath); err == nil {
+		t.Fatalf("incomplete probe must not create a usable journal record")
+	}
+}

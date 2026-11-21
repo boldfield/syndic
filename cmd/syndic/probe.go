@@ -147,7 +147,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	// For incomplete probes, write raw and export for diagnosis but skip the usable manifest
 	if isIncompleteProbe {
 		fmt.Fprintf(os.Stderr, "note: incomplete probe written for diagnosis only (raw: %s, export: %s)\n", rawPath, exportPath)
-		return 0
+		return 1
 	}
 
 	// Create ProbeManifest with fingerprint and calibration

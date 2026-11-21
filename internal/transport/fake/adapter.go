@@ -55,6 +55,7 @@ type Adapter struct {
 	cancelUnconfirmed    bool
 	usageAvailable       bool
 	blockingCancel       bool
+	ProbeUncertainStep   string
 
 	mu             sync.Mutex
 	calls          []CompleteCall
@@ -83,6 +84,7 @@ func New(script []Step, opts Options) *Adapter {
 		cancelUnconfirmed:    opts.CancelUnconfirmed,
 		usageAvailable:       opts.UsageAvailable,
 		blockingCancel:       opts.BlockingCancel,
+		ProbeUncertainStep:   opts.ProbeUncertainStep,
 		hangingAttempt:       make(map[string]context.CancelFunc),
 		cancelBlocked:        make(chan struct{}),
 	}
@@ -96,15 +98,32 @@ type Options struct {
 	ResolvedSecrets      []string
 	CancelUnconfirmed    bool
 	UsageAvailable       bool
-	BlockingCancel       bool // when true, Cancel blocks on cancelBlocked until released
+	BlockingCancel       bool   // when true, Cancel blocks on cancelBlocked until released
+	ProbeUncertainStep   string // probe step that fails after its BeforeSend hook as ErrUncertain
 }
 
 // Probe returns the configured capability record.
-// When opts.BeforeSend is provided, it is called before each probe step (models, max_tokens, etc).
+// When opts.BeforeSend is provided, it is called before each request the real
+// adapter would send: models, max_tokens, max_completion_tokens (only when the
+// configured capability's MaxTokensField is max_completion_tokens), system_role,
+// the two calibration requests (unless disabled), and over_length (only when
+// calibration is enabled and available and AssumedContextLen > 0).
+// ProbeUncertainStep, when set, makes the named step fail after its hook ran,
+// as a sent request of uncertain completion (transport.ErrUncertain).
 func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
-	if opts.BeforeSend != nil {
-		// Call BeforeSend for the main probe steps: models, max_tokens, system_role
-		for _, step := range []string{"models", "max_tokens", "system_role"} {
+	steps := []string{"models", "max_tokens"}
+	if a.capability.MaxTokensField == "max_completion_tokens" {
+		steps = append(steps, "max_completion_tokens")
+	}
+	steps = append(steps, "system_role")
+	if !opts.DisableCalibration {
+		steps = append(steps, "calibration_baseline", "calibration")
+		if !opts.DisableOverLength && a.capability.Calibration.Available && opts.AssumedContextLen > 0 {
+			steps = append(steps, "over_length")
+		}
+	}
+	for _, step := range steps {
+		if opts.BeforeSend != nil {
 			if err := opts.BeforeSend(&transport.ProbeRequest{
 				Model:   model,
 				Step:    step,
@@ -113,27 +132,8 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transp
 				return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
 			}
 		}
-		// Also call for calibration steps if not disabled
-		if !opts.DisableCalibration {
-			for _, step := range []string{"calibration_baseline", "calibration"} {
-				if err := opts.BeforeSend(&transport.ProbeRequest{
-					Model:   model,
-					Step:    step,
-					Timeout: opts.Timeout,
-				}); err != nil {
-					return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
-				}
-			}
-		}
-		// Also call for over_length if not disabled
-		if !opts.DisableOverLength {
-			if err := opts.BeforeSend(&transport.ProbeRequest{
-				Model:   model,
-				Step:    "over_length",
-				Timeout: opts.Timeout,
-			}); err != nil {
-				return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
-			}
+		if a.ProbeUncertainStep == step {
+			return transport.CapabilityRecord{}, fmt.Errorf("%w: fake probe failure after send at %s", transport.ErrUncertain, step)
 		}
 	}
 	return a.capability, nil

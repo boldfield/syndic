@@ -14,5 +14,6 @@ var (
 	ErrModelUnavailable  = errors.New("model unavailable")
 	ErrInvalidIdentity   = errors.New("invalid identity")
 	ErrNotSent           = errors.New("request not sent")
+	ErrUncertain         = errors.New("request sent; completion uncertain")
 	ErrIncompleteProbe   = errors.New("incomplete probe: missing model or max-tokens field")
 )

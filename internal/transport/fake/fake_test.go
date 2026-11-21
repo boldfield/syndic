@@ -1565,3 +1565,63 @@ func TestBeforeSendNil(t *testing.T) {
 		t.Errorf("result text: %q, want Response", result.Text)
 	}
 }
+
+func probeSteps(t *testing.T, a *Adapter, opts transport.ProbeOptions) ([]string, error) {
+	t.Helper()
+	var steps []string
+	opts.BeforeSend = func(r *transport.ProbeRequest) error {
+		steps = append(steps, r.Step)
+		return nil
+	}
+	_, err := a.Probe(context.Background(), "ep", "m", opts)
+	return steps, err
+}
+
+func TestProbeSequenceMatchesRealAdapter(t *testing.T) {
+	cal := transport.Calibration{Available: true}
+	cases := []struct {
+		name string
+		cap  transport.CapabilityRecord
+		opts transport.ProbeOptions
+		want []string
+	}{
+		{"no calibration data skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens"}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"max_completion_tokens adds a request", transport.CapabilityRecord{MaxTokensField: "max_completion_tokens", Calibration: cal}, transport.ProbeOptions{AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration", "over_length"}},
+		{"no context length skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{},
+			[]string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration"}},
+		{"calibration disabled skips over_length", transport.CapabilityRecord{MaxTokensField: "max_tokens", Calibration: cal}, transport.ProbeOptions{DisableCalibration: true, AssumedContextLen: 100},
+			[]string{"models", "max_tokens", "system_role"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := probeSteps(t, New(nil, Options{Capability: tc.cap}), tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("steps = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProbeUncertainStepAfterSend(t *testing.T) {
+	a := New(nil, Options{Capability: transport.CapabilityRecord{MaxTokensField: "max_tokens"}, ProbeUncertainStep: "system_role"})
+	steps, err := probeSteps(t, a, transport.ProbeOptions{})
+	if !errors.Is(err, transport.ErrUncertain) || errors.Is(err, transport.ErrNotSent) {
+		t.Fatalf("err = %v, want ErrUncertain only", err)
+	}
+	if strings.Join(steps, ",") != "models,max_tokens,system_role" {
+		t.Fatalf("steps = %v", steps)
+	}
+}
+
+func TestProbeHookFailureIsNotSent(t *testing.T) {
+	a := New(nil, Options{})
+	_, err := a.Probe(context.Background(), "ep", "m", transport.ProbeOptions{BeforeSend: func(*transport.ProbeRequest) error { return errors.New("no slot") }})
+	if !errors.Is(err, transport.ErrNotSent) || errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("err = %v, want ErrNotSent only", err)
+	}
+}

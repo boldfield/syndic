@@ -282,7 +282,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		serverVersion = step2ServerVersion
 	}
 
-	if errors.Is(step2Err, transport.ErrNotSent) || errors.Is(step2Err, transport.ErrUnreachable) || errors.Is(step2Err, transport.ErrUnauthorized) || errors.Is(step2Err, transport.ErrModelUnavailable) {
+	if errors.Is(step2Err, transport.ErrNotSent) || errors.Is(step2Err, transport.ErrUncertain) || errors.Is(step2Err, transport.ErrUnreachable) || errors.Is(step2Err, transport.ErrUnauthorized) || errors.Is(step2Err, transport.ErrModelUnavailable) {
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
@@ -372,6 +372,12 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	}
 
 	return record, nil
+}
+
+// uncertainErr marks a failure after the request was handed to the transport:
+// the server may or may not have processed it, so it is never ErrNotSent.
+func uncertainErr(err error) error {
+	return fmt.Errorf("%w: %w", transport.ErrUncertain, err)
 }
 
 func recordRawStep(rawSteps map[string]any, step, path string, statusCode int, headers http.Header, body []byte) {
@@ -815,13 +821,14 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	if err != nil {
 		if isConnectionRefusedOrDNSErr(err) {
 			recordRawStep(rawSteps, "models", "/models", 0, nil, nil)
+			return nil
 		}
-		return nil
+		return uncertainErr(err)
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 	if err := httpResp.Body.Close(); err != nil {
-		return err
+		return uncertainErr(err)
 	}
 
 	recordRawStep(rawSteps, "models", "/models", httpResp.StatusCode, httpResp.Header, body)
@@ -922,14 +929,14 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 				recordRawStep(rawSteps, stepName, "/chat/completions", 0, nil, nil)
 				return nil, 0, "", transport.ErrUnreachable
 			}
-			return nil, 0, "", err
+			return nil, 0, "", uncertainErr(err)
 		}
 
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		closeErr := httpResp.Body.Close()
 		cancel()
 		if err := closeErr; err != nil {
-			return nil, 0, "", err
+			return nil, 0, "", uncertainErr(err)
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
@@ -1027,12 +1034,12 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
 		record.SystemRoleHonored = transport.TriUnknown
-		return nil
+		return uncertainErr(err)
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 	if err := httpResp.Body.Close(); err != nil {
-		return err
+		return uncertainErr(err)
 	}
 
 	recordRawStep(rawSteps, "system_role", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
@@ -1180,13 +1187,13 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
 		record.OverLength = "errored"
-		return nil
+		return uncertainErr(err)
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
 	if err := httpResp.Body.Close(); err != nil {
 		record.OverLength = "errored"
-		return nil
+		return uncertainErr(err)
 	}
 
 	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
@@ -1237,19 +1244,22 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody)
 
+	// A pre-send failure or sent-but-uncertain failure stops the probe before the next request.
+	if baselineErr != nil && (errors.Is(baselineErr, transport.ErrNotSent) || errors.Is(baselineErr, transport.ErrUncertain)) {
+		record.Calibration.Available = false
+		return baselineErr
+	}
+
 	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
 
-	// Pre-send errors (ErrNotSent) must propagate; other errors just mark calibration unavailable
+	// ErrNotSent and ErrUncertain must propagate; other errors just mark calibration unavailable
 	if baselineErr != nil {
-		if errors.Is(baselineErr, transport.ErrNotSent) {
-			return baselineErr
-		}
 		record.Calibration.Available = false
 		return nil
 	}
 	if calibrationErr != nil {
-		if errors.Is(calibrationErr, transport.ErrNotSent) {
+		if errors.Is(calibrationErr, transport.ErrNotSent) || errors.Is(calibrationErr, transport.ErrUncertain) {
 			return calibrationErr
 		}
 		record.Calibration.Available = false
@@ -1341,7 +1351,7 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {
-		return 0, nil, nil, nil, err
+		return 0, nil, nil, nil, uncertainErr(err)
 	}
 
 	defer func() { _ = httpResp.Body.Close() }()
