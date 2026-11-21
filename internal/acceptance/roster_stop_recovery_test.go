@@ -709,11 +709,12 @@ func TestRecovery_RosterValidationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	next, err := engine.New(engine.Options{
-		Store:         s.Store,
-		Hub:           s.Hub,
-		RosterPath:    s.RosterPath,
-		EngineVersion: enginetest.EngineVersion,
-		Clock:         s.Clock,
+		NoStartupProbes: true, // these tests seed the records they need
+		Store:           s.Store,
+		Hub:             s.Hub,
+		RosterPath:      s.RosterPath,
+		EngineVersion:   enginetest.EngineVersion,
+		Clock:           s.Clock,
 		NewAdapter: func(p config.Participant, _ config.EndpointProfile) (transport.Adapter, string, error) {
 			return fake.New(nil, fake.Options{DefaultReportedModel: enginetest.DefaultReportedModel}), enginetest.AdapterVersion, nil
 		},

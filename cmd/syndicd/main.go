@@ -38,6 +38,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	rosterPath := fs.String("roster", "", "path to roster TOML file")
 	journalPath := fs.String("journal", "", "path to journal database")
 	secretsDir := fs.String("secrets-dir", "", "directory for file secret references")
+	probeMissing := fs.Bool("probe-missing", false, "at start, also probe participants on endpoints declared metered or unknown that have no usable record")
+	probeRawDir := fs.String("probe-raw-dir", "", "directory for raw records of start-time probes (default: not written)")
+	probeExportDir := fs.String("probe-export-dir", "", "directory for redacted exports of start-time probes (default: not written)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -140,6 +143,10 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		RosterPath:    rosterAbs,
 		EngineVersion: version,
 		NewAdapter:    newAdapterFunc,
+
+		ProbeMissing:   *probeMissing,
+		ProbeRawDir:    *probeRawDir,
+		ProbeExportDir: *probeExportDir,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create engine: %v\n", err)

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -110,19 +111,39 @@ type Options struct {
 	Clock         Clock     // nil means the real clock
 	Rand          io.Reader // nil means crypto/rand.Reader
 	NewAdapter    func(p config.Participant, ep config.EndpointProfile) (adapter transport.Adapter, adapterVersion string, err error)
+
+	// ProbeMissing lets start-time probing probe participants on endpoints
+	// declared metered or unknown (--probe-missing); none and flat endpoints
+	// are probed without it.
+	ProbeMissing bool
+	// ProbeTimeout is the timeout of each probe request; zero means 60s.
+	ProbeTimeout time.Duration
+	// ProbeRawDir and ProbeExportDir, when set, receive the raw record and
+	// the redacted export of every start-time probe, as for `syndic probe`.
+	ProbeRawDir    string
+	ProbeExportDir string
+	// NoStartupProbes turns start-time probing off, leaving every participant
+	// without a usable record unprobed. It exists for tests of the states a
+	// missing or stale record leaves; the daemon never sets it.
+	NoStartupProbes bool
 }
 
 // Engine is the review engine.
 type Engine struct {
-	store      *journal.Store
-	hub        *hub.Hub
-	rosterPath string
-	version    string
-	clock      Clock
-	rand       io.Reader
-	retryDelay time.Duration // the package-level retryDelay when the engine was built
-	noDelivery bool          // the package-level deliveryOff when the engine was built
-	newAdapter func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
+	store           *journal.Store
+	hub             *hub.Hub
+	rosterPath      string
+	version         string
+	clock           Clock
+	rand            io.Reader
+	retryDelay      time.Duration // the package-level retryDelay when the engine was built
+	noDelivery      bool          // the package-level deliveryOff when the engine was built
+	probeMissing    bool
+	probeTimeout    time.Duration
+	probeRawDir     string
+	probeExportDir  string
+	noStartupProbes bool
+	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -183,28 +204,33 @@ func New(o Options) (*Engine, error) {
 		return nil, errors.New("engine: NewAdapter is required")
 	}
 	e := &Engine{
-		store:         o.Store,
-		hub:           o.Hub,
-		rosterPath:    o.RosterPath,
-		version:       o.EngineVersion,
-		clock:         o.Clock,
-		rand:          o.Rand,
-		retryDelay:    retryDelay,
-		noDelivery:    deliveryOff,
-		newAdapter:    o.NewAdapter,
-		running:       make(map[string]bool),
-		inflight:      make(map[string]int),
-		queued:        make(map[string]bool),
-		pools:         make(map[string]*pool),
-		holds:         make(map[string]*hold),
-		orphanedHolds: make(map[string]*hold),
-		calling:       make(map[string]bool),
-		cancelled:     make(map[string]bool),
-		cancelling:    make(map[string]int),
-		pstate:        make(map[string]string),
-		failed:        make(map[string]string),
-		deliveries:    make(map[string]*openTurn),
-		stoppingCh:    make(chan struct{}),
+		store:           o.Store,
+		hub:             o.Hub,
+		rosterPath:      o.RosterPath,
+		version:         o.EngineVersion,
+		clock:           o.Clock,
+		rand:            o.Rand,
+		retryDelay:      retryDelay,
+		noDelivery:      deliveryOff,
+		probeMissing:    o.ProbeMissing,
+		probeTimeout:    probeTimeoutOf(o.ProbeTimeout),
+		probeRawDir:     o.ProbeRawDir,
+		probeExportDir:  o.ProbeExportDir,
+		noStartupProbes: o.NoStartupProbes,
+		newAdapter:      o.NewAdapter,
+		running:         make(map[string]bool),
+		inflight:        make(map[string]int),
+		queued:          make(map[string]bool),
+		pools:           make(map[string]*pool),
+		holds:           make(map[string]*hold),
+		orphanedHolds:   make(map[string]*hold),
+		calling:         make(map[string]bool),
+		cancelled:       make(map[string]bool),
+		cancelling:      make(map[string]int),
+		pstate:          make(map[string]string),
+		failed:          make(map[string]string),
+		deliveries:      make(map[string]*openTurn),
+		stoppingCh:      make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
@@ -241,7 +267,7 @@ func (e *Engine) tx(fn func(tx *journal.Tx, emit hub.Emit) error) error {
 func (e *Engine) Start() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.started {
+	if e.started || e.runState != "" {
 		return errors.New("engine: already started")
 	}
 
@@ -264,6 +290,34 @@ func (e *Engine) Start() error {
 		}
 
 		for _, attemptID := range pendingAttempts {
+			// A probe request a crash left pending may have been sent: it
+			// becomes unknown and holds its pool, so the restart never
+			// sends it again blindly. It carries the group it probed.
+			if pa, isProbe, err := tx.GetProbeAttempt(attemptID); err != nil {
+				return fmt.Errorf("get probe attempt %s: %w", attemptID, err)
+			} else if isProbe {
+				if !held[attemptID] {
+					if err := tx.OpenHold(journal.Hold{
+						AttemptID:    attemptID,
+						Pool:         pa.Pool,
+						EndpointName: pa.Endpoint,
+						Model:        pa.Model,
+						Group:        pa.Group,
+						HeldSince:    e.clock.Now().UTC(),
+					}); err != nil {
+						return fmt.Errorf("open hold for probe attempt %s: %w", attemptID, err)
+					}
+				}
+				if err := tx.MarkUnknown(attemptID); err != nil {
+					return fmt.Errorf("mark probe attempt unknown: %w", err)
+				}
+				if err := emit("", wire.EventKindAttemptUnknown, wire.EvAttemptUnknown{AttemptID: attemptID}); err != nil {
+					return fmt.Errorf("emit attempt_unknown: %w", err)
+				}
+				recoveredAttempts++
+				continue
+			}
+
 			turnID, runID, err := tx.GetAttemptTurnAndRun(attemptID)
 			if err != nil {
 				return fmt.Errorf("get turn for attempt %s: %w", attemptID, err)
@@ -434,8 +488,46 @@ func (e *Engine) Start() error {
 	e.runState = "probing"
 	e.runFirstSeq = firstSeq
 
-	// Start-time probes belong here, between the two commits; a crash in
-	// this window leaves a probing run that the next start abandons.
+	// Start-time probes run between the two commits; a crash in this window
+	// leaves a probing run that the next start abandons. e.mu is released
+	// so a client attached during probing gets hello (state "probing") and
+	// refusals from submit instead of waiting for the probes to end. Probing
+	// never fails the start: a probe that fails leaves its participant
+	// unprobed, and the engine stays available for reads and recovery.
+	e.mu.Unlock()
+	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions)
+	e.mu.Lock()
+	if probed.wrote {
+		// The records the probes wrote are in the journal; build the manifest
+		// again so it freezes them.
+		rebuilt, err := manifest.Build(manifest.Input{
+			Store:          e.store,
+			Roster:         roster,
+			RosterPath:     path,
+			RosterFile:     file,
+			EngineVersion:  e.version,
+			StartedAt:      startedAt,
+			AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
+		})
+		if err != nil {
+			// Probing must not stop the engine: freeze the state from before.
+			log.Printf("engine: build manifest after probes: %v", err)
+		} else {
+			built = rebuilt
+		}
+	}
+	for id, reason := range probed.failed {
+		if mp, ok := built.Participants[id]; ok && !mp.Usable {
+			mp.Detail = probeFailedPrefix + reason
+			built.Participants[id] = mp
+		}
+	}
+	unprobed = unprobed[:0]
+	for _, p := range roster.Participants {
+		if !built.Participants[p.ID].Usable {
+			unprobed = append(unprobed, p.ID)
+		}
+	}
 
 	// Phase 2: write the manifest once and announce engine_started.
 	var manifestHash string
