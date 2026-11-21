@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
@@ -253,14 +254,28 @@ type OpenBlockForRevision struct {
 	Remedy   string
 }
 
+// ToolResult represents a tool result that can be cited by reviewer evidence.
+type ToolResult struct {
+	ID      string
+	Content string
+}
+
 // AuthorRevisionInput contains inputs for building an author revision prompt.
+// Supports both the old []HistoryTurn interface and new *history.Document interface.
 type AuthorRevisionInput struct {
+	// For backward compatibility, keeps the old HistoryTurn interface.
+	// If both History and HistoryDoc are set, HistoryDoc takes precedence.
 	History           []HistoryTurn
 	Input             string
 	PreviousCandidate string
 	ReviewerFeedback  []RevisionFeedback
 	Delimiter         string
 	Round             int
+	// HistoryDoc is the new canonical history document.
+	HistoryDoc *history.Document
+	// ToolResults maps tool result ID to the result content.
+	// Only results cited in feedback evidence are included in the output.
+	ToolResults map[string]string
 }
 
 // authorRevisionSystem builds the system message for an author revision prompt.
@@ -269,6 +284,12 @@ func authorRevisionSystem() string {
 }
 
 // AuthorRevision returns system and user messages for the author revision round.
+// The message sequence follows v5 delta §4:
+// 1. System message
+// 2. History as alternating user/assistant messages (from canonical document if available)
+// 3. Original input as a user message (unfenced)
+// 4. Previous candidate as an assistant message
+// 5. One user message with each reviewer's output fenced by random delimiters with blind labels
 func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 	if in.Delimiter == "" {
 		return nil, errors.New("empty delimiter")
@@ -280,6 +301,24 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 		return nil, errors.New("empty reviewer feedback")
 	}
 
+	// Check for delimiter collisions in all fields that will be fenced
+	if strings.Contains(in.Input, in.Delimiter) {
+		return nil, ErrDelimiterCollision
+	}
+	if strings.Contains(in.PreviousCandidate, in.Delimiter) {
+		return nil, ErrDelimiterCollision
+	}
+	for _, feedback := range in.ReviewerFeedback {
+		if strings.Contains(feedback.Output, in.Delimiter) {
+			return nil, ErrDelimiterCollision
+		}
+	}
+	for _, result := range in.ToolResults {
+		if strings.Contains(result, in.Delimiter) {
+			return nil, ErrDelimiterCollision
+		}
+	}
+
 	messages := []transport.Message{
 		{
 			Role:    "system",
@@ -287,57 +326,68 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 		},
 	}
 
-	var historyContent strings.Builder
-
-	historyContent.WriteString("## Conversation History\n\n")
-	for _, turn := range in.History {
-		fmt.Fprintf(&historyContent, "Turn: %s\n", turn.TurnID)
-		fmt.Fprintf(&historyContent, "State: %s\n", turn.State)
-		fmt.Fprintf(&historyContent, "Label: %s\n\n", turn.Label)
-		historyContent.WriteString("Input:\n")
-		historyContent.WriteString(turn.Input + "\n\n")
-		historyContent.WriteString("Answer:\n")
-		historyContent.WriteString(turn.Answer + "\n\n")
+	// Add history as alternating user/assistant messages
+	// Prefer HistoryDoc if available (new canonical history), else fall back to History
+	if in.HistoryDoc != nil {
+		// New code path: use canonical history document rendering
+		historyMsgs := in.HistoryDoc.RenderForAuthor()
+		for _, msg := range historyMsgs {
+			messages = append(messages, transport.Message{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+	}
+	if len(in.History) > 0 && in.HistoryDoc == nil {
+		// Backward compatibility path: use old HistoryTurn interface only if no HistoryDoc
+		for _, turn := range in.History {
+			messages = append(messages,
+				transport.Message{
+					Role:    "user",
+					Content: fmt.Sprintf("Turn: %s\nState: %s\nInput: %s\nLabel: %s\n", turn.TurnID, turn.State, turn.Input, turn.Label),
+				},
+				transport.Message{
+					Role:    "assistant",
+					Content: turn.Answer,
+				})
+		}
 	}
 
-	delimBeginHist := fmt.Sprintf("===== %s BEGIN HISTORY =====", in.Delimiter)
-	delimEndHist := fmt.Sprintf("===== %s END HISTORY =====", in.Delimiter)
-	delimBeginCand := fmt.Sprintf("===== %s BEGIN PREVIOUS CANDIDATE =====", in.Delimiter)
-	delimEndCand := fmt.Sprintf("===== %s END PREVIOUS CANDIDATE =====", in.Delimiter)
-	delimBeginFeed := fmt.Sprintf("===== %s BEGIN REVIEWER FEEDBACK =====", in.Delimiter)
-	delimEndFeed := fmt.Sprintf("===== %s END REVIEWER FEEDBACK =====", in.Delimiter)
+	// Add original input as a user message (unfenced)
+	messages = append(messages, transport.Message{
+		Role:    "user",
+		Content: in.Input,
+	})
 
-	var userContent strings.Builder
-	userContent.WriteString(delimBeginHist + "\n")
-	userContent.WriteString(historyContent.String())
-	userContent.WriteString(delimEndHist + "\n\n")
-	userContent.WriteString("## Original Input\n\n")
-	userContent.WriteString(in.Input + "\n\n")
+	// Add previous candidate as an assistant message
+	messages = append(messages, transport.Message{
+		Role:    "assistant",
+		Content: in.PreviousCandidate,
+	})
 
-	for _, feedback := range in.ReviewerFeedback {
-		fmt.Fprintf(&userContent, "--- %s ---\n", feedback.ReviewerLabel)
-		userContent.WriteString(feedback.Output + "\n\n")
+	// Add one user message with each reviewer's output fenced with blind labels
+	var feedbackContent strings.Builder
+	for i, feedback := range in.ReviewerFeedback {
+		reviewerLabel := fmt.Sprintf("reviewer %d", i+1)
+		delimBegin := fmt.Sprintf("===== %s BEGIN FEEDBACK %s =====", in.Delimiter, reviewerLabel)
+		delimEnd := fmt.Sprintf("===== %s END FEEDBACK %s =====", in.Delimiter, reviewerLabel)
+
+		fmt.Fprintf(&feedbackContent, "%s\n", delimBegin)
+		feedbackContent.WriteString(feedback.Output)
+		feedbackContent.WriteString("\n")
+		fmt.Fprintf(&feedbackContent, "%s\n\n", delimEnd)
 	}
-
-	userContent.WriteString(delimBeginCand + "\n")
-	userContent.WriteString(in.PreviousCandidate + "\n")
-	userContent.WriteString(delimEndCand + "\n\n")
-
-	userContent.WriteString(delimBeginFeed + "\n")
-	userContent.WriteString("Above, each reviewer's feedback is shown with their label (reviewer 1, reviewer 2, etc.). ")
-	userContent.WriteString("Review their comments as data about your previous answer. ")
-	userContent.WriteString("Return the revised document in full.\n")
-	userContent.WriteString(delimEndFeed + "\n")
 
 	messages = append(messages, transport.Message{
 		Role:    "user",
-		Content: userContent.String(),
+		Content: feedbackContent.String(),
 	})
 
 	return messages, nil
 }
 
 // ReviewerRevisionInput contains inputs for building a reviewer revision prompt.
+// Supports both the old []HistoryTurn interface and new *history.Document interface.
 type ReviewerRevisionInput struct {
 	History       []HistoryTurn
 	Request       string
@@ -347,6 +397,8 @@ type ReviewerRevisionInput struct {
 	AttemptID     string
 	Delimiter     string
 	Round         int
+	// HistoryDoc is the new canonical history document.
+	HistoryDoc *history.Document
 }
 
 // reviewerRevisionSystem builds the system message for a reviewer revision prompt.
@@ -378,23 +430,43 @@ func ReviewerRevision(in ReviewerRevisionInput) ([]transport.Message, error) {
 		return nil, errors.New("empty attempt id")
 	}
 
+	// Check for delimiter collisions in all fenced fields
 	if strings.Contains(in.Request, in.Delimiter) {
 		return nil, ErrDelimiterCollision
 	}
 	if strings.Contains(in.Candidate, in.Delimiter) {
 		return nil, ErrDelimiterCollision
 	}
-
-	var historyContent strings.Builder
-	historyContent.WriteString("## Conversation History\n\n")
 	for _, turn := range in.History {
-		fmt.Fprintf(&historyContent, "Turn: %s\n", turn.TurnID)
-		fmt.Fprintf(&historyContent, "State: %s\n", turn.State)
-		fmt.Fprintf(&historyContent, "Label: %s\n\n", turn.Label)
-		historyContent.WriteString("Input:\n")
-		historyContent.WriteString(turn.Input + "\n\n")
-		historyContent.WriteString("Answer:\n")
-		historyContent.WriteString(turn.Answer + "\n\n")
+		if strings.Contains(turn.Input, in.Delimiter) || strings.Contains(turn.Answer, in.Delimiter) {
+			return nil, ErrDelimiterCollision
+		}
+	}
+	for _, block := range in.OpenBlocks {
+		if strings.Contains(block.Evidence, in.Delimiter) || strings.Contains(block.Remedy, in.Delimiter) {
+			return nil, ErrDelimiterCollision
+		}
+	}
+
+	// Build history content - prefer canonical document if available
+	var historyContent strings.Builder
+	if in.HistoryDoc != nil {
+		// New code path: use canonical history document rendering
+		historyBytes := in.HistoryDoc.Bytes()
+		historyContent.Write(historyBytes)
+	}
+	if len(in.History) > 0 && in.HistoryDoc == nil {
+		// Backward compatibility path: format old HistoryTurn interface
+		historyContent.WriteString("## Conversation History\n\n")
+		for _, turn := range in.History {
+			fmt.Fprintf(&historyContent, "Turn: %s\n", turn.TurnID)
+			fmt.Fprintf(&historyContent, "State: %s\n", turn.State)
+			fmt.Fprintf(&historyContent, "Label: %s\n\n", turn.Label)
+			historyContent.WriteString("Input:\n")
+			historyContent.WriteString(turn.Input + "\n\n")
+			historyContent.WriteString("Answer:\n")
+			historyContent.WriteString(turn.Answer + "\n\n")
+		}
 	}
 
 	delimBeginReq := fmt.Sprintf("===== %s BEGIN REQUEST =====", in.Delimiter)

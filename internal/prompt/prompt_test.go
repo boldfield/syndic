@@ -689,15 +689,22 @@ func TestAuthorRevisionSuccess(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(messages))
+	// Message sequence: system, history (user, assistant), original input (user),
+	// previous candidate (assistant), feedback (user) = 6 messages
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d", len(messages))
 	}
 
 	if messages[0].Role != "system" {
 		t.Errorf("first message should be system")
 	}
-	if messages[1].Role != "user" {
-		t.Errorf("second message should be user")
+
+	// Check message roles: user, assistant, user, assistant, user
+	expectedRoles := []string{"system", "user", "assistant", "user", "assistant", "user"}
+	for i, expectedRole := range expectedRoles {
+		if messages[i].Role != expectedRole {
+			t.Errorf("message %d: expected role %s, got %s", i, expectedRole, messages[i].Role)
+		}
 	}
 
 	// Check that system message contains appropriate guidance
@@ -705,30 +712,32 @@ func TestAuthorRevisionSuccess(t *testing.T) {
 		t.Errorf("system message should mention revision")
 	}
 
-	// Check that user message contains history
+	// Check that history user message contains turn id
 	if !strings.Contains(messages[1].Content, "turn1") {
-		t.Errorf("user message should contain history turn id")
+		t.Errorf("history user message should contain turn id")
 	}
 
-	// Check that user message contains reviewer feedback
-	if !strings.Contains(messages[1].Content, "reviewer 1") {
-		t.Errorf("user message should contain reviewer label")
+	// Check that history assistant message contains answer
+	if !strings.Contains(messages[2].Content, "Here is the document") {
+		t.Errorf("history assistant message should contain answer")
 	}
 
-	// Check that user message contains previous candidate
-	if !strings.Contains(messages[1].Content, "first attempt") {
-		t.Errorf("user message should contain previous candidate")
+	// Check that original input message contains the input
+	if !strings.Contains(messages[3].Content, "Now revise it") {
+		t.Errorf("original input message should contain the input")
 	}
 
-	// Check that delimiter fences are present
-	if !strings.Contains(messages[1].Content, "BEGIN HISTORY") {
-		t.Errorf("user message should contain BEGIN HISTORY delimiter")
+	// Check that previous candidate message contains the candidate
+	if !strings.Contains(messages[4].Content, "first attempt") {
+		t.Errorf("previous candidate message should contain the candidate")
 	}
-	if !strings.Contains(messages[1].Content, "END HISTORY") {
-		t.Errorf("user message should contain END HISTORY delimiter")
+
+	// Check that feedback message contains reviewer feedback
+	if !strings.Contains(messages[5].Content, "reviewer 1") {
+		t.Errorf("feedback message should contain reviewer label")
 	}
-	if !strings.Contains(messages[1].Content, "BEGIN PREVIOUS CANDIDATE") {
-		t.Errorf("user message should contain BEGIN PREVIOUS CANDIDATE delimiter")
+	if !strings.Contains(messages[5].Content, "VERDICT v1") {
+		t.Errorf("feedback message should contain verdict")
 	}
 }
 
@@ -797,17 +806,25 @@ func TestAuthorRevisionMultipleFeedback(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(messages[1].Content, "reviewer 1") {
-		t.Errorf("user message should contain reviewer 1")
+	// Message sequence: system, input (user), previous candidate (assistant), feedback (user) = 4 messages
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages (no history), got %d", len(messages))
 	}
-	if !strings.Contains(messages[1].Content, "reviewer 2") {
-		t.Errorf("user message should contain reviewer 2")
+
+	// Feedback is in the last message
+	feedbackMessage := messages[3].Content
+
+	if !strings.Contains(feedbackMessage, "reviewer 1") {
+		t.Errorf("feedback message should contain reviewer 1")
 	}
-	if !strings.Contains(messages[1].Content, "output1") {
-		t.Errorf("user message should contain output1")
+	if !strings.Contains(feedbackMessage, "reviewer 2") {
+		t.Errorf("feedback message should contain reviewer 2")
 	}
-	if !strings.Contains(messages[1].Content, "output2") {
-		t.Errorf("user message should contain output2")
+	if !strings.Contains(feedbackMessage, "output1") {
+		t.Errorf("feedback message should contain output1")
+	}
+	if !strings.Contains(feedbackMessage, "output2") {
+		t.Errorf("feedback message should contain output2")
 	}
 }
 
@@ -1129,17 +1146,22 @@ func TestAuthorRevisionHistoryPreserved(t *testing.T) {
 		Round:     1,
 	})
 
-	userContent := messages[1].Content
-	if !strings.Contains(userContent, "turn456") {
-		t.Errorf("history turn id should be preserved")
+	// Message sequence: system, history user, history assistant, input, candidate, feedback
+	// History turn ID and label should be in messages[1] (history user message)
+	historyUserContent := messages[1].Content
+	if !strings.Contains(historyUserContent, "turn456") {
+		t.Errorf("history turn id should be preserved in history user message")
 	}
-	if !strings.Contains(userContent, "First attempt with details") {
-		t.Errorf("history input should be preserved verbatim")
+	if !strings.Contains(historyUserContent, "First attempt with details") {
+		t.Errorf("history input should be preserved verbatim in history user message")
 	}
-	if !strings.Contains(userContent, "no approved answer (incomplete)") {
-		t.Errorf("missing answer line should be preserved")
+	if !strings.Contains(historyUserContent, "unreviewed (solo)") {
+		t.Errorf("history label should be preserved in history user message")
 	}
-	if !strings.Contains(userContent, "unreviewed (solo)") {
-		t.Errorf("history label should be preserved")
+
+	// History assistant message should contain the missing answer line
+	historyAssistantContent := messages[2].Content
+	if !strings.Contains(historyAssistantContent, "no approved answer (incomplete)") {
+		t.Errorf("missing answer line should be preserved in history assistant message")
 	}
 }
