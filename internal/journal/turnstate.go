@@ -162,6 +162,25 @@ func (tx *Tx) FreezeCandidate(turnID, content, hash string) (candidateID string,
 	return candidateID, nil
 }
 
+// SetLatestCandidate creates a candidate with round/supersedes and atomically updates turns.candidate_id.
+// This is used for revision rounds where multiple candidates may exist for a turn.
+func (tx *Tx) SetLatestCandidate(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	// Create the candidate with round and supersedes
+	candidateID, err = tx.CreateCandidateWithRound(turnID, content, hash, round, supersedes)
+	if err != nil {
+		return "", fmt.Errorf("create candidate: %w", err)
+	}
+
+	// Atomically update the turn's candidate_id to point to the new candidate
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET candidate_id = ? WHERE id = ?
+	`, candidateID, turnID); err != nil {
+		return "", fmt.Errorf("update turn candidate_id: %w", err)
+	}
+
+	return candidateID, nil
+}
+
 // SetPhaseAtCancel stores the phase string on a turn.
 func (tx *Tx) SetPhaseAtCancel(turnID, phase string) error {
 	if _, err := tx.tx.Exec(`

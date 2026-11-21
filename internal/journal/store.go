@@ -296,3 +296,13 @@ func (s *Store) SetTurnFileTainted(turnID string, tainted bool) error {
 		return tx.SetTurnFileTainted(turnID, tainted)
 	})
 }
+
+// SetLatestCandidate creates a candidate with round/supersedes and atomically updates turns.candidate_id.
+func (s *Store) SetLatestCandidate(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		candidateID, txErr = tx.SetLatestCandidate(turnID, content, hash, round, supersedes)
+		return txErr
+	})
+	return candidateID, err
+}

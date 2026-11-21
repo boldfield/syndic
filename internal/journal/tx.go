@@ -464,15 +464,29 @@ func (tx *Tx) GetRun(runID string) (*RunRow, error) {
 
 // CreateCandidate stores a new candidate with a caller-provided hash.
 func (tx *Tx) CreateCandidate(turnID, content, hash string) (candidateID string, err error) {
+	return tx.CreateCandidateWithRound(turnID, content, hash, 0, "")
+}
+
+// CreateCandidateWithRound stores a new candidate with round and supersedes metadata.
+func (tx *Tx) CreateCandidateWithRound(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	if round < 0 || round > 5 {
+		return "", fmt.Errorf("round must be between 0 and 5, got %d", round)
+	}
+
 	candidateID, err = generateID()
 	if err != nil {
 		return "", err
 	}
 
+	var supersedesPtr *string
+	if supersedes != "" {
+		supersedesPtr = &supersedes
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO candidates (id, turn_id, content, content_hash)
-		VALUES (?, ?, ?, ?)
-	`, candidateID, turnID, content, hash); err != nil {
+		INSERT INTO candidates (id, turn_id, content, content_hash, round, supersedes)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, candidateID, turnID, content, hash, round, supersedesPtr); err != nil {
 		return "", fmt.Errorf("insert candidate: %w", err)
 	}
 
