@@ -16,13 +16,16 @@ else
 	base_ref="origin/main"
 fi
 
-# Fetch the base ref to ensure it's available
-git fetch origin "${GITHUB_BASE_REF:-.}" --depth=1 2>/dev/null || true
+# Verify the base ref exists and is resolvable
+if ! git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
+	echo "ERROR: Cannot resolve base ref ${base_ref}"
+	exit 1
+fi
 
 # Get the list of changed files in docs/design/ excluding open-questions.md
 changed_design_files=$(
-	git diff --name-only "${base_ref}...HEAD" -- "docs/design/" 2>/dev/null | \
-	grep -v "docs/design/open-questions.md" || true
+	git diff --name-only "${base_ref}...HEAD" -- "docs/design/" --no-renames | \
+	grep -vxF "docs/design/open-questions.md" || true
 )
 
 if [[ -n "$changed_design_files" ]]; then
