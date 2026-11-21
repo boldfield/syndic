@@ -250,6 +250,7 @@ type Participant struct {
 	ContextBound             *int64   `json:"context_bound,omitempty"`
 	OutputBound              *int64   `json:"output_bound,omitempty"`
 	DeclaredBilling          string   `json:"declared_billing"`
+	SpendingControl          string   `json:"spending_control,omitempty"`
 	BytesPerToken            *float64 `json:"bytes_per_token,omitempty"`
 	BytesPerTokenSource      string   `json:"bytes_per_token_source"`
 	ContextSource            string   `json:"context_source"`

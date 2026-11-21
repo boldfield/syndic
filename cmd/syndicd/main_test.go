@@ -648,6 +648,87 @@ func TestStaleSocket(t *testing.T) {
 	// The socket will be recreated during start
 }
 
+func TestLogExternalSpendingControl(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.toml")
+	journalPath := filepath.Join(dir, "journal.db")
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create roster with external spending control on a metered endpoint
+	rosterWithExternal := strings.Replace(
+		enginetest.RosterTOML,
+		`declared_billing = "none"`,
+		`declared_billing = "metered"
+spending_control = "external"`,
+		1,
+	)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterWithExternal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roster, err := config.Load(rosterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	store := journal.NewStore(db)
+	seedProbeRecords(t, store, roster)
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start syndicd in a goroutine
+	sigChan := make(chan os.Signal, 2)
+	var stdout, stderr threadSafeBuffer
+	done := make(chan int, 1)
+
+	go func() {
+		done <- run(
+			[]string{
+				"--roster", rosterPath,
+				"--journal", journalPath,
+				"--secrets-dir", filepath.Join(dir, "secrets"),
+			},
+			&stdout,
+			&stderr,
+			sigChan,
+		)
+	}()
+
+	// Give the daemon time to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Check that external spending control logging appears in stderr
+	stderrOutput := stderr.String()
+	hasMeteredExternal := strings.Contains(stderrOutput, "external spending control:") &&
+		strings.Contains(stderrOutput, "(metered)")
+
+	// Stop the daemon
+	sigChan <- os.Interrupt
+	exitCode := <-done
+
+	if exitCode != 0 {
+		t.Fatalf("want exit code 0, got %d", exitCode)
+	}
+
+	if !hasMeteredExternal {
+		t.Fatalf("want stderr to contain 'external spending control: ... (metered)', got: %q", stderrOutput)
+	}
+}
+
 func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster) {
 	t.Helper()
 	seeded := map[[2]string]bool{}

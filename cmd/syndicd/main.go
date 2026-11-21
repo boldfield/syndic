@@ -157,6 +157,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		return 1
 	}
 
+	// Log external spending control settings at start
+	logExternalSpendingControl(stderr, eng)
+
 	// Create and start the server
 	srv := server.New(server.Options{
 		Paths:  paths,
@@ -282,6 +285,21 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 					return 0
 				}
 			}
+		}
+	}
+}
+
+// logExternalSpendingControl logs all endpoints with external spending control
+// acceptance, once at start.
+func logExternalSpendingControl(w io.Writer, eng *engine.Engine) {
+	status, err := eng.Status()
+	if err != nil {
+		return
+	}
+
+	for _, p := range status.Participants {
+		if p.DeclaredBilling == "metered" && p.SpendingControl == "external" {
+			_, _ = fmt.Fprintf(w, "external spending control: %s (metered)\n", p.ID)
 		}
 	}
 }

@@ -223,10 +223,14 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 	if identity == "" || identity == "unknown" {
 		identity = "unknown (name-matched)"
 	}
+	billing := p.DeclaredBilling
+	if p.DeclaredBilling == "metered" && p.SpendingControl == "external" {
+		billing = "metered, external spending control"
+	}
 	lines = append(lines,
 		"  pool: "+plain(p.Pool)+"  model: "+orDash(plain(p.ReportedModel)),
 		"  identity: "+plain(identity),
-		"  roles: "+orDash(plain(strings.Join(p.EligibleRoles, ", ")))+"  billing: "+orDash(plain(p.DeclaredBilling)),
+		"  roles: "+orDash(plain(strings.Join(p.EligibleRoles, ", ")))+"  billing: "+orDash(plain(billing)),
 	)
 	if marked := markedSameFamily(s, p); marked {
 		lines = append(lines, "  same-family: reported model is in the author's family")
