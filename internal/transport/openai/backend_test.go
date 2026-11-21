@@ -1463,8 +1463,8 @@ func TestProbeOverLengthDisabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if record.OverLength != "not_run" {
-		t.Errorf("OverLength: got %q, want not_run when disabled", record.OverLength)
+	if record.OverLength != "not_run:skipped" {
+		t.Errorf("OverLength: got %q, want not_run:skipped when disabled", record.OverLength)
 	}
 }
 

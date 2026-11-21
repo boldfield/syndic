@@ -294,8 +294,8 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 		wantElig  transport.Tri
 	}{
 		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 6, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
-		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run", transport.TriUnknown},
-		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run", transport.TriUnknown},
+		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run:skipped", transport.TriUnknown},
+		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run:skipped", transport.TriUnknown},
 		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 5, "max_tokens", "rejected:other", transport.TriUnknown},
 		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 5, "max_tokens", "markers_missing", transport.TriUnknown},
 	}

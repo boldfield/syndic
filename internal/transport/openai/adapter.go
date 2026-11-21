@@ -245,7 +245,8 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		EligibleRequiredReviewer: transport.TriUnknown,
 		MaxTokensField:           "",
 		FinishReasons:            make(map[string]transport.CompletionStatus),
-		OverLength:               "not_run",
+		OverLength:               "not_run:skipped",
+		OverLengthClassifier:     overLengthClassificationRule,
 		LatencyMillis:            nil,
 		ToolRestrictions:         []string{"no tool definitions sent"},
 		ServerVersion:            "unknown",
@@ -336,7 +337,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	}
 
 	if !opts.DisableOverLength {
-		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
+		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen)
 	}
 
 	if len(probeFinishReasons) > 0 {
@@ -1036,7 +1037,7 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 	return "rejected:other", "unknown error"
 }
 
-func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
+func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
