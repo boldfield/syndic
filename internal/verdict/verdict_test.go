@@ -921,3 +921,26 @@ func TestV2MalformedOmittedBlockMaintainsRejection(t *testing.T) {
 		t.Errorf("expected problem about missing block-1, got %q", result.Problem)
 	}
 }
+
+func TestV1RejectedWhenContextRequiresV2(t *testing.T) {
+	v1 := fake.VerdictApprove("hash", "att")
+	cases := []struct {
+		name string
+		ctx  *V2Context
+		want Classification
+	}{
+		{"first round, no blocks", &V2Context{Round: 0}, Valid},
+		{"later round", &V2Context{Round: 2}, Malformed},
+		{"open blocks", &V2Context{OwnerOpenBlockIDs: map[string]bool{"b1": true}}, Malformed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseWithContext(v1, "hash", "att", tc.ctx).Classification; got != tc.want {
+				t.Errorf("classification = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := Parse(v1, "hash", "att").Classification; got != Valid {
+		t.Errorf("historical Parse of v1 = %v, want Valid", got)
+	}
+}

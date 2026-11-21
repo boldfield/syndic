@@ -283,6 +283,17 @@ func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) R
 		}
 	}
 
+	// A context that demands v2 (a later round, or open blocks needing a
+	// disposition) cannot be satisfied by a v1 envelope, which carries neither.
+	if envelopeVersion == "v1" && v2Ctx != nil && (v2Ctx.Round > 0 || len(v2Ctx.OwnerOpenBlockIDs) > 0) {
+		return Result{
+			Classification: Malformed,
+			Commentary:     commentary,
+			Verdict:        buildPartialVerdict(fields),
+			Problem:        "VERDICT v1 not accepted after the first round or with open blocks; VERDICT v2 required",
+		}
+	}
+
 	// Parse round value for v2
 	var roundValue int
 	if envelopeVersion == "v2" {

@@ -2156,33 +2156,36 @@ func TestGetReviewerOpenBlockIDsAcrossRounds(t *testing.T) {
 		VALUES (?, ?, ?, 'low', 'evidence', 'remedy', 'open', ?)
 	`, blockID, verdict1ID, candidateHashA, blockID)
 
-	// Verify query returns the block from round 1 when querying for any round
-	rows, err := conn.Query(`
-		SELECT b.reviewer_block_id
-		FROM blocks b
-		JOIN verdicts v ON b.verdict_id = v.id
-		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ? AND b.state = 'open' AND a.participant = ?
-		ORDER BY b.reviewer_block_id
-	`, turnID, reviewerParticipant)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
+	// A withdrawn block on candidate A and a block owned by another
+	// participant must both stay out of the reviewer's set.
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id, withdrawn_against_hash)
+		VALUES ('block-withdrawn', ?, ?, 'low', 'e', 'r', 'withdrawn', 'block-withdrawn', ?)
+	`, verdict1ID, candidateHashA, candidateHashB)
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES ('attempt-other', ?, 'reviewer-2', 'review', 1, CURRENT_TIMESTAMP, 'completed')
+	`, turnID)
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES ('verdict-other', 'attempt-other', ?, 'valid')
+	`, candidateHashA)
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id)
+		VALUES ('block-other', 'verdict-other', ?, 'low', 'e', 'r', 'open', 'block-other')
+	`, candidateHashA)
 
-	blockIDs := make(map[string]bool)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			t.Fatalf("scan failed: %v", err)
-		}
-		blockIDs[id] = true
+	// Looked up through the real method while a revised candidate B is current.
+	store := journal.NewStore(db)
+	var blockIDs map[string]bool
+	if err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		blockIDs, err = tx.GetReviewerOpenBlockIDs(turnID, reviewerParticipant)
+		return err
+	}); err != nil {
+		t.Fatalf("GetReviewerOpenBlockIDs: %v", err)
 	}
-
-	if len(blockIDs) != 1 {
-		t.Errorf("expected 1 open block, got %d", len(blockIDs))
-	}
-	if !blockIDs[blockID] {
-		t.Errorf("expected block %q to be in open blocks, got %v", blockID, blockIDs)
+	if len(blockIDs) != 1 || !blockIDs[blockID] {
+		t.Errorf("open blocks = %v, want only %q", blockIDs, blockID)
 	}
 }
