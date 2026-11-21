@@ -14,10 +14,11 @@ const (
 	ProtocolVersion     = 1
 	MaxFrameBytes       = 1 << 20 // 1 MiB
 	MaxContentPageBytes = 262144  // 256 KiB
-	// MaxConversationListSize is the maximum number of conversation summaries returned per page
-	// in a ConversationsReply. When a ConversationsRequest omits Limit, the server defaults to 200.
-	// A client may request a larger limit, which the server clamps to this maximum to prevent
-	// exceeding MaxFrameBytes with long workspace paths. See acceptance tests for the clamping behavior.
+	// MaxConversationListSize is the maximum number of conversation summaries that may be
+	// returned in a ConversationsReply. The server returns at most min(limit, 200) items
+	// and stops early to ensure the encoded reply fits within MaxFrameBytes, returning
+	// next_cursor for remaining items. A page must always contain at least one item when
+	// available; if a single item exceeds MaxFrameBytes, it is refused with error{code:"frame"}.
 	MaxConversationListSize = 200
 )
 
@@ -513,11 +514,11 @@ type ConversationTurnSummary struct {
 }
 
 type ConversationReply struct {
-	ID    string                    `json:"id"`
-	Turns []ConversationTurnSummary `json:"turns"`
+	ID string `json:"id"`
 	// Turns is the complete turn list; paging for the turn list is not specified in the design.
 	// The frame cap (MaxFrameBytes) bounds the reply size; a turn list that does not fit
-	// is refused with error{code: "frame"} as specified in section 3 of the protocol.
+	// is refused with error{code: "frame"} as specified in the v4 delta's Framing section.
+	Turns []ConversationTurnSummary `json:"turns"`
 }
 
 // Event body types
