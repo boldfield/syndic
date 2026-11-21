@@ -514,46 +514,46 @@ func TestSubmitPreservesWhitespaceAndSpacePrefixedSlash(t *testing.T) {
 // TestClipToWidth verifies width clipping for wide characters.
 func TestClipToWidth(t *testing.T) {
 	tests := []struct {
-		name     string
-		line     string
-		width    int
-		want     string
+		name  string
+		line  string
+		width int
+		want  string
 	}{
 		{
-			name: "ASCII within width",
-			line: "hello",
+			name:  "ASCII within width",
+			line:  "hello",
 			width: 10,
-			want: "hello",
+			want:  "hello",
 		},
 		{
-			name: "ASCII exceed width",
-			line: "hello world",
+			name:  "ASCII exceed width",
+			line:  "hello world",
 			width: 8,
-			want: "hello wo",
+			want:  "hello wo",
 		},
 		{
-			name: "emoji clipping - fits with space after",
-			line: "test 😀 emoji",
+			name:  "emoji clipping - fits with space after",
+			line:  "test 😀 emoji",
 			width: 8,
-			want: "test 😀 ",
+			want:  "test 😀 ",
 		},
 		{
-			name: "CJK characters",
-			line: "测试文本",
+			name:  "CJK characters",
+			line:  "测试文本",
 			width: 8,
-			want: "测试文本",
+			want:  "测试文本",
 		},
 		{
-			name: "mixed ASCII and CJK",
-			line: "hello 世界 test",
+			name:  "mixed ASCII and CJK",
+			line:  "hello 世界 test",
 			width: 12,
-			want: "hello 世界 t",
+			want:  "hello 世界 t",
 		},
 		{
-			name: "width zero",
-			line: "test",
+			name:  "width zero",
+			line:  "test",
 			width: 0,
-			want: "",
+			want:  "",
 		},
 	}
 
