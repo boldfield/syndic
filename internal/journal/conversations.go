@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // ConversationRow represents a conversation from the conversations table with aggregated turn data.
@@ -37,19 +39,15 @@ var ErrWorkspaceMismatch = errors.New("workspace_mismatch")
 var ErrMalformedCursor = errors.New("malformed cursor")
 
 // firstLine returns the first line of text cut to 80 cells, handling UTF-8 safely.
-// A cell is one display column; this approximates by counting runes, which over-counts wide characters.
+// A cell is one display column; uses runewidth to handle wide characters correctly.
 // Design §3 specifies: "the first line of the first input cut to 80 cells".
 func firstLine(text string, maxCells int) string {
 	// Find first newline
 	if idx := strings.IndexByte(text, '\n'); idx >= 0 {
 		text = text[:idx]
 	}
-	// Cut to maxCells runes, without splitting a multi-byte sequence
-	runes := []rune(text)
-	if len(runes) > maxCells {
-		runes = runes[:maxCells]
-	}
-	return string(runes)
+	// Cut to maxCells display width, handling wide characters (CJK, emoji, etc.)
+	return runewidth.Truncate(text, maxCells, "")
 }
 
 // scanConvRow scans a conversation row from the query result using a Scan function.
@@ -169,8 +167,10 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 
 	// Use a subquery with MAX(t.rowid) to handle keyset cursor
 	// Apply keyset cursor filter: we want rows where (max_rowid, id) < (cursor_rowid, cursor_id) in DESC order
+	// This handles -1 (no-turn conversations) correctly
 	cursorWhere := ""
-	if cursorRowid >= 0 {
+	if cursor != "" {
+		// Cursor filtering applies even when cursorRowid is -1 (conversations with no turns)
 		cursorWhere = "AND (COALESCE(cte.max_rowid, -1) < ? OR (COALESCE(cte.max_rowid, -1) = ? AND cte.id > ?))"
 		args = append(args, cursorRowid, cursorRowid, cursorID)
 	}
@@ -185,8 +185,8 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 		)
 		SELECT
 			cte.id, cte.created_at, cte.workspace,
-			(SELECT MAX(a.dispatched_at) FROM turns t2
-				LEFT JOIN attempts a ON t2.id = a.turn_id
+			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
+				FROM turns t2
 				WHERE t2.conversation_id = cte.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = cte.id AND t2.terminal_state IS NULL)) as running,
@@ -238,9 +238,8 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 
 // GetConversation retrieves a conversation by ID or unique prefix.
 // If idPrefix is a full ID, it returns that conversation exactly.
-// If idPrefix is a prefix, it matches the first conversation whose ID starts with that prefix.
-// Returns ErrAmbiguousConversationID if the prefix matches multiple conversations.
-// Returns ErrNoSuchContent if the ID is not found.
+// If idPrefix is a prefix, it returns an error if multiple conversations match;
+// returns ErrNoSuchContent if the ID is not found.
 func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
 	var row *ConversationRow
 	err := s.Tx(func(tx *Tx) error {
@@ -258,8 +257,8 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	rows, err := tx.tx.Query(`
 		SELECT
 			c.id, c.created_at, c.workspace,
-			(SELECT MAX(a.dispatched_at) FROM turns t2
-				LEFT JOIN attempts a ON t2.id = a.turn_id
+			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
+				FROM turns t2
 				WHERE t2.conversation_id = c.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
@@ -310,7 +309,7 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
 		SELECT t.id, t.terminal_state,
-			(SELECT MAX(a.dispatched_at) FROM attempts a WHERE a.turn_id = t.id) as submitted_at
+			datetime('2000-01-01', '+' || COALESCE(t.rowid, 0) || ' seconds') as submitted_at
 		FROM turns t
 		WHERE t.conversation_id = ?
 		ORDER BY t.rowid ASC
@@ -406,8 +405,8 @@ func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*Conversa
 	row := tx.tx.QueryRow(`
 		SELECT
 			c.id, c.created_at, c.workspace,
-			(SELECT MAX(a.dispatched_at) FROM turns t2
-				LEFT JOIN attempts a ON t2.id = a.turn_id
+			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
+				FROM turns t2
 				WHERE t2.conversation_id = c.id) as last_submitted_at,
 			COUNT(t.id) as turn_count,
 			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,

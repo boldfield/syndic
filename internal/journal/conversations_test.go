@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
+
 	"github.com/boldfield/syndic/internal/journal"
 )
 
@@ -720,12 +722,10 @@ func TestListConversationsPaginationKeepsPreviousRows(t *testing.T) {
 	ws := "/home/user/project"
 
 	// Create 5 conversations with turns to establish stable ordering
-	var conversations []string
 	for i := 0; i < 5; i++ {
 		conv := f.createConversation(t, &ws)
 		turn := f.createTurn(t, runID, conv)
 		f.addMessage(t, turn, "message "+string(rune('a'+i)))
-		conversations = append(conversations, conv)
 	}
 
 	// Get all pages in sequence without modifications
@@ -801,6 +801,181 @@ func TestConversationPreviewMultibyteTruncation(t *testing.T) {
 	actualLength := len([]rune(conv.Preview))
 	if actualLength > expectedLength {
 		t.Errorf("preview length %d exceeds 80 runes, got %d", expectedLength, actualLength)
+	}
+
+	// Should not contain the second line
+	if strings.Contains(conv.Preview, "Second line") {
+		t.Errorf("preview should not contain second line")
+	}
+
+	// Should be valid UTF-8
+	if !utf8.ValidString(conv.Preview) {
+		t.Errorf("preview is not valid UTF-8")
+	}
+}
+
+func TestListConversationsPaginationWithNoTurnConversations(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Create a run for adding turns to some conversations
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	ws := "/home/user/project"
+
+	// Create 3 conversations with turns and 2 without
+	// Conversations without turns will have max_rowid = -1 and must still paginate correctly
+	convWithTurns := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		conv := f.createConversation(t, &ws)
+		convWithTurns[i] = conv
+		turn := f.createTurn(t, runID, conv)
+		f.addMessage(t, turn, "message "+string(rune('a'+i)))
+	}
+
+	// Create 2 conversations without turns (no-turn conversations)
+	for i := 0; i < 2; i++ {
+		f.createConversation(t, &ws)
+	}
+
+	// Paginate through all conversations with limit=2
+	var allConvs []journal.ConversationRow
+	var cursor string
+	for page := 0; page < 3; page++ {
+		pageConvs, nextCursor, err := f.store.ListConversations(&ws, cursor, 2)
+		if err != nil {
+			t.Fatalf("ListConversations page %d: %v", page, err)
+		}
+		allConvs = append(allConvs, pageConvs...)
+		if len(pageConvs) == 0 {
+			break
+		}
+		cursor = nextCursor
+	}
+
+	// Check that we got all 5 conversations
+	if len(allConvs) != 5 {
+		t.Errorf("expected 5 total conversations, got %d", len(allConvs))
+	}
+
+	// Check for duplicates and verify no-turn conversations are present
+	seen := make(map[string]bool)
+	noTurnCount := 0
+	for _, c := range allConvs {
+		if seen[c.ID] {
+			t.Errorf("duplicate conversation %s in pagination", c.ID)
+		}
+		seen[c.ID] = true
+		if c.TurnCount == 0 {
+			noTurnCount++
+		}
+	}
+
+	if noTurnCount != 2 {
+		t.Errorf("expected 2 no-turn conversations, got %d", noTurnCount)
+	}
+}
+
+func TestListConversationsPaginationStabilityWithMutation(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Create a run
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	ws := "/home/user/project"
+
+	// Create 5 conversations with turns
+	convs := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		conv := f.createConversation(t, &ws)
+		convs[i] = conv
+		turn := f.createTurn(t, runID, conv)
+		f.addMessage(t, turn, "message "+string(rune('a'+i)))
+	}
+
+	// Get page 1 with limit=2
+	page1, cursor1, err := f.store.ListConversations(&ws, "", 2)
+	if err != nil {
+		t.Fatalf("ListConversations page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("expected 2 conversations on page 1, got %d", len(page1))
+	}
+
+	// Now add a turn to the last conversation (which hasn't been returned yet)
+	// This should not cause it to skip to the front where it could be duplicated
+	lastConv := convs[4]
+	newTurn := f.createTurn(t, runID, lastConv)
+	f.addMessage(t, newTurn, "new turn message")
+
+	// Get page 2 with the cursor from page 1
+	page2, cursor2, err := f.store.ListConversations(&ws, cursor1, 2)
+	if err != nil {
+		t.Fatalf("ListConversations page 2: %v", err)
+	}
+
+	// Get page 3
+	page3, _, err := f.store.ListConversations(&ws, cursor2, 2)
+	if err != nil {
+		t.Fatalf("ListConversations page 3: %v", err)
+	}
+
+	// Collect all conversation IDs
+	allConvs := append(page1, append(page2, page3...)...)
+	seen := make(map[string]bool)
+	for _, c := range allConvs {
+		if seen[c.ID] {
+			t.Errorf("duplicate conversation %s found across pages", c.ID)
+		}
+		seen[c.ID] = true
+	}
+
+	// Check that we got all 5 unique conversations
+	if len(seen) != 5 {
+		t.Errorf("expected 5 unique conversations, got %d", len(seen))
+	}
+}
+
+func TestConversationPreviewDisplayWidth(t *testing.T) {
+	f := newConvFixture(t)
+
+	// Create a run and conversation
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	convID := f.createConversation(t, nil)
+
+	// Create a turn with wide characters (CJK, emoji)
+	// CJK characters are 2 cells wide, emoji can be 1-2+ cells
+	turnID := f.createTurn(t, runID, convID)
+	// 40 emoji characters (assume 2 cells each) = 80 cells
+	content := strings.Repeat("🎉", 40) + "\nSecond line"
+	f.addMessage(t, turnID, content)
+
+	// Get the conversation
+	conv, err := f.store.GetConversation(convID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+
+	// Use runewidth to check the display width
+	width := 0
+	for _, r := range conv.Preview {
+		w := runewidth.RuneWidth(r)
+		if w > 0 {
+			width += w
+		}
+	}
+
+	if width > 80 {
+		t.Errorf("preview display width %d exceeds 80 cells", width)
 	}
 
 	// Should not contain the second line
