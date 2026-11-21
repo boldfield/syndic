@@ -285,6 +285,11 @@ type QuickProfile struct {
 	DefinitionSHA256 string   `json:"definition_sha256"`
 }
 
+type Revision struct {
+	Default int `json:"default"`
+	Ceiling int `json:"ceiling"`
+}
+
 type StatusReply struct {
 	RunID                string         `json:"run_id"`
 	RunStartedAt         string         `json:"run_started_at"`
@@ -300,6 +305,7 @@ type StatusReply struct {
 	QuickProfiles        []QuickProfile `json:"quick_profiles"`
 	TurnsOpen            []string       `json:"turns_open"`
 	EngineStartedAt      string         `json:"engine_started_at"`
+	Revision             *Revision      `json:"revision,omitempty"`
 }
 
 type SubmitRequest struct {
@@ -308,6 +314,10 @@ type SubmitRequest struct {
 	Preset           *string `json:"preset,omitempty"`
 	QuickProfile     *string `json:"quick_profile,omitempty"`
 	AllowProvisional *bool   `json:"allow_provisional,omitempty"`
+	Workspace        *string `json:"workspace,omitempty"`
+	ConversationID   *string `json:"conversation_id,omitempty"`
+	ContextFromTurn  *string `json:"context_from_turn,omitempty"`
+	MaxRounds        *int    `json:"max_rounds,omitempty"`
 }
 
 type SubmitReply struct {
@@ -315,6 +325,8 @@ type SubmitReply struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
+	ConversationID  string  `json:"conversation_id"`
+	ContextHash     string  `json:"context_hash"`
 }
 
 type CancelRequest struct {
@@ -463,6 +475,41 @@ type UnsubscribeReply struct {
 	OK bool `json:"ok"`
 }
 
+type ConversationsRequest struct {
+	Workspace *string `json:"workspace,omitempty"`
+	Cursor    *string `json:"cursor,omitempty"`
+	Limit     *int    `json:"limit,omitempty"`
+}
+
+type ConversationSummary struct {
+	ID              string  `json:"id"`
+	CreatedAt       string  `json:"created_at"`
+	Workspace       *string `json:"workspace"`
+	LastSubmittedAt string  `json:"last_submitted_at"`
+	TurnCount       int     `json:"turn_count"`
+	Running         bool    `json:"running"`
+	Preview         string  `json:"preview"`
+}
+
+type ConversationsReply struct {
+	Items      []ConversationSummary `json:"items"`
+	NextCursor *string               `json:"next_cursor,omitempty"`
+}
+
+type ConversationRequest struct {
+	ID string `json:"id"`
+}
+
+type ConversationTurnSummary struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+type ConversationReply struct {
+	ID    string                    `json:"id"`
+	Turns []ConversationTurnSummary `json:"turns"`
+}
+
 // Event body types
 
 type EvRunOpened struct {
@@ -500,6 +547,11 @@ type EvTurnSubmitted struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
+	ConversationID  string  `json:"conversation_id"`
+}
+
+type EvConversationCreated struct {
+	ConversationID string `json:"conversation_id"`
 }
 
 type EvTurnState struct {
@@ -617,17 +669,19 @@ type EvOverride struct {
 
 // String constants for request types
 const (
-	RequestHello       = "hello"
-	RequestStatus      = "status"
-	RequestSubmit      = "submit"
-	RequestCancel      = "cancel"
-	RequestOverride    = "override"
-	RequestRelease     = "release"
-	RequestTurn        = "turn"
-	RequestTranscript  = "transcript"
-	RequestContent     = "content"
-	RequestSubscribe   = "subscribe"
-	RequestUnsubscribe = "unsubscribe"
+	RequestHello         = "hello"
+	RequestStatus        = "status"
+	RequestSubmit        = "submit"
+	RequestCancel        = "cancel"
+	RequestOverride      = "override"
+	RequestRelease       = "release"
+	RequestTurn          = "turn"
+	RequestTranscript    = "transcript"
+	RequestContent       = "content"
+	RequestSubscribe     = "subscribe"
+	RequestUnsubscribe   = "unsubscribe"
+	RequestConversations = "conversations"
+	RequestConversation  = "conversation"
 )
 
 // String constants for error codes
@@ -654,6 +708,10 @@ const (
 	ErrorCodeNotOpen             = "not_open"
 	ErrorCodeNotFound            = "not_found"
 	ErrorCodeBadRequest          = "bad_request"
+	ErrorCodeProbing             = "probing"
+	ErrorCodeWorkspaceMismatch   = "workspace_mismatch"
+	ErrorCodeMaxRounds           = "max_rounds"
+	ErrorCodeEgress              = "egress"
 )
 
 // String constants for event kinds
@@ -681,6 +739,7 @@ const (
 	EventKindBudgetEstimateExceeded = "budget_estimate_exceeded"
 	EventKindBudgetExhausted        = "budget_exhausted"
 	EventKindOverride               = "override"
+	EventKindConversationCreated    = "conversation_created"
 )
 
 var EventKinds = []string{
@@ -707,4 +766,5 @@ var EventKinds = []string{
 	EventKindBudgetEstimateExceeded,
 	EventKindBudgetExhausted,
 	EventKindOverride,
+	EventKindConversationCreated,
 }

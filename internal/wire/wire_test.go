@@ -365,6 +365,7 @@ func TestEventKindsConstant(t *testing.T) {
 		"budget_estimate_exceeded",
 		"budget_exhausted",
 		"override",
+		"conversation_created",
 	}
 
 	// Check exact set match
@@ -413,20 +414,24 @@ func TestRequestNames(t *testing.T) {
 		RequestContent,
 		RequestSubscribe,
 		RequestUnsubscribe,
+		RequestConversations,
+		RequestConversation,
 	}
 
 	expectedNames := map[string]bool{
-		"hello":       true,
-		"status":      true,
-		"submit":      true,
-		"cancel":      true,
-		"override":    true,
-		"release":     true,
-		"turn":        true,
-		"transcript":  true,
-		"content":     true,
-		"subscribe":   true,
-		"unsubscribe": true,
+		"hello":         true,
+		"status":        true,
+		"submit":        true,
+		"cancel":        true,
+		"override":      true,
+		"release":       true,
+		"turn":          true,
+		"transcript":    true,
+		"content":       true,
+		"subscribe":     true,
+		"unsubscribe":   true,
+		"conversations": true,
+		"conversation":  true,
 	}
 
 	for _, r := range requests {
@@ -466,6 +471,10 @@ func TestErrorCodes(t *testing.T) {
 		"not_open",
 		"not_found",
 		"bad_request",
+		"probing",
+		"workspace_mismatch",
+		"max_rounds",
+		"egress",
 	}
 
 	errorCodes := []string{
@@ -491,6 +500,10 @@ func TestErrorCodes(t *testing.T) {
 		ErrorCodeNotOpen,
 		ErrorCodeNotFound,
 		ErrorCodeBadRequest,
+		ErrorCodeProbing,
+		ErrorCodeWorkspaceMismatch,
+		ErrorCodeMaxRounds,
+		ErrorCodeEgress,
 	}
 
 	// Check lengths match
@@ -534,6 +547,8 @@ func TestSubmitReplyJSON(t *testing.T) {
 		Preset:          "review",
 		QuickProfile:    &qp,
 		EstimatedTokens: 50000,
+		ConversationID:  "conv-456",
+		ContextHash:     "ctx-abc123",
 	}
 
 	data, err := json.Marshal(reply)
@@ -551,6 +566,8 @@ func TestSubmitReplyJSON(t *testing.T) {
 		"preset":           true,
 		"quick_profile":    true,
 		"estimated_tokens": true,
+		"conversation_id":  true,
+		"context_hash":     true,
 	}
 
 	// Check exact key set
@@ -928,6 +945,285 @@ func TestFrameOmitEmpty(t *testing.T) {
 	if _, ok := m["body"]; ok {
 		t.Error("Nil body should be omitted")
 	}
+}
+
+func TestSubmitReplyWithConversation(t *testing.T) {
+	qp := "fast"
+	reply := SubmitReply{
+		TurnID:          "turn-123",
+		Preset:          "review",
+		QuickProfile:    &qp,
+		EstimatedTokens: 50000,
+		ConversationID:  "conv-456",
+		ContextHash:     "ctx-abc123",
+	}
+
+	data, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"turn_id":          true,
+		"preset":           true,
+		"quick_profile":    true,
+		"estimated_tokens": true,
+		"conversation_id":  true,
+		"context_hash":     true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("SubmitReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in SubmitReply: %s", key)
+		}
+	}
+}
+
+func TestSubmitRequestWithConversation(t *testing.T) {
+	req := SubmitRequest{
+		SubmissionID:    "sub-123",
+		Input:           "test input",
+		Workspace:       ptrString("/home/user"),
+		ConversationID:  ptrString("conv-456"),
+		ContextFromTurn: ptrString("turn-789"),
+		MaxRounds:       ptrInt(2),
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"submission_id":     true,
+		"input":             true,
+		"workspace":         true,
+		"conversation_id":   true,
+		"context_from_turn": true,
+		"max_rounds":        true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("SubmitRequest has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in SubmitRequest: %s", key)
+		}
+	}
+}
+
+func TestConversationsReplyJSON(t *testing.T) {
+	summary := ConversationSummary{
+		ID:              "conv-123",
+		CreatedAt:       "2026-11-21T10:00:00Z",
+		Workspace:       ptrString("/home/user"),
+		LastSubmittedAt: "2026-11-21T11:00:00Z",
+		TurnCount:       3,
+		Running:         false,
+		Preview:         "What is 2+2?",
+	}
+
+	reply := ConversationsReply{
+		Items:      []ConversationSummary{summary},
+		NextCursor: ptrString("cursor-next"),
+	}
+
+	data, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"items":       true,
+		"next_cursor": true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("ConversationsReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in ConversationsReply: %s", key)
+		}
+	}
+}
+
+func TestConversationReplyJSON(t *testing.T) {
+	reply := ConversationReply{
+		ID: "conv-123",
+		Turns: []ConversationTurnSummary{
+			{ID: "turn-1", State: "approved"},
+			{ID: "turn-2", State: "incomplete"},
+		},
+	}
+
+	data, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"id":    true,
+		"turns": true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("ConversationReply has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in ConversationReply: %s", key)
+		}
+	}
+}
+
+func TestEvConversationCreatedJSON(t *testing.T) {
+	ev := EvConversationCreated{
+		ConversationID: "conv-123",
+	}
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"conversation_id": true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("EvConversationCreated has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in EvConversationCreated: %s", key)
+		}
+	}
+}
+
+func TestEvTurnSubmittedWithConversationJSON(t *testing.T) {
+	qp := "fast"
+	ev := EvTurnSubmitted{
+		TurnID:          "turn-123",
+		SubmissionID:    "sub-456",
+		Preset:          "review",
+		QuickProfile:    &qp,
+		EstimatedTokens: 40000,
+		ConversationID:  "conv-789",
+	}
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"turn_id":          true,
+		"submission_id":    true,
+		"preset":           true,
+		"quick_profile":    true,
+		"estimated_tokens": true,
+		"conversation_id":  true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("EvTurnSubmitted has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in EvTurnSubmitted: %s", key)
+		}
+	}
+}
+
+func TestStatusReplyWithRevisionJSON(t *testing.T) {
+	revision := &Revision{Default: 2, Ceiling: 5}
+	reply := StatusReply{
+		RunID:                "run-123",
+		DefaultPreset:        "review",
+		DeadlinesProvisional: false,
+		Participants:         []Participant{},
+		Pools:                []Pool{},
+		OrphanedHolds:        []Hold{},
+		QuickProfiles:        []QuickProfile{},
+		TurnsOpen:            []string{},
+		Revision:             revision,
+	}
+
+	data, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if _, ok := m["revision"]; !ok {
+		t.Error("Revision field should be present when set")
+	}
+
+	var revisionData map[string]interface{}
+	revisionBytes, err := json.Marshal(m["revision"])
+	if err != nil {
+		t.Fatalf("Failed to marshal revision: %v", err)
+	}
+	if err := json.Unmarshal(revisionBytes, &revisionData); err != nil {
+		t.Fatalf("Failed to unmarshal revision: %v", err)
+	}
+
+	expectedRevisionKeys := map[string]bool{
+		"default": true,
+		"ceiling": true,
+	}
+
+	if len(revisionData) != len(expectedRevisionKeys) {
+		t.Errorf("Revision has %d keys, expected %d. Keys: %v", len(revisionData), len(expectedRevisionKeys), revisionData)
+	}
+	for key := range revisionData {
+		if !expectedRevisionKeys[key] {
+			t.Errorf("Unexpected key in Revision: %s", key)
+		}
+	}
+}
+
+func ptrInt(i int) *int {
+	return &i
 }
 
 // buildExactFrame returns a frame whose encoded line, including the newline,
