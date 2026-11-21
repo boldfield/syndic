@@ -5,13 +5,19 @@ import (
 	"testing"
 )
 
-func TestCanonicalFormat(t *testing.T) {
+func TestCanonicalFormatV2(t *testing.T) {
 	id := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1", "ev2"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{CallID: "call2", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	canonical, err := Canonical(id)
@@ -19,9 +25,54 @@ func TestCanonicalFormat(t *testing.T) {
 		t.Fatalf("Canonical failed: %v", err)
 	}
 
-	expected := "syndic-candidate/v1\nmanifest:abc123\nturn:turn1\nauthor_attempt:attempt1\ncontent_sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\ncontent_len:5\nevidence:ev1,ev2\n"
+	expected := "syndic-candidate/v2\nmanifest:abc123\nturn:turn1\nauthor_attempt:attempt1\ncontent_sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\ncontent_len:5\nevidence:call1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,call2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ncontext:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nround:0\nchanges:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n"
 	if string(canonical) != expected {
 		t.Errorf("Canonical format mismatch.\nExpected:\n%q\nGot:\n%q", expected, string(canonical))
+	}
+}
+
+func TestCanonicalFormatV2WithNone(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "",
+		Round:       1,
+		ChangesHash: "",
+	}
+
+	canonical, err := Canonical(id)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
+
+	expected := "syndic-candidate/v2\nmanifest:abc123\nturn:turn1\nauthor_attempt:attempt1\ncontent_sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\ncontent_len:5\nevidence:call1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ncontext:none\nround:1\nchanges:none\n"
+	if string(canonical) != expected {
+		t.Errorf("Canonical format mismatch.\nExpected:\n%q\nGot:\n%q", expected, string(canonical))
+	}
+}
+
+func TestCanonicalFormatV1Backward(t *testing.T) {
+	id := IdentityV1{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		EvidenceIDs:     []string{"ev1", "ev2"},
+	}
+
+	canonical, err := CanonicalV1(id)
+	if err != nil {
+		t.Fatalf("CanonicalV1 failed: %v", err)
+	}
+
+	expected := "syndic-candidate/v1\nmanifest:abc123\nturn:turn1\nauthor_attempt:attempt1\ncontent_sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\ncontent_len:5\nevidence:ev1,ev2\n"
+	if string(canonical) != expected {
+		t.Errorf("CanonicalV1 format mismatch.\nExpected:\n%q\nGot:\n%q", expected, string(canonical))
 	}
 }
 
@@ -31,7 +82,13 @@ func TestHashValue(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1", "ev2"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{CallID: "call2", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	hash, err := Hash(id)
@@ -39,9 +96,17 @@ func TestHashValue(t *testing.T) {
 		t.Fatalf("Hash failed: %v", err)
 	}
 
-	expectedHash := "8c24d1efe000fe81f3d653df3740ed0c201461beeaf46df78a8433659dd5878e"
+	// Golden v2 hash: exact expected value
+	const expectedHash = "c3ad2f583675b73a955827580ad9204b323e8c196710e9fa4d9569056c5f890f"
 	if hash != expectedHash {
-		t.Errorf("Hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
+		t.Errorf("Golden v2 hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
+	}
+
+	// Hash should be lowercase hex
+	for _, c := range hash {
+		if (c < 'a' || c > 'f') && (c < '0' || c > '9') {
+			t.Errorf("Hash contains invalid character: %c", c)
+		}
 	}
 }
 
@@ -51,7 +116,12 @@ func TestHashConsistency(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1", "ev2"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	hash1, err := Hash(id)
@@ -69,21 +139,31 @@ func TestHashConsistency(t *testing.T) {
 	}
 }
 
-func TestHashChangesWithManifest(t *testing.T) {
+func TestHashChangesWithResultSHA256(t *testing.T) {
 	id1 := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	id2 := Identity{
-		ManifestHash:    "xyz789",
+		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	hash1, err := Hash(id1)
@@ -96,141 +176,23 @@ func TestHashChangesWithManifest(t *testing.T) {
 	}
 
 	if hash1 == hash2 {
-		t.Error("Hash should change when manifest hash changes")
+		t.Error("Hash should change when result_sha256 changes")
 	}
 }
 
-func TestHashChangesWithTurnID(t *testing.T) {
+func TestHashChangesWithEvidenceOrder(t *testing.T) {
 	id1 := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	id2 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn2",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	hash1, err := Hash(id1)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-	hash2, err := Hash(id2)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-
-	if hash1 == hash2 {
-		t.Error("Hash should change when turn id changes")
-	}
-}
-
-func TestHashChangesWithAuthorAttemptID(t *testing.T) {
-	id1 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	id2 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt2",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	hash1, err := Hash(id1)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-	hash2, err := Hash(id2)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-
-	if hash1 == hash2 {
-		t.Error("Hash should change when author attempt id changes")
-	}
-}
-
-func TestHashChangesWithContent(t *testing.T) {
-	id1 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	id2 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("world"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	hash1, err := Hash(id1)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-	hash2, err := Hash(id2)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-
-	if hash1 == hash2 {
-		t.Error("Hash should change when content changes")
-	}
-}
-
-func TestHashChangesWithContentByte(t *testing.T) {
-	id1 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	id2 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hallo"),
-		EvidenceIDs:     []string{"ev1"},
-	}
-
-	hash1, err := Hash(id1)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-	hash2, err := Hash(id2)
-	if err != nil {
-		t.Fatalf("Hash failed: %v", err)
-	}
-
-	if hash1 == hash2 {
-		t.Error("Hash should change when one byte of content changes")
-	}
-}
-
-func TestHashChangesWithEvidenceList(t *testing.T) {
-	id1 := Identity{
-		ManifestHash:    "abc123",
-		TurnID:          "turn1",
-		AuthorAttemptID: "attempt1",
-		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev1", "ev2"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{CallID: "call2", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	id2 := Identity{
@@ -238,7 +200,13 @@ func TestHashChangesWithEvidenceList(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev2", "ev1"},
+		Evidence: []EvidencePair{
+			{CallID: "call2", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	hash1, err := Hash(id1)
@@ -255,34 +223,133 @@ func TestHashChangesWithEvidenceList(t *testing.T) {
 	}
 }
 
-func TestEvidenceOrderMatters(t *testing.T) {
+// Sentinel collision tests: ensure "none" and empty string are distinct
+func TestContextHashNoneCollision(t *testing.T) {
 	id1 := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"a", "b"},
+		Evidence:        []EvidencePair{},
+		ContextHash:     "",
+		Round:           0,
+		ChangesHash:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
+	canonical, err := Canonical(id1)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
+
+	// Both should produce "context:none" but we validate that the literal "none" string is rejected
+	if !strings.Contains(string(canonical), "context:none\n") {
+		t.Error("Should produce context:none for empty context_hash")
+	}
+
+	// Test that literal "none" is rejected as invalid
 	id2 := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"b", "a"},
+		Evidence:        []EvidencePair{},
+		ContextHash:     "none",
+		Round:           0,
+		ChangesHash:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
-	canonical1, err := Canonical(id1)
+	_, err = Canonical(id2)
+	if err == nil {
+		t.Error("Should reject literal 'none' string for context_hash")
+	}
+}
+
+func TestChangesHashNoneCollision(t *testing.T) {
+	id1 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:           0,
+		ChangesHash:     "",
+	}
+
+	canonical, err := Canonical(id1)
 	if err != nil {
 		t.Fatalf("Canonical failed: %v", err)
 	}
-	canonical2, err := Canonical(id2)
-	if err != nil {
-		t.Fatalf("Canonical failed: %v", err)
+
+	if !strings.Contains(string(canonical), "changes:none\n") {
+		t.Error("Should produce changes:none for empty changes_hash")
 	}
 
-	if string(canonical1) == string(canonical2) {
-		t.Error("Canonical forms should differ when evidence order differs")
+	// Test that literal "none" is rejected as invalid
+	id2 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:           0,
+		ChangesHash:     "none",
+	}
+
+	_, err = Canonical(id2)
+	if err == nil {
+		t.Error("Should reject literal 'none' string for changes_hash")
+	}
+}
+
+func TestHashV1Consistency(t *testing.T) {
+	id := IdentityV1{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		EvidenceIDs:     []string{"ev1", "ev2"},
+	}
+
+	hash1, err := HashV1(id)
+	if err != nil {
+		t.Fatalf("First HashV1 failed: %v", err)
+	}
+
+	hash2, err := HashV1(id)
+	if err != nil {
+		t.Fatalf("Second HashV1 failed: %v", err)
+	}
+
+	if hash1 != hash2 {
+		t.Errorf("HashV1 not consistent: %s vs %s", hash1, hash2)
+	}
+
+	// Golden v1 hash regression: stored candidates must maintain their v1 hash
+	const expectedV1Hash = "8c24d1efe000fe81f3d653df3740ed0c201461beeaf46df78a8433659dd5878e"
+	if hash1 != expectedV1Hash {
+		t.Errorf("Golden v1 hash mismatch.\nExpected: %s\nGot:      %s", expectedV1Hash, hash1)
+	}
+}
+
+func TestV1LegacyCanonicalFormat(t *testing.T) {
+	id := IdentityV1{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		EvidenceIDs:     []string{},
+	}
+
+	canonical, err := CanonicalV1(id)
+	if err != nil {
+		t.Fatalf("CanonicalV1 failed: %v", err)
+	}
+
+	expected := "syndic-candidate/v1\nmanifest:abc123\nturn:turn1\nauthor_attempt:attempt1\ncontent_sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\ncontent_len:5\nevidence:none\n"
+	if string(canonical) != expected {
+		t.Errorf("CanonicalV1 format mismatch.\nExpected:\n%q\nGot:\n%q", expected, string(canonical))
 	}
 }
 
@@ -292,7 +359,10 @@ func TestNoEvidence(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{},
+		Evidence:        []EvidencePair{},
+		ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:           0,
+		ChangesHash:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	canonical, err := Canonical(id)
@@ -301,7 +371,7 @@ func TestNoEvidence(t *testing.T) {
 	}
 
 	if !strings.Contains(string(canonical), "evidence:none\n") {
-		t.Error("Should have evidence:none when no evidence ids")
+		t.Error("Should have evidence:none when no evidence pairs")
 	}
 }
 
@@ -311,7 +381,12 @@ func TestEmptyContent(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte{},
-		EvidenceIDs:     []string{"ev1"},
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
 	canonical, err := Canonical(id)
@@ -330,7 +405,10 @@ func TestNonUTF8Content(t *testing.T) {
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte{0xFF, 0xFE, 0xFD},
-		EvidenceIDs:     []string{},
+		Evidence:        []EvidencePair{},
+		ContextHash:     "",
+		Round:           0,
+		ChangesHash:     "",
 	}
 
 	canonical, err := Canonical(id)
@@ -343,13 +421,137 @@ func TestNonUTF8Content(t *testing.T) {
 	}
 }
 
+func TestHashChangesWithContextHash(t *testing.T) {
+	id1 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	id2 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("Hash should change when context hash changes")
+	}
+}
+
+func TestHashChangesWithRound(t *testing.T) {
+	id1 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	id2 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       1,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("Hash should change when round changes")
+	}
+}
+
+func TestHashChangesWithChangesHash(t *testing.T) {
+	id1 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	id2 := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	}
+
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("Hash should change when changes hash changes")
+	}
+}
+
 func TestManifestHashEmpty(t *testing.T) {
 	id := Identity{
 		ManifestHash:    "",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{},
+		Evidence:        []EvidencePair{},
+		Round:           0,
 	}
 
 	_, err := Canonical(id)
@@ -364,7 +566,8 @@ func TestTurnIDContainsNewline(t *testing.T) {
 		TurnID:          "turn\n1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{},
+		Evidence:        []EvidencePair{},
+		Round:           0,
 	}
 
 	_, err := Canonical(id)
@@ -373,17 +576,345 @@ func TestTurnIDContainsNewline(t *testing.T) {
 	}
 }
 
-func TestEvidenceIDContainsComma(t *testing.T) {
+func TestEvidenceCallIDContainsColon(t *testing.T) {
 	id := Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
 		AuthorAttemptID: "attempt1",
 		Content:         []byte("hello"),
-		EvidenceIDs:     []string{"ev,1"},
+		Evidence: []EvidencePair{
+			{CallID: "call:1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		Round: 0,
 	}
 
 	_, err := Canonical(id)
 	if err == nil {
-		t.Error("Should error when evidence id contains comma")
+		t.Error("Should error when call_id contains colon")
+	}
+}
+
+func TestEvidenceResultSHA256Invalid(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "not-hex"},
+		},
+		Round: 0,
+	}
+
+	_, err := Canonical(id)
+	if err == nil {
+		t.Error("Should error when result_sha256 is not valid 64-hex")
+	}
+}
+
+func TestNegativeRound(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence:        []EvidencePair{},
+		Round:           -1,
+	}
+
+	_, err := Canonical(id)
+	if err == nil {
+		t.Error("Should error when round is negative")
+	}
+}
+
+func TestContextHashContainsNewline(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "ctx\n1",
+		Round:           0,
+		ChangesHash:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	_, err := Canonical(id)
+	if err == nil {
+		t.Error("Should error when context hash contains newline")
+	}
+}
+
+func TestChangesHashContainsNewline(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:           0,
+		ChangesHash:     "changes\r1",
+	}
+
+	_, err := Canonical(id)
+	if err == nil {
+		t.Error("Should error when changes hash contains carriage return")
+	}
+}
+
+// Comprehensive v2 golden test with all fields: round 2, three evidence pairs, full context and changes
+func TestGoldenV2Complete(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "manifest123",
+		TurnID:          "turn456",
+		AuthorAttemptID: "attempt789",
+		Content:         []byte("The answer to the ultimate question is 42."),
+		Evidence: []EvidencePair{
+			{CallID: "tool_call_1", ResultSHA256: "1111111111111111111111111111111111111111111111111111111111111111"},
+			{CallID: "tool_call_2", ResultSHA256: "2222222222222222222222222222222222222222222222222222222222222222"},
+			{CallID: "tool_call_3", ResultSHA256: "3333333333333333333333333333333333333333333333333333333333333333"},
+		},
+		ContextHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Round:       2,
+		ChangesHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+
+	canonical, err := Canonical(id)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
+
+	// Golden v2 canonical bytes
+	expectedCanonical := "syndic-candidate/v2\nmanifest:manifest123\nturn:turn456\nauthor_attempt:attempt789\ncontent_sha256:ae17837249bd3cc284f04b750d212e4c5f439e51901889c3a6ac2eded8fc2412\ncontent_len:42\nevidence:tool_call_1:1111111111111111111111111111111111111111111111111111111111111111,tool_call_2:2222222222222222222222222222222222222222222222222222222222222222,tool_call_3:3333333333333333333333333333333333333333333333333333333333333333\ncontext:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nround:2\nchanges:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+	if string(canonical) != expectedCanonical {
+		t.Errorf("Golden v2 canonical bytes mismatch.\nExpected:\n%q\nGot:\n%q", expectedCanonical, string(canonical))
+	}
+
+	// Golden v2 hash: exact expected value
+	hash, err := Hash(id)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	const expectedHash = "7406bd6fbeb7e3487a022975dd5fc9e4f69945f686d186a1fd134c9223b42ccf"
+	if hash != expectedHash {
+		t.Errorf("Golden v2 hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
+	}
+
+	// Verify that changing evidence order changes hash
+	id2 := Identity{
+		ManifestHash:    "manifest123",
+		TurnID:          "turn456",
+		AuthorAttemptID: "attempt789",
+		Content:         []byte("The answer to the ultimate question is 42."),
+		Evidence: []EvidencePair{
+			{CallID: "tool_call_3", ResultSHA256: "3333333333333333333333333333333333333333333333333333333333333333"},
+			{CallID: "tool_call_2", ResultSHA256: "2222222222222222222222222222222222222222222222222222222222222222"},
+			{CallID: "tool_call_1", ResultSHA256: "1111111111111111111111111111111111111111111111111111111111111111"},
+		},
+		ContextHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Round:       2,
+		ChangesHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash == hash2 {
+		t.Error("Hash should change when evidence order changes")
+	}
+}
+
+// TestAllBoundFieldMutations verifies that every bound field mutation changes the hash.
+// This ensures the identity is injective: changing any input produces a different hash.
+func TestAllBoundFieldMutations(t *testing.T) {
+	baseID := Identity{
+		ManifestHash:    "manifest_base",
+		TurnID:          "turn_base",
+		AuthorAttemptID: "attempt_base",
+		Content:         []byte("base content"),
+		Evidence: []EvidencePair{
+			{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       1,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	baseHash, err := Hash(baseID)
+	if err != nil {
+		t.Fatalf("Base hash failed: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		id   Identity
+	}{
+		{
+			name: "ManifestHash mutated",
+			id: Identity{
+				ManifestHash:    "manifest_different",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "TurnID mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_different",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "AuthorAttemptID mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_different",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "Content mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("different content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "Evidence pair added",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+					{CallID: "call_b", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "Evidence pair removed",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence:        []EvidencePair{},
+				ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:           1,
+				ChangesHash:     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "Evidence call_id mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_z", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "ContextHash mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				Round:       1,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "Round mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       5,
+				ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			},
+		},
+		{
+			name: "ChangesHash mutated",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("base content"),
+				Evidence: []EvidencePair{
+					{CallID: "call_a", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				},
+				ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				Round:       1,
+				ChangesHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mutatedHash, err := Hash(tt.id)
+			if err != nil {
+				t.Fatalf("Hash failed: %v", err)
+			}
+
+			if mutatedHash == baseHash {
+				t.Errorf("Hash should change when %s", tt.name)
+			}
+		})
 	}
 }
