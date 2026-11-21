@@ -450,6 +450,49 @@ func TestRenderForAuthorInjective(t *testing.T) {
 	}
 }
 
+// Documents that differ only in their change lines must render differently
+// for both the author and the reviewer.
+func TestRenderChangeLinesInjective(t *testing.T) {
+	mk := func(c ...Change) *Document {
+		return build(t, Turn{ID: "t", State: "approved", Input: []byte("q"), Answer: []byte("x"), Label: "reviewed",
+			ChangesState: "applied", Changes: c})
+	}
+	docs := []*Document{
+		mk(Change{"a not", "applied"}),
+		mk(Change{"a", "not applied"}),
+		mk(Change{"a", "applied"}),
+		mk(Change{"a", "conflict"}),
+		mk(Change{"b", "applied"}),
+		mk(Change{"a", "applied"}, Change{"b", "applied"}),
+	}
+	entropy := func() *bytes.Reader { return bytes.NewReader(bytes.Repeat([]byte{0xab}, 16)) }
+	authors := map[string]int{}
+	reviewers := map[string]int{}
+	hashes := map[string]int{}
+	for i, x := range docs {
+		if j, ok := hashes[x.Hash()]; ok {
+			t.Fatalf("documents %d and %d share a hash", j, i)
+		}
+		hashes[x.Hash()] = i
+		var sb strings.Builder
+		for _, m := range x.RenderForAuthor() {
+			sb.WriteString(m.Role + "\x00" + m.Content + "\x01")
+		}
+		if j, ok := authors[sb.String()]; ok {
+			t.Fatalf("documents %d and %d render identically for the author", j, i)
+		}
+		authors[sb.String()] = i
+		r, err := x.RenderForReviewer(entropy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j, ok := reviewers[r]; ok {
+			t.Fatalf("documents %d and %d render identically for the reviewer", j, i)
+		}
+		reviewers[r] = i
+	}
+}
+
 func TestRenderForReviewer(t *testing.T) {
 	d := build(t, goldens[1].turns...)
 	out, err := d.RenderForReviewer(bytes.NewReader(bytes.Repeat([]byte{0xab}, 16)))
