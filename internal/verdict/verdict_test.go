@@ -326,6 +326,40 @@ func TestParseVerdicts(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:            "VerdictV1WithRoundField",
+			text:            strings.Join([]string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "round: 1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "only allowed in VERDICT v2") {
+					t.Errorf("expected error about v2-only field in v1, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:            "VerdictV1WithBlockStateField",
+			text:            strings.Join([]string{"VERDICT v1", "candidate: hash123", "attempt: attempt1", "block-state: b1 withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "only allowed in VERDICT v2") {
+					t.Errorf("expected error about v2-only field in v1, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:             "VerdictV2ApproveWithChanges",
+			text:             fake.VerdictApproveWithChanges("hash123", "attempt1"), // Uses v1, but we'll test v2 version separately
+			candidateHash:    "hash123",
+			attemptID:        "attempt1",
+			expectedClass:    RevisionRequest,
+			expectedDecision: "approve-with-changes",
+		},
 	}
 
 	for _, tt := range tests {
@@ -434,5 +468,479 @@ func TestParseTrimming(t *testing.T) {
 
 	if result.Verdict.Reason != "This is trimmed" {
 		t.Errorf("expected reason 'This is trimmed', got %q", result.Verdict.Reason)
+	}
+}
+
+func TestParseV2Context(t *testing.T) {
+	tests := []struct {
+		name             string
+		text             string
+		candidateHash    string
+		attemptID        string
+		v2Ctx            *V2Context
+		expectedClass    Classification
+		expectedDecision string
+		expectedProblem  bool
+		checks           func(t *testing.T, r Result)
+	}{
+		{
+			name:          "V2WrongRound",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 2", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             1,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "wrong round") {
+					t.Errorf("expected error about wrong round, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2MissingBlockState",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "missing block-state") {
+					t.Errorf("expected error about missing block-state, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2ForeignBlockState",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: b2 withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "foreign block-state") {
+					t.Errorf("expected error about foreign block-state, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2ValidWithContextAllWithdrawn",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: b1 withdrawn", "block-state: b2 withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+					"b2": true,
+				},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+		},
+		{
+			name:          "V2ValidWithContextMixed",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: b1 withdrawn", "block-state: b2 maintained", "verdict: block", "severity: low", "block_id: b3", "evidence: test", "remedy: fix", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+					"b2": true,
+				},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "block",
+		},
+		{
+			name:            "V2NoContextMalformed",
+			text:            strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: b1 withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash:   "hash123",
+			attemptID:       "attempt1",
+			v2Ctx:           nil,
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "validation context") {
+					t.Errorf("expected error about validation context, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2RoundTrailingGarbage",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1abc", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx:         nil,
+			expectedClass: Malformed,
+		},
+		{
+			name:          "V2RoundLeadingPlus",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: +2", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             2,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "leading '+'") {
+					t.Errorf("expected error about leading '+', got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2EmptyBlockID",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state:  withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             1,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "empty") {
+					t.Errorf("expected error about empty block_id, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2ForeignBlockWhenOwnerHasNoBlocks",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: zzz withdrawn", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             1,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "foreign block-state") {
+					t.Errorf("expected error about foreign block-state, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2ApproveWithChangesRevisionRequest",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "verdict: approve-with-changes", "reason: revise please", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             1,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:    RevisionRequest,
+			expectedDecision: "approve-with-changes",
+		},
+		{
+			name:          "V2MalformedOmittedBlockMaintainsRejection",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "missing block-state") {
+					t.Errorf("expected error about missing block-state, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2ApproveEmptyBlockSet",
+			text:          fake.VerdictV2Approve("hash123", "attempt1", 0),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             0,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if r.Verdict.EnvelopeVersion != "v2" {
+					t.Errorf("expected envelope version v2, got %s", r.Verdict.EnvelopeVersion)
+				}
+				if r.Verdict.Round != 0 {
+					t.Errorf("expected round 0, got %d", r.Verdict.Round)
+				}
+			},
+		},
+		{
+			name:          "V2BlockValidWithContext",
+			text:          fake.VerdictV2Block("hash123", "attempt1", 1, "b1", "high", "evidence text", "fix it", "reason text"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round:             1,
+				OwnerOpenBlockIDs: map[string]bool{},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "block",
+			checks: func(t *testing.T, r Result) {
+				if r.Verdict.EnvelopeVersion != "v2" {
+					t.Errorf("expected envelope version v2, got %s", r.Verdict.EnvelopeVersion)
+				}
+				if r.Verdict.Round != 1 {
+					t.Errorf("expected round 1, got %d", r.Verdict.Round)
+				}
+				if r.Verdict.Severity != "high" {
+					t.Errorf("expected severity high, got %s", r.Verdict.Severity)
+				}
+			},
+		},
+		{
+			name:          "V2ApproveMaintainedBlockMalformed",
+			text:          fake.VerdictV2ApproveMaintainedBlock("hash123", "attempt1", 1),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+		},
+		{
+			name:          "V2WithdrawnBlockValid",
+			text:          fake.VerdictV2WithdrawnBlock("hash123", "attempt1", 1),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if len(r.Verdict.BlockStates) != 1 {
+					t.Errorf("expected 1 block state, got %d", len(r.Verdict.BlockStates))
+				}
+				if r.Verdict.BlockStates[0].BlockID != "b1" {
+					t.Errorf("expected block ID b1, got %s", r.Verdict.BlockStates[0].BlockID)
+				}
+				if r.Verdict.BlockStates[0].State != "withdrawn" {
+					t.Errorf("expected block state withdrawn, got %s", r.Verdict.BlockStates[0].State)
+				}
+			},
+		},
+		{
+			name:          "V2MultipleBlockStates",
+			text:          fake.VerdictV2WithBlockStates("hash123", "attempt1", 1, []string{"block-state: b1 withdrawn", "block-state: b2 maintained"}),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+					"b2": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "approve verdict cannot have maintained blocks") {
+					t.Errorf("expected error about approve with maintained blocks, got: %s", r.Problem)
+				}
+			},
+		},
+		{
+			name:          "V2AllWithdrawn",
+			text:          fake.VerdictV2WithBlockStates("hash123", "attempt1", 1, []string{"block-state: b1 withdrawn", "block-state: b2 withdrawn"}),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+					"b2": true,
+				},
+			},
+			expectedClass:    Valid,
+			expectedDecision: "approve",
+			checks: func(t *testing.T, r Result) {
+				if len(r.Verdict.BlockStates) != 2 {
+					t.Errorf("expected 2 block states, got %d", len(r.Verdict.BlockStates))
+				}
+			},
+		},
+		{
+			name:          "V2DuplicateBlockState",
+			text:          strings.Join([]string{"VERDICT v2", "candidate: hash123", "attempt: attempt1", "round: 1", "block-state: b1 withdrawn", "block-state: b1 maintained", "verdict: approve", "reason: test", "END VERDICT"}, "\n"),
+			candidateHash: "hash123",
+			attemptID:     "attempt1",
+			v2Ctx: &V2Context{
+				Round: 1,
+				OwnerOpenBlockIDs: map[string]bool{
+					"b1": true,
+				},
+			},
+			expectedClass:   Malformed,
+			expectedProblem: true,
+			checks: func(t *testing.T, r Result) {
+				if !strings.Contains(r.Problem, "duplicate block-state") {
+					t.Errorf("expected error about duplicate block-state, got: %s", r.Problem)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ParseWithContext(tt.text, tt.candidateHash, tt.attemptID, tt.v2Ctx)
+
+			if result.Classification != tt.expectedClass {
+				t.Errorf("expected classification %s, got %s", tt.expectedClass, result.Classification)
+			}
+
+			if tt.expectedDecision != "" && result.Verdict.Decision != tt.expectedDecision {
+				t.Errorf("expected decision %s, got %s", tt.expectedDecision, result.Verdict.Decision)
+			}
+
+			if tt.expectedProblem && result.Problem == "" {
+				t.Errorf("expected non-empty problem")
+			}
+
+			if !tt.expectedProblem && result.Classification != Valid && result.Classification != RevisionRequest && result.Problem == "" {
+				t.Errorf("expected problem for classification %s", result.Classification)
+			}
+
+			if tt.checks != nil {
+				tt.checks(t, result)
+			}
+		})
+	}
+}
+
+func TestV2ValidationWithContext(t *testing.T) {
+	cases := []struct {
+		name          string
+		text          string
+		round         int
+		ownerBlockIDs map[string]bool
+		expectValid   bool
+		expectProblem string
+	}{
+		{
+			name:          "wrong round is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 99\nverdict: approve\nreason: test\nEND VERDICT",
+			round:         1,
+			ownerBlockIDs: map[string]bool{},
+			expectValid:   false,
+			expectProblem: "wrong round",
+		},
+		{
+			name:          "omitted own block is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\nreason: test\nEND VERDICT",
+			round:         1,
+			ownerBlockIDs: map[string]bool{"block-1": true},
+			expectValid:   false,
+			expectProblem: "missing block-state",
+		},
+		{
+			name:          "foreign block is malformed",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nblock-state: foreign-block maintained\nverdict: approve\nreason: test\nEND VERDICT",
+			round:         1,
+			ownerBlockIDs: map[string]bool{},
+			expectValid:   false,
+			expectProblem: "foreign",
+		},
+		{
+			name:          "correct round with withdrawn block",
+			text:          "VERDICT v2\ncandidate: hash\nattempt: att\nround: 2\nblock-state: block-1 withdrawn\nverdict: approve\nreason: test\nEND VERDICT",
+			round:         2,
+			ownerBlockIDs: map[string]bool{"block-1": true},
+			expectValid:   true,
+			expectProblem: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &V2Context{
+				Round:             tc.round,
+				OwnerOpenBlockIDs: tc.ownerBlockIDs,
+			}
+			result := ParseWithContext(tc.text, "hash", "att", ctx)
+
+			if tc.expectValid && result.Classification != Valid {
+				t.Errorf("expected Valid, got %v: %v", result.Classification, result.Problem)
+			}
+			if !tc.expectValid && result.Classification == Valid {
+				t.Errorf("expected malformed, got Valid")
+			}
+			if !tc.expectValid && tc.expectProblem != "" && !strings.Contains(result.Problem, tc.expectProblem) {
+				t.Errorf("expected problem containing %q, got %q", tc.expectProblem, result.Problem)
+			}
+		})
+	}
+}
+
+func TestV2MalformedOmittedBlockMaintainsRejection(t *testing.T) {
+	text := "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nverdict: approve\nreason: test\nEND VERDICT"
+	ctx := &V2Context{
+		Round:             1,
+		OwnerOpenBlockIDs: map[string]bool{"block-1": true},
+	}
+	result := ParseWithContext(text, "hash", "att", ctx)
+
+	if result.Classification != Malformed {
+		t.Errorf("expected Malformed, got %v", result.Classification)
+	}
+	if !strings.Contains(result.Problem, "block-1") {
+		t.Errorf("expected problem about missing block-1, got %q", result.Problem)
+	}
+}
+
+func TestV1RejectedWhenContextRequiresV2(t *testing.T) {
+	v1 := fake.VerdictApprove("hash", "att")
+	cases := []struct {
+		name string
+		ctx  *V2Context
+		want Classification
+	}{
+		{"first round, no blocks", &V2Context{Round: 0}, Valid},
+		{"later round", &V2Context{Round: 2}, Malformed},
+		{"open blocks", &V2Context{OwnerOpenBlockIDs: map[string]bool{"b1": true}}, Malformed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseWithContext(v1, "hash", "att", tc.ctx).Classification; got != tc.want {
+				t.Errorf("classification = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := Parse(v1, "hash", "att").Classification; got != Valid {
+		t.Errorf("historical Parse of v1 = %v, want Valid", got)
 	}
 }

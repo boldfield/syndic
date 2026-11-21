@@ -2107,3 +2107,85 @@ func insertTurnFor(t *testing.T, conn *sql.DB, turnID, runID, mode string) {
 	mustExec(t, conn, `INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
 	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`, turnID, runID, mode, "conv-"+turnID)
 }
+
+func TestGetReviewerOpenBlockIDsAcrossRounds(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	// Setup: create run and turn
+	runID := "run-1"
+	turnID := "turn-1"
+	setupTestData(t, conn, runID, turnID)
+
+	// Create two attempts (representing different rounds)
+	attempt1ID := "attempt-1"
+	attempt2ID := "attempt-2"
+	reviewerParticipant := "reviewer-1"
+
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, ?, 'review', 1, CURRENT_TIMESTAMP, 'completed')
+	`, attempt1ID, turnID, reviewerParticipant)
+
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES (?, ?, ?, 'review', 2, CURRENT_TIMESTAMP, 'completed')
+	`, attempt2ID, turnID, reviewerParticipant)
+
+	// Create verdicts for both attempts with different candidate hashes
+	candidateHashA := "hash-candidate-a"
+	candidateHashB := "hash-candidate-b"
+	verdict1ID := "verdict-1"
+	verdict2ID := "verdict-2"
+
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, ?, 'valid')
+	`, verdict1ID, attempt1ID, candidateHashA)
+
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES (?, ?, ?, 'valid')
+	`, verdict2ID, attempt2ID, candidateHashB)
+
+	// Create an open block from round 1 on candidate A
+	blockID := "block-1"
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id)
+		VALUES (?, ?, ?, 'low', 'evidence', 'remedy', 'open', ?)
+	`, blockID, verdict1ID, candidateHashA, blockID)
+
+	// A withdrawn block on candidate A and a block owned by another
+	// participant must both stay out of the reviewer's set.
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id, withdrawn_against_hash)
+		VALUES ('block-withdrawn', ?, ?, 'low', 'e', 'r', 'withdrawn', 'block-withdrawn', ?)
+	`, verdict1ID, candidateHashA, candidateHashB)
+	mustExec(t, conn, `
+		INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state)
+		VALUES ('attempt-other', ?, 'reviewer-2', 'review', 1, CURRENT_TIMESTAMP, 'completed')
+	`, turnID)
+	mustExec(t, conn, `
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status)
+		VALUES ('verdict-other', 'attempt-other', ?, 'valid')
+	`, candidateHashA)
+	mustExec(t, conn, `
+		INSERT INTO blocks (id, verdict_id, candidate_hash, severity, evidence, remedy, state, reviewer_block_id)
+		VALUES ('block-other', 'verdict-other', ?, 'low', 'e', 'r', 'open', 'block-other')
+	`, candidateHashA)
+
+	// Looked up through the real method while a revised candidate B is current.
+	store := journal.NewStore(db)
+	var blockIDs map[string]bool
+	if err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		blockIDs, err = tx.GetReviewerOpenBlockIDs(turnID, reviewerParticipant)
+		return err
+	}); err != nil {
+		t.Fatalf("GetReviewerOpenBlockIDs: %v", err)
+	}
+	if len(blockIDs) != 1 || !blockIDs[blockID] {
+		t.Errorf("open blocks = %v, want only %q", blockIDs, blockID)
+	}
+}
