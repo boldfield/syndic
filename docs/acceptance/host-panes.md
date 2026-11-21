@@ -20,9 +20,14 @@ Save this as `roster.toml` and replace `http://localhost:8080` with your stub en
 ```toml
 default_preset = "test-preset"
 
-[[presets]]
-name = "test-preset"
-mode = "governed"
+[deadlines]
+attempt = "30s"
+turn = "60s"
+delivery = "10s"
+provisional = true
+
+[presets.test-preset]
+mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
 
@@ -54,17 +59,8 @@ network_dependency = "none"
 max_tokens_field = "max_tokens"
 tokens_per_byte_max = 1.0
 
-[[pools]]
-name = "default"
+[pools.default]
 concurrency = 10
-
-[[deadlines]]
-phase = "attempt"
-duration_ms = 30000
-
-[[deadlines]]
-phase = "turn"
-duration_ms = 60000
 ```
 
 ## Stub Endpoint Implementation
@@ -79,7 +75,7 @@ Your stub endpoint must handle these requests:
    }
    ```
 
-2. **Author request (no envelope)**: Return a simple chat completion
+2. **Author request**: Return a simple chat completion. Author requests have a system message that does not mention "reviewer".
    ```json
    {
      "id": "chatcmpl-123",
@@ -93,21 +89,34 @@ Your stub endpoint must handle these requests:
    }
    ```
 
-3. **Reviewer request (has envelope)**: Extract `candidate_hash` and `attempt_id` from the request's `envelope` field and return a well-formed approval:
+3. **Reviewer request (verdict)**: The request's system message will contain the word "reviewer". Extract `candidate:` and `attempt:` from the user message, and return a well-formed approval envelope with both values populated:
    ```json
    {
      "id": "chatcmpl-456",
      "object": "chat.completion",
      "model": "test-model",
      "choices": [{
-       "message": {"role": "assistant", "content": "<verdict approve=\"<candidate_hash>\" attempt=\"<attempt_id>\"/>"},
+       "message": {"role": "assistant", "content": "VERDICT v1\ncandidate: <HASH_FROM_REQUEST>\nattempt: <ID_FROM_REQUEST>\nverdict: approve\nreason: Approved\nEND VERDICT"},
        "finish_reason": "stop"
      }],
      "usage": {"prompt_tokens": 20, "completion_tokens": 10}
    }
    ```
+   The hash and attempt ID must match what the engine sent in the request; mismatches cause rejection.
 
-For blocking requests, use a verdict with `block_severity` and return an appropriate block message.
+4. **Block request (verdict block)**: Return a block verdict with the same candidate/attempt extraction as step 3, but with verdict type "block":
+   ```text
+   VERDICT v1
+   candidate: <HASH_FROM_REQUEST>
+   attempt: <ID_FROM_REQUEST>
+   verdict: block
+   severity: high
+   block_id: unsafe-content
+   evidence: Content violates policy
+   remedy: Rephrase the question
+   reason: This request violates safety policy
+   END VERDICT
+   ```
 
 ## Scenario: Terminal Session (80×24 cells, all phases)
 
@@ -170,26 +179,26 @@ Each step lists what to type, what to observe, and what to verify.
   - No line exceeds 80 display columns (use `echo -n "text" | wc -c` for byte count or use a display-width tool)
   - No wrapping or horizontal scrolling; all content is visible
 
-### Step 7: Submit a turn that is blocked (optional, requires block-configured stub)
+### Step 7: Submit a turn that is blocked
 
-If your stub is configured to block certain requests:
+Configure your stub to block requests matching a specific keyword. For example, the stub can check if the user message contains "BLOCK_ME" and respond with a block verdict instead of approve.
 
-- **Type:** `A request that triggers a block` (or use a stub-configured block query)
+- **Type:** `Please explain BLOCK_ME` (or the keyword your stub is configured to block on)
 - **Press:** `Enter` to submit
 - **Observe:**
   - The input area clears
-  - After the reviewer response arrives, the answer area shows the block message
+  - After the reviewer response arrives, the answer area shows the block message with severity and reason
   - The status bar indicates the turn is blocked
-- **Verify:** The block message is fully visible and indicates severity and reason
+- **Verify:** The block message is fully visible and readable; it includes severity (e.g., "high"), block ID, evidence, remedy, and reason
 
-### Step 8: Check the `/why` command (optional)
+### Step 8: Check the `/why` command on a blocked turn
 
-If a turn has entered a hold or incomplete state:
+After completing Step 7 with a blocked turn visible:
 
 - **Type:** `/why`
 - **Press:** `Enter`
-- **Observe:** Information appears explaining the hold or failure reason
-- **Verify:** The output is relevant to the turn's current state
+- **Observe:** Detailed information appears explaining why the turn was blocked, including the block severity and reason
+- **Verify:** The output clearly states the turn is blocked and provides actionable information
 
 ## Verification Record
 
