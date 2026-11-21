@@ -3,12 +3,23 @@ package verdict
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 var (
 	fieldNameRegex = regexp.MustCompile(`^[a-z_-]+: `)
-	validFields    = map[string]bool{
+	validFieldsV1  = map[string]bool{
+		"candidate": true,
+		"attempt":   true,
+		"verdict":   true,
+		"severity":  true,
+		"block_id":  true,
+		"evidence":  true,
+		"remedy":    true,
+		"reason":    true,
+	}
+	validFieldsV2 = map[string]bool{
 		"candidate":   true,
 		"attempt":     true,
 		"verdict":     true,
@@ -54,7 +65,16 @@ type Result struct {
 	Problem        string
 }
 
+type V2Context struct {
+	Round             int
+	OwnerOpenBlockIDs map[string]bool
+}
+
 func Parse(text, candidateHash, attemptID string) Result {
+	return ParseWithContext(text, candidateHash, attemptID, nil)
+}
+
+func ParseWithContext(text, candidateHash, attemptID string, v2Ctx *V2Context) Result {
 	lines := strings.Split(text, "\n")
 
 	// Handle CRLF: trim trailing \r from each line
@@ -126,7 +146,16 @@ func Parse(text, candidateHash, attemptID string) Result {
 			value := parts[1]
 
 			// Check if name is valid (lowercase letters, underscores, and hyphens)
-			if !isValidFieldName(name) {
+			if !isValidFieldName(name, envelopeVersion) {
+				// Check if this is a v2-only field in a v1 envelope
+				if envelopeVersion == "v1" && (name == "round" || name == "block-state") {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        fmt.Sprintf("field %s is only allowed in VERDICT v2, not v1", name),
+					}
+				}
 				return Result{
 					Classification: Malformed,
 					Commentary:     commentary,
@@ -154,6 +183,17 @@ func Parse(text, candidateHash, attemptID string) Result {
 						Commentary:     commentary,
 						Verdict:        buildPartialVerdict(fields),
 						Problem:        fmt.Sprintf("invalid block-state value: %s (must be 'withdrawn' or 'maintained')", state),
+					}
+				}
+				// Check for duplicate block-state lines for the same block
+				for _, bs := range blockStates {
+					if bs.BlockID == blockID {
+						return Result{
+							Classification: Malformed,
+							Commentary:     commentary,
+							Verdict:        buildPartialVerdict(fields),
+							Problem:        fmt.Sprintf("duplicate block-state line for block %s", blockID),
+						}
 					}
 				}
 				blockStates = append(blockStates, BlockState{BlockID: blockID, State: state})
@@ -250,8 +290,45 @@ func Parse(text, candidateHash, attemptID string) Result {
 			}
 		}
 
-		// For round > 0, block-states must be present (checked later based on actual open blocks)
-		// For now, we validate that if approve is used with any maintained block, it's malformed
+		// Validate round matches expected round if context is provided
+		if v2Ctx != nil && roundValue != v2Ctx.Round {
+			return Result{
+				Classification: Malformed,
+				Commentary:     commentary,
+				Verdict:        buildPartialVerdict(fields),
+				Problem:        fmt.Sprintf("wrong round: expected %d, got %d", v2Ctx.Round, roundValue),
+			}
+		}
+
+		// Validate block-state dispositions against expected open blocks
+		if v2Ctx != nil && len(v2Ctx.OwnerOpenBlockIDs) > 0 {
+			seenBlocks := make(map[string]bool)
+			for _, bs := range blockStates {
+				seenBlocks[bs.BlockID] = true
+				// Check if this block is in the expected set
+				if !v2Ctx.OwnerOpenBlockIDs[bs.BlockID] {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        fmt.Sprintf("foreign block-state: %s is not an open block owned by this reviewer", bs.BlockID),
+					}
+				}
+			}
+			// Check for missing block-state lines
+			for blockID := range v2Ctx.OwnerOpenBlockIDs {
+				if !seenBlocks[blockID] {
+					return Result{
+						Classification: Malformed,
+						Commentary:     commentary,
+						Verdict:        buildPartialVerdict(fields),
+						Problem:        fmt.Sprintf("missing block-state for open block %s", blockID),
+					}
+				}
+			}
+		}
+
+		// Validate that approve doesn't have maintained blocks
 		if verdict == "approve" && len(blockStates) > 0 {
 			for _, bs := range blockStates {
 				if bs.State == "maintained" {
@@ -360,8 +437,11 @@ func Parse(text, candidateHash, attemptID string) Result {
 	return result
 }
 
-func isValidFieldName(name string) bool {
-	return validFields[name]
+func isValidFieldName(name, envelopeVersion string) bool {
+	if envelopeVersion == "v2" {
+		return validFieldsV2[name]
+	}
+	return validFieldsV1[name]
 }
 
 // buildPartialVerdict constructs a Verdict from parsed fields, trimming values appropriately.
@@ -380,8 +460,8 @@ func buildPartialVerdict(fields map[string]string) Verdict {
 
 // parseRound parses a round string as an integer.
 func parseRound(roundStr string) (int, error) {
-	var round int
-	_, err := fmt.Sscanf(roundStr, "%d", &round)
+	roundStr = strings.TrimSpace(roundStr)
+	round, err := strconv.Atoi(roundStr)
 	if err != nil {
 		return 0, fmt.Errorf("round must be a valid integer, got %q", roundStr)
 	}
