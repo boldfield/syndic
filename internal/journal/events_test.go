@@ -30,10 +30,11 @@ func TestEmitConsecutiveSeq(t *testing.T) {
 
 	// Create a turn for FK constraint
 	turnID := "test-turn-1"
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -92,10 +93,11 @@ func TestEmitRollbackDoesNotReuse(t *testing.T) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -191,10 +193,11 @@ func TestEventsSinceWithAppendEvent(t *testing.T) {
 
 	// Create a turn for Emit
 	turnID := "test-turn-3"
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -265,10 +268,11 @@ func TestEventsSincePaging(t *testing.T) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -408,10 +412,11 @@ func TestEmitInvalidJSON(t *testing.T) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -445,10 +450,11 @@ func TestEventAtAndDataRoundTrip(t *testing.T) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'solo', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}

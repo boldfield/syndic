@@ -128,8 +128,8 @@ func build004(t *testing.T) string {
 		mustExec(t, conn, `INSERT INTO schema_version (version) VALUES (?)`, i+1)
 	}
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash, kind) VALUES ('r1', '{"a":1}', 'mh', 'probe')`)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES ('t1', 'r1', 'solo')`)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES ('t2', 'r1', 'solo')`)
+	insertTurnFor(t, conn, "t1", "r1", "solo")
+	insertTurnFor(t, conn, "t2", "r1", "solo")
 	// Legacy messages, inserted out of sequence order.
 	for _, m := range []struct {
 		id  string
@@ -162,8 +162,8 @@ func TestMigration005OverV004ProbeRows(t *testing.T) {
 	conn := db.Conn()
 
 	var v int
-	if err := conn.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 6 {
-		t.Fatalf("version = %d, err %v; want 6", v, err)
+	if err := conn.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 7 {
+		t.Fatalf("version = %d, err %v; want 7", v, err)
 	}
 
 	var kind, manifest, mh string

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
 
@@ -64,6 +65,14 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 }
 
+func createTestConversation(t *testing.T, conn *sql.DB, id string) {
+	t.Helper()
+	_, err := conn.Exec(`INSERT INTO conversations (id, workspace) VALUES (?, NULL)`, id)
+	if err != nil {
+		t.Fatalf("failed to create test conversation: %v", err)
+	}
+}
+
 func TestEnumCheckConstraints(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -86,12 +95,17 @@ func TestEnumCheckConstraints(t *testing.T) {
 		args  []interface{}
 		valid bool
 	}{
-		{"valid mode solo", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-1", runID, "solo"}, true},
-		{"valid mode review", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-2", runID, "review"}, true},
-		{"invalid mode", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-3", runID, "invalid"}, false},
-		{"valid terminal state approved", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-4", runID, "solo", "approved"}, true},
-		{"valid terminal state solo_complete", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-5", runID, "solo", "solo_complete"}, true},
-		{"invalid terminal state", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-6", runID, "solo", "invalid"}, false},
+		{"valid mode solo", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-1", runID, "solo", "conv-1"}, true},
+		{"valid mode review", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-2", runID, "review", "conv-2"}, true},
+		{"invalid mode", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-3", runID, "invalid", "conv-3"}, false},
+		{"valid terminal state approved", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-4", runID, "solo", "approved", "conv-4"}, true},
+		{"valid terminal state solo_complete", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-5", runID, "solo", "solo_complete", "conv-5"}, true},
+		{"invalid terminal state", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-6", runID, "solo", "invalid", "conv-6"}, false},
+	}
+
+	// Create conversations for the tests
+	for i := 1; i <= 6; i++ {
+		createTestConversation(t, conn, fmt.Sprintf("conv-%d", i))
 	}
 
 	for _, tc := range testCases {
@@ -699,8 +713,8 @@ func TestFreshDBSchemaVersion4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6, got %d", version)
+	if version != 7 {
+		t.Errorf("expected schema version 7, got %d", version)
 	}
 }
 
@@ -815,10 +829,7 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 	}
 
 	// Insert test turn
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	// Insert test attempt and verdict
 	_, err = conn.Exec("INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state) VALUES ('attempt-1', 'turn-1', 'participant-1', 'phase-1', 1, CURRENT_TIMESTAMP, 'completed')")
@@ -860,8 +871,8 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6 after upgrade, got %d", version)
+	if version != 7 {
+		t.Errorf("expected schema version 7 after upgrade, got %d", version)
 	}
 
 	// Check that the block still exists with null withdrawn_against_hash and other fields unchanged
@@ -969,10 +980,7 @@ func TestOpenOnMigratedDBNoChange(t *testing.T) {
 		t.Fatalf("failed to insert run: %v", err)
 	}
 
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	_, err = conn.Exec("INSERT INTO events (event_type, data) VALUES ('probe_complete', 'probe data')")
 	if err != nil {
@@ -1162,10 +1170,7 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 		t.Fatalf("failed to insert run: %v", err)
 	}
 
-	_, err = conn.Exec("INSERT INTO turns (id, run_id, mode) VALUES ('turn-1', 'run-1', 'review')")
-	if err != nil {
-		t.Fatalf("failed to insert turn: %v", err)
-	}
+	insertTurnFor(t, conn, "turn-1", "run-1", "review")
 
 	// Insert test event at v1
 	_, err = conn.Exec("INSERT INTO events (turn_id, event_type, data) VALUES ('turn-1', 'test_event', 'event data')")
@@ -1203,8 +1208,8 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6 after upgrade, got %d", version)
+	if version != 7 {
+		t.Errorf("expected schema version 7 after upgrade, got %d", version)
 	}
 
 	// Check that the event still exists with original data preserved
@@ -1383,10 +1388,11 @@ func setupTestData(t *testing.T, conn *sql.DB, runID, turnID string) {
 		t.Fatalf("failed to create run: %v", err)
 	}
 
-	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'review')
-	`, turnID, runID)
+	_, err = conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'review', ?)`, turnID, runID, "conv-"+turnID)
 	if err != nil {
 		t.Fatalf("failed to create turn: %v", err)
 	}
@@ -2083,4 +2089,21 @@ func TestStoreAppendEventWithoutTurn(t *testing.T) {
 	if n != 1 {
 		t.Errorf("expected 1 event, got %d", n)
 	}
+}
+
+// insertTurnFor inserts a turn row on a database at any schema version. From
+// migration 007 on a turn must reference a conversation, so one is created
+// (conv-<turnID>) when the table exists; older schemas get a bare turn.
+func insertTurnFor(t *testing.T, conn *sql.DB, turnID, runID, mode string) {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='conversations'`).Scan(&n); err != nil {
+		t.Fatalf("probe conversations table: %v", err)
+	}
+	if n == 0 {
+		mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)`, turnID, runID, mode)
+		return
+	}
+	mustExec(t, conn, `INSERT INTO conversations (id) VALUES (?)`, "conv-"+turnID)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`, turnID, runID, mode, "conv-"+turnID)
 }

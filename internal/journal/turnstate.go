@@ -3,6 +3,7 @@ package journal
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -153,6 +154,91 @@ func (tx *Tx) FreezeCandidate(turnID, content, hash string) (candidateID string,
 	}
 
 	// Set the turn's candidate_id
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET candidate_id = ? WHERE id = ?
+	`, candidateID, turnID); err != nil {
+		return "", fmt.Errorf("update turn candidate_id: %w", err)
+	}
+
+	return candidateID, nil
+}
+
+// SetLatestCandidate creates a candidate with round/supersedes and atomically updates turns.candidate_id.
+// This is used for revision rounds where multiple candidates may exist for a turn.
+// Validates design invariants: round 0 has no supersedes, round > 0 supersedes the current candidate,
+// round sequences incrementally, round 0 cannot be created when a candidate already exists, and
+// rounds must respect max_rounds_in_effect and max_rounds_ceiling.
+func (tx *Tx) SetLatestCandidate(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	// Get turn's current candidate_id and round limits
+	var currentCandidateID sql.NullString
+	var maxRoundsInEffect sql.NullInt64
+	var maxRoundsCeiling sql.NullInt64
+	err = tx.tx.QueryRow(`
+		SELECT candidate_id, max_rounds_in_effect, max_rounds_ceiling FROM turns WHERE id = ?
+	`, turnID).Scan(&currentCandidateID, &maxRoundsInEffect, &maxRoundsCeiling)
+	if err != nil {
+		return "", fmt.Errorf("query turn: %w", err)
+	}
+
+	// Validate design invariants
+	if round == 0 {
+		// Round 0 cannot have a supersedes
+		if supersedes != "" {
+			return "", fmt.Errorf("round 0 cannot have a supersedes candidate")
+		}
+		// Round 0 cannot be created when turn already has a candidate
+		if currentCandidateID.Valid {
+			return "", fmt.Errorf("round 0 cannot be created for turn with existing candidate")
+		}
+	} else {
+		// Round > 0 must have supersedes
+		if supersedes == "" {
+			return "", fmt.Errorf("round %d must supersede a previous candidate", round)
+		}
+
+		// Verify that the supersedes candidate exists and belongs to this turn
+		var supersedesTurnID string
+		var supersedesRound int
+		err := tx.tx.QueryRow(`
+			SELECT turn_id, round FROM candidates WHERE id = ?
+		`, supersedes).Scan(&supersedesTurnID, &supersedesRound)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("supersedes candidate %s does not exist", supersedes)
+			}
+			return "", fmt.Errorf("query supersedes candidate: %w", err)
+		}
+
+		if supersedesTurnID != turnID {
+			return "", fmt.Errorf("supersedes candidate %s belongs to turn %s, not turn %s", supersedes, supersedesTurnID, turnID)
+		}
+
+		// Verify that supersedes is the current candidate_id of the turn
+		if !currentCandidateID.Valid || currentCandidateID.String != supersedes {
+			return "", fmt.Errorf("supersedes must be the current candidate of the turn (got %q, current is %q)", supersedes, currentCandidateID.String)
+		}
+
+		// Enforce round sequencing: round must equal previous round + 1
+		if round != supersedesRound+1 {
+			return "", fmt.Errorf("round %d must follow round %d sequentially (expected %d)", round, supersedesRound, supersedesRound+1)
+		}
+
+		// Respect max_rounds_in_effect and max_rounds_ceiling
+		if maxRoundsInEffect.Valid && round > int(maxRoundsInEffect.Int64) {
+			return "", fmt.Errorf("round %d exceeds max_rounds_in_effect %d", round, maxRoundsInEffect.Int64)
+		}
+		if maxRoundsCeiling.Valid && round > int(maxRoundsCeiling.Int64) {
+			return "", fmt.Errorf("round %d exceeds max_rounds_ceiling %d", round, maxRoundsCeiling.Int64)
+		}
+	}
+
+	// Create the candidate with round and supersedes
+	candidateID, err = tx.CreateCandidateWithRound(turnID, content, hash, round, supersedes)
+	if err != nil {
+		return "", fmt.Errorf("create candidate: %w", err)
+	}
+
+	// Atomically update the turn's candidate_id to point to the new candidate
 	if _, err := tx.tx.Exec(`
 		UPDATE turns SET candidate_id = ? WHERE id = ?
 	`, candidateID, turnID); err != nil {

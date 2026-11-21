@@ -19,7 +19,7 @@ func mustExec(t *testing.T, conn *sql.DB, q string, args ...interface{}) {
 func seed004(t *testing.T, conn *sql.DB) {
 	t.Helper()
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES ('t1', 'r1', 'solo')`)
+	insertTurnFor(t, conn, "t1", "r1", "solo")
 	mustExec(t, conn, `INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at) VALUES ('a1', 't1', 'p', 'review', 0, 'now')`)
 }
 
@@ -30,8 +30,8 @@ func TestMigration004FreshVersion(t *testing.T) {
 	if err := db.Conn().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 6 {
-		t.Errorf("version = %d, want 6", v)
+	if v != 7 {
+		t.Errorf("version = %d, want 7", v)
 	}
 }
 
@@ -104,7 +104,8 @@ func TestMigration004SubmissionIDUnique(t *testing.T) {
 	defer cleanup()
 	conn := db.Conn()
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
-	ins := `INSERT INTO turns (id, run_id, mode, submission_id) VALUES (?, 'r1', 'solo', ?)`
+	mustExec(t, conn, `INSERT INTO conversations (id) VALUES ('c')`)
+	ins := `INSERT INTO turns (id, run_id, mode, submission_id, conversation_id) VALUES (?, 'r1', 'solo', ?, 'c')`
 	mustExec(t, conn, ins, "t1", "s1")
 	if _, err := conn.Exec(ins, "t2", "s1"); err == nil {
 		t.Error("duplicate submission_id accepted")

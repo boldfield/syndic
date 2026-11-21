@@ -154,6 +154,9 @@ type TurnParams struct {
 	TurnDeadlineMS    int64
 	TurnDeadline      time.Time
 	BudgetJSON        json.RawMessage
+	ConversationID    string
+	MaxRoundsInEffect *int
+	MaxRoundsCeiling  *int
 }
 
 // CreateEngineTurn creates a new engine turn with the given parameters.
@@ -161,6 +164,14 @@ type TurnParams struct {
 func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 	if p.SubmissionID == "" {
 		return "", fmt.Errorf("SubmissionID is required")
+	}
+
+	convID := p.ConversationID
+	if convID == "" {
+		convID, err = tx.CreateConversation(nil)
+		if err != nil {
+			return "", fmt.Errorf("create conversation: %w", err)
+		}
 	}
 
 	turnID, err = generateID()
@@ -181,9 +192,9 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 	}
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr, convID, p.MaxRoundsInEffect, p.MaxRoundsCeiling); err != nil {
 		if isUniqueConstraintError(err, "submission_id") {
 			return "", ErrDuplicateSubmission
 		}
@@ -204,6 +215,10 @@ type TurnRow struct {
 	CandidateID                         string
 	AttemptDeadlineMS, TurnDeadlineMS   int64
 	BudgetJSON                          json.RawMessage
+	ConversationID                      string
+	MaxRoundsInEffect, MaxRoundsCeiling *int
+	ContextHash                         *string
+	FileTainted                         bool
 }
 
 // ErrTurnNotFound is returned by GetTurn for an unknown turn id.
@@ -247,12 +262,17 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 	var attemptDeadlineMS sql.NullInt64
 	var turnDeadlineMS sql.NullInt64
 	var budgetJSONStr sql.NullString
+	var maxRoundsInEffect sql.NullInt64
+	var maxRoundsCeiling sql.NullInt64
+	var contextHash sql.NullString
+	var conversationID sql.NullString
+	var fileTainted bool
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json
+		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted
 		FROM turns WHERE id = ?
 	`, turnID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &conversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
 	); err != nil {
 		return nil, err
 	}
@@ -297,6 +317,10 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 		row.CandidateID = candidateID.String
 	}
 
+	if conversationID.Valid {
+		row.ConversationID = conversationID.String
+	}
+
 	if attemptDeadlineMS.Valid {
 		row.AttemptDeadlineMS = attemptDeadlineMS.Int64
 	}
@@ -308,6 +332,22 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 	if budgetJSONStr.Valid {
 		row.BudgetJSON = json.RawMessage(budgetJSONStr.String)
 	}
+
+	if maxRoundsInEffect.Valid {
+		v := int(maxRoundsInEffect.Int64)
+		row.MaxRoundsInEffect = &v
+	}
+
+	if maxRoundsCeiling.Valid {
+		v := int(maxRoundsCeiling.Int64)
+		row.MaxRoundsCeiling = &v
+	}
+
+	if contextHash.Valid {
+		row.ContextHash = &contextHash.String
+	}
+
+	row.FileTainted = fileTainted
 
 	return &row, nil
 }
@@ -337,12 +377,16 @@ func (tx *Tx) FindSubmission(submissionID string) (*TurnRow, bool, error) {
 	var attemptDeadlineMS sql.NullInt64
 	var turnDeadlineMS sql.NullInt64
 	var budgetJSONStr sql.NullString
+	var maxRoundsInEffect sql.NullInt64
+	var maxRoundsCeiling sql.NullInt64
+	var contextHash sql.NullString
+	var fileTainted bool
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json
+		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted
 		FROM turns WHERE submission_id = ?
 	`, submissionID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID_, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID_, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &row.ConversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, nil
@@ -401,6 +445,22 @@ func (tx *Tx) FindSubmission(submissionID string) (*TurnRow, bool, error) {
 	if budgetJSONStr.Valid {
 		row.BudgetJSON = json.RawMessage(budgetJSONStr.String)
 	}
+
+	if maxRoundsInEffect.Valid {
+		v := int(maxRoundsInEffect.Int64)
+		row.MaxRoundsInEffect = &v
+	}
+
+	if maxRoundsCeiling.Valid {
+		v := int(maxRoundsCeiling.Int64)
+		row.MaxRoundsCeiling = &v
+	}
+
+	if contextHash.Valid {
+		row.ContextHash = &contextHash.String
+	}
+
+	row.FileTainted = fileTainted
 
 	return &row, true, nil
 }
