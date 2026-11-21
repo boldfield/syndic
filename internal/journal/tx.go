@@ -666,3 +666,40 @@ func (tx *Tx) GetAttemptTurnAndRun(attemptID string) (turnID, runID string, err 
 	}
 	return turnID, runID, nil
 }
+
+// CreateConversation creates a new conversation and returns its ID.
+func (tx *Tx) CreateConversation(workspace *string) (conversationID string, err error) {
+	conversationID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO conversations (id, workspace)
+		VALUES (?, ?)
+	`, conversationID, workspace); err != nil {
+		return "", fmt.Errorf("insert conversation: %w", err)
+	}
+
+	return conversationID, nil
+}
+
+// SetTurnContextHash sets the context_hash for a turn.
+func (tx *Tx) SetTurnContextHash(turnID, contextHash string) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET context_hash = ? WHERE id = ?
+	`, contextHash, turnID); err != nil {
+		return fmt.Errorf("update turn context_hash: %w", err)
+	}
+	return nil
+}
+
+// SetTurnFileTainted sets the file_tainted flag for a turn.
+func (tx *Tx) SetTurnFileTainted(turnID string, tainted bool) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET file_tainted = ? WHERE id = ?
+	`, tainted, turnID); err != nil {
+		return fmt.Errorf("update turn file_tainted: %w", err)
+	}
+	return nil
+}

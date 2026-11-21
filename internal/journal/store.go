@@ -272,3 +272,27 @@ func (s *Store) OpenBlocks(turnID string) ([]Block, error) {
 	})
 	return blocks, err
 }
+
+// CreateConversation creates a new conversation and returns its ID.
+func (s *Store) CreateConversation(workspace *string) (conversationID string, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		conversationID, txErr = tx.CreateConversation(workspace)
+		return txErr
+	})
+	return conversationID, err
+}
+
+// SetTurnContextHash sets the context_hash for a turn.
+func (s *Store) SetTurnContextHash(turnID, contextHash string) error {
+	return s.Tx(func(tx *Tx) error {
+		return tx.SetTurnContextHash(turnID, contextHash)
+	})
+}
+
+// SetTurnFileTainted sets the file_tainted flag for a turn.
+func (s *Store) SetTurnFileTainted(turnID string, tainted bool) error {
+	return s.Tx(func(tx *Tx) error {
+		return tx.SetTurnFileTainted(turnID, tainted)
+	})
+}

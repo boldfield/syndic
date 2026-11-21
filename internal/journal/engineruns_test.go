@@ -666,11 +666,20 @@ func TestGetTurnNullableColumns(t *testing.T) {
 		t.Fatalf("failed to create legacy probe run: %v", err)
 	}
 
+	legacyConvID := "legacy-conv-1"
+	_, err = conn.Exec(`
+		INSERT INTO conversations (id, workspace)
+		VALUES (?, NULL)
+	`, legacyConvID)
+	if err != nil {
+		t.Fatalf("failed to create legacy conversation: %v", err)
+	}
+
 	legacyTurnID := "legacy-turn-1"
 	_, err = conn.Exec(`
-		INSERT INTO turns (id, run_id, mode)
-		VALUES (?, ?, 'solo')
-	`, legacyTurnID, probeRunID)
+		INSERT INTO turns (id, run_id, mode, conversation_id)
+		VALUES (?, ?, 'solo', ?)
+	`, legacyTurnID, probeRunID, legacyConvID)
 	if err != nil {
 		t.Fatalf("failed to create legacy turn: %v", err)
 	}
