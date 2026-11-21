@@ -14,7 +14,23 @@ const (
 	ProtocolVersion     = 1
 	MaxFrameBytes       = 1 << 20 // 1 MiB
 	MaxContentPageBytes = 262144  // 256 KiB
+	// MaxConversationListSize is the maximum number of conversation summaries that may be
+	// returned in a ConversationsReply. conversations.limit follows the transcript convention:
+	// absent or <= 0 means 200; a positive limit above 200 is clamped to 200. The server returns
+	// at most that many items (see ConversationListLimit) and stops early to ensure the encoded reply fits within MaxFrameBytes, returning
+	// next_cursor for remaining items. A page must always contain at least one item when
+	// available; if a single item exceeds MaxFrameBytes, it is refused with error{code:"frame"}.
+	MaxConversationListSize = 200
 )
+
+// ConversationListLimit resolves the optional conversations.limit to the page size:
+// absent or non-positive yields MaxConversationListSize, larger values are clamped.
+func ConversationListLimit(limit *int) int {
+	if limit == nil || *limit <= 0 || *limit > MaxConversationListSize {
+		return MaxConversationListSize
+	}
+	return *limit
+}
 
 var ErrFrameTooLarge = errors.New("frame exceeds 1 MiB")
 
@@ -138,6 +154,8 @@ type Error struct {
 	Pool         *string         `json:"pool,omitempty"`
 	AttemptID    *string         `json:"attempt_id,omitempty"`
 	LastSeq      *int64          `json:"last_seq,omitempty"`
+	Ceiling      *int            `json:"ceiling,omitempty"`
+	Route        *string         `json:"route,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -285,6 +303,11 @@ type QuickProfile struct {
 	DefinitionSHA256 string   `json:"definition_sha256"`
 }
 
+type Revision struct {
+	Default int `json:"default"`
+	Ceiling int `json:"ceiling"`
+}
+
 type StatusReply struct {
 	RunID                string         `json:"run_id"`
 	RunStartedAt         string         `json:"run_started_at"`
@@ -300,6 +323,7 @@ type StatusReply struct {
 	QuickProfiles        []QuickProfile `json:"quick_profiles"`
 	TurnsOpen            []string       `json:"turns_open"`
 	EngineStartedAt      string         `json:"engine_started_at"`
+	Revision             Revision       `json:"revision"`
 }
 
 type SubmitRequest struct {
@@ -308,6 +332,10 @@ type SubmitRequest struct {
 	Preset           *string `json:"preset,omitempty"`
 	QuickProfile     *string `json:"quick_profile,omitempty"`
 	AllowProvisional *bool   `json:"allow_provisional,omitempty"`
+	Workspace        string  `json:"workspace"`
+	ConversationID   *string `json:"conversation_id,omitempty"`
+	ContextFromTurn  *string `json:"context_from_turn,omitempty"`
+	MaxRounds        *int    `json:"max_rounds,omitempty"`
 }
 
 type SubmitReply struct {
@@ -315,6 +343,8 @@ type SubmitReply struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
+	ConversationID  string  `json:"conversation_id"`
+	ContextHash     string  `json:"context_hash"`
 }
 
 type CancelRequest struct {
@@ -463,6 +493,44 @@ type UnsubscribeReply struct {
 	OK bool `json:"ok"`
 }
 
+type ConversationsRequest struct {
+	Workspace *string `json:"workspace,omitempty"`
+	Cursor    *string `json:"cursor,omitempty"`
+	Limit     *int    `json:"limit,omitempty"`
+}
+
+type ConversationSummary struct {
+	ID              string  `json:"id"`
+	CreatedAt       string  `json:"created_at"`
+	Workspace       *string `json:"workspace"`
+	LastSubmittedAt string  `json:"last_submitted_at"`
+	TurnCount       int     `json:"turn_count"`
+	Running         bool    `json:"running"`
+	Preview         string  `json:"preview"`
+}
+
+type ConversationsReply struct {
+	Items      []ConversationSummary `json:"items"`
+	NextCursor *string               `json:"next_cursor,omitempty"`
+}
+
+type ConversationRequest struct {
+	ID string `json:"id"`
+}
+
+type ConversationTurnSummary struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+type ConversationReply struct {
+	ID string `json:"id"`
+	// Turns is the complete turn list; paging for the turn list is not specified in the design.
+	// The frame cap (MaxFrameBytes) bounds the reply size; a turn list that does not fit
+	// is refused with error{code: "frame"} as specified in the v4 delta's Framing section.
+	Turns []ConversationTurnSummary `json:"turns"`
+}
+
 // Event body types
 
 type EvRunOpened struct {
@@ -500,6 +568,11 @@ type EvTurnSubmitted struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
+	ConversationID  string  `json:"conversation_id"`
+}
+
+type EvConversationCreated struct {
+	ConversationID string `json:"conversation_id"`
 }
 
 type EvTurnState struct {
@@ -617,17 +690,19 @@ type EvOverride struct {
 
 // String constants for request types
 const (
-	RequestHello       = "hello"
-	RequestStatus      = "status"
-	RequestSubmit      = "submit"
-	RequestCancel      = "cancel"
-	RequestOverride    = "override"
-	RequestRelease     = "release"
-	RequestTurn        = "turn"
-	RequestTranscript  = "transcript"
-	RequestContent     = "content"
-	RequestSubscribe   = "subscribe"
-	RequestUnsubscribe = "unsubscribe"
+	RequestHello         = "hello"
+	RequestStatus        = "status"
+	RequestSubmit        = "submit"
+	RequestCancel        = "cancel"
+	RequestOverride      = "override"
+	RequestRelease       = "release"
+	RequestTurn          = "turn"
+	RequestTranscript    = "transcript"
+	RequestContent       = "content"
+	RequestSubscribe     = "subscribe"
+	RequestUnsubscribe   = "unsubscribe"
+	RequestConversations = "conversations"
+	RequestConversation  = "conversation"
 )
 
 // String constants for error codes
@@ -654,6 +729,10 @@ const (
 	ErrorCodeNotOpen             = "not_open"
 	ErrorCodeNotFound            = "not_found"
 	ErrorCodeBadRequest          = "bad_request"
+	ErrorCodeProbing             = "probing"
+	ErrorCodeWorkspaceMismatch   = "workspace_mismatch"
+	ErrorCodeMaxRounds           = "max_rounds"
+	ErrorCodeEgress              = "egress"
 )
 
 // String constants for event kinds
@@ -681,6 +760,7 @@ const (
 	EventKindBudgetEstimateExceeded = "budget_estimate_exceeded"
 	EventKindBudgetExhausted        = "budget_exhausted"
 	EventKindOverride               = "override"
+	EventKindConversationCreated    = "conversation_created"
 )
 
 var EventKinds = []string{
@@ -707,4 +787,5 @@ var EventKinds = []string{
 	EventKindBudgetEstimateExceeded,
 	EventKindBudgetExhausted,
 	EventKindOverride,
+	EventKindConversationCreated,
 }
