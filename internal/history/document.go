@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 )
 
 // Turn represents the minimal data needed to build one turn's history entry.
@@ -34,17 +35,26 @@ func New() *Document {
 }
 
 // SetContextFromTurn sets the trim point: only turns from this ID onward will be included.
-// If the turn ID is not found, all turns are included.
-func (d *Document) SetContextFromTurn(turnID string) {
-	d.contextFromTurn = turnID
+// If the turn ID is not found, it returns an error.
+func (d *Document) SetContextFromTurn(turnID string) error {
+	// Verify the turn ID exists
+	for _, turn := range d.turns {
+		if turn.ID == turnID {
+			d.contextFromTurn = turnID
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown turn ID: %q", turnID)
 }
 
 // ValidateState checks if a state value is valid.
 func ValidateState(state string) error {
 	validStates := map[string]bool{
-		"approved":   true,
-		"incomplete": true,
-		"cancelled":  true,
+		"approved":      true,
+		"incomplete":    true,
+		"cancelled":     true,
+		"solo_complete": true,
+		"overridden":    true,
 	}
 	if !validStates[state] {
 		return fmt.Errorf("invalid state: %q", state)
@@ -312,9 +322,15 @@ func (d *Document) parseField(docBytes []byte, offset int) (string, []byte, int,
 		return "", nil, offset, fmt.Errorf("parse field header: invalid length format %q (no leading zeros or signs)", lengthStr)
 	}
 
-	// Parse decimal length
-	var byteLen int
-	_, err := fmt.Sscanf(lengthStr, "%d", &byteLen)
+	// Validate that all characters are digits
+	for i, c := range lengthStr {
+		if c < '0' || c > '9' {
+			return "", nil, offset, fmt.Errorf("parse field header: invalid character %q at position %d in length %q", c, i, lengthStr)
+		}
+	}
+
+	// Parse decimal length using strconv for strictness
+	byteLen, err := strconv.Atoi(lengthStr)
 	if err != nil {
 		return "", nil, offset, fmt.Errorf("parse field header: invalid length %q: %w", lengthStr, err)
 	}
@@ -413,6 +429,9 @@ func (d *Document) RenderForAuthor() ([]Message, error) {
 			}
 		}
 
+		// Check if this is a missing-answer turn (incomplete or cancelled state)
+		isMissingAnswer := string(fields["state"]) == "incomplete" || string(fields["state"]) == "cancelled"
+
 		// Build lossless rendering: include state, label, and changes
 		var userContent bytes.Buffer
 		userContent.WriteString("state: ")
@@ -422,33 +441,41 @@ func (d *Document) RenderForAuthor() ([]Message, error) {
 		userContent.Write(fields["input"])
 		userContent.WriteString("\n")
 
-		var answerContent bytes.Buffer
-		answerContent.WriteString("label: ")
-		answerContent.Write(fields["label"])
-		answerContent.WriteString("\n")
-		answerContent.WriteString("answer: ")
-		answerContent.Write(fields["answer"])
-		answerContent.WriteString("\n")
-
-		// Add changes if present
-		if len(changes) > 0 {
-			answerContent.WriteString("changes:\n")
-			for _, change := range changes {
-				answerContent.Write(change)
-				answerContent.WriteString("\n")
-			}
-		}
-
 		// Add user message with state and input
 		messages = append(messages, Message{
 			Role:    "user",
 			Content: userContent.String(),
 		})
 
-		// Add assistant message with label, answer, and changes
+		// For missing-answer turns, the assistant message contains ONLY the missing-answer line
+		// For other turns, it contains label, answer, and changes
+		var answerContent string
+		if isMissingAnswer {
+			answerContent = string(fields["answer"])
+		} else {
+			var buf bytes.Buffer
+			buf.WriteString("label: ")
+			buf.Write(fields["label"])
+			buf.WriteString("\n")
+			buf.WriteString("answer: ")
+			buf.Write(fields["answer"])
+			buf.WriteString("\n")
+
+			// Add changes if present
+			if len(changes) > 0 {
+				buf.WriteString("changes:\n")
+				for _, change := range changes {
+					buf.Write(change)
+					buf.WriteString("\n")
+				}
+			}
+			answerContent = buf.String()
+		}
+
+		// Add assistant message
 		messages = append(messages, Message{
 			Role:    "assistant",
-			Content: answerContent.String(),
+			Content: answerContent,
 		})
 	}
 

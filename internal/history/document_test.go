@@ -457,12 +457,10 @@ func TestDocumentRenderForAuthorWithMissingAnswer(t *testing.T) {
 		t.Errorf("second message role should be 'assistant', got %q", messages[1].Role)
 	}
 
-	// Second message should contain label and missing-answer marker
-	if !strings.Contains(messages[1].Content, "label: unreviewed (solo)") {
-		t.Errorf("second message should contain label: %q", messages[1].Content)
-	}
-	if !strings.Contains(messages[1].Content, "no approved answer") {
-		t.Errorf("second message should contain missing-answer marker, got %q", messages[1].Content)
+	// Second message should contain ONLY the missing-answer marker (no label, no other fields)
+	expectedContent := "no approved answer (incomplete)"
+	if messages[1].Content != expectedContent {
+		t.Errorf("missing-answer message should contain only missing-answer marker. expected %q, got %q", expectedContent, messages[1].Content)
 	}
 }
 
@@ -674,7 +672,7 @@ func TestDocumentStrictParsing(t *testing.T) {
 }
 
 func TestDocumentValidateState(t *testing.T) {
-	validStates := []string{"approved", "incomplete", "cancelled"}
+	validStates := []string{"approved", "incomplete", "cancelled", "solo_complete", "overridden"}
 	for _, state := range validStates {
 		if err := ValidateState(state); err != nil {
 			t.Errorf("valid state %q rejected: %v", state, err)
@@ -1038,24 +1036,18 @@ func TestDocumentStrictParsing_RejectNonCanonical(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a valid document for testing
-			validDoc := New()
-			validTurn := Turn{
-				ID:           "t",
-				State:        "approved",
-				Input:        []byte("i"),
-				Answer:       []byte("a"),
-				Label:        "reviewed",
-				ChangesState: "",
-				Changes:      nil,
-			}
-			if err := validDoc.AddTurn(validTurn); err != nil {
-				t.Fatalf("AddTurn failed: %v", err)
+			testDoc := &Document{
+				buf:   bytes.NewBufferString(tt.docStr[len("syndic-history/v1\n"):]),
+				turns: []Turn{},
 			}
 
-			// For now, just verify valid documents parse
-			if !tt.wantErr {
-				_, err := validDoc.RenderForAuthor()
+			// Try to parse the malformed document
+			_, err := testDoc.RenderForAuthor()
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error for malformed document, got nil")
+				}
+			} else {
 				if err != nil {
 					t.Errorf("valid document should parse: %v", err)
 				}
@@ -1163,7 +1155,9 @@ func TestDocumentTrimSelection(t *testing.T) {
 	}
 
 	// With trim from turn-2, only turns 2 and 3 should be present
-	doc.SetContextFromTurn("turn-2")
+	if err := doc.SetContextFromTurn("turn-2"); err != nil {
+		t.Fatalf("SetContextFromTurn failed: %v", err)
+	}
 	trimmedBytes := doc.Bytes()
 	if strings.Contains(string(trimmedBytes), "turn-1") {
 		t.Errorf("turn-1 should not be in trimmed document")
@@ -1190,7 +1184,9 @@ func TestDocumentTrimSelection(t *testing.T) {
 			t.Fatalf("AddTurn failed: %v", err)
 		}
 	}
-	trimmedHash.SetContextFromTurn("turn-2")
+	if err := trimmedHash.SetContextFromTurn("turn-2"); err != nil {
+		t.Fatalf("SetContextFromTurn failed: %v", err)
+	}
 	trimmedHashVal := trimmedHash.Hash()
 
 	if fullHashVal == trimmedHashVal {
@@ -1249,6 +1245,34 @@ func TestDocumentAnswerIgnoredForIncomplete(t *testing.T) {
 	// Hashes should also be the same
 	if docWithSecret.Hash() != docWithoutSecret.Hash() {
 		t.Errorf("incomplete turn hashes should match regardless of Answer field")
+	}
+}
+
+// Test SetContextFromTurn with unknown ID
+func TestDocumentSetContextFromTurnUnknownID(t *testing.T) {
+	doc := New()
+	turns := []Turn{
+		{
+			ID:           "turn-1",
+			State:        "approved",
+			Input:        []byte("Q1"),
+			Answer:       []byte("A1"),
+			Label:        "reviewed",
+			ChangesState: "",
+			Changes:      nil,
+		},
+	}
+
+	for _, turn := range turns {
+		if err := doc.AddTurn(turn); err != nil {
+			t.Fatalf("AddTurn failed: %v", err)
+		}
+	}
+
+	// Try to set context with unknown turn ID
+	err := doc.SetContextFromTurn("unknown-id")
+	if err == nil {
+		t.Errorf("expected error for unknown turn ID, got nil")
 	}
 }
 
