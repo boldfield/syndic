@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport"
@@ -194,6 +195,31 @@ func TestWhyBlockReasonOnce(t *testing.T) {
 	v := untilView(t, r, "reviewer reason (reviewer): unsafe")
 	if n := strings.Count(v, "reviewer reason (reviewer): unsafe"); n != 1 {
 		t.Fatalf("reviewer reason shown %d times, want once:\n%s", n, v)
+	}
+}
+
+// TestWhyTrustsTheTurnRecord covers a turn reply that has already recorded
+// the turn as incomplete while its turn_state event has not yet arrived: /why
+// still fetches the record and explains the ending instead of saying the turn
+// is running.
+func TestWhyTrustsTheTurnRecord(t *testing.T) {
+	a := NewApp(context.Background(), "unused.sock")
+	a.cl = &client.Client{}
+	a.state.Turns = map[string]TurnInfo{"t1": {ID: "t1", State: "incomplete", SubmitSeq: 1}}
+	a.state.TurnState = map[string]string{"t1": "author_dispatched"}
+	if cmd := cmdWhy(a, nil); cmd == nil {
+		t.Fatal("/why did not fetch the turn record")
+	}
+	reason := "author_failed:gate:identity mismatch"
+	a.onWhy(whyMsg{gen: a.gen, id: "t1", turn: &wire.TurnReply{State: "incomplete", TerminalReason: &reason}})
+	v := a.View()
+	if strings.Contains(v, "still running") || !strings.Contains(v, "reason: "+reason) {
+		t.Fatalf("/why did not explain the ended turn:\n%s", v)
+	}
+
+	a.onWhy(whyMsg{gen: a.gen, id: "t1", turn: &wire.TurnReply{State: "reviewers_dispatched"}})
+	if v := a.View(); !strings.Contains(v, "turn t1 is still running") || !strings.Contains(v, "state: reviewers_dispatched") {
+		t.Fatalf("/why on an open turn record:\n%s", v)
 	}
 }
 

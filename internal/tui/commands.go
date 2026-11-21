@@ -276,14 +276,9 @@ func cmdWhy(a *App, _ []string) tea.Cmd {
 		a.refusal = "no turn yet"
 		return nil
 	}
-	if !isTerminalState(a.state.TurnState[id]) {
-		state := a.state.TurnState[id]
-		if ti, ok := a.state.Turns[id]; ok && ti.State != "" {
-			state = ti.State
-		}
-		a.panel = []string{"turn " + id + " is still running", "state: " + state}
-		return nil
-	}
+	// Whether the turn has ended is read from the engine's turn record, not
+	// from local state: the turn_state event and an earlier turn reply can
+	// arrive in either order.
 	if a.cl == nil {
 		a.refusal = "engine: not connected"
 		return nil
@@ -306,6 +301,10 @@ func (a *App) onWhy(msg whyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.err != nil {
 		a.refusal = "why: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	if !isTerminalState(msg.turn.State) {
+		a.panel = []string{"turn " + msg.id + " is still running", "state: " + msg.turn.State}
 		return a, nil
 	}
 	a.panel = whyLines(msg.id, msg.turn, a.state.LastBudgetNotice)
