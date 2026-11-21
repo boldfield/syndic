@@ -525,3 +525,28 @@ func TestQuickProfileVanishingCancelsOpenApproval(t *testing.T) {
 		t.Fatalf("approval written for an absent profile: %v %v", approvals, err)
 	}
 }
+
+func TestFindQuickTomlHomeWithTrailingSeparatorOrSymlink(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".syndic"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".syndic", "quick.toml"), []byte(`profile = "solo"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "homelink")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, h := range map[string]string{"trailing separator": home + string(filepath.Separator), "symlinked home": link} {
+		t.Setenv("HOME", h)
+		if path, _, err := findQuickToml(project); err != nil || path != "" {
+			t.Errorf("%s: found %q, %v above home", name, path, err)
+		}
+	}
+}

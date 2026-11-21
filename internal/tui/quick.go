@@ -105,7 +105,9 @@ func findQuickToml(wd string) (string, []byte, error) {
 		return "", nil, fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	current := wd
+	home = filepath.Clean(home)
+	current := filepath.Clean(wd)
+	homeInfo, _ := os.Stat(home)
 	var currentDev uint64
 	if st, err := os.Stat(current); err == nil {
 		currentDev = getDevID(st)
@@ -122,6 +124,11 @@ func findQuickToml(wd string) (string, []byte, error) {
 		// Check if we've reached the home directory
 		if current == home {
 			break
+		}
+		if homeInfo != nil {
+			if ci, err := os.Stat(current); err == nil && os.SameFile(ci, homeInfo) {
+				break
+			}
 		}
 
 		parent := filepath.Dir(current)
