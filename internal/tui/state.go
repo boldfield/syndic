@@ -152,7 +152,8 @@ type State struct {
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
 	UnapprovedProfile   *string
 	NextPreset          string // set by /mode: the preset of the next submit only
-	ModeOverrideTurn    string // turn ID of the last turn submitted with /mode
+	QuickInvalid        string // "quick: invalid <path>" when the project file cannot be used
+	ModeSubmissionID    string // submission id of the last submit that carried a /mode preset
 }
 
 // NewState returns a fresh State.
@@ -202,7 +203,7 @@ func apply(s State, f wire.Frame) State {
 				State:           "submitted",
 				Preset:          body.Preset,
 				QuickProfile:    body.QuickProfile,
-				ModeOverride:    s.ModeOverrideTurn == body.TurnID,
+				ModeOverride:    s.ModeSubmissionID != "" && s.ModeSubmissionID == body.SubmissionID,
 				SubmittedAt:     frameTime,
 				SubmitSeq:       f.Seq,
 				EstimatedTokens: body.EstimatedTokens,

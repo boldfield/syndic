@@ -11,7 +11,6 @@ import (
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/google/uuid"
 )
 
 const (
@@ -88,10 +87,10 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 	}
 }
 
-// submitCmd submits input with a fresh submission id, preset, and quick profile if any.
-func submitCmd(ctx context.Context, cl *client.Client, input, preset string, quickProfile *string) tea.Cmd {
+// submitCmd submits input under the submission id, with the preset and quick profile, if any.
+func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, preset string, quickProfile *string) tea.Cmd {
 	return func() tea.Msg {
-		req := wire.SubmitRequest{SubmissionID: uuid.NewString(), Input: input}
+		req := wire.SubmitRequest{SubmissionID: submissionID, Input: input}
 		if preset != "" {
 			req.Preset = &preset
 		}

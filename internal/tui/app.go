@@ -2,8 +2,8 @@ package tui
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +13,7 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 )
 
 type tab int
@@ -53,14 +54,14 @@ type App struct {
 	tickRunning          bool
 	onEvent              func(wire.Frame)
 
-	content                   *ContentCache
-	drafts                    *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
-	quickSelection            *QuickSelection // quick profile state
-	nextSubmitHasModeOverride bool            // /mode was used for the next submit
-	answerScrollRow           int             // first visible line of the answer tab
-	candidateIDByTurn         map[string]string
-	openBlocksByTurn          map[string][]wire.OpenBlock // open blocks from turn replies
-	overrideReasons           map[string]string           // the reason of each override event
+	content           *ContentCache
+	drafts            *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection    *QuickSelection // quick profile state
+	workDir           string          // where the quick profile search starts; the process directory when empty
+	answerScrollRow   int             // first visible line of the answer tab
+	candidateIDByTurn map[string]string
+	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
+	overrideReasons   map[string]string           // the reason of each override event
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -89,6 +90,11 @@ func WithEventObserver(f func(wire.Frame)) Option {
 	return func(a *App) { a.onEvent = f }
 }
 
+// WithWorkDir starts the quick profile search in dir rather than the process's working directory.
+func WithWorkDir(dir string) Option {
+	return func(a *App) { a.workDir = dir }
+}
+
 // NewApp returns an App that talks to the engine socket at socketPath.
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
@@ -109,22 +115,25 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		blockDetail:       make(map[string]wire.OpenBlock),
 	}
 	a.state.ConnState = ConnStateConnecting
-	wd, err := os.Getwd()
-	if err != nil {
-		wd = ""
-	}
-	qs, err := NewQuickSelection(wd)
-	if err != nil {
-		// Log error but continue; quick selection will not be available
-		qs = &QuickSelection{
-			ApprovedProfiles:    make(map[string]ApprovedProfile),
-			DeclinedThisProcess: make(map[string]bool),
-		}
-	}
-	a.quickSelection = qs
 	for _, o := range opts {
 		o(a)
 	}
+	var errs []error
+	if a.workDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("quick: cannot find the working directory: %w", err))
+		}
+		a.workDir = wd
+	}
+	qs, err := NewQuickSelection(a.workDir)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		a.refusal = errors.Join(errs...).Error()
+	}
+	a.quickSelection = qs
 	return a
 }
 
@@ -348,8 +357,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N":
 			return a, a.approvalNo()
 		case "esc", "ctrl+c":
-			a.cancelApproval("quick profile approval cancelled")
-			return a, nil
+			return a, a.approvalNo()
 		}
 		return a, nil
 	}
@@ -466,31 +474,16 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	var quickProfile *string
-	if a.quickSelection != nil {
-		// Use session override or check project profile with full definition SHA validation
-		if a.quickSelection.SessionOverride != nil {
-			if *a.quickSelection.SessionOverride != "off" {
-				quickProfile = a.quickSelection.SessionOverride
-			}
-		} else if a.quickSelection.ProjectProfile != nil && a.state.Status != nil {
-			// Find the profile definition SHA from status
-			for _, qp := range a.state.Status.QuickProfiles {
-				if qp.Name == *a.quickSelection.ProjectProfile {
-					if a.quickSelection.IsProjectProfileApprovedWithDefinition(qp.DefinitionSHA256) {
-						quickProfile = a.quickSelection.ProjectProfile
-					}
-					break
-				}
-			}
-		}
+	var profiles []wire.QuickProfile
+	if a.state.Status != nil {
+		profiles = a.state.Status.QuickProfiles
 	}
-	// Mark that /mode will apply to this submit so ModeOverride is set correctly
-	// even if turn_submitted event arrives before submit reply
+	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
+	id := uuid.NewString()
 	if a.state.NextPreset != "" {
-		a.nextSubmitHasModeOverride = true
+		a.state.ModeSubmissionID = id
 	}
-	return submitCmd(a.ctx, a.cl, line, a.state.NextPreset, quickProfile)
+	return submitCmd(a.ctx, a.cl, id, line, a.state.NextPreset, a.quickSelection.selected(profiles))
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -523,16 +516,10 @@ func (a *App) ensureTurnInfo() {
 func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if msg.refusal != "" {
 		a.refusal = msg.refusal
-		a.nextSubmitHasModeOverride = false
 		return nil
 	}
 	a.input.SetValue("")
-	// Track if /mode was used for this turn
-	if a.state.NextPreset != "" {
-		a.state.ModeOverrideTurn = msg.turnID
-	}
 	a.state.NextPreset = "" // /mode applies to one submit
-	a.nextSubmitHasModeOverride = false
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
 	}
@@ -571,156 +558,71 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
-// updateQuickProfileState checks if the project's quick profile is approved
-// and sets the UnapprovedProfile state accordingly. It may also trigger an approval prompt.
+// updateQuickProfileState sets the quick profile banners from the project
+// selection and the roster's profiles, and opens the approval prompt when the
+// operator has not yet answered for this state.
 func (a *App) updateQuickProfileState() {
-	if a.quickSelection == nil {
-		a.state.UnapprovedProfile = nil
+	a.state.UnapprovedProfile, a.state.QuickInvalid = nil, ""
+	qs := a.quickSelection
+	if qs.Override != nil {
+		return // typed by the operator: no approval, no banner
+	}
+	if qs.Invalid != "" {
+		a.state.QuickInvalid = qs.Invalid
 		return
 	}
-
-	// If SessionOverride is set to "off", explicitly disable the profile
-	if a.quickSelection.SessionOverride != nil && *a.quickSelection.SessionOverride == "off" {
-		a.state.UnapprovedProfile = nil
+	if qs.ProjectProfile == "" || a.state.Status == nil {
 		return
 	}
-
-	// If SessionOverride is set to something else, it's pre-approved by typing it
-	if a.quickSelection.SessionOverride != nil {
-		a.state.UnapprovedProfile = nil
-		return
-	}
-
-	// Check if there's a parse error on the project file
-	if a.quickSelection.ProjectParseError != nil {
-		a.state.UnapprovedProfile = a.quickSelection.ProjectParseError
-		return
-	}
-
-	// If no project profile, we're done
-	if a.quickSelection.ProjectProfile == nil {
-		a.state.UnapprovedProfile = nil
-		return
-	}
-
-	// Check if project profile is in the status
-	if a.state.Status == nil {
-		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
-		a.requestApprovalIfNeeded()
-		return
-	}
-
-	profileName := *a.quickSelection.ProjectProfile
-	var profileDef *wire.QuickProfile
+	var def *wire.QuickProfile
 	for i := range a.state.Status.QuickProfiles {
-		if a.state.Status.QuickProfiles[i].Name == profileName {
-			profileDef = &a.state.Status.QuickProfiles[i]
-			break
+		if a.state.Status.QuickProfiles[i].Name == qs.ProjectProfile {
+			def = &a.state.Status.QuickProfiles[i]
 		}
 	}
-
-	if profileDef == nil {
-		// Profile not in status - unapproved with note that engine has no such profile
-		msg := fmt.Sprintf("%s (engine has no such profile)", profileName)
+	if def == nil {
+		msg := qs.ProjectProfile + " (engine has no such profile)"
 		a.state.UnapprovedProfile = &msg
 		return
 	}
-
-	// Check if the project file and profile are fully approved
-	if a.quickSelection.IsProjectProfileApprovedWithDefinition(profileDef.DefinitionSHA256) {
-		a.state.UnapprovedProfile = nil
+	if qs.approvedFor(def.DefinitionSHA256) {
+		if a.approval != nil {
+			a.cancelApproval("")
+		}
 		return
 	}
-
-	// Check if declined this process
-	declineKey := a.quickSelection.ProjectFilePath + ":" + profileName
-	if a.quickSelection.DeclinedThisProcess[declineKey] {
-		a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
+	a.state.UnapprovedProfile = &qs.ProjectProfile
+	if qs.declined[qs.stateKey(def.DefinitionSHA256)] {
 		return
 	}
-
-	// Not approved - trigger approval prompt
-	a.state.UnapprovedProfile = a.quickSelection.ProjectProfile
-	a.requestApprovalIfNeeded()
+	a.requestApproval(*def)
 }
 
-// requestApprovalIfNeeded shows an approval prompt for an unapproved project profile.
-func (a *App) requestApprovalIfNeeded() {
-	if a.approval != nil || a.confirm != nil {
-		// Already showing a prompt
+// requestApproval shows the file, the profile and its effect and asks yes or no.
+func (a *App) requestApproval(def wire.QuickProfile) {
+	qs := a.quickSelection
+	if a.confirm != nil || (a.approval != nil && a.approval.definitionSHA256 == def.DefinitionSHA256 && a.approval.fileSHA256 == qs.ProjectFileSHA) {
 		return
 	}
-	if a.quickSelection == nil || a.state.Status == nil {
-		return
+	a.approval = &approvalPrompt{
+		filePath:         qs.ProjectFilePath,
+		profileName:      qs.ProjectProfile,
+		fileSHA256:       qs.ProjectFileSHA,
+		definitionSHA256: def.DefinitionSHA256,
 	}
-
-	// If session override is set, don't ask
-	if a.quickSelection.SessionOverride != nil {
-		return
-	}
-
-	// If there's a parse error, don't ask (can't approve invalid files)
-	if a.quickSelection.ProjectParseError != nil {
-		return
-	}
-
-	if a.quickSelection.ProjectProfile == nil {
-		return
-	}
-
-	profileName := *a.quickSelection.ProjectProfile
-	filePath := a.quickSelection.ProjectFilePath
-	fileData := a.quickSelection.ProjectFileData
-
-	// Find the profile in status first
-	var qp *wire.QuickProfile
-	for i := range a.state.Status.QuickProfiles {
-		if a.state.Status.QuickProfiles[i].Name == profileName {
-			qp = &a.state.Status.QuickProfiles[i]
-			break
+	budgets := "none"
+	if def.Budgets != nil {
+		if b, err := json.Marshal(def.Budgets); err == nil {
+			budgets = string(b)
 		}
 	}
-	if qp == nil {
-		// Profile not found in status; don't ask (will be shown as unapproved with engine note)
-		return
-	}
-
-	// Don't ask again if already fully approved with current definition SHA
-	if a.quickSelection.IsProjectProfileApprovedWithDefinition(qp.DefinitionSHA256) {
-		return
-	}
-
-	declineKey := filePath + ":" + profileName
-	if a.quickSelection.DeclinedThisProcess[declineKey] {
-		return
-	}
-
-	// Compute file SHA256
-	fileHash := fmt.Sprintf("%x", sha256.Sum256(fileData))
-
-	// Show approval prompt
-	a.approval = &approvalPrompt{
-		filePath:         filePath,
-		profileName:      profileName,
-		fileSHA256:       fileHash,
-		definitionSHA256: qp.DefinitionSHA256,
-		profile:          *qp,
-	}
-
-	// Build panel with profile info
-	var budgetsStr string
-	if qp.Budgets != nil {
-		budgets, _ := json.Marshal(qp.Budgets)
-		budgetsStr = string(budgets)
-	}
-
 	a.panel = []string{
-		fmt.Sprintf("Project file: %s", filePath),
-		fmt.Sprintf("Select quick profile %q", profileName),
+		"Project file: " + qs.ProjectFilePath,
+		fmt.Sprintf("selects quick profile %q:", qs.ProjectProfile),
 		"",
-		fmt.Sprintf("  preset: %s", qp.Preset),
-		fmt.Sprintf("  drafts: %v", qp.Drafts),
-		fmt.Sprintf("  budgets: %s", budgetsStr),
+		"  preset:  " + def.Preset,
+		fmt.Sprintf("  drafts:  %v", def.Drafts),
+		"  budgets: " + budgets,
 		"",
 		"Approve this selection? (y/n)",
 	}
@@ -762,16 +664,6 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	case wire.EventKindTurnSubmitted:
 		var body wire.EvTurnSubmitted
 		if json.Unmarshal(msg.frame.Body, &body) == nil {
-			// Fix ModeOverride flag if /mode was used for this submit
-			if a.nextSubmitHasModeOverride {
-				turns := copyMap(a.state.Turns)
-				if ti, ok := turns[body.TurnID]; ok {
-					ti.ModeOverride = true
-					turns[body.TurnID] = ti
-					a.state.Turns = turns
-				}
-				a.nextSubmitHasModeOverride = false
-			}
 			// The record carries the configured turn deadline and token limit.
 			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, body.TurnID))
 		}

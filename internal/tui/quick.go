@@ -13,101 +13,82 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/boldfield/syndic/internal/wire"
 )
 
-// QuickSelection holds the current quick profile selection state.
+// QuickSelection is the quick profile state of one TUI process: what the
+// project file names, what the operator approved, and what they typed.
 type QuickSelection struct {
-	ProjectProfile      *string // name from .syndic/quick.toml, if found and parsed
-	ProjectFilePath     string  // path to the .syndic/quick.toml file
-	ProjectFileData     []byte  // bytes of the .syndic/quick.toml file
-	ProjectParseError   *string // error from parsing project file, if any (includes path)
-	SessionOverride     *string // set by /quick command; "off" means send nothing
-	ApprovedProfiles    map[string]ApprovedProfile
-	DeclinedThisProcess map[string]bool // tracks declined approvals to ask once per process
+	ProjectProfile  string // name from .syndic/quick.toml; "" when none or invalid
+	ProjectFilePath string
+	ProjectFileSHA  string
+	Invalid         string                     // "quick: invalid <path>" when the project file could not be used
+	Override        *string                    // set by /quick: a profile name, or "off"
+	approved        map[string]ApprovedProfile // by project file path
+	declined        map[string]bool            // states the operator answered no to in this process
 }
 
-// ApprovedProfile holds one approved quick profile record.
+// ApprovedProfile is one record of the approvals file.
 type ApprovedProfile struct {
-	FilePath                string
-	FileSHA256              string
-	ProfileName             string
-	ProfileDefinitionSHA256 string
+	FilePath                string `json:"FilePath"`
+	FileSHA256              string `json:"FileSHA256"`
+	ProfileName             string `json:"ProfileName"`
+	ProfileDefinitionSHA256 string `json:"ProfileDefinitionSHA256"`
 }
 
-// SelectedProfile returns the profile to send on submit, or "" if none.
-// It prefers SessionOverride, then ProjectProfile if approved, then "".
-// Note: This checks only path+name approval; for full 4-value validation, use IsProjectProfileApprovedWithDefinition.
-func (qs *QuickSelection) SelectedProfile() *string {
-	if qs.SessionOverride != nil {
-		if *qs.SessionOverride == "off" {
-			return nil
-		}
-		return qs.SessionOverride
-	}
-	if qs.ProjectProfile != nil && qs.isProjectProfileApproved() {
-		return qs.ProjectProfile
-	}
-	return nil
+// approvedFor reports whether the project selection matches a stored entry on
+// all four values: file path, file bytes, profile name and the definition hash
+// status.quick_profiles reports now.
+func (qs *QuickSelection) approvedFor(definitionSHA256 string) bool {
+	ap, ok := qs.approved[qs.ProjectFilePath]
+	return ok && ap.FileSHA256 == qs.ProjectFileSHA && ap.ProfileName == qs.ProjectProfile &&
+		ap.ProfileDefinitionSHA256 == definitionSHA256
 }
 
-// SelectedProfileFull returns the profile to send on submit with full 4-value approval validation.
-// It prefers SessionOverride, then ProjectProfile if fully approved with definition SHA, then "".
-func (qs *QuickSelection) SelectedProfileFull(definitionSHA256 string) *string {
-	if qs.SessionOverride != nil {
-		if *qs.SessionOverride == "off" {
-			return nil
-		}
-		return qs.SessionOverride
-	}
-	if qs.ProjectProfile != nil && qs.IsProjectProfileApprovedWithDefinition(definitionSHA256) {
-		return qs.ProjectProfile
-	}
-	return nil
+// stateKey identifies the state a no was given for.
+func (qs *QuickSelection) stateKey(definitionSHA256 string) string {
+	return strings.Join([]string{qs.ProjectFilePath, qs.ProjectFileSHA, qs.ProjectProfile, definitionSHA256}, "\x00")
 }
 
-// IsUnapproved returns the name/error of an unapproved profile, or nil if none.
-// Returns the parse error if one exists, otherwise the unapproved profile name.
-func (qs *QuickSelection) IsUnapproved() *string {
-	if qs.SessionOverride != nil && *qs.SessionOverride != "off" {
+// selected returns the profile to send on submit, or nil. An override wins and
+// needs no approval; a project selection must match a stored entry.
+func (qs *QuickSelection) selected(profiles []wire.QuickProfile) *string {
+	if qs == nil {
 		return nil
 	}
-	if qs.ProjectParseError != nil {
-		return qs.ProjectParseError
+	if qs.Override != nil {
+		if *qs.Override == "off" {
+			return nil
+		}
+		return qs.Override
 	}
-	if qs.ProjectProfile != nil && !qs.isProjectProfileApproved() {
-		return qs.ProjectProfile
+	if qs.ProjectProfile == "" {
+		return nil
+	}
+	for _, p := range profiles {
+		if p.Name == qs.ProjectProfile && qs.approvedFor(p.DefinitionSHA256) {
+			name := p.Name
+			return &name
+		}
 	}
 	return nil
 }
 
-// isProjectProfileApproved checks if the project profile is approved.
-// It validates all four values: file path, file SHA256, profile name, and definition SHA256.
-// It is used only when the definition SHA is available from status.quick_profiles.
-func (qs *QuickSelection) isProjectProfileApproved() bool {
-	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" || qs.ProjectFileData == nil {
-		return false
+// approve records an approval, in memory and in the approvals file, replacing
+// any older entry for the same project file.
+func (qs *QuickSelection) approve(definitionSHA256 string) error {
+	ap := ApprovedProfile{
+		FilePath:                qs.ProjectFilePath,
+		FileSHA256:              qs.ProjectFileSHA,
+		ProfileName:             qs.ProjectProfile,
+		ProfileDefinitionSHA256: definitionSHA256,
 	}
-	fileSHA := fmt.Sprintf("%x", sha256.Sum256(qs.ProjectFileData))
-	key := qs.ProjectFilePath + ":" + *qs.ProjectProfile
-	ap, ok := qs.ApprovedProfiles[key]
-	if !ok {
-		return false
+	if err := writeApproval(ap); err != nil {
+		return err
 	}
-	return ap.FileSHA256 == fileSHA
-}
-
-// IsProjectProfileApprovedWithDefinition checks if the project profile is approved with all four values.
-func (qs *QuickSelection) IsProjectProfileApprovedWithDefinition(definitionSHA256 string) bool {
-	if qs.ProjectProfile == nil || qs.ProjectFilePath == "" || qs.ProjectFileData == nil {
-		return false
-	}
-	fileSHA := fmt.Sprintf("%x", sha256.Sum256(qs.ProjectFileData))
-	key := qs.ProjectFilePath + ":" + *qs.ProjectProfile
-	ap, ok := qs.ApprovedProfiles[key]
-	if !ok {
-		return false
-	}
-	return ap.FileSHA256 == fileSHA && ap.ProfileDefinitionSHA256 == definitionSHA256
+	qs.approved[ap.FilePath] = ap
+	return nil
 }
 
 // quickTomlFile holds the parsed .syndic/quick.toml structure.
@@ -216,142 +197,97 @@ func approvalsPath() (string, error) {
 	return file, nil
 }
 
-// readApprovals reads and parses the approvals file.
+// readApprovals reads the approvals file: one JSON entry per line, keyed by project file path.
 func readApprovals() (map[string]ApprovedProfile, error) {
 	file, err := approvalsPath()
 	if err != nil {
 		return nil, err
 	}
-
+	approvals := make(map[string]ApprovedProfile)
 	data, err := os.ReadFile(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return approvals, nil
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return make(map[string]ApprovedProfile), nil
-		}
 		return nil, err
 	}
-
-	approvals := make(map[string]ApprovedProfile)
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
+	for _, line := range strings.Split(string(data), "\n") {
 		var ap ApprovedProfile
-		if err := json.Unmarshal([]byte(line), &ap); err != nil {
+		if strings.TrimSpace(line) == "" || json.Unmarshal([]byte(line), &ap) != nil {
 			continue
 		}
-		key := ap.FilePath + ":" + ap.ProfileName
-		approvals[key] = ap
+		approvals[ap.FilePath] = ap
 	}
-
 	return approvals, nil
 }
 
-// writeApproval writes or updates an approval record.
-func writeApproval(filePath, profileName, fileSHA256, definitionSHA256 string) error {
+// writeApproval stores ap, replacing any older entry for the same path, and
+// leaves the file mode 0600 in a 0700 directory.
+func writeApproval(ap ApprovedProfile) error {
 	file, err := approvalsPath()
 	if err != nil {
 		return err
 	}
-
 	dir := filepath.Dir(file)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("cannot create approvals directory: %w", err)
 	}
-
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("cannot chmod approvals directory: %w", err)
+	}
 	approvals, err := readApprovals()
 	if err != nil {
 		return err
 	}
-
-	key := filePath + ":" + profileName
-	approvals[key] = ApprovedProfile{
-		FilePath:                filePath,
-		FileSHA256:              fileSHA256,
-		ProfileName:             profileName,
-		ProfileDefinitionSHA256: definitionSHA256,
+	approvals[ap.FilePath] = ap
+	paths := make([]string, 0, len(approvals))
+	for p := range approvals {
+		paths = append(paths, p)
 	}
-
-	// Sort keys for deterministic output
-	keys := make([]string, 0, len(approvals))
-	for k := range approvals {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var lines []string
-	for _, k := range keys {
-		ap := approvals[k]
-		if data, err := json.Marshal(ap); err == nil {
-			lines = append(lines, string(data))
+	sort.Strings(paths)
+	var b strings.Builder
+	for _, p := range paths {
+		line, err := json.Marshal(approvals[p])
+		if err != nil {
+			return err
 		}
+		b.Write(line)
+		b.WriteByte('\n')
 	}
-
-	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(b.String()), 0o600); err != nil {
 		return fmt.Errorf("cannot write approvals file: %w", err)
 	}
-
-	// Ensure the file has correct permissions even if it already existed
-	if err := os.Chmod(file, 0600); err != nil {
+	// WriteFile keeps the mode of a file that already exists.
+	if err := os.Chmod(file, 0o600); err != nil {
 		return fmt.Errorf("cannot chmod approvals file: %w", err)
 	}
-
-	// Ensure directory has correct permissions
-	if err := os.Chmod(dir, 0700); err != nil {
-		return fmt.Errorf("cannot chmod approvals directory: %w", err)
-	}
-
 	return nil
 }
 
-// NewQuickSelection creates a fresh QuickSelection, discovering and approving as needed.
+// NewQuickSelection discovers the project file from wd and loads the approvals.
+// The returned selection is always usable; the error says what could not be read.
 func NewQuickSelection(wd string) (*QuickSelection, error) {
-	qs := &QuickSelection{
-		ApprovedProfiles:    make(map[string]ApprovedProfile),
-		DeclinedThisProcess: make(map[string]bool),
-	}
-
-	approvals, err := readApprovals()
+	qs := &QuickSelection{declined: make(map[string]bool)}
+	var errs []error
+	approved, err := readApprovals()
 	if err != nil {
-		return qs, fmt.Errorf("cannot read approvals: %w", err)
+		errs = append(errs, fmt.Errorf("quick: cannot read approvals: %w", err))
+		approved = make(map[string]ApprovedProfile)
 	}
-
-	for _, ap := range approvals {
-		qs.ApprovedProfiles[ap.FilePath+":"+ap.ProfileName] = ap
-	}
+	qs.approved = approved
 
 	path, data, err := findQuickToml(wd)
 	if err != nil {
-		return qs, fmt.Errorf("cannot search for quick.toml: %w", err)
+		errs = append(errs, fmt.Errorf("quick: cannot read %s: %w", path, err))
 	}
-
 	if data != nil {
-		profile, parseErr := parseQuickToml(data, path)
-		if parseErr != "" {
-			qs.ProjectParseError = &parseErr
-		} else if profile != "" {
-			qs.ProjectProfile = &profile
+		if profile, bad := parseQuickToml(data, path); bad != "" {
+			qs.Invalid = bad
+		} else {
+			qs.ProjectProfile = profile
 			qs.ProjectFilePath = path
-			qs.ProjectFileData = data
+			qs.ProjectFileSHA = fmt.Sprintf("%x", sha256.Sum256(data))
 		}
 	}
-
-	return qs, nil
-}
-
-// ApproveProfile marks a profile as approved after showing the user what it does.
-// definitionSHA256 must come from status.quick_profiles, not computed locally.
-func (qs *QuickSelection) ApproveProfile(filePath string, profileName string, fileSHA256 string, definitionSHA256 string) error {
-	return writeApproval(filePath, profileName, fileSHA256, definitionSHA256)
-}
-
-// CheckApproval checks if a profile file and profile name are approved,
-// and returns whether it's approved and what details it has.
-func (qs *QuickSelection) CheckApproval(filePath, fileSHA256, profileName, definitionSHA256 string) bool {
-	key := filePath + ":" + profileName
-	if ap, ok := qs.ApprovedProfiles[key]; ok {
-		return ap.FileSHA256 == fileSHA256 && ap.ProfileDefinitionSHA256 == definitionSHA256
-	}
-	return false
+	return qs, errors.Join(errs...)
 }

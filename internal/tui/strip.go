@@ -150,12 +150,10 @@ func renderBanners(s State) []string {
 	}
 
 	if s.UnapprovedProfile != nil && *s.UnapprovedProfile != "" {
-		// Invalid files already have "quick: invalid <path>" format, don't prepend again
-		if strings.HasPrefix(*s.UnapprovedProfile, "quick: invalid") {
-			banners = append(banners, *s.UnapprovedProfile)
-		} else {
-			banners = append(banners, fmt.Sprintf("quick: unapproved %s", *s.UnapprovedProfile))
-		}
+		banners = append(banners, fmt.Sprintf("quick: unapproved %s", *s.UnapprovedProfile))
+	}
+	if s.QuickInvalid != "" {
+		banners = append(banners, s.QuickInvalid)
 	}
 
 	return banners
