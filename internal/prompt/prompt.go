@@ -2,18 +2,19 @@
 package prompt
 
 import (
-	"encoding/hex"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
-// ErrDelimiterCollision is returned when the delimiter appears in the request or candidate.
-var ErrDelimiterCollision = errors.New("delimiter appears in request or candidate")
+// ErrDelimiterCollision is an alias for history.ErrDelimiterCollision for backward compatibility.
+var ErrDelimiterCollision = history.ErrDelimiterCollision
 
 // EnvelopeFormat is the required format for reviewer verdicts in initial review, as specified in v3 delta section 6.
 const EnvelopeFormat = `VERDICT v1
@@ -42,13 +43,9 @@ reason: <free text, one or more lines>
 END VERDICT`
 
 // NewDelimiter reads 16 bytes from rand and returns them as 32 lowercase hex characters.
-func NewDelimiter(rand io.Reader) (string, error) {
-	b := make([]byte, 16)
-	_, err := io.ReadFull(rand, b)
-	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
+// This is a convenience wrapper around history.NewDelimiter for backward compatibility.
+func NewDelimiter(r io.Reader) (string, error) {
+	return history.NewDelimiter(r)
 }
 
 // Author returns system and user messages for the author phase.
@@ -261,21 +258,30 @@ type ToolResult struct {
 }
 
 // AuthorRevisionInput contains inputs for building an author revision prompt.
-// Supports both the old []HistoryTurn interface and new *history.Document interface.
 type AuthorRevisionInput struct {
-	// For backward compatibility, keeps the old HistoryTurn interface.
-	// If both History and HistoryDoc are set, HistoryDoc takes precedence.
-	History           []HistoryTurn
 	Input             string
 	PreviousCandidate string
 	ReviewerFeedback  []RevisionFeedback
 	Delimiter         string
 	Round             int
-	// HistoryDoc is the new canonical history document.
+	// HistoryDoc is the canonical history document (required).
 	HistoryDoc *history.Document
 	// ToolResults maps tool result ID to the result content.
 	// Only results cited in feedback evidence are included in the output.
 	ToolResults map[string]string
+}
+
+// extractCitedToolIDs extracts tool IDs from text that may contain citations like "tool:1", "tool:2".
+// Returns a map of unique tool IDs found.
+func extractCitedToolIDs(text string) map[string]bool {
+	cited := make(map[string]bool)
+	re := regexp.MustCompile(`\btool:([^\s,.\];:]+)`)
+	for _, match := range re.FindAllStringSubmatch(text, -1) {
+		if len(match) > 1 {
+			cited[match[1]] = true
+		}
+	}
+	return cited
 }
 
 // authorRevisionSystem builds the system message for an author revision prompt.
@@ -285,14 +291,18 @@ func authorRevisionSystem() string {
 
 // AuthorRevision returns system and user messages for the author revision round.
 // The message sequence follows v5 delta §4:
-// 1. System message
-// 2. History as alternating user/assistant messages (from canonical document if available)
-// 3. Original input as a user message (unfenced)
-// 4. Previous candidate as an assistant message
-// 5. One user message with each reviewer's output fenced by random delimiters with blind labels
+//  1. System message
+//  2. History as alternating user/assistant messages (from canonical document)
+//  3. Original input as a user message (unfenced)
+//  4. Previous candidate as an assistant message
+//  5. One user message with each reviewer's output fenced by random delimiters with blind labels,
+//     followed by cited tool results also fenced
 func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 	if in.Delimiter == "" {
 		return nil, errors.New("empty delimiter")
+	}
+	if in.HistoryDoc == nil {
+		return nil, errors.New("empty history document")
 	}
 	if in.PreviousCandidate == "" {
 		return nil, errors.New("empty previous candidate")
@@ -326,31 +336,13 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 		},
 	}
 
-	// Add history as alternating user/assistant messages
-	// Prefer HistoryDoc if available (new canonical history), else fall back to History
-	if in.HistoryDoc != nil {
-		// New code path: use canonical history document rendering
-		historyMsgs := in.HistoryDoc.RenderForAuthor()
-		for _, msg := range historyMsgs {
-			messages = append(messages, transport.Message{
-				Role:    msg.Role,
-				Content: msg.Content,
-			})
-		}
-	}
-	if len(in.History) > 0 && in.HistoryDoc == nil {
-		// Backward compatibility path: use old HistoryTurn interface only if no HistoryDoc
-		for _, turn := range in.History {
-			messages = append(messages,
-				transport.Message{
-					Role:    "user",
-					Content: fmt.Sprintf("Turn: %s\nState: %s\nInput: %s\nLabel: %s\n", turn.TurnID, turn.State, turn.Input, turn.Label),
-				},
-				transport.Message{
-					Role:    "assistant",
-					Content: turn.Answer,
-				})
-		}
+	// Add history as alternating user/assistant messages from canonical document
+	historyMsgs := in.HistoryDoc.RenderForAuthor()
+	for _, msg := range historyMsgs {
+		messages = append(messages, transport.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
 	}
 
 	// Add original input as a user message (unfenced)
@@ -366,6 +358,7 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 	})
 
 	// Add one user message with each reviewer's output fenced with blind labels
+	// and followed by their cited tool results
 	var feedbackContent strings.Builder
 	for i, feedback := range in.ReviewerFeedback {
 		reviewerLabel := fmt.Sprintf("reviewer %d", i+1)
@@ -375,7 +368,24 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 		fmt.Fprintf(&feedbackContent, "%s\n", delimBegin)
 		feedbackContent.WriteString(feedback.Output)
 		feedbackContent.WriteString("\n")
-		fmt.Fprintf(&feedbackContent, "%s\n\n", delimEnd)
+		fmt.Fprintf(&feedbackContent, "%s\n", delimEnd)
+
+		// Extract cited tool IDs from feedback and append only cited results
+		citedIDs := extractCitedToolIDs(feedback.Output)
+		if len(citedIDs) > 0 {
+			feedbackContent.WriteString("\n")
+			for toolID := range citedIDs {
+				if content, ok := in.ToolResults[toolID]; ok {
+					delimBeginResult := fmt.Sprintf("===== %s BEGIN TOOL RESULT %s =====", in.Delimiter, toolID)
+					delimEndResult := fmt.Sprintf("===== %s END TOOL RESULT %s =====", in.Delimiter, toolID)
+					fmt.Fprintf(&feedbackContent, "%s\n", delimBeginResult)
+					feedbackContent.WriteString(content)
+					feedbackContent.WriteString("\n")
+					fmt.Fprintf(&feedbackContent, "%s\n", delimEndResult)
+				}
+			}
+		}
+		feedbackContent.WriteString("\n")
 	}
 
 	messages = append(messages, transport.Message{
@@ -387,9 +397,7 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 }
 
 // ReviewerRevisionInput contains inputs for building a reviewer revision prompt.
-// Supports both the old []HistoryTurn interface and new *history.Document interface.
 type ReviewerRevisionInput struct {
-	History       []HistoryTurn
 	Request       string
 	Candidate     string
 	CandidateHash string
@@ -397,7 +405,7 @@ type ReviewerRevisionInput struct {
 	AttemptID     string
 	Delimiter     string
 	Round         int
-	// HistoryDoc is the new canonical history document.
+	// HistoryDoc is the canonical history document (required).
 	HistoryDoc *history.Document
 }
 
@@ -423,6 +431,9 @@ func ReviewerRevision(in ReviewerRevisionInput) ([]transport.Message, error) {
 	if in.Delimiter == "" {
 		return nil, errors.New("empty delimiter")
 	}
+	if in.HistoryDoc == nil {
+		return nil, errors.New("empty history document")
+	}
 	if in.CandidateHash == "" {
 		return nil, errors.New("empty candidate hash")
 	}
@@ -437,42 +448,18 @@ func ReviewerRevision(in ReviewerRevisionInput) ([]transport.Message, error) {
 	if strings.Contains(in.Candidate, in.Delimiter) {
 		return nil, ErrDelimiterCollision
 	}
-	for _, turn := range in.History {
-		if strings.Contains(turn.Input, in.Delimiter) || strings.Contains(turn.Answer, in.Delimiter) {
-			return nil, ErrDelimiterCollision
-		}
-	}
 	for _, block := range in.OpenBlocks {
-		if strings.Contains(block.Evidence, in.Delimiter) || strings.Contains(block.Remedy, in.Delimiter) {
+		if strings.Contains(block.BlockID, in.Delimiter) ||
+			strings.Contains(block.Severity, in.Delimiter) ||
+			strings.Contains(block.Evidence, in.Delimiter) ||
+			strings.Contains(block.Remedy, in.Delimiter) {
 			return nil, ErrDelimiterCollision
 		}
 	}
 
-	// Build history content - prefer canonical document if available
-	var historyContent strings.Builder
-	if in.HistoryDoc != nil {
-		// New code path: use canonical history document rendering
-		historyBytes := in.HistoryDoc.Bytes()
-		historyContent.Write(historyBytes)
-	}
-	if len(in.History) > 0 && in.HistoryDoc == nil {
-		// Backward compatibility path: format old HistoryTurn interface
-		historyContent.WriteString("## Conversation History\n\n")
-		for _, turn := range in.History {
-			fmt.Fprintf(&historyContent, "Turn: %s\n", turn.TurnID)
-			fmt.Fprintf(&historyContent, "State: %s\n", turn.State)
-			fmt.Fprintf(&historyContent, "Label: %s\n\n", turn.Label)
-			historyContent.WriteString("Input:\n")
-			historyContent.WriteString(turn.Input + "\n\n")
-			historyContent.WriteString("Answer:\n")
-			historyContent.WriteString(turn.Answer + "\n\n")
-		}
-	}
-
+	// Generate fenced request and candidate using random delimiters
 	delimBeginReq := fmt.Sprintf("===== %s BEGIN REQUEST =====", in.Delimiter)
 	delimEndReq := fmt.Sprintf("===== %s END REQUEST =====", in.Delimiter)
-	delimBeginHist := fmt.Sprintf("===== %s BEGIN HISTORY =====", in.Delimiter)
-	delimEndHist := fmt.Sprintf("===== %s END HISTORY =====", in.Delimiter)
 	delimBeginCand := fmt.Sprintf("===== %s BEGIN CANDIDATE =====", in.Delimiter)
 	delimEndCand := fmt.Sprintf("===== %s END CANDIDATE =====", in.Delimiter)
 
@@ -480,20 +467,32 @@ func ReviewerRevision(in ReviewerRevisionInput) ([]transport.Message, error) {
 	userContent.WriteString(delimBeginReq + "\n")
 	userContent.WriteString(in.Request + "\n")
 	userContent.WriteString(delimEndReq + "\n\n")
-	userContent.WriteString(delimBeginHist + "\n")
-	userContent.WriteString(historyContent.String())
-	userContent.WriteString(delimEndHist + "\n\n")
+
+	// Render history using canonical document with collision checking
+	historyContent, err := in.HistoryDoc.RenderForReviewer(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	userContent.WriteString(historyContent + "\n")
+
 	userContent.WriteString(delimBeginCand + "\n")
 	userContent.WriteString(in.Candidate + "\n")
 	userContent.WriteString(delimEndCand + "\n\n")
 
+	// Render open blocks fenced with collision checks
 	if len(in.OpenBlocks) > 0 {
-		userContent.WriteString("## Your Open Blocks from Earlier Rounds\n\n")
+		userContent.WriteString("Your Open Blocks from Earlier Rounds:\n\n")
 		for _, block := range in.OpenBlocks {
+			// Fence each open block to prevent structure imitation
+			delimBeginBlock := fmt.Sprintf("===== %s BEGIN BLOCK %s =====", in.Delimiter, block.BlockID)
+			delimEndBlock := fmt.Sprintf("===== %s END BLOCK %s =====", in.Delimiter, block.BlockID)
+
+			fmt.Fprintf(&userContent, "%s\n", delimBeginBlock)
 			fmt.Fprintf(&userContent, "Block ID: %s\n", block.BlockID)
 			fmt.Fprintf(&userContent, "Severity: %s\n", block.Severity)
 			fmt.Fprintf(&userContent, "Evidence: %s\n", block.Evidence)
-			fmt.Fprintf(&userContent, "Remedy: %s\n\n", block.Remedy)
+			fmt.Fprintf(&userContent, "Remedy: %s\n", block.Remedy)
+			fmt.Fprintf(&userContent, "%s\n\n", delimEndBlock)
 		}
 		userContent.WriteString("Review the revised candidate against your open blocks. ")
 		userContent.WriteString("For each block, indicate in your VERDICT whether it is withdrawn or maintained.\n\n")
