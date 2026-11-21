@@ -162,8 +162,8 @@ func partRoster() string {
 		fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = %q\neligible_roles = [%q]\npool = %q\n%s\n", id, model, endpoint, role, pool, extra)
 	}
 	part("author", "local", "llama2", "author", "default", "")
-	part("r1", "local", "llama3", "reviewer", "default", "context_tokens = 100000\nbytes_per_token = 3.5")
-	part("r2", "paid", "qwen", "reviewer", "p2", "")
+	part("r1", "local", "llama3", "reviewer", "default", "context_tokens = 100000\nbytes_per_token = 3.5\naccept_unknown_truncation = true")
+	part("r2", "paid", "qwen", "reviewer", "p2", "accept_unknown_truncation = true")
 	part("nofp", "local", "nofp", "reviewer", "spare", "")
 	part("mism", "local", "mism", "reviewer", "spare", "")
 	part("norec", "local", "norec", "reviewer", "spare", "")
@@ -503,6 +503,7 @@ route = "api"
 endpoint = "local2"
 eligible_roles = ["reviewer"]
 pool = "default"
+accept_unknown_truncation = true
 
 [[endpoints]]
 name = "local"

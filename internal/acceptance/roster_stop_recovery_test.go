@@ -67,7 +67,11 @@ func rosterTOMLOf(parts []rosterPart, pools map[string]string) string {
 		} else if !p.spare {
 			required = append(required, fmt.Sprintf("%q", p.id))
 		}
-		fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = %q\neligible_roles = [%q]\npool = %q\n\n", p.id, p.model, p.endpoint, role, p.pool)
+		if role == "reviewer" {
+			fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = %q\neligible_roles = [%q]\npool = %q\naccept_unknown_truncation = true\n\n", p.id, p.model, p.endpoint, role, p.pool)
+		} else {
+			fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = %q\neligible_roles = [%q]\npool = %q\n\n", p.id, p.model, p.endpoint, role, p.pool)
+		}
 	}
 	for i, name := range []string{"local", "local2"} {
 		fmt.Fprintf(&b, "[[endpoints]]\nname = %q\nbase_url = \"http://localhost:%d/v1\"\ndeclared_location = \"local\"\ndeclared_execution = \"local\"\ndeclared_billing = \"none\"\nnetwork_dependency = \"none\"\ndialect = \"chat_completions_v1\"\nmodels = [\"llama2\", \"llama3\"]\ntokens_per_byte_max = 1.0\n\n", name, 11434+i)
@@ -197,7 +201,7 @@ func TestRoster_FileChanged(t *testing.T) {
 		t.Fatalf("roster_path = %q, want %q", start.RosterPath, s.RosterPath)
 	}
 
-	extra := "[[participants]]\nid = \"extra\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\n\n[[endpoints]]"
+	extra := "[[participants]]\nid = \"extra\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\naccept_unknown_truncation = true\n\n[[endpoints]]"
 	different := strings.Replace(string(original), "[[endpoints]]", extra, 1)
 	if different == string(original) {
 		t.Fatal("the roster has no [[endpoints]] to add a participant before")

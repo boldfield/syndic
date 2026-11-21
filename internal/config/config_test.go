@@ -748,6 +748,89 @@ func TestValidateViolations(t *testing.T) {
 			},
 			wantMsgs: []string{"ep1", "external", "metered"},
 		},
+		{
+			name: "valid revision settings at roster level",
+			mutate: func(r *Roster) {
+				mr := 2
+				mrc := 5
+				r.Revision = Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid max_rounds (negative)",
+			mutate: func(r *Roster) {
+				mr := -1
+				r.Revision = Revision{MaxRounds: &mr}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds (exceeds 5)",
+			mutate: func(r *Roster) {
+				mr := 6
+				r.Revision = Revision{MaxRounds: &mr}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds_ceiling (negative)",
+			mutate: func(r *Roster) {
+				mrc := -1
+				r.Revision = Revision{MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds_ceiling", "must be between 0 and 5"},
+		},
+		{
+			name: "invalid max_rounds_ceiling (exceeds 5)",
+			mutate: func(r *Roster) {
+				mrc := 6
+				r.Revision = Revision{MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds_ceiling", "must be between 0 and 5"},
+		},
+		{
+			name: "max_rounds exceeds max_rounds_ceiling at roster level",
+			mutate: func(r *Roster) {
+				mr := 4
+				mrc := 2
+				r.Revision = Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+			},
+			wantMsgs: []string{"revision.max_rounds", "must not exceed", "revision.max_rounds_ceiling"},
+		},
+		{
+			name: "solo preset with revision settings (valid)",
+			mutate: func(r *Roster) {
+				mr := 2
+				mrc := 5
+				soloPreset := r.Presets["review"]
+				soloPreset.Mode = "solo"
+				soloPreset.RequiredReviewers = []string{}
+				soloPreset.Revision = &Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+				r.Presets["solo_with_revision"] = soloPreset
+				r.DefaultPreset = "review"
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "valid revision settings in review preset",
+			mutate: func(r *Roster) {
+				mr := 1
+				mrc := 3
+				p := r.Presets["review"]
+				p.Revision = &Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "valid accept_unknown_truncation on participant",
+			mutate: func(r *Roster) {
+				acceptUnknown := true
+				r.Participants[0].AcceptUnknownTruncation = &acceptUnknown
+			},
+			wantMsgs: []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1775,5 +1858,343 @@ func TestStressTest(t *testing.T) {
 	elapsed := time.Since(start)
 	if elapsed > 100*time.Millisecond {
 		t.Logf("Validation took %v (may be slow)", elapsed)
+	}
+}
+
+func TestResolveRevisionDefaults(t *testing.T) {
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}},
+		},
+	}
+	r.ApplyDefaults()
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 2 {
+		t.Errorf("MaxRounds = %v, want 2", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 5 {
+		t.Errorf("MaxRoundsCeiling = %v, want 5", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestResolveRevisionPresetOverride(t *testing.T) {
+	mr := 1
+	mrc := 3
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+				Revision: &Revision{MaxRounds: &mr, MaxRoundsCeiling: &mrc}},
+		},
+	}
+	r.ApplyDefaults()
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 1 {
+		t.Errorf("MaxRounds = %v, want 1", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 3 {
+		t.Errorf("MaxRoundsCeiling = %v, want 3", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestResolveRevisionPartialOverride(t *testing.T) {
+	mrc := 4
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+				Revision: &Revision{MaxRoundsCeiling: &mrc}},
+		},
+	}
+	r.ApplyDefaults()
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 2 {
+		t.Errorf("MaxRounds = %v, want 2 (default)", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("MaxRoundsCeiling = %v, want 4 (preset override)", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestResolveRevisionDefaultBreaksCeiling(t *testing.T) {
+	mrc := 1
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+				Revision: &Revision{MaxRoundsCeiling: &mrc}},
+		},
+	}
+	r.ApplyDefaults()
+
+	err := r.Validate()
+	if err == nil {
+		t.Fatal("Validate should have failed: effective default 2 exceeds ceiling 1")
+	}
+	if !strings.Contains(err.Error(), "max_rounds") || !strings.Contains(err.Error(), "max_rounds_ceiling") {
+		t.Errorf("error doesn't mention max_rounds or ceiling: %v", err)
+	}
+}
+
+func TestApplyDefaultsRevision(t *testing.T) {
+	r := &Roster{}
+	r.ApplyDefaults()
+
+	if r.Revision.MaxRounds == nil || *r.Revision.MaxRounds != 2 {
+		t.Errorf("Revision.MaxRounds = %v, want 2", r.Revision.MaxRounds)
+	}
+	if r.Revision.MaxRoundsCeiling == nil || *r.Revision.MaxRoundsCeiling != 5 {
+		t.Errorf("Revision.MaxRoundsCeiling = %v, want 5", r.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestResolveRevisionMaxRoundsOnlyOverride(t *testing.T) {
+	mr := 1
+	r := &Roster{
+		DefaultPreset: "review",
+		Participants: []Participant{
+			{ID: "author", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleAuthor}},
+			{ID: "reviewer", Model: "m1", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}},
+		},
+		Endpoints: []EndpointProfile{
+			{Name: "ep1", Dialect: "chat_completions_v1", DeclaredLocation: "local", DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none"},
+		},
+		Presets: map[string]Preset{
+			"review": {Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+				Revision: &Revision{MaxRounds: &mr}},
+		},
+	}
+	r.ApplyDefaults()
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 1 {
+		t.Errorf("MaxRounds = %v, want 1 (preset override)", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 5 {
+		t.Errorf("MaxRoundsCeiling = %v, want 5 (default)", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestLoadRevisionFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.toml")
+
+	content := `default_preset = "review"
+
+[deadlines]
+attempt = "300s"
+turn = "900s"
+delivery = "60s"
+provisional = false
+
+[revision]
+max_rounds = 3
+max_rounds_ceiling = 4
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if err = r.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	if r.Revision.MaxRounds == nil || *r.Revision.MaxRounds != 3 {
+		t.Errorf("Roster revision MaxRounds = %v, want 3", r.Revision.MaxRounds)
+	}
+	if r.Revision.MaxRoundsCeiling == nil || *r.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Roster revision MaxRoundsCeiling = %v, want 4", r.Revision.MaxRoundsCeiling)
+	}
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 3 {
+		t.Errorf("Effective revision MaxRounds = %v, want 3", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestLoadRevisionPresetOverrideFromTOML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.toml")
+
+	content := `default_preset = "review"
+
+[deadlines]
+attempt = "300s"
+turn = "900s"
+delivery = "60s"
+provisional = false
+
+[revision]
+max_rounds = 3
+max_rounds_ceiling = 4
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.review.revision]
+max_rounds = 1
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if err = r.Validate(); err != nil {
+		t.Fatalf("Validate failed: %v", err)
+	}
+
+	eff, err := r.Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if eff.Revision.MaxRounds == nil || *eff.Revision.MaxRounds != 1 {
+		t.Errorf("Effective revision MaxRounds = %v, want 1 (preset override)", eff.Revision.MaxRounds)
+	}
+	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
+		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4 (roster default)", eff.Revision.MaxRoundsCeiling)
 	}
 }

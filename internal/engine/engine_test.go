@@ -567,6 +567,30 @@ func TestIneligibleRequiredReviewer(t *testing.T) {
 	}
 }
 
+func TestUnknownRequiredReviewerNotAccepted(t *testing.T) {
+	rosterWithoutAccept := strings.Replace(enginetest.RosterTOML, `accept_unknown_truncation = true`, `accept_unknown_truncation = false`, 1)
+	h := enginetest.New(t, rosterWithoutAccept, nil, enginetest.WithEligibleRequiredReviewer("reviewer", transport.TriUnknown))
+	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
+	if we.Detail == nil || *we.Detail != "unknown_required_reviewer_not_accepted:reviewer" {
+		t.Fatalf("detail = %v", we.Detail)
+	}
+}
+
+func TestUnknownRequiredReviewerAccepted(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("the answer")},
+		"reviewer": {enginetest.Reply("approved")},
+	}, enginetest.WithEligibleRequiredReviewer("reviewer", transport.TriUnknown))
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})
+	if err != nil {
+		t.Fatalf("Submit refused: %v", err)
+	}
+	if reply.TurnID == "" {
+		t.Fatal("no turn id returned")
+	}
+}
+
 func TestUnprobedRefusal(t *testing.T) {
 	h := enginetest.New(t, enginetest.RosterTOML, nil, enginetest.SkipProbe("reviewer"))
 	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q"})

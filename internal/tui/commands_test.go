@@ -449,7 +449,7 @@ func twoReviewerRoster() string {
 	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
 	var extra string
 	for _, id := range []string{"r1", "r2"} {
-		extra += "[[participants]]\nid = \"" + id + "\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"\n\n"
+		extra += "[[participants]]\nid = \"" + id + "\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"\naccept_unknown_truncation = true\n\n"
 	}
 	toml = strings.Replace(toml, "[[endpoints]]", extra+"[[endpoints]]", 1)
 	toml = strings.Replace(toml, `required_reviewers = ["reviewer"]`, `required_reviewers = ["r1", "r2"]`, 1)

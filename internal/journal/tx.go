@@ -85,7 +85,14 @@ func (tx *Tx) CreateRun(manifest json.RawMessage) (runID, manifestHash string, e
 }
 
 // CreateTurn creates a new turn for the given run, returning the turn ID.
+// If conversationID is empty, a new conversation with NULL workspace is created.
 func (tx *Tx) CreateTurn(runID, mode string, deadline *time.Time) (turnID string, err error) {
+	return tx.CreateTurnWithConversation(runID, mode, deadline, "")
+}
+
+// CreateTurnWithConversation creates a new turn for the given run with an explicit conversation ID.
+// If conversationID is empty, a new conversation with NULL workspace is created.
+func (tx *Tx) CreateTurnWithConversation(runID, mode string, deadline *time.Time, conversationID string) (turnID string, err error) {
 	turnID, err = generateID()
 	if err != nil {
 		return "", err
@@ -97,10 +104,24 @@ func (tx *Tx) CreateTurn(runID, mode string, deadline *time.Time) (turnID string
 		deadlineStr = &ds
 	}
 
+	// If no conversation ID provided, create a new one
+	if conversationID == "" {
+		conversationID, err = generateID()
+		if err != nil {
+			return "", err
+		}
+		if _, err := tx.tx.Exec(`
+			INSERT INTO conversations (id, workspace)
+			VALUES (?, NULL)
+		`, conversationID); err != nil {
+			return "", fmt.Errorf("insert conversation: %w", err)
+		}
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline)
-		VALUES (?, ?, ?, ?)
-	`, turnID, runID, mode, deadlineStr); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, conversation_id)
+		VALUES (?, ?, ?, ?, ?)
+	`, turnID, runID, mode, deadlineStr, conversationID); err != nil {
 		return "", fmt.Errorf("insert turn: %w", err)
 	}
 
@@ -464,15 +485,29 @@ func (tx *Tx) GetRun(runID string) (*RunRow, error) {
 
 // CreateCandidate stores a new candidate with a caller-provided hash.
 func (tx *Tx) CreateCandidate(turnID, content, hash string) (candidateID string, err error) {
+	return tx.CreateCandidateWithRound(turnID, content, hash, 0, "")
+}
+
+// CreateCandidateWithRound stores a new candidate with round and supersedes metadata.
+func (tx *Tx) CreateCandidateWithRound(turnID, content, hash string, round int, supersedes string) (candidateID string, err error) {
+	if round < 0 || round > 5 {
+		return "", fmt.Errorf("round must be between 0 and 5, got %d", round)
+	}
+
 	candidateID, err = generateID()
 	if err != nil {
 		return "", err
 	}
 
+	var supersedesPtr *string
+	if supersedes != "" {
+		supersedesPtr = &supersedes
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO candidates (id, turn_id, content, content_hash)
-		VALUES (?, ?, ?, ?)
-	`, candidateID, turnID, content, hash); err != nil {
+		INSERT INTO candidates (id, turn_id, content, content_hash, round, supersedes)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, candidateID, turnID, content, hash, round, supersedesPtr); err != nil {
 		return "", fmt.Errorf("insert candidate: %w", err)
 	}
 
@@ -665,4 +700,41 @@ func (tx *Tx) GetAttemptTurnAndRun(attemptID string) (turnID, runID string, err 
 		return "", "", fmt.Errorf("query attempt: %w", err)
 	}
 	return turnID, runID, nil
+}
+
+// CreateConversation creates a new conversation and returns its ID.
+func (tx *Tx) CreateConversation(workspace *string) (conversationID string, err error) {
+	conversationID, err = generateID()
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.tx.Exec(`
+		INSERT INTO conversations (id, workspace)
+		VALUES (?, ?)
+	`, conversationID, workspace); err != nil {
+		return "", fmt.Errorf("insert conversation: %w", err)
+	}
+
+	return conversationID, nil
+}
+
+// SetTurnContextHash sets the context_hash for a turn.
+func (tx *Tx) SetTurnContextHash(turnID, contextHash string) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET context_hash = ? WHERE id = ?
+	`, contextHash, turnID); err != nil {
+		return fmt.Errorf("update turn context_hash: %w", err)
+	}
+	return nil
+}
+
+// SetTurnFileTainted sets the file_tainted flag for a turn.
+func (tx *Tx) SetTurnFileTainted(turnID string, tainted bool) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET file_tainted = ? WHERE id = ?
+	`, tainted, turnID); err != nil {
+		return fmt.Errorf("update turn file_tainted: %w", err)
+	}
+	return nil
 }
