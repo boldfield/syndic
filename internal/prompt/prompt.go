@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/history"
@@ -271,17 +272,80 @@ type AuthorRevisionInput struct {
 	ToolResults map[string]string
 }
 
-// extractCitedToolIDs extracts tool IDs from text that may contain citations like "tool:1", "tool:2".
-// Returns a map of unique tool IDs found.
-func extractCitedToolIDs(text string) map[string]bool {
+// extractCitedToolIDsFromBlocks extracts tool IDs only from evidence lines in VERDICT blocks.
+// A block may cite tool results by id in its evidence line; only those exact results
+// should be included in the author's prompt. This prevents uncited reviewer results from leaking
+// into the author's context.
+// Returns a map of unique tool IDs found, in a deterministic order.
+func extractCitedToolIDsFromBlocks(output string) map[string]bool {
 	cited := make(map[string]bool)
-	re := regexp.MustCompile(`\btool:([^\s,.\];:]+)`)
-	for _, match := range re.FindAllStringSubmatch(text, -1) {
-		if len(match) > 1 {
-			cited[match[1]] = true
+
+	// Split the output into lines to find evidence lines
+	lines := strings.Split(output, "\n")
+
+	for i, line := range lines {
+		// Look for lines that start with "evidence:" (case-insensitive, allowing for leading whitespace)
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "evidence:") || strings.HasPrefix(trimmed, "Evidence:") {
+			// Extract the evidence content
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) > 1 {
+				evidenceContent := strings.TrimSpace(parts[1])
+				// Also check following lines if they're part of a multi-line evidence block
+				// (until we hit another field or END VERDICT)
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := strings.TrimSpace(lines[j])
+					// Stop if we hit another field (contains a colon at the start)
+					// or END VERDICT
+					if strings.HasPrefix(nextLine, "END VERDICT") {
+						break
+					}
+					// Check if this looks like a new field (has a colon, all lowercase word before it)
+					if isFieldLine(nextLine) {
+						break
+					}
+					// Otherwise, this line is part of the multi-line evidence
+					evidenceContent += "\n" + lines[j]
+				}
+
+				// Extract tool IDs from the evidence content
+				// Citations are in the form "tool:ID" where ID is a word
+				toolRegex := regexp.MustCompile(`\btool:([^\s,.\];:]+)`)
+				for _, match := range toolRegex.FindAllStringSubmatch(evidenceContent, -1) {
+					if len(match) > 1 {
+						cited[match[1]] = true
+					}
+				}
+			}
 		}
 	}
+
 	return cited
+}
+
+// isFieldLine checks if a line looks like a VERDICT field line (starts with a known field name).
+func isFieldLine(line string) bool {
+	// List of known VERDICT field names
+	fields := []string{
+		"candidate:",
+		"attempt:",
+		"round:",
+		"block-state:",
+		"verdict:",
+		"severity:",
+		"block_id:",
+		"evidence:",
+		"remedy:",
+		"reason:",
+	}
+
+	lower := strings.ToLower(line)
+	for _, field := range fields {
+		if strings.HasPrefix(lower, field) {
+			return true
+		}
+	}
+	return false
 }
 
 // authorRevisionSystem builds the system message for an author revision prompt.
@@ -323,9 +387,23 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 			return nil, ErrDelimiterCollision
 		}
 	}
-	for _, result := range in.ToolResults {
-		if strings.Contains(result, in.Delimiter) {
-			return nil, ErrDelimiterCollision
+
+	// First, extract which tool results are actually cited in the evidence lines.
+	// We will only check collisions and render the cited results.
+	allCitedIDs := make(map[string]bool)
+	for _, feedback := range in.ReviewerFeedback {
+		citedInThisFeedback := extractCitedToolIDsFromBlocks(feedback.Output)
+		for id := range citedInThisFeedback {
+			allCitedIDs[id] = true
+		}
+	}
+
+	// Only check collisions on the cited results (not uncited ones)
+	for citedID := range allCitedIDs {
+		if result, ok := in.ToolResults[citedID]; ok {
+			if strings.Contains(result, in.Delimiter) {
+				return nil, ErrDelimiterCollision
+			}
 		}
 	}
 
@@ -370,11 +448,18 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 		feedbackContent.WriteString("\n")
 		fmt.Fprintf(&feedbackContent, "%s\n", delimEnd)
 
-		// Extract cited tool IDs from feedback and append only cited results
-		citedIDs := extractCitedToolIDs(feedback.Output)
+		// Extract cited tool IDs from evidence lines only and append only cited results
+		citedIDs := extractCitedToolIDsFromBlocks(feedback.Output)
 		if len(citedIDs) > 0 {
 			feedbackContent.WriteString("\n")
+			// Sort tool IDs for deterministic output
+			var sortedIDs []string
 			for toolID := range citedIDs {
+				sortedIDs = append(sortedIDs, toolID)
+			}
+			sort.Strings(sortedIDs)
+
+			for _, toolID := range sortedIDs {
 				if content, ok := in.ToolResults[toolID]; ok {
 					delimBeginResult := fmt.Sprintf("===== %s BEGIN TOOL RESULT %s =====", in.Delimiter, toolID)
 					delimEndResult := fmt.Sprintf("===== %s END TOOL RESULT %s =====", in.Delimiter, toolID)

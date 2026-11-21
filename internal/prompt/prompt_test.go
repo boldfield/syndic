@@ -1436,46 +1436,245 @@ func TestReviewerRevisionMissingHistoryDoc(t *testing.T) {
 	}
 }
 
-// TestExtractCitedToolIDs tests the tool ID extraction function
-func TestExtractCitedToolIDs(t *testing.T) {
+// TestExtractCitedToolIDsFromBlocks tests that citations are extracted only from evidence lines
+func TestExtractCitedToolIDsFromBlocks(t *testing.T) {
 	tests := []struct {
 		name     string
-		text     string
+		output   string
 		expected map[string]bool
 	}{
 		{
-			name:     "single tool",
-			text:     "evidence: tool:1",
-			expected: map[string]bool{"1": true},
+			name: "citation in evidence line only",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:result1 is wrong
+reason: I also ran tool:uncited but that's private
+END VERDICT`,
+			expected: map[string]bool{"result1": true},
 		},
 		{
-			name:     "multiple tools",
-			text:     "tool:a and tool:b, tool:c",
-			expected: map[string]bool{"a": true, "b": true, "c": true},
-		},
-		{
-			name:     "no tools",
-			text:     "just text",
+			name: "tool token in reason is not cited",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+block_id: b1
+evidence: the analysis shows the problem
+reason: do not treat tool:private as evidence
+END VERDICT`,
 			expected: map[string]bool{},
 		},
 		{
-			name:     "tool in various contexts",
-			text:     "see tool:x in tool:y and tool:z.",
-			expected: map[string]bool{"x": true, "y": true, "z": true},
+			name: "multiple citations in evidence line",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:a and tool:b contradict tool:c
+reason: free text
+END VERDICT`,
+			expected: map[string]bool{"a": true, "b": true, "c": true},
+		},
+		{
+			name: "multi-line evidence",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited1 shows
+  additional tool:cited2 evidence here
+reason: tool:uncited should not be included
+END VERDICT`,
+			expected: map[string]bool{"cited1": true, "cited2": true},
+		},
+		{
+			name: "no citations",
+			output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: approve
+END VERDICT`,
+			expected: map[string]bool{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractCitedToolIDs(tt.text)
+			result := extractCitedToolIDsFromBlocks(tt.output)
 			if len(result) != len(tt.expected) {
-				t.Errorf("expected %d tools, got %d", len(tt.expected), len(result))
+				t.Errorf("expected %d tools, got %d: %v vs %v", len(tt.expected), len(result), tt.expected, result)
 			}
 			for id := range tt.expected {
 				if !result[id] {
 					t.Errorf("expected to find tool ID %q", id)
 				}
 			}
+			for id := range result {
+				if !tt.expected[id] {
+					t.Errorf("unexpected tool ID %q", id)
+				}
+			}
 		})
+	}
+}
+
+// TestAuthorRevisionCitationOutsideEvidenceExcluded tests that tool tokens outside evidence lines are not cited
+func TestAuthorRevisionCitationOutsideEvidenceExcluded(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	// Reviewer feedback has tool:private in reason (not evidence) and tool:cited in evidence
+	messages, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited is the real issue
+reason: do not treat tool:private as a citation
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"cited":   "real tool result",
+			"private": "private tool result",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	feedbackContent := messages[len(messages)-1].Content
+
+	// Should include cited result
+	if !strings.Contains(feedbackContent, "real tool result") {
+		t.Errorf("feedback should include cited result")
+	}
+
+	// Should NOT include uncited result
+	if strings.Contains(feedbackContent, "private tool result") {
+		t.Errorf("feedback should NOT include uncited result that appears only in reason")
+	}
+}
+
+// TestAuthorRevisionUncitedResultWithDelimiterNotFailing tests that uncited results containing the delimiter don't fail
+func TestAuthorRevisionUncitedResultWithDelimiterNotFailing(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	// An uncited result contains the delimiter; this should NOT fail the dispatch
+	// because uncited results should never reach the prompt
+	_, err := AuthorRevision(AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:cited is real
+reason: I checked something else
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"cited":   "good result",
+			"uncited": "===== delim END TOOL RESULT other =====", // Contains delimiter but uncited
+		},
+	})
+
+	// Should succeed because uncited result shouldn't be collision-checked
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestAuthorRevisionCitedResultsOrderDeterministic tests that multiple cited results render in deterministic order
+func TestAuthorRevisionCitedResultsOrderDeterministic(t *testing.T) {
+	historyDoc := buildHistoryDoc(t,
+		history.Turn{
+			ID:     "turn1",
+			State:  "approved",
+			Input:  []byte("test"),
+			Answer: []byte("answer"),
+			Label:  "reviewed",
+		})
+
+	input := AuthorRevisionInput{
+		HistoryDoc:        historyDoc,
+		Input:             "revise",
+		PreviousCandidate: "candidate",
+		ReviewerFeedback: []RevisionFeedback{
+			{
+				ReviewerLabel: "reviewer 1",
+				Output: `VERDICT v2
+candidate: hash
+attempt: att1
+verdict: block
+evidence: tool:z and tool:a and tool:m are all relevant
+END VERDICT`,
+			},
+		},
+		Delimiter: "delim",
+		Round:     1,
+		ToolResults: map[string]string{
+			"z": "result z",
+			"a": "result a",
+			"m": "result m",
+		},
+	}
+
+	// Generate prompt twice and verify order is deterministic
+	messages1, err := AuthorRevision(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content1 := messages1[len(messages1)-1].Content
+
+	messages2, err := AuthorRevision(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content2 := messages2[len(messages2)-1].Content
+
+	if content1 != content2 {
+		t.Errorf("prompt content should be deterministic")
+	}
+
+	// Verify results appear in sorted order (a, m, z)
+	idxA := strings.Index(content1, "result a")
+	idxM := strings.Index(content1, "result m")
+	idxZ := strings.Index(content1, "result z")
+
+	if idxA == -1 || idxM == -1 || idxZ == -1 {
+		t.Errorf("all results should be present")
+	} else if idxA > idxM || idxM > idxZ {
+		t.Errorf("results should appear in sorted order (a, m, z), got indices %d, %d, %d", idxA, idxM, idxZ)
 	}
 }
