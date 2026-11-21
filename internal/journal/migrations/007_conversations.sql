@@ -45,16 +45,28 @@ BEGIN
 	SELECT RAISE(ABORT, 'round must be between 0 and 5');
 END;
 
+-- Enforce turns.conversation_id is NOT NULL after backfill
+CREATE TRIGGER turns_conversation_id_not_null_insert BEFORE INSERT ON turns
+WHEN NEW.conversation_id IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'turns.conversation_id cannot be NULL: every turn belongs to one conversation');
+END;
+
+CREATE TRIGGER turns_conversation_id_not_null_update BEFORE UPDATE OF conversation_id ON turns
+WHEN NEW.conversation_id IS NULL
+BEGIN
+	SELECT RAISE(ABORT, 'turns.conversation_id cannot be NULL: every turn belongs to one conversation');
+END;
+
 -- Foreign key constraint for turns.conversation_id (insert/update)
--- Only enforces when a conversation_id is provided; legacy rows with NULL are allowed
 CREATE TRIGGER turns_conversation_id_fk_insert BEFORE INSERT ON turns
-WHEN NEW.conversation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM conversations WHERE id = NEW.conversation_id)
+WHEN NOT EXISTS(SELECT 1 FROM conversations WHERE id = NEW.conversation_id)
 BEGIN
 	SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: turns.conversation_id');
 END;
 
 CREATE TRIGGER turns_conversation_id_fk_update BEFORE UPDATE OF conversation_id ON turns
-WHEN NEW.conversation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM conversations WHERE id = NEW.conversation_id)
+WHEN NOT EXISTS(SELECT 1 FROM conversations WHERE id = NEW.conversation_id)
 BEGIN
 	SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed: turns.conversation_id');
 END;

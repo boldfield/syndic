@@ -13,9 +13,11 @@ func setupTurnstateTestData(t *testing.T, conn *sql.DB) (runID, turnID, attemptI
 	runID = "test-run-" + t.Name()
 	turnID = "test-turn-" + t.Name()
 	attemptID = "test-attempt-" + t.Name()
+	conversationID := "test-conv-" + t.Name()
 
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES (?, '{}', 'hash')`, runID)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode) VALUES (?, ?, 'review')`, turnID, runID)
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES (?, NULL)`, conversationID)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, 'review', ?)`, turnID, runID, conversationID)
 	mustExec(t, conn, `INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at) VALUES (?, ?, 'p1', 'author', 0, '2026-11-18T10:00:00Z')`, attemptID, turnID)
 	return runID, turnID, attemptID
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"testing"
 
@@ -64,6 +65,14 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 }
 
+func createTestConversation(t *testing.T, conn *sql.DB, id string) {
+	t.Helper()
+	_, err := conn.Exec(`INSERT INTO conversations (id, workspace) VALUES (?, NULL)`, id)
+	if err != nil {
+		t.Fatalf("failed to create test conversation: %v", err)
+	}
+}
+
 func TestEnumCheckConstraints(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -86,12 +95,17 @@ func TestEnumCheckConstraints(t *testing.T) {
 		args  []interface{}
 		valid bool
 	}{
-		{"valid mode solo", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-1", runID, "solo"}, true},
-		{"valid mode review", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-2", runID, "review"}, true},
-		{"invalid mode", "INSERT INTO turns (id, run_id, mode) VALUES (?, ?, ?)", []interface{}{"turn-3", runID, "invalid"}, false},
-		{"valid terminal state approved", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-4", runID, "solo", "approved"}, true},
-		{"valid terminal state solo_complete", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-5", runID, "solo", "solo_complete"}, true},
-		{"invalid terminal state", "INSERT INTO turns (id, run_id, mode, terminal_state) VALUES (?, ?, ?, ?)", []interface{}{"turn-6", runID, "solo", "invalid"}, false},
+		{"valid mode solo", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-1", runID, "solo", "conv-1"}, true},
+		{"valid mode review", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-2", runID, "review", "conv-2"}, true},
+		{"invalid mode", "INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)", []interface{}{"turn-3", runID, "invalid", "conv-3"}, false},
+		{"valid terminal state approved", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-4", runID, "solo", "approved", "conv-4"}, true},
+		{"valid terminal state solo_complete", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-5", runID, "solo", "solo_complete", "conv-5"}, true},
+		{"invalid terminal state", "INSERT INTO turns (id, run_id, mode, terminal_state, conversation_id) VALUES (?, ?, ?, ?, ?)", []interface{}{"turn-6", runID, "solo", "invalid", "conv-6"}, false},
+	}
+
+	// Create conversations for the tests
+	for i := 1; i <= 6; i++ {
+		createTestConversation(t, conn, fmt.Sprintf("conv-%d", i))
 	}
 
 	for _, tc := range testCases {

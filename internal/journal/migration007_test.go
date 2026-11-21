@@ -333,7 +333,7 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 
 	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
 	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
-	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'solo', 'c1')`)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id, max_rounds_in_effect, max_rounds_ceiling) VALUES ('t1', 'r1', 'solo', 'c1', 5, 5)`)
 
 	cand1ID, _ := store.SetLatestCandidate("t1", "content1", "hash1", 0, "")
 
@@ -352,7 +352,7 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Test that SetLatestCandidate fails and rolls back
+	// Test that SetLatestCandidate fails during validation (before insert) and rolls back
 	_, err := store.SetLatestCandidate("t1", "content2", "hash2", 1, "nonexistent_candidate")
 
 	if err == nil {
@@ -384,6 +384,57 @@ func TestAtomicRoundCandidateRollback(t *testing.T) {
 
 	if roundAfter != roundBefore {
 		t.Errorf("candidate round changed: before=%d, after=%d (should be unchanged)", roundBefore, roundAfter)
+	}
+}
+
+// TestAtomicRoundCandidateRollbackPostInsert tests true transactional rollback when
+// failure happens after candidate is inserted but before turns.candidate_id is updated.
+func TestAtomicRoundCandidateRollbackPostInsert(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+	store := journal.NewStore(db)
+
+	mustExec(t, conn, `INSERT INTO conversations (id, workspace) VALUES ('c1', NULL)`)
+	mustExec(t, conn, `INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h')`)
+	mustExec(t, conn, `INSERT INTO turns (id, run_id, mode, conversation_id, max_rounds_in_effect) VALUES ('t1', 'r1', 'solo', 'c1', 0)`)
+
+	cand1ID, _ := store.SetLatestCandidate("t1", "content1", "hash1", 0, "")
+
+	var countBefore int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM candidates WHERE turn_id = ?`, "t1").Scan(&countBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	var latestIDBefore string
+	if err := conn.QueryRow(`SELECT candidate_id FROM turns WHERE id = ?`, "t1").Scan(&latestIDBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test: attempting round 1 when max_rounds_in_effect is 0 should fail during candidate creation
+	// (zero revisions allowed, so no round 1 possible)
+	_, err := store.SetLatestCandidate("t1", "content2", "hash2", 1, cand1ID)
+
+	if err == nil {
+		t.Fatal("expected error for round exceeding max_rounds_in_effect, got nil")
+	}
+
+	var countAfter int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM candidates WHERE turn_id = ?`, "t1").Scan(&countAfter); err != nil {
+		t.Fatal(err)
+	}
+
+	var latestIDAfter string
+	if err := conn.QueryRow(`SELECT candidate_id FROM turns WHERE id = ?`, "t1").Scan(&latestIDAfter); err != nil {
+		t.Fatal(err)
+	}
+
+	if countAfter != countBefore {
+		t.Errorf("candidate count changed: before=%d, after=%d (should be unchanged)", countBefore, countAfter)
+	}
+
+	if latestIDAfter != latestIDBefore {
+		t.Errorf("candidate_id changed: before=%q, after=%q (should be unchanged)", latestIDBefore, latestIDAfter)
 	}
 }
 
@@ -491,6 +542,15 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 		t.Errorf("candidate content changed: got %q, want %q", candContent1, "old content 1")
 	}
 
+	// Verify candidate content for t2
+	var candContent2 string
+	if err := db.Conn().QueryRow(`SELECT content FROM candidates WHERE id = ?`, "c2").Scan(&candContent2); err != nil {
+		t.Fatal(err)
+	}
+	if candContent2 != "old content 2" {
+		t.Errorf("candidate content changed: got %q, want %q", candContent2, "old content 2")
+	}
+
 	// Verify journal sequences unchanged
 	var journalSeqsAfter []int64
 	rows, err = db.Conn().Query(`SELECT journal_seq FROM messages WHERE turn_id IN ('t1', 't2') ORDER BY journal_seq`)
@@ -527,6 +587,56 @@ func TestMigration007LegacyTurnBytesPreserved(t *testing.T) {
 	}
 	if t1ConvID == t2ConvID {
 		t.Errorf("legacy turns should have different conversations, both got %q", t1ConvID)
+	}
+
+	// Verify conversation mappings and workspaces
+	if !checkConversationMapping(t, db.Conn(), "t1", t1ConvID, "conv-t1", nil) {
+		t.Error("t1 conversation mapping incorrect")
+	}
+	if !checkConversationMapping(t, db.Conn(), "t2", t2ConvID, "conv-t2", nil) {
+		t.Error("t2 conversation mapping incorrect")
+	}
+
+	// Verify byte-identical turn fields before and after (excluding budget_json which may differ in representation)
+	t1After := struct {
+		ID, RunID, Mode, SubmissionID, SubmissionHash, TerminalState, TerminalReason sql.NullString
+		Epoch, AttemptDeadlineMS, TurnDeadlineMS                                     sql.NullInt64
+	}{}
+	if err := db.Conn().QueryRow(`SELECT id, run_id, mode, submission_id, submission_hash, epoch, attempt_deadline_ms, turn_deadline_ms, terminal_state, terminal_reason FROM turns WHERE id = 't1'`).
+		Scan(&t1After.ID, &t1After.RunID, &t1After.Mode, &t1After.SubmissionID, &t1After.SubmissionHash, &t1After.Epoch, &t1After.AttemptDeadlineMS, &t1After.TurnDeadlineMS, &t1After.TerminalState, &t1After.TerminalReason); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare all fields
+	if t1Before.ID.String != t1After.ID.String {
+		t.Errorf("t1.id changed: before=%q, after=%q", t1Before.ID.String, t1After.ID.String)
+	}
+	if t1Before.RunID.String != t1After.RunID.String {
+		t.Errorf("t1.run_id changed: before=%q, after=%q", t1Before.RunID.String, t1After.RunID.String)
+	}
+	if t1Before.Mode.String != t1After.Mode.String {
+		t.Errorf("t1.mode changed: before=%q, after=%q", t1Before.Mode.String, t1After.Mode.String)
+	}
+	if t1Before.SubmissionID.String != t1After.SubmissionID.String || t1Before.SubmissionID.Valid != t1After.SubmissionID.Valid {
+		t.Errorf("t1.submission_id changed: before=%q (valid=%v), after=%q (valid=%v)", t1Before.SubmissionID.String, t1Before.SubmissionID.Valid, t1After.SubmissionID.String, t1After.SubmissionID.Valid)
+	}
+	if t1Before.SubmissionHash.String != t1After.SubmissionHash.String || t1Before.SubmissionHash.Valid != t1After.SubmissionHash.Valid {
+		t.Errorf("t1.submission_hash changed: before=%q (valid=%v), after=%q (valid=%v)", t1Before.SubmissionHash.String, t1Before.SubmissionHash.Valid, t1After.SubmissionHash.String, t1After.SubmissionHash.Valid)
+	}
+	if t1Before.Epoch.Int64 != t1After.Epoch.Int64 || t1Before.Epoch.Valid != t1After.Epoch.Valid {
+		t.Errorf("t1.epoch changed: before=%d (valid=%v), after=%d (valid=%v)", t1Before.Epoch.Int64, t1Before.Epoch.Valid, t1After.Epoch.Int64, t1After.Epoch.Valid)
+	}
+	if t1Before.AttemptDeadlineMS.Int64 != t1After.AttemptDeadlineMS.Int64 || t1Before.AttemptDeadlineMS.Valid != t1After.AttemptDeadlineMS.Valid {
+		t.Errorf("t1.attempt_deadline_ms changed: before=%d (valid=%v), after=%d (valid=%v)", t1Before.AttemptDeadlineMS.Int64, t1Before.AttemptDeadlineMS.Valid, t1After.AttemptDeadlineMS.Int64, t1After.AttemptDeadlineMS.Valid)
+	}
+	if t1Before.TurnDeadlineMS.Int64 != t1After.TurnDeadlineMS.Int64 || t1Before.TurnDeadlineMS.Valid != t1After.TurnDeadlineMS.Valid {
+		t.Errorf("t1.turn_deadline_ms changed: before=%d (valid=%v), after=%d (valid=%v)", t1Before.TurnDeadlineMS.Int64, t1Before.TurnDeadlineMS.Valid, t1After.TurnDeadlineMS.Int64, t1After.TurnDeadlineMS.Valid)
+	}
+	if t1Before.TerminalState.String != t1After.TerminalState.String || t1Before.TerminalState.Valid != t1After.TerminalState.Valid {
+		t.Errorf("t1.terminal_state changed: before=%q (valid=%v), after=%q (valid=%v)", t1Before.TerminalState.String, t1Before.TerminalState.Valid, t1After.TerminalState.String, t1After.TerminalState.Valid)
+	}
+	if t1Before.TerminalReason.String != t1After.TerminalReason.String || t1Before.TerminalReason.Valid != t1After.TerminalReason.Valid {
+		t.Errorf("t1.terminal_reason changed: before=%q (valid=%v), after=%q (valid=%v)", t1Before.TerminalReason.String, t1Before.TerminalReason.Valid, t1After.TerminalReason.String, t1After.TerminalReason.Valid)
 	}
 
 	// Verify GetTurn works on migrated turn
@@ -604,12 +714,46 @@ func TestMigration007FreshAndUpgradeConverge(t *testing.T) {
 	compareTableSchema(t, dbUpgrade.Conn(), dbFresh.Conn(), "candidates")
 }
 
+func checkConversationMapping(t *testing.T, conn *sql.DB, turnID, actualConvID, expectedConvPrefix string, expectedWorkspace *string) bool {
+	t.Helper()
+
+	// Verify conversation ID format
+	if actualConvID != expectedConvPrefix {
+		t.Errorf("Turn %s: conversation_id = %q, want %q", turnID, actualConvID, expectedConvPrefix)
+		return false
+	}
+
+	// Verify workspace
+	var workspace sql.NullString
+	if err := conn.QueryRow(`SELECT workspace FROM conversations WHERE id = ?`, actualConvID).Scan(&workspace); err != nil {
+		t.Fatalf("Query conversation workspace: %v", err)
+	}
+
+	if expectedWorkspace == nil {
+		if workspace.Valid {
+			t.Errorf("Turn %s: conversation workspace = %q, want NULL", turnID, workspace.String)
+			return false
+		}
+	} else {
+		if !workspace.Valid || workspace.String != *expectedWorkspace {
+			t.Errorf("Turn %s: conversation workspace = %q, want %q", turnID, workspace.String, *expectedWorkspace)
+			return false
+		}
+	}
+
+	return true
+}
+
 func compareTableSchema(t *testing.T, expected *sql.DB, actual *sql.DB, table string) {
 	t.Helper()
 
-	// Compare column info
-	expectedCols := getTableInfo(t, expected, table)
-	actualCols := getTableInfo(t, actual, table)
+	// Compare column info with full PRAGMA table_info details
+	expectedCols := getTableInfoFull(t, expected, table)
+	actualCols := getTableInfoFull(t, actual, table)
+
+	if len(expectedCols) != len(actualCols) {
+		t.Errorf("%s: column count differs: expected %d, got %d", table, len(expectedCols), len(actualCols))
+	}
 
 	for i, col := range expectedCols {
 		if i >= len(actualCols) {
@@ -620,12 +764,45 @@ func compareTableSchema(t *testing.T, expected *sql.DB, actual *sql.DB, table st
 			t.Errorf("%s: column %d differs: expected %q, got %q", table, i, col, actualCols[i])
 		}
 	}
-	if len(actualCols) > len(expectedCols) {
-		t.Errorf("%s: extra columns in actual: %v", table, actualCols[len(expectedCols):])
+
+	// Compare indexes for the table
+	expectedIndexes := getIndexes(t, expected, table)
+	actualIndexes := getIndexes(t, actual, table)
+
+	if len(expectedIndexes) != len(actualIndexes) {
+		t.Errorf("%s: index count differs: expected %d, got %d", table, len(expectedIndexes), len(actualIndexes))
+	}
+
+	for i, idx := range expectedIndexes {
+		if i >= len(actualIndexes) {
+			t.Errorf("%s: missing index at position %d: %v", table, i, idx)
+			continue
+		}
+		if idx != actualIndexes[i] {
+			t.Errorf("%s: index %d differs: expected %q, got %q", table, i, idx, actualIndexes[i])
+		}
+	}
+
+	// Compare triggers for the table
+	expectedTriggers := getTriggers(t, expected, table)
+	actualTriggers := getTriggers(t, actual, table)
+
+	if len(expectedTriggers) != len(actualTriggers) {
+		t.Errorf("%s: trigger count differs: expected %d, got %d", table, len(expectedTriggers), len(actualTriggers))
+	}
+
+	for i, trg := range expectedTriggers {
+		if i >= len(actualTriggers) {
+			t.Errorf("%s: missing trigger at position %d: %v", table, i, trg)
+			continue
+		}
+		if trg != actualTriggers[i] {
+			t.Errorf("%s: trigger %d differs: expected %q, got %q", table, i, trg, actualTriggers[i])
+		}
 	}
 }
 
-func getTableInfo(t *testing.T, conn *sql.DB, table string) []string {
+func getTableInfoFull(t *testing.T, conn *sql.DB, table string) []string {
 	t.Helper()
 	query := `PRAGMA table_info(` + table + `)`
 	rows, err := conn.Query(query)
@@ -645,10 +822,69 @@ func getTableInfo(t *testing.T, conn *sql.DB, table string) []string {
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
 			t.Fatal(err)
 		}
-		info = append(info, name+":"+typ)
+		// Include notnull constraint in the comparison
+		notNullStr := ""
+		if notnull != 0 {
+			notNullStr = " NOT NULL"
+		}
+		info = append(info, name+":"+typ+notNullStr)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	return info
+}
+
+func getIndexes(t *testing.T, conn *sql.DB, table string) []string {
+	t.Helper()
+	query := `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? ORDER BY name`
+	rows, err := conn.Query(query, table)
+	if err != nil {
+		t.Fatalf("get indexes for %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var indexes []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		// Skip auto-generated SQLite indexes
+		if !isAutoIndex(name) {
+			indexes = append(indexes, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return indexes
+}
+
+func getTriggers(t *testing.T, conn *sql.DB, table string) []string {
+	t.Helper()
+	query := `SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name`
+	rows, err := conn.Query(query, table)
+	if err != nil {
+		t.Fatalf("get triggers for %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var triggers []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		triggers = append(triggers, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return triggers
+}
+
+func isAutoIndex(name string) bool {
+	// SQLite generates automat ic indexes with this pattern
+	return len(name) > 7 && name[:7] == "sqlite_"
 }
