@@ -119,9 +119,9 @@ func (tx *Tx) CreateTurnWithConversation(runID, mode string, deadline *time.Time
 	}
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, conversation_id)
-		VALUES (?, ?, ?, ?, ?)
-	`, turnID, runID, mode, deadlineStr, conversationID); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, conversation_id, submitted_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, turnID, runID, mode, deadlineStr, conversationID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return "", fmt.Errorf("insert turn: %w", err)
 	}
 

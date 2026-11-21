@@ -880,64 +880,122 @@ func TestListConversationsPaginationWithNoTurnConversations(t *testing.T) {
 
 func TestListConversationsPaginationStabilityWithMutation(t *testing.T) {
 	f := newConvFixture(t)
-
-	// Create a run
 	runID, _, err := f.store.CreateRun([]byte("{}"))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-
 	ws := "/home/user/project"
 
-	// Create 5 conversations with turns
-	convs := make([]string, 5)
-	for i := 0; i < 5; i++ {
+	// 4 conversations with turns, plus 3 with none (all tie on key -1, separated by id).
+	var all []string
+	for i := 0; i < 4; i++ {
 		conv := f.createConversation(t, &ws)
-		convs[i] = conv
-		turn := f.createTurn(t, runID, conv)
-		f.addMessage(t, turn, "message "+string(rune('a'+i)))
+		all = append(all, conv)
+		f.addMessage(t, f.createTurn(t, runID, conv), "m")
+	}
+	for i := 0; i < 3; i++ {
+		all = append(all, f.createConversation(t, &ws))
 	}
 
-	// Get page 1 with limit=2
-	page1, cursor1, err := f.store.ListConversations(&ws, "", 2)
+	page1, cursor, err := f.store.ListConversations(&ws, "", 2)
 	if err != nil {
-		t.Fatalf("ListConversations page 1: %v", err)
+		t.Fatalf("page 1: %v", err)
 	}
-	if len(page1) != 2 {
-		t.Fatalf("expected 2 conversations on page 1, got %d", len(page1))
-	}
-
-	// Now add a turn to the last conversation (which hasn't been returned yet)
-	// This should not cause it to skip to the front where it could be duplicated
-	lastConv := convs[4]
-	newTurn := f.createTurn(t, runID, lastConv)
-	f.addMessage(t, newTurn, "new turn message")
-
-	// Get page 2 with the cursor from page 1
-	page2, cursor2, err := f.store.ListConversations(&ws, cursor1, 2)
-	if err != nil {
-		t.Fatalf("ListConversations page 2: %v", err)
+	seen := map[string]int{}
+	for _, c := range page1 {
+		seen[c.ID]++
 	}
 
-	// Get page 3
-	page3, _, err := f.store.ListConversations(&ws, cursor2, 2)
-	if err != nil {
-		t.Fatalf("ListConversations page 3: %v", err)
-	}
-
-	// Collect all conversation IDs
-	allConvs := append(page1, append(page2, page3...)...)
-	seen := make(map[string]bool)
-	for _, c := range allConvs {
-		if seen[c.ID] {
-			t.Errorf("duplicate conversation %s found across pages", c.ID)
+	// Mutate unseen rows: the oldest turn-bearing conversation and a no-turn one,
+	// which would jump above the cursor if the key were recomputed live.
+	var oldest string
+	for _, id := range all[:4] {
+		if seen[id] == 0 {
+			oldest = id // all[0] is the oldest unseen
+			break
 		}
-		seen[c.ID] = true
+	}
+	if oldest == "" {
+		t.Fatal("no unseen turn-bearing conversation")
+	}
+	f.addMessage(t, f.createTurn(t, runID, oldest), "late")
+	f.addMessage(t, f.createTurn(t, runID, all[6]), "late")
+
+	for cursor != "" {
+		var page []journal.ConversationRow
+		page, cursor, err = f.store.ListConversations(&ws, cursor, 2)
+		if err != nil {
+			t.Fatalf("next page: %v", err)
+		}
+		for _, c := range page {
+			seen[c.ID]++
+		}
+	}
+	for _, id := range all {
+		if seen[id] != 1 {
+			t.Errorf("conversation %s seen %d times, want exactly once", id, seen[id])
+		}
+	}
+}
+
+func TestConversationSubmittedAtReal(t *testing.T) {
+	f := newConvFixture(t)
+	runID, _, err := f.store.CreateRun([]byte("{}"))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	conv := f.createConversation(t, nil)
+
+	before := time.Now().Add(-2 * time.Second)
+	t1 := f.createTurn(t, runID, conv)
+	time.Sleep(5 * time.Millisecond)
+	t2 := f.createTurn(t, runID, conv)
+	after := time.Now().Add(2 * time.Second)
+
+	turns, err := f.store.GetConversationTurns(conv)
+	if err != nil {
+		t.Fatalf("GetConversationTurns: %v", err)
+	}
+	if len(turns) != 2 || turns[0].ID != t1 || turns[1].ID != t2 {
+		t.Fatalf("unexpected turn order: %+v", turns)
+	}
+	for _, tr := range turns {
+		if tr.SubmittedAt == nil || tr.SubmittedAt.Before(before) || tr.SubmittedAt.After(after) {
+			t.Errorf("turn %s submitted_at = %v, want within [%v, %v]", tr.ID, tr.SubmittedAt, before, after)
+		}
+	}
+	if !turns[1].SubmittedAt.After(*turns[0].SubmittedAt) {
+		t.Errorf("submitted_at not increasing: %v then %v", turns[0].SubmittedAt, turns[1].SubmittedAt)
 	}
 
-	// Check that we got all 5 unique conversations
-	if len(seen) != 5 {
-		t.Errorf("expected 5 unique conversations, got %d", len(seen))
+	row, err := f.store.GetConversation(conv)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if row.LastSubmittedAt == nil || !row.LastSubmittedAt.Equal(*turns[1].SubmittedAt) {
+		t.Errorf("last_submitted_at = %v, want %v", row.LastSubmittedAt, turns[1].SubmittedAt)
+	}
+
+	// The list query reports the same value.
+	listed, _, err := f.store.ListConversations(nil, "", 10)
+	if err != nil || len(listed) != 1 || listed[0].LastSubmittedAt == nil || !listed[0].LastSubmittedAt.Equal(*turns[1].SubmittedAt) {
+		t.Errorf("listed last_submitted_at mismatch: %+v err %v", listed, err)
+	}
+}
+
+func TestGetConversationExactIDWinsOverLongerIDs(t *testing.T) {
+	f := newConvFixture(t)
+	for _, id := range []string{"abc", "abcd"} {
+		if _, err := f.db.Conn().Exec(`INSERT INTO conversations (id) VALUES (?)`, id); err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	got, err := f.store.GetConversation("abc")
+	if err != nil || got.ID != "abc" {
+		t.Fatalf("exact ID: got %+v err %v", got, err)
+	}
+	if _, err := f.store.GetConversation("ab"); !errors.Is(err, journal.ErrAmbiguousConversationID) {
+		t.Errorf("prefix ab: want ambiguous, got %v", err)
 	}
 }
 

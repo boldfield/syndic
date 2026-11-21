@@ -50,16 +50,33 @@ func firstLine(text string, maxCells int) string {
 	return runewidth.Truncate(text, maxCells, "")
 }
 
+// convColumns is the single column list behind every conversation query; the
+// FROM clause must alias conversations as c. last_submitted_at comes from the
+// durable turns.submitted_at of the latest turn (the same turn the ordering key
+// picks); preview is the first line of the first turn's first input.
+const convColumns = `
+	c.id, c.created_at, c.workspace,
+	(SELECT t2.submitted_at FROM turns t2 WHERE t2.conversation_id = c.id ORDER BY t2.rowid DESC LIMIT 1),
+	(SELECT COUNT(*) FROM turns t2 WHERE t2.conversation_id = c.id),
+	EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL),
+	(SELECT m.content FROM messages m
+		WHERE m.turn_id = (
+			SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
+			ORDER BY t3.rowid ASC LIMIT 1
+		) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1)`
+
 // scanConvRow scans a conversation row from the query result using a Scan function.
 // Expects: id, created_at, workspace, last_submitted_at, turn_count, running, preview
-func scanConvRow(scan func(...any) error) (*ConversationRow, error) {
+// extra receives any additional trailing columns.
+func scanConvRow(scan func(...any) error, extra ...any) (*ConversationRow, error) {
 	var c ConversationRow
 	var createdAtStr string
 	var lastSubmittedAtStr sql.NullString
 	var running sql.NullInt64
 	var preview sql.NullString
 
-	if err := scan(&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview); err != nil {
+	dest := append([]any{&c.ID, &createdAtStr, &c.Workspace, &lastSubmittedAtStr, &c.TurnCount, &running, &preview}, extra...)
+	if err := scan(dest...); err != nil {
 		return nil, err
 	}
 
@@ -120,6 +137,12 @@ func (s *Store) ListConversations(workspace *string, cursor string, limit int) (
 }
 
 // ListConversations returns a page of conversations ordered by latest activity first using keyset pagination.
+//
+// Pagination guarantee: the cursor pins a snapshot (the highest turn rowid at the
+// first page). Later pages order by activity as of that snapshot, so turns submitted
+// between pages never move an unseen conversation across the cursor: every
+// conversation present at the first page appears exactly once across all pages.
+// Cursor format: "snapshot,key,id".
 func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]ConversationRow, string, error) {
 	if limit < 1 {
 		limit = 1
@@ -128,109 +151,69 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 		limit = 200
 	}
 
-	want := limit + 1 // one lookahead row tells us whether another page exists
-
-	// Parse keyset cursor: "maxRowid,id" format
-	var cursorRowid int64 = -1
+	var snap, cursorKey int64
 	var cursorID string
 	if cursor != "" {
-		parts := strings.Split(cursor, ",")
-		if len(parts) != 2 {
+		parts := strings.SplitN(cursor, ",", 3)
+		if len(parts) != 3 || parts[2] == "" {
 			return nil, "", fmt.Errorf("invalid cursor format: %w", ErrMalformedCursor)
 		}
-		r, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			return nil, "", fmt.Errorf("invalid cursor rowid: %w", ErrMalformedCursor)
+		var err error
+		if snap, err = strconv.ParseInt(parts[0], 10, 64); err != nil || snap < 0 {
+			return nil, "", fmt.Errorf("invalid cursor snapshot: %w", ErrMalformedCursor)
 		}
-		cursorRowid = r
-		cursorID = parts[1]
-		if cursorID == "" {
-			return nil, "", fmt.Errorf("invalid cursor id: %w", ErrMalformedCursor)
+		if cursorKey, err = strconv.ParseInt(parts[1], 10, 64); err != nil || cursorKey < -1 {
+			return nil, "", fmt.Errorf("invalid cursor key: %w", ErrMalformedCursor)
 		}
+		cursorID = parts[2]
+	} else if err := tx.tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM turns`).Scan(&snap); err != nil {
+		return nil, "", fmt.Errorf("query snapshot: %w", err)
 	}
 
-	// Build the query with keyset pagination over (max_turn_rowid DESC, c.id ASC)
-	// Get preview from FIRST turn (oldest)
-	var rows *sql.Rows
-	var err error
+	// key: rowid of the conversation's latest turn within the snapshot; -1 when none.
+	const key = `COALESCE((SELECT MAX(tk.rowid) FROM turns tk WHERE tk.conversation_id = c.id AND tk.rowid <= @snap), -1)`
 
-	whereClause := ""
-	args := []interface{}{}
-
+	where := "1=1"
+	args := []any{sql.Named("snap", snap), sql.Named("limit", limit+1)} // one lookahead row tells us whether another page exists
 	if workspace != nil && *workspace == "" {
-		whereClause = "WHERE c.workspace IS NULL"
+		where += " AND c.workspace IS NULL"
 	} else if workspace != nil {
-		whereClause = "WHERE c.workspace = ?"
-		args = append(args, *workspace)
+		where += " AND c.workspace = @workspace"
+		args = append(args, sql.Named("workspace", *workspace))
 	}
-	// else workspace is nil: include all conversations
-
-	// Use a subquery with MAX(t.rowid) to handle keyset cursor
-	// Apply keyset cursor filter: we want rows where (max_rowid, id) < (cursor_rowid, cursor_id) in DESC order
-	// This handles -1 (no-turn conversations) correctly
-	cursorWhere := ""
+	// A nil workspace includes every conversation; only automatic selection excludes legacy NULL-workspace rows.
 	if cursor != "" {
-		// Cursor filtering applies even when cursorRowid is -1 (conversations with no turns)
-		cursorWhere = "AND (COALESCE(cte.max_rowid, -1) < ? OR (COALESCE(cte.max_rowid, -1) = ? AND cte.id > ?))"
-		args = append(args, cursorRowid, cursorRowid, cursorID)
+		where += " AND (" + key + " < @ckey OR (" + key + " = @ckey AND c.id > @cid))"
+		args = append(args, sql.Named("ckey", cursorKey), sql.Named("cid", cursorID))
 	}
 
-	baseQuery := `
-		WITH conv_turns AS (
-			SELECT c.id, c.created_at, c.workspace, COALESCE(MAX(t.rowid), -1) as max_rowid
-			FROM conversations c
-			LEFT JOIN turns t ON c.id = t.conversation_id
-			` + whereClause + `
-			GROUP BY c.id, c.created_at, c.workspace
-		)
-		SELECT
-			cte.id, cte.created_at, cte.workspace,
-			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
-				FROM turns t2
-				WHERE t2.conversation_id = cte.id) as last_submitted_at,
-			COUNT(t.id) as turn_count,
-			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = cte.id AND t2.terminal_state IS NULL)) as running,
-			(SELECT m.content FROM messages m
-				WHERE m.turn_id = (
-					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = cte.id
-					ORDER BY t3.rowid ASC LIMIT 1
-				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
-		FROM conv_turns cte
-		LEFT JOIN turns t ON cte.id = t.conversation_id
-		WHERE 1=1 ` + cursorWhere + `
-		GROUP BY cte.id, cte.created_at, cte.workspace, cte.max_rowid
-		ORDER BY cte.max_rowid DESC, cte.id ASC
-		LIMIT ?
-	`
-	args = append(args, want)
-
-	rows, err = tx.tx.Query(baseQuery, args...)
+	rows, err := tx.tx.Query(`SELECT `+convColumns+`, `+key+` FROM conversations c WHERE `+where+
+		` ORDER BY `+key+` DESC, c.id ASC LIMIT @limit`, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("query conversations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	conversations, err := scanConversationRows(rows)
-	if err != nil {
+	var conversations []ConversationRow
+	var keys []int64
+	for rows.Next() {
+		var k int64
+		c, err := scanConvRow(rows.Scan, &k)
+		if err != nil {
+			return nil, "", fmt.Errorf("scan conversation: %w", err)
+		}
+		conversations = append(conversations, *c)
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, "", fmt.Errorf("scan conversations: %w", err)
 	}
 
 	var nextCursor string
 	if len(conversations) > limit {
 		conversations = conversations[:limit]
-		// Extract the keyset from the last row for the next cursor
-		lastRow := conversations[len(conversations)-1]
-		// Get the max rowid for the last row (we need to query it back)
-		var nextRowid int64
-		err := tx.tx.QueryRow(`
-			SELECT COALESCE(MAX(t.rowid), -1)
-			FROM turns t
-			WHERE t.conversation_id = ?
-		`, lastRow.ID).Scan(&nextRowid)
-		if err != nil {
-			return nil, "", fmt.Errorf("get next rowid: %w", err)
-		}
-		nextCursor = fmt.Sprintf("%d,%s", nextRowid, lastRow.ID)
+		last := limit - 1
+		nextCursor = fmt.Sprintf("%d,%d,%s", snap, keys[last], conversations[last].ID)
 	}
 
 	return conversations, nextCursor, nil
@@ -254,24 +237,10 @@ func (s *Store) GetConversation(idPrefix string) (*ConversationRow, error) {
 func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	// Use substr for exact prefix matching (not LIKE which treats % and _ as wildcards).
 	// substr(c.id,1,length(?)) = ? is safer for non-ASCII ids than range comparison.
-	rows, err := tx.tx.Query(`
-		SELECT
-			c.id, c.created_at, c.workspace,
-			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
-				FROM turns t2
-				WHERE t2.conversation_id = c.id) as last_submitted_at,
-			COUNT(t.id) as turn_count,
-			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-			(SELECT m.content FROM messages m
-				WHERE m.turn_id = (
-					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-					ORDER BY t3.rowid ASC LIMIT 1
-				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
+	rows, err := tx.tx.Query(`SELECT `+convColumns+`
 		FROM conversations c
-		LEFT JOIN turns t ON c.id = t.conversation_id
-		WHERE c.id = ? OR substr(c.id, 1, length(?)) = ?
-		GROUP BY c.id, c.created_at, c.workspace
-		ORDER BY c.id
+		WHERE substr(c.id, 1, length(?)) = ?
+		ORDER BY c.id = ? DESC, c.id
 		LIMIT 2
 	`, idPrefix, idPrefix, idPrefix)
 	if err != nil {
@@ -290,6 +259,9 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	case 1:
 		return &conversations[0], nil
 	default:
+		if conversations[0].ID == idPrefix {
+			return &conversations[0], nil // an exact ID wins over longer IDs it prefixes
+		}
 		return nil, fmt.Errorf("ambiguous conversation ID %q: %w", idPrefix, ErrAmbiguousConversationID)
 	}
 }
@@ -309,7 +281,7 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
 		SELECT t.id, t.terminal_state,
-			datetime('2000-01-01', '+' || COALESCE(t.rowid, 0) || ' seconds') as submitted_at
+			t.submitted_at
 		FROM turns t
 		WHERE t.conversation_id = ?
 		ORDER BY t.rowid ASC
@@ -402,24 +374,10 @@ func (s *Store) GetMostRecentConversationForWorkspace(workspace string) (*Conver
 
 // GetMostRecentConversationForWorkspace returns the most recently submitted conversation for a workspace.
 func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*ConversationRow, error) {
-	row := tx.tx.QueryRow(`
-		SELECT
-			c.id, c.created_at, c.workspace,
-			(SELECT CASE WHEN COUNT(*) > 0 THEN datetime('2000-01-01', '+' || MAX(t2.rowid) || ' seconds') ELSE NULL END
-				FROM turns t2
-				WHERE t2.conversation_id = c.id) as last_submitted_at,
-			COUNT(t.id) as turn_count,
-			(EXISTS(SELECT 1 FROM turns t2 WHERE t2.conversation_id = c.id AND t2.terminal_state IS NULL)) as running,
-			(SELECT m.content FROM messages m
-				WHERE m.turn_id = (
-					SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
-					ORDER BY t3.rowid ASC LIMIT 1
-				) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1) as preview
+	row := tx.tx.QueryRow(`SELECT `+convColumns+`
 		FROM conversations c
-		LEFT JOIN turns t ON c.id = t.conversation_id
 		WHERE c.workspace = ?
-		GROUP BY c.id, c.created_at, c.workspace
-		ORDER BY COALESCE(MAX(t.rowid), -1) DESC, c.id ASC
+		ORDER BY COALESCE((SELECT MAX(tk.rowid) FROM turns tk WHERE tk.conversation_id = c.id), -1) DESC, c.id ASC
 		LIMIT 1
 	`, workspace)
 
