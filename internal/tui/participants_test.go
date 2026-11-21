@@ -651,3 +651,51 @@ func TestParticipantsFitsBodyAt80x24(t *testing.T) {
 		t.Errorf("view is %d lines at 24 rows", n)
 	}
 }
+
+func TestParticipantDetailShowsExternalSpendingControl(t *testing.T) {
+	s := NewState()
+	s.Participants["metered-no-ctrl"] = ParticipantInfo{
+		ID:              "metered-no-ctrl",
+		State:           "idle",
+		DeclaredBilling: "metered",
+		SpendingControl: "",
+	}
+	s.Participants["metered-external"] = ParticipantInfo{
+		ID:              "metered-external",
+		State:           "idle",
+		DeclaredBilling: "metered",
+		SpendingControl: "external",
+	}
+	s.Participants["flat"] = ParticipantInfo{
+		ID:              "flat",
+		State:           "idle",
+		DeclaredBilling: "flat",
+		SpendingControl: "external",
+	}
+
+	now := time.Now()
+
+	detail1 := participantDetail(s, s.Participants["metered-no-ctrl"], now)
+	line1 := strings.Join(detail1, "\n")
+	if !strings.Contains(line1, "billing: metered") {
+		t.Fatalf("metered-no-ctrl detail missing 'billing: metered':\n%s", line1)
+	}
+	if strings.Contains(line1, "external spending control") {
+		t.Fatalf("metered-no-ctrl detail should not contain 'external spending control':\n%s", line1)
+	}
+
+	detail2 := participantDetail(s, s.Participants["metered-external"], now)
+	line2 := strings.Join(detail2, "\n")
+	if !strings.Contains(line2, "metered, external spending control") {
+		t.Fatalf("metered-external detail missing 'metered, external spending control':\n%s", line2)
+	}
+
+	detail3 := participantDetail(s, s.Participants["flat"], now)
+	line3 := strings.Join(detail3, "\n")
+	if !strings.Contains(line3, "billing: flat") {
+		t.Fatalf("flat detail missing 'billing: flat':\n%s", line3)
+	}
+	if strings.Contains(line3, "external spending control") {
+		t.Fatalf("flat detail should not show spending control as 'metered, external spending control':\n%s", line3)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -646,6 +647,197 @@ func TestStaleSocket(t *testing.T) {
 
 	// Just verify the stale socket was handled without error
 	// The socket will be recreated during start
+}
+
+func TestLogExternalSpendingControl(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.toml")
+	journalPath := filepath.Join(dir, "journal.db")
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up isolated environment for the daemon
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// Create roster with external spending control on a metered endpoint
+	rosterWithExternal := strings.Replace(
+		enginetest.RosterTOML,
+		`declared_billing = "none"`,
+		`declared_billing = "metered"
+spending_control = "external"`,
+		1,
+	)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterWithExternal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roster, err := config.Load(rosterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	store := journal.NewStore(db)
+	seedProbeRecords(t, store, roster)
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start syndicd in a goroutine
+	sigChan := make(chan os.Signal, 2)
+	var stdout, stderr threadSafeBuffer
+	done := make(chan int, 1)
+
+	go func() {
+		done <- run(
+			[]string{
+				"--roster", rosterPath,
+				"--journal", journalPath,
+				"--secrets-dir", filepath.Join(dir, "secrets"),
+			},
+			&stdout,
+			&stderr,
+			sigChan,
+		)
+	}()
+
+	// Poll for the log message indicating daemon is ready and has logged external spending control
+	var stderrOutput string
+	var hasMeteredExternal bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stderrOutput = stderr.String()
+		hasMeteredExternal = strings.Contains(stderrOutput, "external spending control:") &&
+			strings.Contains(stderrOutput, "(metered)")
+		if hasMeteredExternal {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Stop the daemon
+	sigChan <- os.Interrupt
+	exitCode := <-done
+
+	if exitCode != 0 {
+		t.Fatalf("want exit code 0, got %d; stderr: %s", exitCode, stderr.String())
+	}
+
+	if !hasMeteredExternal {
+		t.Fatalf("want stderr to contain 'external spending control: ... (metered)', got: %q", stderrOutput)
+	}
+}
+
+func TestLogExternalSpendingControlSharedEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.toml")
+	journalPath := filepath.Join(dir, "journal.db")
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_DATA_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// Create roster with multiple participants on same metered endpoint with external spending control
+	rosterWithExternal := strings.Replace(
+		enginetest.RosterTOML,
+		`declared_billing = "none"`,
+		`declared_billing = "metered"
+spending_control = "external"`,
+		1,
+	)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterWithExternal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roster, err := config.Load(rosterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := journal.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	store := journal.NewStore(db)
+	seedProbeRecords(t, store, roster)
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sigChan := make(chan os.Signal, 2)
+	var stdout, stderr threadSafeBuffer
+	done := make(chan int, 1)
+
+	go func() {
+		done <- run(
+			[]string{
+				"--roster", rosterPath,
+				"--journal", journalPath,
+				"--secrets-dir", filepath.Join(dir, "secrets"),
+			},
+			&stdout,
+			&stderr,
+			sigChan,
+		)
+	}()
+
+	// Poll for the log message indicating daemon is ready
+	var stderrOutput string
+	var foundLog bool
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stderrOutput = stderr.String()
+		foundLog = strings.Contains(stderrOutput, "external spending control:")
+		if foundLog {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	sigChan <- os.Interrupt
+	exitCode := <-done
+
+	if exitCode != 0 {
+		t.Fatalf("want exit code 0, got %d; stderr: %s", exitCode, stderr.String())
+	}
+
+	if !foundLog {
+		t.Fatalf("want stderr to contain 'external spending control:', got: %q", stderrOutput)
+	}
+
+	// Count occurrences of the log message per endpoint to ensure deduplication
+	for _, endpoint := range roster.Endpoints {
+		if endpoint.DeclaredBilling == "metered" {
+			searchStr := fmt.Sprintf("external spending control: %s (metered)", endpoint.Name)
+			count := strings.Count(stderrOutput, searchStr)
+			if count != 1 {
+				t.Fatalf("want exactly 1 log entry for endpoint %s, got %d (stderr: %q)", endpoint.Name, count, stderrOutput)
+			}
+		}
+	}
 }
 
 func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster) {

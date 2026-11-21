@@ -74,9 +74,9 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
-	// Check if endpoint has metered billing
-	if endpointProfile.DeclaredBilling == "metered" {
-		fmt.Fprintf(os.Stderr, "error: endpoint %q has metered billing; no spending ceiling exists in the alpha\n", *endpointName)
+	// Check if endpoint has metered billing without external spending control
+	if endpointProfile.DeclaredBilling == "metered" && endpointProfile.SpendingControl != "external" {
+		fmt.Fprintf(os.Stderr, "error: endpoint %q has metered billing; no spending ceiling is configured (use spending_control = \"external\")\n", *endpointName)
 		return 2
 	}
 

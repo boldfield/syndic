@@ -929,6 +929,49 @@ func TestConfigFingerprintChangesOnMaxTokensFieldChange(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintChangesOnSpendingControlChange(t *testing.T) {
+	profile1 := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "metered",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		MaxTokensField:    "max_tokens",
+		SpendingControl:   "",
+	}
+
+	fp1, err := ConfigFingerprint(profile1, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("First ConfigFingerprint failed: %v", err)
+	}
+
+	profile2 := profile1
+	profile2.SpendingControl = "external"
+
+	fp2, err := ConfigFingerprint(profile2, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Second ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 == fp2 {
+		t.Errorf("Fingerprint should change when spending_control changes")
+	}
+
+	profile3 := profile1
+	profile3.SpendingControl = ""
+
+	fp3, err := ConfigFingerprint(profile3, "model-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Third ConfigFingerprint failed: %v", err)
+	}
+
+	if fp1 != fp3 {
+		t.Errorf("Fingerprint should be same when spending_control is empty in both")
+	}
+}
+
 // TestCalibrationRecordAvailableMarshaling verifies that an available
 // calibration marshals to an object.
 func TestCalibrationRecordAvailableMarshaling(t *testing.T) {

@@ -284,6 +284,9 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		if e.TokensPerByteMax != nil {
 			eMap["tokens_per_byte_max"] = *e.TokensPerByteMax
 		}
+		if e.SpendingControl != "" {
+			eMap["spending_control"] = e.SpendingControl
+		}
 		endpoints[i] = eMap
 	}
 	roMap["endpoints"] = endpoints
