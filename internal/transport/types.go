@@ -200,10 +200,31 @@ type Expected struct {
 	ReportedModel string
 }
 
+// ProbeRequest contains details passed to BeforeSend callbacks during probing.
+type ProbeRequest struct {
+	Model   string
+	Step    string // e.g., "max_tokens", "system_role", "over_length"
+	Timeout time.Duration
+}
+
+// ProbeOptions are options for probing that may be passed through the Adapter interface.
+type ProbeOptions struct {
+	Timeout            time.Duration
+	DisableOverLength  bool
+	DisableCalibration bool
+	AssumedContextLen  int
+	// BeforeSend is an optional callback invoked before each probe HTTP request.
+	// It allows the engine to journal the probe request before dispatch and distinguish
+	// ErrNotSent (pre-send failures) from other errors.
+	BeforeSend func(*ProbeRequest) error
+}
+
 // Adapter is the interface that every participant route implements.
 type Adapter interface {
 	// Probe returns the capability record for the endpoint and model.
-	Probe(ctx context.Context, endpoint, model string) (CapabilityRecord, error)
+	// When opts.BeforeSend is provided, it is called before each probe HTTP request,
+	// allowing pre-send journaling; ErrNotSent failures are distinguished from post-send errors.
+	Probe(ctx context.Context, endpoint, model string, opts ProbeOptions) (CapabilityRecord, error)
 
 	// Complete sends a request and returns the result.
 	// Returns a Go error only for requests the adapter refuses to send.

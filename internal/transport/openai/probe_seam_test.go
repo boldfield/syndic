@@ -19,7 +19,7 @@ import (
 // before it is sent".
 func TestProbeBeforeSendCallback(t *testing.T) {
 	attemptedSteps := []string{}
-	beforeSendCallback := func(req *ProbeRequest) error {
+	beforeSendCallback := func(req *transport.ProbeRequest) error {
 		attemptedSteps = append(attemptedSteps, req.Step)
 		return nil
 	}
@@ -46,7 +46,7 @@ func TestProbeBeforeSendCallback(t *testing.T) {
 	}
 	adapter := New(profile, &mockResolver{secret: "test"})
 
-	opts := ProbeOptions{
+	opts := transport.ProbeOptions{
 		Timeout:            10 * time.Second,
 		BeforeSend:         beforeSendCallback,
 		AssumedContextLen:  100,
@@ -82,7 +82,7 @@ func TestProbeBeforeSendCallback(t *testing.T) {
 // (like journaling failures) are distinguishable from post-send failures via
 // ErrNotSent wrapping. This satisfies design v5 delta section 1a.
 func TestProbeBeforeSendFailureReturnsErrNotSent(t *testing.T) {
-	beforeSendCallback := func(req *ProbeRequest) error {
+	beforeSendCallback := func(req *transport.ProbeRequest) error {
 		if req.Step == "models" {
 			return errors.New("journaling failed")
 		}
@@ -101,7 +101,7 @@ func TestProbeBeforeSendFailureReturnsErrNotSent(t *testing.T) {
 	}
 	adapter := New(profile, &mockResolver{secret: "test"})
 
-	opts := ProbeOptions{
+	opts := transport.ProbeOptions{
 		Timeout:    10 * time.Second,
 		BeforeSend: beforeSendCallback,
 	}

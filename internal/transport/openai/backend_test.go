@@ -1240,7 +1240,7 @@ func TestProbeBehaviorTable(t *testing.T) {
 			}
 
 			adapter := New(profile, &mockResolver{})
-			record, err := adapter.Probe(context.Background(), "test", "test-model")
+			record, err := adapter.Probe(context.Background(), "test", "test-model", transport.ProbeOptions{})
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -1319,7 +1319,7 @@ func TestProbeErrors(t *testing.T) {
 			}
 
 			adapter := New(profile, &mockResolver{})
-			_, err := adapter.Probe(context.Background(), "test", "test-model")
+			_, err := adapter.Probe(context.Background(), "test", "test-model", transport.ProbeOptions{})
 
 			if err == nil {
 				t.Errorf("expected error %v, got nil", tt.expectedErr)
@@ -1390,7 +1390,7 @@ func TestProbeSecretScrubbing(t *testing.T) {
 	resolver := &mockResolver{secret: secret}
 	adapter := New(profile, resolver)
 
-	record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+	record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", transport.ProbeOptions{
 		AssumedContextLen: 131072,
 	})
 
@@ -1451,7 +1451,7 @@ func TestProbeOverLengthDisabled(t *testing.T) {
 
 	adapter := New(profile, &mockResolver{})
 
-	opts := ProbeOptions{
+	opts := transport.ProbeOptions{
 		Timeout:           10 * time.Second,
 		DisableOverLength: true,
 		AssumedContextLen: 131072,
@@ -1665,7 +1665,7 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 			}
 
 			adapter := New(profile, &mockResolver{})
-			record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+			record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", transport.ProbeOptions{
 				AssumedContextLen: 131072,
 			})
 
@@ -1696,7 +1696,7 @@ func TestProbeEndpointMismatch(t *testing.T) {
 	}
 
 	adapter := New(profile, &mockResolver{})
-	_, err := adapter.Probe(context.Background(), "differentendpoint", "test-model")
+	_, err := adapter.Probe(context.Background(), "differentendpoint", "test-model", transport.ProbeOptions{})
 
 	if err == nil {
 		t.Errorf("expected error for endpoint mismatch, got nil")
@@ -1844,7 +1844,7 @@ func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
 
 	adapter := New(profile, &mockResolver{secret: ""})
 
-	record, err := adapter.Probe(context.Background(), "test", "test-model")
+	record, err := adapter.Probe(context.Background(), "test", "test-model", transport.ProbeOptions{})
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}

@@ -100,7 +100,42 @@ type Options struct {
 }
 
 // Probe returns the configured capability record.
-func (a *Adapter) Probe(ctx context.Context, endpoint, model string) (transport.CapabilityRecord, error) {
+// When opts.BeforeSend is provided, it is called before each probe step (models, max_tokens, etc).
+func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
+	if opts.BeforeSend != nil {
+		// Call BeforeSend for the main probe steps: models, max_tokens, system_role
+		for _, step := range []string{"models", "max_tokens", "system_role"} {
+			if err := opts.BeforeSend(&transport.ProbeRequest{
+				Model:   model,
+				Step:    step,
+				Timeout: opts.Timeout,
+			}); err != nil {
+				return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			}
+		}
+		// Also call for calibration steps if not disabled
+		if !opts.DisableCalibration {
+			for _, step := range []string{"calibration_baseline", "calibration"} {
+				if err := opts.BeforeSend(&transport.ProbeRequest{
+					Model:   model,
+					Step:    step,
+					Timeout: opts.Timeout,
+				}); err != nil {
+					return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+				}
+			}
+		}
+		// Also call for over_length if not disabled
+		if !opts.DisableOverLength {
+			if err := opts.BeforeSend(&transport.ProbeRequest{
+				Model:   model,
+				Step:    "over_length",
+				Timeout: opts.Timeout,
+			}); err != nil {
+				return transport.CapabilityRecord{}, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			}
+		}
+	}
 	return a.capability, nil
 }
 

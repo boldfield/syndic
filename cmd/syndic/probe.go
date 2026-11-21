@@ -102,7 +102,7 @@ func cmdProbe(fs *flag.FlagSet, args []string) int {
 	}
 
 	// Build probe options
-	probeOpts := openai.ProbeOptions{
+	probeOpts := transport.ProbeOptions{
 		Timeout:            60 * time.Second,
 		DisableOverLength:  *skipOverLength,
 		DisableCalibration: *skipCalibration,
