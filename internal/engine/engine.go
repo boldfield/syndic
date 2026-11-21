@@ -438,7 +438,9 @@ func (e *Engine) Start() error {
 
 	// Start-time probes belong here, between the two commits; a crash in
 	// this window leaves a probing run that the next start abandons.
-	if err := e.runStartupProbes(context.Background(), roster, built, false); err != nil {
+	// probeMissing is false by default; it should be plumbed from CLI flags in a later task.
+	probeMissing := false
+	if err := e.runStartupProbes(context.Background(), roster, built, probeMissing); err != nil {
 		return fmt.Errorf("engine: startup probes: %w", err)
 	}
 
