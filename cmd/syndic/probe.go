@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -295,7 +296,7 @@ func isInsideGitWorktree(path string) bool {
 			checkPath := resolved
 			for {
 				gitPath := filepath.Join(checkPath, ".git")
-				if _, err := os.Stat(gitPath); err == nil {
+				if isRealGitRepository(gitPath) {
 					return true
 				}
 				parent := filepath.Dir(checkPath)
@@ -316,6 +317,47 @@ func isInsideGitWorktree(path string) bool {
 		current = parent
 	}
 	return false
+}
+
+func isRealGitRepository(gitPath string) bool {
+	// Try to stat the path
+	fi, err := os.Stat(gitPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// .git doesn't exist, not a repository
+			return false
+		}
+		// Can't inspect .git, fail closed - treat as worktree
+		return true
+	}
+
+	if fi.IsDir() {
+		// It's a directory. Check if it contains a HEAD regular file.
+		headPath := filepath.Join(gitPath, "HEAD")
+		fi, err := os.Stat(headPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// HEAD doesn't exist
+				return false
+			}
+			// Can't inspect HEAD, fail closed
+			return true
+		}
+		// HEAD exists and is a regular file, it's a repository
+		return fi.Mode().IsRegular()
+	}
+	// It's a file (or symlink, etc). Check if it's a regular file containing "gitdir:" after leading whitespace.
+	if !fi.Mode().IsRegular() {
+		// Not a regular file (could be FIFO, socket, etc), ignore it
+		return false
+	}
+	content, err := os.ReadFile(gitPath)
+	if err != nil {
+		// Can't read the file, fail closed
+		return true
+	}
+	contentStr := strings.TrimSpace(string(content))
+	return strings.HasPrefix(contentStr, "gitdir:")
 }
 
 func getOperationalErrorCode(err error) int {
