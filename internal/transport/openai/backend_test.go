@@ -1340,6 +1340,26 @@ func TestProbeSecretScrubbing(t *testing.T) {
 			return
 		}
 
+		var reqBody map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+		messages, ok := reqBody["messages"].([]any)
+		var promptTokens int
+		if ok && len(messages) > 0 {
+			msg, _ := messages[len(messages)-1].(map[string]any)
+			content, _ := msg["content"].(string)
+			// Return different token counts for calibration requests
+			if content == "" {
+				promptTokens = 1 // baseline calibration
+			} else if len(content) == 4096 {
+				promptTokens = 100 // calibration text
+			} else if len(content) > 100000 {
+				promptTokens = 50 // over-length probe
+			} else {
+				promptTokens = 10 // other requests
+			}
+		}
+
 		resp := ResponseBody{
 			Model: "test-model",
 			Choices: []ChoiceBody{
@@ -1350,7 +1370,7 @@ func TestProbeSecretScrubbing(t *testing.T) {
 					FinishReason: "stop",
 				},
 			},
-			Usage: &UsageData{PromptTokens: intPtr(10), CompletionTokens: intPtr(5)},
+			Usage: &UsageData{PromptTokens: intPtr(promptTokens), CompletionTokens: intPtr(5)},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Secret", secret)
@@ -1370,7 +1390,9 @@ func TestProbeSecretScrubbing(t *testing.T) {
 	resolver := &mockResolver{secret: secret}
 	adapter := New(profile, resolver)
 
-	record, err := adapter.Probe(context.Background(), "test", "test-model")
+	record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1387,7 +1409,7 @@ func TestProbeSecretScrubbing(t *testing.T) {
 	if err := json.Unmarshal(record.Raw, &steps); err != nil {
 		t.Fatalf("Raw is not a JSON object: %v", err)
 	}
-	for _, k := range []string{"models", "max_tokens", "system_role", "over_length"} {
+	for _, k := range []string{"models", "max_tokens", "system_role", "calibration_baseline", "calibration", "over_length"} {
 		if _, ok := steps[k]; !ok {
 			t.Errorf("Raw missing step %q: %s", k, rawStr)
 		}
@@ -1441,8 +1463,8 @@ func TestProbeOverLengthDisabled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if record.OverLength != "not_run" {
-		t.Errorf("OverLength: got %q, want not_run when disabled", record.OverLength)
+	if record.OverLength != "not_run:skipped" {
+		t.Errorf("OverLength: got %q, want not_run:skipped when disabled", record.OverLength)
 	}
 }
 
@@ -1452,6 +1474,7 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 		name              string
 		setupServer       func(*http.ServeMux)
 		expectedOverLengt string
+		expectedEligible  transport.Tri
 	}{
 		{
 			name: "both_markers_returned",
@@ -1465,9 +1488,20 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 
 					messages, ok := reqBody["messages"].([]any)
 					var requestContent string
+					var promptTokens int
 					if ok && len(messages) > 0 {
 						msg, _ := messages[len(messages)-1].(map[string]any)
 						requestContent, _ = msg["content"].(string)
+						// Return different token counts for calibration requests
+						if requestContent == "" {
+							promptTokens = 1 // baseline calibration
+						} else if len(requestContent) == 4096 {
+							promptTokens = 100 // calibration text (matches expected size)
+						} else if len(requestContent) > 100000 {
+							promptTokens = 50 // over-length probe
+						} else {
+							promptTokens = 10 // other requests
+						}
 					}
 
 					resp := ResponseBody{
@@ -1480,12 +1514,17 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 								FinishReason: "stop",
 							},
 						},
+						Usage: &UsageData{
+							PromptTokens:     intPtr(promptTokens),
+							CompletionTokens: intPtr(5),
+						},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
 				})
 			},
-			expectedOverLengt: "both_markers_returned",
+			expectedOverLengt: "accepted_whole",
+			expectedEligible:  transport.TriUnknown,
 		},
 		{
 			name: "head_marker_only",
@@ -1498,25 +1537,42 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 					_ = json.NewDecoder(r.Body).Decode(&reqBody)
 
 					messages, ok := reqBody["messages"].([]any)
+					var promptTokens int
 					if ok && len(messages) > 0 {
 						msg, _ := messages[len(messages)-1].(map[string]any)
 						content, _ := msg["content"].(string)
-						headMarker := strings.Split(content, "x")[0]
-
-						resp := ResponseBody{
-							Model: "test-model",
-							Choices: []ChoiceBody{
-								{
-									Message: ChoiceMessage{
-										Content: "Found head marker: " + headMarker,
-									},
-									FinishReason: "stop",
-								},
-							},
+						// Return different token counts for calibration requests
+						if content == "" {
+							promptTokens = 1 // baseline calibration
+						} else if len(content) == 4096 {
+							promptTokens = 100 // calibration text
+						} else if len(content) > 100000 {
+							promptTokens = 50 // over-length probe
+						} else {
+							promptTokens = 10 // other requests
 						}
-						w.Header().Set("Content-Type", "application/json")
-						_ = json.NewEncoder(w).Encode(resp)
-						return
+						// Extract first 32 hex chars (head marker) for over-length probe
+						if len(content) >= 32 {
+							headMarker := content[:32]
+							resp := ResponseBody{
+								Model: "test-model",
+								Choices: []ChoiceBody{
+									{
+										Message: ChoiceMessage{
+											Content: "Found head marker: " + headMarker,
+										},
+										FinishReason: "stop",
+									},
+								},
+								Usage: &UsageData{
+									PromptTokens:     intPtr(promptTokens),
+									CompletionTokens: intPtr(5),
+								},
+							}
+							w.Header().Set("Content-Type", "application/json")
+							_ = json.NewEncoder(w).Encode(resp)
+							return
+						}
 					}
 
 					resp := ResponseBody{
@@ -1529,12 +1585,17 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 								FinishReason: "stop",
 							},
 						},
+						Usage: &UsageData{
+							PromptTokens:     intPtr(promptTokens),
+							CompletionTokens: intPtr(5),
+						},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
 				})
 			},
-			expectedOverLengt: "silent_truncation_likely",
+			expectedOverLengt: "markers_missing",
+			expectedEligible:  transport.TriUnknown,
 		},
 		{
 			name: "no_markers",
@@ -1543,6 +1604,26 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				})
 				m.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+					var reqBody map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&reqBody)
+
+					messages, ok := reqBody["messages"].([]any)
+					var promptTokens int
+					if ok && len(messages) > 0 {
+						msg, _ := messages[len(messages)-1].(map[string]any)
+						content, _ := msg["content"].(string)
+						// Return different token counts for calibration requests
+						if content == "" {
+							promptTokens = 1 // baseline calibration
+						} else if len(content) == 4096 {
+							promptTokens = 100 // calibration text
+						} else if len(content) > 100000 {
+							promptTokens = 50 // over-length probe
+						} else {
+							promptTokens = 10 // other requests
+						}
+					}
+
 					resp := ResponseBody{
 						Model: "test-model",
 						Choices: []ChoiceBody{
@@ -1553,12 +1634,17 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 								FinishReason: "stop",
 							},
 						},
+						Usage: &UsageData{
+							PromptTokens:     intPtr(promptTokens),
+							CompletionTokens: intPtr(5),
+						},
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(resp)
 				})
 			},
-			expectedOverLengt: "silent_truncation_likely",
+			expectedOverLengt: "markers_missing",
+			expectedEligible:  transport.TriUnknown,
 		},
 	}
 
@@ -1579,7 +1665,9 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 			}
 
 			adapter := New(profile, &mockResolver{})
-			record, err := adapter.Probe(context.Background(), "test", "test-model")
+			record, err := adapter.ProbeWithOptions(context.Background(), "test", "test-model", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
 
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -1589,8 +1677,8 @@ func TestProbeOverLengthMarkers(t *testing.T) {
 				t.Errorf("OverLength: got %q, want %q", record.OverLength, tt.expectedOverLengt)
 			}
 
-			if record.OverLength == "silent_truncation_likely" && record.EligibleRequiredReviewer != transport.TriNo {
-				t.Errorf("EligibleRequiredReviewer should be TriNo when OverLength is silent_truncation_likely, got %q", record.EligibleRequiredReviewer)
+			if record.EligibleRequiredReviewer != tt.expectedEligible {
+				t.Errorf("EligibleRequiredReviewer: got %q, want %q", record.EligibleRequiredReviewer, tt.expectedEligible)
 			}
 		})
 	}

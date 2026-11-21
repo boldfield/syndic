@@ -48,6 +48,8 @@ type Export struct {
 	MaxTokensField           string                                `json:"max_tokens_field"`
 	FinishReasons            map[string]transport.CompletionStatus `json:"finish_reasons"`
 	OverLength               string                                `json:"over_length"`
+	OverLengthClassifier     string                                `json:"over_length_classifier"`
+	OverLengthFinishReason   string                                `json:"over_length_finish_reason,omitempty"`
 	Latency                  *int                                  `json:"latency_millis,omitempty"`
 	ToolRestrictions         []string                              `json:"tool_restrictions,omitempty"`
 	AdapterVersion           string                                `json:"adapter_version"`
@@ -85,6 +87,8 @@ func Redact(record transport.CapabilityRecord, profile config.EndpointProfile) (
 		MaxTokensField:           record.MaxTokensField,
 		FinishReasons:            maps.Clone(record.FinishReasons),
 		OverLength:               record.OverLength,
+		OverLengthClassifier:     record.OverLengthClassifier,
+		OverLengthFinishReason:   record.OverLengthFinishReason,
 		Latency:                  record.LatencyMillis,
 		ToolRestrictions:         slices.Clone(record.ToolRestrictions),
 		AdapterVersion:           record.AdapterVersion,

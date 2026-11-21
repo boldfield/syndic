@@ -19,6 +19,7 @@ import (
 )
 
 var markerRe = regexp.MustCompile(`<<<(?:HEAD|TAIL)_\d+>>>`)
+var hexMarkerRe = regexp.MustCompile(`[0-9a-f]{32}`)
 
 // probeServer is a configurable fake endpoint that counts requests per step.
 type probeServer struct {
@@ -30,7 +31,9 @@ type probeServer struct {
 	rejectField map[string]bool
 	chatStatus  int // when non-zero, every chat request gets this status
 	noUsage     bool
-	overLength  string // "both", "head", "error"
+	overLength  string // "both", "head", "error", "error:context"
+	// markerFormat controls how markers are returned: "", "embedded", "embedded-only-tail"
+	markerFormat string
 	// calibration response control: prompt tokens for baseline and calibration
 	calibrationBaseline      int  // 0 means use default (1)
 	calibrationObserved      int  // 0 means use default (based on text size)
@@ -138,16 +141,41 @@ func (p *probeServer) handler() http.Handler {
 				promptTokens = 1034 // default: matches acceptance test
 			}
 		case len(user) > 100000:
+			// Try to find old-style markers first, then hex markers (new style)
 			markers := markerRe.FindAllString(user, -1)
+			if len(markers) == 0 {
+				// Try to find new hex markers (32-char hex strings)
+				markers = hexMarkerRe.FindAllString(user, -1)
+				if len(markers) > 0 {
+					markers = markers[:2] // Take only first two (head and tail)
+				}
+			}
 			switch p.overLength {
 			case "error":
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"too long"}`))
 				return
+			case "error:context":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"context_length_exceeded"}`))
+				return
 			case "head":
-				answer = markers[0]
+				if len(markers) > 0 {
+					answer = markers[0]
+				}
 			default:
-				answer = strings.Join(markers, " ")
+				if len(markers) >= 2 {
+					switch p.markerFormat {
+					case "embedded":
+						answer = "xx" + markers[0] + "yy\n" + markers[1] + "."
+					case "embedded-only-tail":
+						answer = markers[1] + "."
+					default:
+						answer = strings.Join(markers[:2], " ")
+					}
+				} else if len(markers) > 0 {
+					answer = markers[0]
+				}
 			}
 		}
 		resp := map[string]any{
@@ -194,7 +222,9 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	srv, a := newProbeServer(p)
 	defer srv.Close()
 
-	rec, err := a.Probe(context.Background(), "test", "m1")
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +238,7 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 		"AuthMode":                 {rec.AuthMode, "api-key"},
 		"UsageAvailable":           {rec.UsageAvailable, transport.TriYes},
 		"SystemRoleHonored":        {rec.SystemRoleHonored, transport.TriYes},
-		"OverLength":               {rec.OverLength, "both_markers_returned"},
+		"OverLength":               {rec.OverLength, "accepted_whole"},
 		"EligibleRequiredReviewer": {rec.EligibleRequiredReviewer, transport.TriUnknown},
 		"ReportedModel":            {rec.ReportedModel, "m1-reported"},
 		"Streaming":                {rec.Streaming, transport.TriUnknown},
@@ -263,18 +293,20 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 		wantOver  string
 		wantElig  transport.Tri
 	}{
-		{"fallback_to_max_completion_tokens", &probeServer{rejectField: map[string]bool{"max_tokens": true}}, false, 4, "max_completion_tokens", "both_markers_returned", transport.TriUnknown},
-		{"both_rejected", &probeServer{rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run", transport.TriUnknown},
-		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run", transport.TriUnknown},
-		{"over_length_errored", &probeServer{overLength: "error"}, false, 3, "max_tokens", "errored", transport.TriUnknown},
-		{"head_only", &probeServer{overLength: "head"}, false, 3, "max_tokens", "silent_truncation_likely", transport.TriNo},
+		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 6, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
+		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run:skipped", transport.TriUnknown},
+		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run:skipped", transport.TriUnknown},
+		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 5, "max_tokens", "rejected:other", transport.TriUnknown},
+		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 5, "max_tokens", "markers_missing", transport.TriUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, a := newProbeServer(tt.p)
 			defer srv.Close()
+			// Enable calibration for tests that need it (when not skipping over-length)
+			disableCalibration := tt.skipOver
 			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
-				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: true, AssumedContextLen: 131072,
+				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: disableCalibration, AssumedContextLen: 131072,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -664,5 +696,329 @@ func TestCalibrationResponseReadFailure(t *testing.T) {
 	}
 	if rec.Calibration != (transport.Calibration{}) {
 		t.Errorf("Calibration: got %+v, want zero value", rec.Calibration)
+	}
+}
+
+func TestProbeOverLengthNoContext(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "not_run:no_context" {
+		t.Errorf("OverLength: got %q, want not_run:no_context", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriUnknown {
+		t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthNoCalibration(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 100, calibrationObserved: 100}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "not_run:no_calibration" {
+		t.Errorf("OverLength: got %q, want not_run:no_calibration", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriUnknown {
+		t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthMarkerEmbedded(t *testing.T) {
+	tests := []struct {
+		name         string
+		markerFormat string
+		wantOverLen  string
+	}{
+		{"markers_space_separated", "", "accepted_whole"},
+		{"markers_with_surrounding_text", "embedded", "accepted_whole"},
+		{"only_tail_marker", "embedded-only-tail", "markers_missing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &probeServer{
+				calibrationBaseline: 10,
+				calibrationObserved: 1034,
+				overLength:          "both",
+				markerFormat:        tt.markerFormat,
+			}
+			srv, a := newProbeServer(p)
+			defer srv.Close()
+
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.OverLength != tt.wantOverLen {
+				t.Errorf("OverLength: got %q, want %q", rec.OverLength, tt.wantOverLen)
+			}
+		})
+	}
+}
+
+func TestProbeOverLengthContextRejection(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		overLength:          "error:context",
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "rejected:context" {
+		t.Errorf("OverLength: got %q, want rejected:context", rec.OverLength)
+	}
+	if rec.EligibleRequiredReviewer != transport.TriYes {
+		t.Errorf("EligibleRequiredReviewer: got %v, want yes", rec.EligibleRequiredReviewer)
+	}
+}
+
+func TestProbeOverLengthOtherRejections(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantElig   transport.Tri
+	}{
+		{"auth_401", 401, `{"error":"invalid api token"}`, transport.TriUnknown},
+		{"forbidden_403", 403, `{"error":"forbidden"}`, transport.TriUnknown},
+		{"rate_limit_429", 429, `{"error":"too many requests"}`, transport.TriUnknown},
+		{"policy_error_400", 400, `{"error":"content policy violation, max_tokens not allowed"}`, transport.TriUnknown},
+		{"generic_400", 400, `{"error":"bad request"}`, transport.TriUnknown},
+		{"generic_413", 413, `{"error":"payload too large"}`, transport.TriUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+			})
+			mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				body, _ := io.ReadAll(r.Body)
+				var req map[string]any
+				_ = json.Unmarshal(body, &req)
+				msgs, _ := req["messages"].([]any)
+				var user string
+				for _, m := range msgs {
+					mm := m.(map[string]any)
+					if mm["role"] != "system" {
+						user, _ = mm["content"].(string)
+					}
+				}
+
+				if len(user) > 100000 {
+					w.WriteHeader(tt.statusCode)
+					_, _ = w.Write([]byte(tt.body))
+					return
+				}
+
+				promptTokens := 1
+				if user == "" {
+					promptTokens = 10
+				} else if len(user) == 4096 {
+					promptTokens = 100
+				}
+
+				resp := map[string]any{
+					"model": "m1",
+					"choices": []any{map[string]any{
+						"message":       map[string]any{"role": "assistant", "content": "ok"},
+						"finish_reason": "stop",
+					}},
+					"usage": map[string]any{
+						"prompt_tokens":     promptTokens,
+						"completion_tokens": 1,
+					},
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+			})
+			s := httptest.NewServer(mux)
+			defer s.Close()
+			a := New(config.EndpointProfile{Name: "test", BaseURL: s.URL}, &mockResolver{})
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
+			if err != nil {
+				t.Fatalf("probe failed: %v", err)
+			}
+			if rec.OverLength != "rejected:other" {
+				t.Errorf("OverLength: got %q, want rejected:other", rec.OverLength)
+			}
+			if rec.EligibleRequiredReviewer != transport.TriUnknown {
+				t.Errorf("EligibleRequiredReviewer: got %v, want unknown", rec.EligibleRequiredReviewer)
+			}
+		})
+	}
+}
+
+func TestProbeOverLengthTokenLimitExceeded(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantElig transport.Tri
+	}{
+		{"token_limit_exceeded_lowercase", `{"error":"token limit exceeded"}`, transport.TriYes},
+		{"token_limit_exceeded_uppercase", `{"error":"TOKEN LIMIT EXCEEDED"}`, transport.TriYes},
+		{"token_limit_exceeded_mixed", `{"error":"Token Limit Exceeded"}`, transport.TriYes},
+		{"maximum_context_length_mixed", `{"error":"Maximum Context Length"}`, transport.TriYes},
+		{"context_length_exceeded_mixed", `{"error":"CONTEXT_LENGTH_EXCEEDED"}`, transport.TriYes},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+			})
+			mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Server", "fake/1.0")
+				body, _ := io.ReadAll(r.Body)
+				var req map[string]any
+				_ = json.Unmarshal(body, &req)
+				msgs, _ := req["messages"].([]any)
+				var user string
+				for _, m := range msgs {
+					mm := m.(map[string]any)
+					if mm["role"] != "system" {
+						user, _ = mm["content"].(string)
+					}
+				}
+
+				if len(user) > 100000 {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(tt.body))
+					return
+				}
+
+				promptTokens := 1
+				if user == "" {
+					promptTokens = 10
+				} else if len(user) == 4096 {
+					promptTokens = 1034
+				}
+
+				resp := map[string]any{
+					"model": "m1",
+					"choices": []any{map[string]any{
+						"message":       map[string]any{"role": "assistant", "content": "ok"},
+						"finish_reason": "stop",
+					}},
+					"usage": map[string]any{
+						"prompt_tokens":     promptTokens,
+						"completion_tokens": 1,
+					},
+				}
+				_ = json.NewEncoder(w).Encode(resp)
+			})
+			s := httptest.NewServer(mux)
+			defer s.Close()
+			a := New(config.EndpointProfile{Name: "test", BaseURL: s.URL}, &mockResolver{})
+			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+				AssumedContextLen: 131072,
+			})
+			if err != nil {
+				t.Fatalf("probe failed: %v", err)
+			}
+			if rec.OverLength != "rejected:context" {
+				t.Errorf("OverLength: got %q, want rejected:context", rec.OverLength)
+			}
+			if rec.EligibleRequiredReviewer != transport.TriYes {
+				t.Errorf("EligibleRequiredReviewer: got %v, want yes", rec.EligibleRequiredReviewer)
+			}
+		})
+	}
+}
+
+func TestProbeOverLengthClassifierExported(t *testing.T) {
+	p := &probeServer{calibrationBaseline: 10, calibrationObserved: 1034}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLengthClassifier == "" {
+		t.Errorf("OverLengthClassifier should not be empty")
+	}
+	if !strings.Contains(rec.OverLengthClassifier, "400 or 413") {
+		t.Errorf("OverLengthClassifier should describe the classification rule, got: %s", rec.OverLengthClassifier)
+	}
+}
+
+func TestProbeOverLengthFinishReasonRecorded(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		overLength:          "both",
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "accepted_whole" {
+		t.Errorf("OverLength: got %q, want accepted_whole", rec.OverLength)
+	}
+	if rec.OverLengthFinishReason != "stop" {
+		t.Errorf("OverLengthFinishReason: got %q, want stop", rec.OverLengthFinishReason)
+	}
+}
+
+func TestProbeOverLengthNoFinishReasonForRejection(t *testing.T) {
+	p := &probeServer{
+		calibrationBaseline: 10,
+		calibrationObserved: 1034,
+		overLength:          "error:context",
+	}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
+		AssumedContextLen: 131072,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OverLength != "rejected:context" {
+		t.Errorf("OverLength: got %q, want rejected:context", rec.OverLength)
+	}
+	if rec.OverLengthFinishReason != "" {
+		t.Errorf("OverLengthFinishReason: got %q, want empty", rec.OverLengthFinishReason)
+	}
+	if rec.OverLengthClassifier == "" {
+		t.Errorf("OverLengthClassifier should be set for rejection")
 	}
 }

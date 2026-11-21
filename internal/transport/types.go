@@ -174,7 +174,9 @@ type CapabilityRecord struct {
 	EligibleRequiredReviewer Tri
 	MaxTokensField           string
 	FinishReasons            map[string]CompletionStatus
-	OverLength               string // "errored", "both_markers_returned", "silent_truncation_likely", "not_run"
+	OverLength               string // "rejected:context", "rejected:other", "accepted_whole", "markers_missing", "errored", "not_run:no_calibration", "not_run:no_context"
+	OverLengthClassifier     string // the classification rule describing how rejections are classified by status and body
+	OverLengthFinishReason   string // the finish reason from the over-length response (empty if no response)
 	LatencyMillis            *int
 	ToolRestrictions         []string
 	ServerVersion            string
