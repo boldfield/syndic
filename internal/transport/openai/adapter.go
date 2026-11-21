@@ -3,6 +3,8 @@ package openai
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +14,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,9 +41,6 @@ type Adapter struct {
 
 // AdapterVersion identifies this adapter in capability records.
 const AdapterVersion = "openai-v1"
-
-// probeMarkerSeq keeps head and tail markers unique even on a coarse clock.
-var probeMarkerSeq atomic.Int64
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
@@ -336,12 +334,12 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		return record, err
 	}
 
-	if !opts.DisableOverLength {
-		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
-	}
-
 	if !opts.DisableCalibration {
 		a.probeCalibration(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout)
+	}
+
+	if !opts.DisableOverLength {
+		a.probeOverLength(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts.Timeout, opts.AssumedContextLen, probeFinishReasons)
 	}
 
 	if len(probeFinishReasons) > 0 {
@@ -352,8 +350,8 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		record.FinishReasons = make(map[string]transport.CompletionStatus)
 	}
 
-	if record.OverLength == "silent_truncation_likely" {
-		record.EligibleRequiredReviewer = transport.TriNo
+	if record.OverLength == "rejected:context" {
+		record.EligibleRequiredReviewer = transport.TriYes
 	}
 
 	if serverVersion != "" {
@@ -1013,24 +1011,77 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
+// classifyRejectionError classifies an HTTP error response as either context-length or other rejection.
+// Context-length errors are status 400/413 with specific error messages indicating token limit exceeded.
+func classifyRejectionError(statusCode int, body []byte) string {
+	if statusCode == 401 || statusCode == 403 {
+		return "rejected:other"
+	}
+	if statusCode == 404 || statusCode == 429 {
+		return "rejected:other"
+	}
+	if statusCode == 400 || statusCode == 413 {
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "context_length_exceeded") ||
+			strings.Contains(bodyStr, "max_tokens") ||
+			strings.Contains(bodyStr, "token") ||
+			strings.Contains(bodyStr, "length") {
+			return "rejected:context"
+		}
+		return "rejected:other"
+	}
+	if statusCode >= 500 && statusCode < 600 {
+		return "rejected:other"
+	}
+	return "rejected:other"
+}
+
 func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, timeout time.Duration, assumedContextLen int, finishReasons map[string]transport.CompletionStatus) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	uniqueSuffix := time.Now().UnixNano() + probeMarkerSeq.Add(1)
-	headMarker := fmt.Sprintf("<<<HEAD_%d>>>", uniqueSuffix)
-	tailMarker := fmt.Sprintf("<<<TAIL_%d>>>", uniqueSuffix)
-
-	promptSizeChars := (assumedContextLen * 3 / 2) * 4
-	fillerSize := promptSizeChars - len(headMarker) - len(tailMarker) - len("Please respond with both markers: HEAD and TAIL. ")
-	if fillerSize < 0 {
-		fillerSize = 0
+	// Check if calibration is available
+	if !record.Calibration.Available {
+		record.OverLength = "not_run:no_calibration"
+		return
 	}
 
-	filler := strings.Repeat("x", fillerSize)
-	promptContent := headMarker + filler + tailMarker + " Please respond with both markers: HEAD and TAIL."
+	if assumedContextLen <= 0 {
+		record.OverLength = "not_run:no_context"
+		return
+	}
+
+	// Generate hex markers (128 bits = 16 bytes = 32 hex chars)
+	headMarkerBytes := make([]byte, 16)
+	tailMarkerBytes := make([]byte, 16)
+	if _, err := rand.Read(headMarkerBytes); err != nil {
+		record.OverLength = "errored"
+		return
+	}
+	if _, err := rand.Read(tailMarkerBytes); err != nil {
+		record.OverLength = "errored"
+		return
+	}
+	headMarker := hex.EncodeToString(headMarkerBytes)
+	tailMarker := hex.EncodeToString(tailMarkerBytes)
+
+	// Calculate filler size: 1.5 * assumed_context * bytes_per_token
+	fillerSizeBytes := int(1.5 * float64(assumedContextLen) * record.Calibration.BytesPerToken)
+	if fillerSizeBytes < 0 {
+		fillerSizeBytes = 0
+	}
+
+	// Construct prompt with repeated calibration text
+	fillerRepeats := (fillerSizeBytes + len([]byte(calibrationText)) - 1) / len([]byte(calibrationText))
+	filler := strings.Repeat(calibrationText, fillerRepeats)
+	fillerBytes := []byte(filler)
+	if len(fillerBytes) > fillerSizeBytes {
+		fillerBytes = fillerBytes[:fillerSizeBytes]
+	}
+
+	promptContent := headMarker + string(fillerBytes) + tailMarker
 
 	messages := []MessageInput{
 		{Role: "user", Content: promptContent},
@@ -1076,8 +1127,10 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 
 	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
 
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		record.OverLength = "errored"
+	// Classify rejection errors (4xx/5xx)
+	if httpResp.StatusCode != 0 && (httpResp.StatusCode < 200 || httpResp.StatusCode >= 300) {
+		outcome := classifyRejectionError(httpResp.StatusCode, body)
+		record.OverLength = outcome
 		return
 	}
 
@@ -1088,18 +1141,20 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	content := respData.Choices[0].Message.Content
+
+	// Check for markers (hex values must appear without requiring surrounding delimiters)
 	hasHeadMarker := strings.Contains(content, headMarker)
 	hasTailMarker := strings.Contains(content, tailMarker)
-
-	if hasHeadMarker && hasTailMarker {
-		record.OverLength = "both_markers_returned"
-	} else {
-		record.OverLength = "silent_truncation_likely"
-	}
 
 	finishReason := respData.Choices[0].FinishReason
 	if finishReason != "" {
 		finishReasons[finishReason] = mapFinishReason(finishReason)
+	}
+
+	if hasHeadMarker && hasTailMarker {
+		record.OverLength = "accepted_whole"
+	} else {
+		record.OverLength = "markers_missing"
 	}
 }
 

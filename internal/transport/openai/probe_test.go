@@ -19,6 +19,7 @@ import (
 )
 
 var markerRe = regexp.MustCompile(`<<<(?:HEAD|TAIL)_\d+>>>`)
+var hexMarkerRe = regexp.MustCompile(`[0-9a-f]{32}`)
 
 // probeServer is a configurable fake endpoint that counts requests per step.
 type probeServer struct {
@@ -30,7 +31,7 @@ type probeServer struct {
 	rejectField map[string]bool
 	chatStatus  int // when non-zero, every chat request gets this status
 	noUsage     bool
-	overLength  string // "both", "head", "error"
+	overLength  string // "both", "head", "error", "error:context"
 	// calibration response control: prompt tokens for baseline and calibration
 	calibrationBaseline      int  // 0 means use default (1)
 	calibrationObserved      int  // 0 means use default (based on text size)
@@ -138,16 +139,34 @@ func (p *probeServer) handler() http.Handler {
 				promptTokens = 1034 // default: matches acceptance test
 			}
 		case len(user) > 100000:
+			// Try to find old-style markers first, then hex markers (new style)
 			markers := markerRe.FindAllString(user, -1)
+			if len(markers) == 0 {
+				// Try to find new hex markers (32-char hex strings)
+				markers = hexMarkerRe.FindAllString(user, -1)
+				if len(markers) > 0 {
+					markers = markers[:2] // Take only first two (head and tail)
+				}
+			}
 			switch p.overLength {
 			case "error":
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"too long"}`))
 				return
+			case "error:context":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"context_length_exceeded"}`))
+				return
 			case "head":
-				answer = markers[0]
+				if len(markers) > 0 {
+					answer = markers[0]
+				}
 			default:
-				answer = strings.Join(markers, " ")
+				if len(markers) >= 2 {
+					answer = strings.Join(markers[:2], " ")
+				} else if len(markers) > 0 {
+					answer = markers[0]
+				}
 			}
 		}
 		resp := map[string]any{
@@ -208,7 +227,7 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 		"AuthMode":                 {rec.AuthMode, "api-key"},
 		"UsageAvailable":           {rec.UsageAvailable, transport.TriYes},
 		"SystemRoleHonored":        {rec.SystemRoleHonored, transport.TriYes},
-		"OverLength":               {rec.OverLength, "both_markers_returned"},
+		"OverLength":               {rec.OverLength, "accepted_whole"},
 		"EligibleRequiredReviewer": {rec.EligibleRequiredReviewer, transport.TriUnknown},
 		"ReportedModel":            {rec.ReportedModel, "m1-reported"},
 		"Streaming":                {rec.Streaming, transport.TriUnknown},
@@ -263,18 +282,20 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 		wantOver  string
 		wantElig  transport.Tri
 	}{
-		{"fallback_to_max_completion_tokens", &probeServer{rejectField: map[string]bool{"max_tokens": true}}, false, 4, "max_completion_tokens", "both_markers_returned", transport.TriUnknown},
-		{"both_rejected", &probeServer{rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run", transport.TriUnknown},
+		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 6, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
+		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run", transport.TriUnknown},
 		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run", transport.TriUnknown},
-		{"over_length_errored", &probeServer{overLength: "error"}, false, 3, "max_tokens", "errored", transport.TriUnknown},
-		{"head_only", &probeServer{overLength: "head"}, false, 3, "max_tokens", "silent_truncation_likely", transport.TriNo},
+		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 5, "max_tokens", "rejected:other", transport.TriUnknown},
+		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 5, "max_tokens", "markers_missing", transport.TriUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, a := newProbeServer(tt.p)
 			defer srv.Close()
+			// Enable calibration for tests that need it (when not skipping over-length)
+			disableCalibration := tt.skipOver
 			rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", ProbeOptions{
-				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: true, AssumedContextLen: 131072,
+				Timeout: 0, DisableOverLength: tt.skipOver, DisableCalibration: disableCalibration, AssumedContextLen: 131072,
 			})
 			if err != nil {
 				t.Fatal(err)
