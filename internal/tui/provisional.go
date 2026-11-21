@@ -36,18 +36,18 @@ func (a *App) showProvisionalPrompt(status *wire.StatusReply) {
 	if a.provisional != nil {
 		return // already showing
 	}
+	var rosterPath string
+	if status != nil {
+		rosterPath = status.RosterPath
+	}
 	pp := &provisionalPrompt{
-		rosterPath: status.RosterPath,
+		rosterPath: rosterPath,
 	}
 	lines := []string{
 		"Provisional deadlines are in effect for this engine.",
 	}
-	if status != nil && status.RosterPath != "" {
-		lines = append(lines, "Configured at: "+status.RosterPath)
-	} else if status == nil {
-		lines = []string{
-			"Provisional deadlines are in effect.",
-		}
+	if rosterPath != "" {
+		lines = append(lines, "Configured at: "+rosterPath)
 	}
 	lines = append(lines, "", "Type y to proceed with this submit, or n/esc to cancel.")
 	a.provisional = pp
