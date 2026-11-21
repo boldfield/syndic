@@ -26,13 +26,14 @@ type Identity struct {
 	ChangesHash     string         // v2: empty for none, or 64-char lowercase hex SHA-256
 }
 
-// Legacy support: EvidenceIDs for backwards compatibility in tests
+// IdentityV1 represents a v1 candidate for reconstructing historical records.
+// Used to validate that stored candidates with v1 hashes remain readable without rehashing.
 type IdentityV1 struct {
 	ManifestHash    string
 	TurnID          string
 	AuthorAttemptID string
 	Content         []byte
-	EvidenceIDs     []string // v1: opaque evidence IDs (deprecated)
+	EvidenceIDs     []string // v1: opaque evidence IDs
 }
 
 // Canonical computes the canonical form of an identity in v2 format.
