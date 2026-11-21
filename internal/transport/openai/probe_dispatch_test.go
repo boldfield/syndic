@@ -262,3 +262,81 @@ func TestProbeBodyCloseFailureIsUncertainOnEveryStep(t *testing.T) {
 		})
 	}
 }
+
+// newRedirectingServer answers every request without a hop query with a
+// same-host 307 to the same path, then lets inner serve the redirected request.
+// hits counts every network request, redirects included.
+func newRedirectingServer(t *testing.T, inner http.Handler, hits *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Query().Get("hop") == "" {
+			http.Redirect(w, r, r.URL.Path+"?hop=1", http.StatusTemporaryRedirect)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestProbeBeforeSendAccountsEveryRedirect(t *testing.T) {
+	var innerHits, hits atomic.Int32
+	srv := newRedirectingServer(t, newDispatchServer(t, &innerHits, false).Config.Handler, &hits)
+	var steps []string
+	var redirects []int
+	rec, err := newDispatchAdapter(srv).ProbeWithOptions(context.Background(), "test", "m", dispatchProbeOpts(func(r *transport.ProbeRequest) error {
+		steps = append(steps, r.Step)
+		redirects = append(redirects, r.Redirect)
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	var wantSteps []string
+	var wantRedirects []int
+	for _, step := range allProbeSteps {
+		wantSteps = append(wantSteps, step, step)
+		wantRedirects = append(wantRedirects, 0, 1)
+	}
+	if !reflect.DeepEqual(steps, wantSteps) || !reflect.DeepEqual(redirects, wantRedirects) {
+		t.Fatalf("hook steps = %v redirects = %v, want %v %v", steps, redirects, wantSteps, wantRedirects)
+	}
+	if int(hits.Load()) != len(steps) {
+		t.Fatalf("network requests = %d, hook calls = %d", hits.Load(), len(steps))
+	}
+	if rec.ReportedModel == "" || rec.MaxTokensField != "max_completion_tokens" {
+		t.Fatalf("unexpected record: %+v", rec)
+	}
+}
+
+func TestProbeRedirectBeforeSendFailureIsUncertainOnEveryStep(t *testing.T) {
+	for idx, step := range allProbeSteps {
+		t.Run(step, func(t *testing.T) {
+			var innerHits, hits atomic.Int32
+			srv := newRedirectingServer(t, newDispatchServer(t, &innerHits, false).Config.Handler, &hits)
+			calls := 0
+			_, err := newDispatchAdapter(srv).ProbeWithOptions(context.Background(), "test", "m", dispatchProbeOpts(func(r *transport.ProbeRequest) error {
+				calls++
+				if r.Step == step && r.Redirect > 0 {
+					return errors.New("journal full")
+				}
+				return nil
+			}))
+			if !errors.Is(err, transport.ErrUncertain) {
+				t.Fatalf("err = %v, want ErrUncertain", err)
+			}
+			if errors.Is(err, transport.ErrNotSent) {
+				t.Fatalf("initial request was sent; must not be ErrNotSent: %v", err)
+			}
+			// Every earlier step sent two requests; this step sent only its
+			// initial request, and the refused redirect never left the process.
+			if want := 2*idx + 2; calls != want {
+				t.Fatalf("hook calls = %d, want %d", calls, want)
+			}
+			if want := 2*idx + 1; int(hits.Load()) != want {
+				t.Fatalf("network requests = %d, want %d", hits.Load(), want)
+			}
+		})
+	}
+}

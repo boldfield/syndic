@@ -205,6 +205,9 @@ type ProbeRequest struct {
 	Model   string
 	Step    string // e.g., "max_tokens", "system_role", "over_length"
 	Timeout time.Duration
+	// Redirect is 0 for the step's initial request and n for the nth
+	// redirect the client follows; each is a separate network request.
+	Redirect int
 }
 
 // ProbeOptions are options for probing that may be passed through the Adapter interface.

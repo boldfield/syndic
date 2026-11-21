@@ -377,7 +377,44 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 // uncertainErr marks a failure after the request was handed to the transport:
 // the server may or may not have processed it, so it is never ErrNotSent.
 func uncertainErr(err error) error {
+	if errors.Is(err, transport.ErrUncertain) {
+		return err
+	}
 	return fmt.Errorf("%w: %w", transport.ErrUncertain, err)
+}
+
+// doProbe sends one probe request. The caller accounts the initial request
+// through opts.BeforeSend; every redirect the client follows is a further
+// network request, so doProbe accounts it here before it is sent. Once a
+// redirect has been followed the initial request has left the process, so any
+// failure, including a BeforeSend failure for the redirect, is ErrUncertain and
+// never ErrNotSent or a dial error.
+func (a *Adapter) doProbe(httpReq *http.Request, opts transport.ProbeOptions, preq transport.ProbeRequest) (*http.Response, error) {
+	client := *a.client
+	policy := a.client.CheckRedirect
+	redirected := false
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if policy != nil {
+			if err := policy(req, via); err != nil {
+				return err
+			}
+		}
+		redirected = true
+		if opts.BeforeSend != nil {
+			hop := preq
+			hop.Redirect = len(via)
+			if err := opts.BeforeSend(&hop); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	httpResp, err := client.Do(httpReq)
+	if err != nil && redirected {
+		return nil, fmt.Errorf("%w: redirected probe request: %v", transport.ErrUncertain, err)
+	}
+	return httpResp, err
 }
 
 func recordRawStep(rawSteps map[string]any, step, path string, statusCode int, headers http.Header, body []byte) {
@@ -817,7 +854,7 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		}
 	}
 
-	httpResp, err := a.client.Do(httpReq)
+	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: record.Model, Step: "models", Timeout: opts.Timeout})
 	if err != nil {
 		if isConnectionRefusedOrDNSErr(err) {
 			recordRawStep(rawSteps, "models", "/models", 0, nil, nil)
@@ -922,7 +959,7 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		}
 
 		startTime := time.Now()
-		httpResp, err := a.client.Do(httpReq)
+		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: field, Timeout: opts.Timeout})
 		if err != nil {
 			cancel()
 			if isConnectionRefusedOrDNSErr(err) {
@@ -1038,7 +1075,7 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		}
 	}
 
-	httpResp, err := a.client.Do(httpReq)
+	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: "system_role", Timeout: opts.Timeout})
 	if err != nil {
 		record.SystemRoleHonored = transport.TriUnknown
 		return uncertainErr(err)
@@ -1195,7 +1232,7 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		}
 	}
 
-	httpResp, err := a.client.Do(httpReq)
+	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: "over_length", Timeout: opts.Timeout})
 	if err != nil {
 		record.OverLength = "errored"
 		return uncertainErr(err)
@@ -1351,11 +1388,11 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		return 0, nil, nil, nil, err
 	}
 
+	stepName := "calibration"
+	if messageContent == "" {
+		stepName = "calibration_baseline"
+	}
 	if opts.BeforeSend != nil {
-		stepName := "calibration"
-		if messageContent == "" {
-			stepName = "calibration_baseline"
-		}
 		if err := opts.BeforeSend(&transport.ProbeRequest{
 			Model:   model,
 			Step:    stepName,
@@ -1365,7 +1402,7 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		}
 	}
 
-	httpResp, err := a.client.Do(httpReq)
+	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: stepName, Timeout: opts.Timeout})
 	if err != nil {
 		return 0, nil, nil, nil, uncertainErr(err)
 	}
