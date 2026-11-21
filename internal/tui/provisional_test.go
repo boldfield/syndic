@@ -6,6 +6,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -13,6 +14,18 @@ import (
 // provisional = true and provisional = false, verifying that the
 // provisional prompt appears only when deadlines are provisional and
 // that pressing yes/no/esc handles the submission correctly.
+
+// submissionIDsFromTurns extracts the submission IDs from the EvTurnSubmitted events
+// for all turns in the harness.
+func submissionIDsFromTurns(h *enginetest.Harness) []string {
+	var ids []string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvTurnSubmitted); ok {
+			ids = append(ids, p.SubmissionID)
+		}
+	}
+	return ids
+}
 
 func provisionalRoster(replace ...string) string {
 	roster := strings.Replace(enginetest.RosterTOML, "provisional = false", "provisional = true", 1)
@@ -50,15 +63,18 @@ func TestProvisionalFirstSubmitPromptsCreatesNoTurn(t *testing.T) {
 		t.Errorf("input cleared: got %q, want 'question'", r.app.input.Value())
 	}
 
-	// Verify the prompt text is in the view
+	// Verify the prompt text is in the view, including the input prompt
 	if !strings.Contains(v, "Provisional deadlines") {
 		t.Fatalf("view missing prompt: %s", v)
+	}
+	if !strings.Contains(v, "(y/n)>") {
+		t.Fatalf("view missing input prompt text: %s", v)
 	}
 }
 
 // TestProvisionalYesResendsProceedsCreatesOneTurn verifies that pressing
-// 'y' resends the submission with allow_provisional: true, creating exactly
-// one turn.
+// 'y' resends the submission with a new submission_id, creating exactly
+// one turn, and that pressing yes creates no prompt text in the view.
 func TestProvisionalYesResendsProceedsCreatesOneTurn(t *testing.T) {
 	roster := provisionalRoster()
 	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
@@ -74,18 +90,25 @@ func TestProvisionalYesResendsProceedsCreatesOneTurn(t *testing.T) {
 	// Press 'y' to confirm
 	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-	// Wait for the turn to be created
+	// Wait for the turn to be created with no provisional prompt
 	r.until(t, "turn created after yes with all checks", func(a *App) (string, bool) {
-		return "", len(a.state.Turns) == 1 && a.provisional == nil && a.input.Value() == "" && a.allowProvisional
+		view := a.View()
+		return view, len(a.state.Turns) == 1 && a.provisional == nil && a.input.Value() == "" && a.allowProvisional && !strings.Contains(view, "Provisional deadlines")
 	})
+
+	// Verify exactly one submission ID was recorded (the resend)
+	ids := submissionIDsFromTurns(h)
+	if len(ids) != 1 {
+		t.Fatalf("expected 1 turn submitted, got %d; submission IDs: %v", len(ids), ids)
+	}
 }
 
 // TestProvisionalSecondSubmitNoPrompt verifies that after answering yes
 // to a provisional prompt, the allowProvisional flag is set so subsequent
-// submit attempts won't re-prompt (the flag prevents showing the prompt).
+// submit attempts don't re-prompt.
 func TestProvisionalSecondSubmitNoPrompt(t *testing.T) {
 	roster := provisionalRoster()
-	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer")}, "reviewer": {approve()}}
+	scripts := map[string][]fake.Step{"author": {enginetest.Reply("answer"), enginetest.Reply("answer2")}, "reviewer": {approve(), approve()}}
 	h := enginetest.New(t, roster, scripts)
 	r := startAnswerRig(t, h)
 
@@ -95,16 +118,23 @@ func TestProvisionalSecondSubmitNoPrompt(t *testing.T) {
 		return a.View(), a.provisional != nil
 	})
 
-	// Before pressing yes, allowProvisional should be false
-	if r.app.allowProvisional {
-		t.Fatal("allowProvisional should be false before confirming")
-	}
-
+	// Press 'y' to confirm
 	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-	// After confirming, allowProvisional should be true
-	r.until(t, "allowProvisional set after yes", func(a *App) (string, bool) {
-		return "", a.allowProvisional
+	// Wait for the first turn to be created
+	r.until(t, "first turn created", func(a *App) (string, bool) {
+		return "", len(a.state.Turns) == 1 && a.provisional == nil && a.allowProvisional
+	})
+
+	// Wait for the first turn to settle
+	idle(t, r)
+
+	// Now type a second submit - should not show provisional prompt
+	r.typeLine("second question")
+
+	// Wait for the second turn to be created without a provisional prompt
+	r.until(t, "second turn created without prompt", func(a *App) (string, bool) {
+		return a.View(), len(a.state.Turns) == 2 && a.provisional == nil && !strings.Contains(a.View(), "Provisional deadlines")
 	})
 }
 
@@ -185,18 +215,17 @@ func TestProvisionalBannerPersists(t *testing.T) {
 	})
 	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 
-	// Wait for turn to complete, banner should still be visible
-	r.until(t, "turn created", func(a *App) (string, bool) {
-		return "", len(a.state.Turns) > 0
-	})
-
+	// Wait for turn to complete, banner should still be visible and no provisional prompt
 	v = r.until(t, "banner visible after yes", func(a *App) (string, bool) {
 		view := a.View()
-		return view, strings.Contains(view, "deadlines: provisional")
+		return view, len(a.state.Turns) > 0 && strings.Contains(view, "deadlines: provisional")
 	})
 
 	if !strings.Contains(v, "deadlines: provisional") {
 		t.Fatalf("banner not visible after yes: %s", v)
+	}
+	if strings.Contains(v, "(y/n)>") {
+		t.Fatalf("provisional prompt still visible after yes: %s", v)
 	}
 }
 

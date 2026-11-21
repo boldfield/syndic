@@ -18,7 +18,7 @@ func (a *App) provisionalYes() tea.Cmd {
 	a.panel = nil
 	a.input.Prompt = defaultPrompt
 	a.refusal = ""
-	id := uuid.New().String()
+	id := uuid.NewString()
 	return a.submitInputWithID(a.lastSubmitInput, id)
 }
 

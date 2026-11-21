@@ -38,7 +38,7 @@ type eventMsg struct {
 type submitMsg struct {
 	turnID  string
 	refusal string
-	err     error // the original error (may be wire.Error) for checking specific error codes
+	err     error // preserved to check error codes like ErrorCodeProvisional; refusal is user-facing text
 }
 
 // tickMsg is sent every second for elapsed time updates.

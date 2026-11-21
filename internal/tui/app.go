@@ -354,25 +354,15 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.approval != nil {
 		// An approval owns the keyboard: only y/n, esc and ctrl+c.
-		switch msg.String() {
-		case "y", "Y":
-			return a, a.approvalYes()
-		case "n", "N":
-			return a, a.approvalNo()
-		case "esc", "ctrl+c":
-			return a, a.approvalNo()
+		if cmd := a.handleYesNoKey(msg, a.approvalYes, a.approvalNo); cmd != nil {
+			return a, cmd
 		}
 		return a, nil
 	}
 	if a.provisional != nil {
 		// A provisional prompt owns the keyboard: only y/n, esc and ctrl+c.
-		switch msg.String() {
-		case "y", "Y":
-			return a, a.provisionalYes()
-		case "n", "N":
-			return a, a.provisionalNo()
-		case "esc", "ctrl+c":
-			return a, a.provisionalNo()
+		if cmd := a.handleYesNoKey(msg, a.provisionalYes, a.provisionalNo); cmd != nil {
+			return a, cmd
 		}
 		return a, nil
 	}
@@ -470,19 +460,23 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+// handleYesNoKey processes y/n/esc keys for yes/no prompts, returning the
+// command if handled, nil otherwise.
+func (a *App) handleYesNoKey(msg tea.KeyMsg, yes, no func() tea.Cmd) tea.Cmd {
+	switch msg.String() {
+	case "y", "Y":
+		return yes()
+	case "n", "N":
+		return no()
+	case "esc", "ctrl+c":
+		return no()
+	}
+	return nil
+}
+
 // enter runs a command or submits the line. A command clears the line; a
 // submit clears it only once the engine accepts it.
 func (a *App) enter() tea.Cmd {
-	if a.provisional != nil {
-		line := strings.TrimSpace(a.input.Value())
-		switch line {
-		case "y", "Y":
-			return a.provisionalYes()
-		case "n", "N":
-			return a.provisionalNo()
-		}
-		return nil
-	}
 	if a.confirm != nil {
 		return a.confirmEnter()
 	}
