@@ -38,6 +38,7 @@ type eventMsg struct {
 type submitMsg struct {
 	turnID  string
 	refusal string
+	err     error // the original error (may be wire.Error) for checking specific error codes
 }
 
 // tickMsg is sent every second for elapsed time updates.
@@ -88,7 +89,7 @@ func readCmd(ctx context.Context, gen int, cl *client.Client) tea.Cmd {
 }
 
 // submitCmd submits input under the submission id, with the preset and quick profile, if any.
-func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, preset string, quickProfile *string) tea.Cmd {
+func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, preset string, quickProfile *string, allowProvisional bool) tea.Cmd {
 	return func() tea.Msg {
 		req := wire.SubmitRequest{SubmissionID: submissionID, Input: input}
 		if preset != "" {
@@ -97,9 +98,13 @@ func submitCmd(ctx context.Context, cl *client.Client, submissionID, input, pres
 		if quickProfile != nil {
 			req.QuickProfile = quickProfile
 		}
+		if allowProvisional {
+			t := true
+			req.AllowProvisional = &t
+		}
 		reply, err := cl.Submit(ctx, req)
 		if err != nil {
-			return submitMsg{refusal: formatRefusal(err)}
+			return submitMsg{refusal: formatRefusal(err), err: err}
 		}
 		return submitMsg{turnID: reply.TurnID}
 	}

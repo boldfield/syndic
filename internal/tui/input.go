@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	defaultPrompt = "> "
-	reasonPrompt  = "reason> " // while a confirmation waits for its answer
+	defaultPrompt             = "> "
+	reasonPrompt              = "reason> " // while a confirmation waits for its answer
+	provisionalDeadlinePrompt = "(y/n)> "  // while provisional deadline confirmation waits
 )
 
 func newInput() textinput.Model {

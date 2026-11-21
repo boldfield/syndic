@@ -39,14 +39,17 @@ type App struct {
 	gen int
 	cl  *client.Client
 
-	width, height int
-	state         State
-	tab           tab
-	input         textinput.Model
-	refusal       string          // the one-line message under the body: a refusal, or what a command did
-	panel         []string        // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	approval      *approvalPrompt // a quick profile approval pending yes/no
-	confirm       *releasePrompt  // a /release waiting for its reason; it takes the next line typed
+	width, height    int
+	state            State
+	tab              tab
+	input            textinput.Model
+	refusal          string             // the one-line message under the body: a refusal, or what a command did
+	panel            []string           // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	approval         *approvalPrompt    // a quick profile approval pending yes/no
+	confirm          *releasePrompt     // a /release waiting for its reason; it takes the next line typed
+	provisional      *provisionalPrompt // provisional deadline confirmation pending yes/no
+	allowProvisional bool               // whether to automatically allow provisional deadlines for the rest of this session
+	lastSubmitInput  string             // the input to resend if provisional is confirmed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
@@ -361,6 +364,18 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	if a.provisional != nil {
+		// A provisional prompt owns the keyboard: only y/n, esc and ctrl+c.
+		switch msg.String() {
+		case "y", "Y":
+			return a, a.provisionalYes()
+		case "n", "N":
+			return a, a.provisionalNo()
+		case "esc", "ctrl+c":
+			return a, a.provisionalNo()
+		}
+		return a, nil
+	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
 		switch msg.String() {
@@ -458,6 +473,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // enter runs a command or submits the line. A command clears the line; a
 // submit clears it only once the engine accepts it.
 func (a *App) enter() tea.Cmd {
+	if a.provisional != nil {
+		line := strings.TrimSpace(a.input.Value())
+		switch line {
+		case "y", "Y":
+			return a.provisionalYes()
+		case "n", "N":
+			return a.provisionalNo()
+		}
+		return nil
+	}
 	if a.confirm != nil {
 		return a.confirmEnter()
 	}
@@ -474,6 +499,12 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
+	a.lastSubmitInput = line
+	return a.submitInput(line)
+}
+
+// submitInput sends the given input as a submit request.
+func (a *App) submitInput(line string) tea.Cmd {
 	var profiles []wire.QuickProfile
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
@@ -483,7 +514,7 @@ func (a *App) enter() tea.Cmd {
 	if a.state.NextPreset != "" {
 		a.state.ModeSubmissionID = id
 	}
-	return submitCmd(a.ctx, a.cl, id, line, a.state.NextPreset, a.quickSelection.selected(profiles))
+	return submitCmd(a.ctx, a.cl, id, line, a.state.NextPreset, a.quickSelection.selected(profiles), a.allowProvisional)
 }
 
 // ensureTick starts the one-second tick chain if a turn is open and none runs.
@@ -515,6 +546,14 @@ func (a *App) ensureTurnInfo() {
 
 func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if msg.refusal != "" {
+		// Check if this is a provisional error
+		var we *wire.Error
+		if errors.As(msg.err, &we) && we.Code == wire.ErrorCodeProvisional {
+			if a.state.Status != nil {
+				a.showProvisionalPrompt(a.state.Status)
+				return nil
+			}
+		}
 		a.refusal = msg.refusal
 		return nil
 	}
