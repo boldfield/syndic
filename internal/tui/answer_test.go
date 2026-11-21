@@ -347,3 +347,16 @@ func TestContentCacheRetriesFailuresOnly(t *testing.T) {
 		t.Fatal("a successful fetch is fetched again")
 	}
 }
+
+// Two turns submitted within the same second are ordered by journal sequence,
+// not by their random ids.
+func TestAnswerTurnOrdersBySubmitSeq(t *testing.T) {
+	at := time.Unix(1700000000, 0)
+	s := State{Turns: map[string]TurnInfo{
+		"zzz": {ID: "zzz", SubmittedAt: at, SubmitSeq: 5},
+		"aaa": {ID: "aaa", SubmittedAt: at, SubmitSeq: 9},
+	}}
+	if got := answerTurn(s); got != "aaa" {
+		t.Fatalf("answerTurn = %q, want the later submission aaa", got)
+	}
+}
