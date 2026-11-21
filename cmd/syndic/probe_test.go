@@ -357,6 +357,11 @@ func TestProbeRawDirInGitWorktree(t *testing.T) {
 	if err := os.Mkdir(gitDir, 0700); err != nil {
 		t.Fatalf("failed to create .git: %v", err)
 	}
+	// Create HEAD file to mark it as a real repository
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create HEAD: %v", err)
+	}
 
 	rawDir := filepath.Join(tmpDir, "raw")
 	secretsDir := filepath.Join(tmpDir, "secrets")
@@ -891,6 +896,11 @@ func TestProbeRawDirInGitWorktreeWithHttptest(t *testing.T) {
 	if err := os.Mkdir(gitDir, 0700); err != nil {
 		t.Fatalf("failed to create .git: %v", err)
 	}
+	// Create HEAD file to mark it as a real repository
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create HEAD: %v", err)
+	}
 
 	rawDir := filepath.Join(tmpDir, "raw")
 	secretsDir := filepath.Join(tmpDir, "secrets")
@@ -1080,6 +1090,11 @@ func TestProbeRawDirRelativePathFromNestedWorkingDirectory(t *testing.T) {
 	}
 	if err := os.Mkdir(gitDir, 0700); err != nil {
 		t.Fatalf("failed to create .git: %v", err)
+	}
+	// Create HEAD file to mark it as a real repository
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create HEAD: %v", err)
 	}
 
 	// Set working directory to the nested directory
@@ -2244,6 +2259,653 @@ required_reviewers = ["reviewer"]
 
 	if strings.Contains(runManifest.String, sentinelSecret) {
 		t.Fatalf("manifest should not contain resolver secret, but got: %s", runManifest.String)
+	}
+}
+
+func TestProbeRawDirUnderGitDirWithHead(t *testing.T) {
+	// A raw directory under a directory whose .git is a directory containing HEAD: exit 4
+	tmpDir := t.TempDir()
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create HEAD: %v", err)
+	}
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
+
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4, got %d", exitCode)
+	}
+
+	// Verify no files were written
+	if _, err := os.Stat(rawDir); err == nil {
+		t.Fatal("raw dir should not exist")
+	}
+}
+
+func TestProbeRawDirUnderGitFile(t *testing.T) {
+	// A raw directory under a directory whose .git is a file containing gitdir:: exit 4
+	tmpDir := t.TempDir()
+	gitPath := filepath.Join(tmpDir, ".git")
+	gitdirContent := "gitdir: /some/path/to/real/repo"
+	if err := os.WriteFile(gitPath, []byte(gitdirContent), 0600); err != nil {
+		t.Fatalf("failed to create .git file: %v", err)
+	}
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tmpDir, "runtime"))
+
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4, got %d", exitCode)
+	}
+}
+
+func TestProbeRawDirUnderFakeGitDirWithHooksOnly(t *testing.T) {
+	// A raw directory under a directory whose .git is a directory containing only hooks: pass
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+	// Create only a hooks subdirectory, no HEAD
+	hooksDir := filepath.Join(gitDir, "hooks")
+	if err := os.Mkdir(hooksDir, 0700); err != nil {
+		t.Fatalf("failed to create hooks: %v", err)
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should not be 4 since the check passes (no real repository found)
+	if exitCode == 4 {
+		t.Fatalf("expected non-4 exit code for fake .git directory, got %d", exitCode)
+	}
+}
+
+func TestProbeRawDirUnderEmptyGitFile(t *testing.T) {
+	// A raw directory under a directory whose .git is an empty regular file: pass
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	gitPath := filepath.Join(tmpDir, ".git")
+	if err := os.WriteFile(gitPath, []byte(""), 0600); err != nil {
+		t.Fatalf("failed to create empty .git file: %v", err)
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	rosterContent := fmt.Sprintf(`
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "%s"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`, server.URL)
+
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should not be 4 since it's an empty file, not a worktree
+	if exitCode == 4 {
+		t.Fatalf("expected non-4 exit code for empty .git file, got %d", exitCode)
+	}
+}
+
+func TestProbeRawDirUnderFakeGitDirWithRealRepoAbove(t *testing.T) {
+	// A non-repository .git directory nearer the raw directory, with a real repository two levels further up: exit 4
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+
+	// Create a real repository at the top level
+	topGitDir := filepath.Join(tmpDir, ".git")
+	if err := os.Mkdir(topGitDir, 0700); err != nil {
+		t.Fatalf("failed to create top .git: %v", err)
+	}
+	topHeadPath := filepath.Join(topGitDir, "HEAD")
+	if err := os.WriteFile(topHeadPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create top HEAD: %v", err)
+	}
+
+	// Create a fake .git directory at a nested level
+	nestedDir := filepath.Join(tmpDir, "nested")
+	if err := os.Mkdir(nestedDir, 0700); err != nil {
+		t.Fatalf("failed to create nested dir: %v", err)
+	}
+	fakeGitDir := filepath.Join(nestedDir, ".git")
+	if err := os.Mkdir(fakeGitDir, 0700); err != nil {
+		t.Fatalf("failed to create fake .git: %v", err)
+	}
+	// Create only hooks, no HEAD
+	hooksDir := filepath.Join(fakeGitDir, "hooks")
+	if err := os.Mkdir(hooksDir, 0700); err != nil {
+		t.Fatalf("failed to create hooks: %v", err)
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(nestedDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should exit 4 because the real repository at the top level is found after skipping the fake one
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4 for real repo above fake .git, got %d", exitCode)
+	}
+}
+
+func TestProbeRawDirUnderUnreadableGitDir(t *testing.T) {
+	// A .git directory that cannot be read (mode 0000): exit 4
+	// Skip if running as root
+	if os.Geteuid() == 0 {
+		t.Skip("skipping test when running as root")
+	}
+
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	gitDir := filepath.Join(tmpDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+
+	// Make it unreadable
+	if err := os.Chmod(gitDir, 0000); err != nil {
+		t.Fatalf("failed to chmod .git: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore permissions for cleanup
+		_ = os.Chmod(gitDir, 0700)
+	})
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(tmpDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	// Should exit 4 because we fail closed when can't inspect .git
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4 for unreadable .git dir, got %d", exitCode)
+	}
+}
+
+func TestProbeRawDirThroughSymlinkToRepo(t *testing.T) {
+	// A raw directory reached through a symbolic link into a real repository: exit 4
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+
+	// Create a real repository
+	repoDir := filepath.Join(tmpDir, "repo")
+	if err := os.Mkdir(repoDir, 0700); err != nil {
+		t.Fatalf("failed to create repo dir: %v", err)
+	}
+	gitDir := filepath.Join(repoDir, ".git")
+	if err := os.Mkdir(gitDir, 0700); err != nil {
+		t.Fatalf("failed to create .git: %v", err)
+	}
+	headPath := filepath.Join(gitDir, "HEAD")
+	if err := os.WriteFile(headPath, []byte("ref: refs/heads/main\n"), 0600); err != nil {
+		t.Fatalf("failed to create HEAD: %v", err)
+	}
+
+	// Create a symlink to the repo
+	linkDir := filepath.Join(tmpDir, "link")
+	if err := os.Symlink(repoDir, linkDir); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("failed to create runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	rawDir := filepath.Join(linkDir, "raw")
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	rosterPath := filepath.Join(tmpDir, "roster.toml")
+	exportDir := filepath.Join(tmpDir, "export")
+	journalPath := filepath.Join(tmpDir, "journal.sqlite")
+
+	if err := os.MkdirAll(secretsDir, 0700); err != nil {
+		t.Fatalf("failed to create secrets dir: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "config"))
+
+	rosterContent := `
+default_preset = "test-preset"
+
+[[participants]]
+id = "author"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["author"]
+pool = "default"
+
+[[endpoints]]
+name = "test-endpoint"
+base_url = "http://localhost:9999"
+dialect = "chat_completions_v1"
+models = ["test-model"]
+declared_location = "local"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+
+[[participants]]
+id = "reviewer"
+model = "test-model"
+route = "api"
+endpoint = "test-endpoint"
+eligible_roles = ["reviewer"]
+pool = "default"
+
+[presets.test-preset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+`
+	if err := os.WriteFile(rosterPath, []byte(rosterContent), 0600); err != nil {
+		t.Fatalf("failed to write roster: %v", err)
+	}
+
+	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exitCode := cmdProbe(fs, []string{
+		"--roster", rosterPath,
+		"--endpoint", "test-endpoint",
+		"--model", "test-model",
+		"--raw-dir", rawDir,
+		"--export-dir", exportDir,
+		"--journal", journalPath,
+		"--secrets-dir", secretsDir,
+	})
+
+	if exitCode != 4 {
+		t.Fatalf("expected exit code 4 for raw dir through symlink to repo, got %d", exitCode)
 	}
 }
 
