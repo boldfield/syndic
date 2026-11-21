@@ -685,7 +685,6 @@ func TestAuthorRevisionSuccess(t *testing.T) {
 			},
 		},
 		Delimiter: "delim123",
-		Round:     1,
 	})
 
 	if err != nil {
@@ -755,7 +754,6 @@ func TestAuthorRevisionValidationErrors(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "",
-		Round:     1,
 	})
 	if err == nil {
 		t.Errorf("expected error for empty delimiter")
@@ -769,7 +767,6 @@ func TestAuthorRevisionValidationErrors(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 	if err == nil {
 		t.Errorf("expected error for empty previous candidate")
@@ -781,7 +778,6 @@ func TestAuthorRevisionValidationErrors(t *testing.T) {
 		PreviousCandidate: "test",
 		ReviewerFeedback:  []RevisionFeedback{},
 		Delimiter:         "delim",
-		Round:             1,
 	})
 	if err == nil {
 		t.Errorf("expected error for empty reviewer feedback")
@@ -805,7 +801,6 @@ func TestAuthorRevisionMultipleFeedback(t *testing.T) {
 			},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 
 	if err != nil {
@@ -1066,7 +1061,6 @@ func TestAuthorRevisionNoParticipantID(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 
 	for _, msg := range messages {
@@ -1152,7 +1146,6 @@ func TestAuthorRevisionHistoryPreserved(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 
 	// Message sequence: system, history user, history assistant, input, candidate, feedback
@@ -1206,7 +1199,6 @@ func TestAuthorRevisionCanonicalHistory(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1232,7 +1224,6 @@ func TestAuthorRevisionMissingHistoryDoc(t *testing.T) {
 			{Output: "feedback"},
 		},
 		Delimiter: "delim",
-		Round:     1,
 	})
 	if err == nil {
 		t.Errorf("should error when HistoryDoc is nil")
@@ -1379,7 +1370,7 @@ func reviseWithResults(t *testing.T, fbs ...RevisionFeedback) string {
 	t.Helper()
 	msgs, err := AuthorRevision(AuthorRevisionInput{
 		HistoryDoc: buildHistoryDoc(t, history.Turn{ID: "t1", State: "approved", Input: []byte("i"), Answer: []byte("a"), Label: "reviewed"}),
-		Input:      "revise", PreviousCandidate: "cand", ReviewerFeedback: fbs, Delimiter: "delim", Round: 1,
+		Input:      "revise", PreviousCandidate: "cand", ReviewerFeedback: fbs, Delimiter: "delim",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1450,7 +1441,7 @@ func TestAuthorRevisionSharesAcceptedGrammar(t *testing.T) {
 		"evidence: secret\n" + blockOutput("", "nothing", "x") + "\nevidence: secret",
 		"VERDICT v1\ncandidate: h\nattempt: a\nverdict: block\nevidence: secret\nEND VERDICT",
 	} {
-		if got := citedResultIDs(out, map[string]string{"secret": "s"}); len(got) != 0 {
+		if got := citedResultIDs(RevisionFeedback{Output: out, Results: map[string]string{"secret": "s"}}); len(got) != 0 {
 			t.Fatalf("cited %v from %q", got, out)
 		}
 	}
@@ -1466,10 +1457,27 @@ func TestAuthorRevisionUncitedResultWithDelimiterDoesNotFail(t *testing.T) {
 func TestAuthorRevisionCitedResultCollision(t *testing.T) {
 	_, err := AuthorRevision(AuthorRevisionInput{
 		HistoryDoc: buildHistoryDoc(t, history.Turn{ID: "t1", State: "approved", Input: []byte("i"), Answer: []byte("a"), Label: "reviewed"}),
-		Input:      "r", PreviousCandidate: "c", Delimiter: "delim", Round: 1,
+		Input:      "r", PreviousCandidate: "c", Delimiter: "delim",
 		ReviewerFeedback: []RevisionFeedback{{Output: blockOutput("", "see ok", "x"), Results: map[string]string{"ok": "bad delim"}}},
 	})
 	if !errors.Is(err, ErrDelimiterCollision) {
 		t.Fatalf("want collision, got %v", err)
+	}
+}
+
+func TestAuthorRevisionV2EvidenceCitesResult(t *testing.T) {
+	v2 := "VERDICT v2\ncandidate: c\nattempt: a\nverdict: block\nblock-state: new\nseverity: low\nblock_id: b1\nevidence: see call_v2\nremedy: x\nreason: r\nEND VERDICT"
+	got := reviseWithResults(t, RevisionFeedback{
+		Output:   v2,
+		Evidence: "see call_v2",
+		Results:  map[string]string{"call_v2": "V2-CITED-RESULT", "call_other": "V2-UNCITED"},
+	})
+	if !strings.Contains(got, "V2-CITED-RESULT") || strings.Contains(got, "V2-UNCITED") {
+		t.Fatalf("v2 citation not honored:\n%s", got)
+	}
+	// Without supplied evidence a v2 output is not parsed, so nothing is cited.
+	got = reviseWithResults(t, RevisionFeedback{Output: v2, Results: map[string]string{"call_v2": "V2-CITED-RESULT"}})
+	if strings.Contains(got, "V2-CITED-RESULT") {
+		t.Fatal("result cited from unparsed v2 output")
 	}
 }

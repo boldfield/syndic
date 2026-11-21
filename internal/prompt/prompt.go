@@ -235,6 +235,10 @@ type RevisionFeedback struct {
 	// Results maps the ids of the tool results this reviewer received to their
 	// content. Only results this reviewer's evidence cites reach the author.
 	Results map[string]string
+	// Evidence is the evidence field of this reviewer's accepted verdict block,
+	// as parsed for the envelope version actually received (v1 or v2). When
+	// empty, a valid v1 envelope in Output is parsed instead.
+	Evidence string
 }
 
 // OpenBlockForRevision represents an open block from a previous round that persists into a revision round.
@@ -245,41 +249,44 @@ type OpenBlockForRevision struct {
 	Remedy   string
 }
 
-// ToolResult represents a tool result that can be cited by reviewer evidence.
-type ToolResult struct {
-	ID      string
-	Content string
-}
-
 // AuthorRevisionInput contains inputs for building an author revision prompt.
 type AuthorRevisionInput struct {
 	Input             string
 	PreviousCandidate string
 	ReviewerFeedback  []RevisionFeedback
 	Delimiter         string
-	Round             int
 	// HistoryDoc is the canonical history document (required).
 	HistoryDoc *history.Document
 }
 
 // citedResultIDs returns, in sorted order, the ids from known that a reviewer's
-// accepted verdict block cites in its evidence field. The evidence is taken from
-// verdict.Parse, so the grammar is the accepted one: commentary outside the
+// accepted verdict block cites in its evidence field. The evidence is the
+// caller-supplied accepted evidence (any envelope version) or, absent that, taken
+// from verdict.Parse (v1), so the grammar is the accepted one: commentary outside the
 // envelope, other fields, and unaccepted output never cite a result. Evidence is
 // split on whitespace and list punctuation; each token cites at most one id,
 // matched exactly, falling back to the token without trailing sentence
 // punctuation only when the exact token is not a known id.
-func citedResultIDs(output string, known map[string]string) []string {
+func citedResultIDs(f RevisionFeedback) []string {
+	known := f.Results
 	if len(known) == 0 {
 		return nil
 	}
-	// The envelope names its own candidate and attempt; they are not checked here.
-	probe := verdict.Parse(output, "", "").Verdict
-	res := verdict.Parse(output, probe.Candidate, probe.Attempt)
-	if res.Classification != verdict.Valid || res.Verdict.Evidence == "" {
+	evidence := f.Evidence
+	if evidence == "" {
+		// No caller-supplied evidence: accept only a valid v1 envelope. The
+		// envelope names its own candidate and attempt; they are not checked here.
+		probe := verdict.Parse(f.Output, "", "").Verdict
+		res := verdict.Parse(f.Output, probe.Candidate, probe.Attempt)
+		if res.Classification != verdict.Valid {
+			return nil
+		}
+		evidence = res.Verdict.Evidence
+	}
+	if evidence == "" {
 		return nil
 	}
-	tokens := strings.FieldsFunc(res.Verdict.Evidence, func(r rune) bool {
+	tokens := strings.FieldsFunc(evidence, func(r rune) bool {
 		switch r {
 		case ' ', '\t', '\n', '\r', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '`', '<', '>':
 			return true
@@ -347,7 +354,7 @@ func AuthorRevision(in AuthorRevisionInput) ([]transport.Message, error) {
 	// Select cited results first; only those are collision-checked and rendered.
 	cited := make([][]string, len(in.ReviewerFeedback))
 	for i, feedback := range in.ReviewerFeedback {
-		cited[i] = citedResultIDs(feedback.Output, feedback.Results)
+		cited[i] = citedResultIDs(feedback)
 		for _, id := range cited[i] {
 			if strings.Contains(id, in.Delimiter) || strings.Contains(feedback.Results[id], in.Delimiter) {
 				return nil, ErrDelimiterCollision
