@@ -65,6 +65,7 @@ type App struct {
 	candidateIDByTurn map[string]string
 	openBlocksByTurn  map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons   map[string]string           // the reason of each override event
+	terminalMode      TerminalMode                // how to render: normal or plain
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -102,6 +103,11 @@ func WithSubmitObserver(f func(wire.SubmitRequest)) Option {
 // WithWorkDir starts the quick profile search in dir rather than the process's working directory.
 func WithWorkDir(dir string) Option {
 	return func(a *App) { a.workDir = dir }
+}
+
+// WithTerminalMode sets the terminal rendering mode.
+func WithTerminalMode(mode TerminalMode) Option {
+	return func(a *App) { a.terminalMode = mode }
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -172,6 +178,7 @@ func (a *App) answerIn(turnID string) answerInput {
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
+		plainMode:      a.terminalMode == TerminalModePlain,
 	}
 }
 
@@ -861,7 +868,14 @@ func (a *App) quit() tea.Cmd {
 
 // bodyHeight is the number of lines left for the active tab.
 func (a *App) bodyHeight() int {
-	return max(a.height-len(renderBanners(a.state))-1-inputHeight, 0)
+	banners := renderBanners(a.state)
+	banners = capBannersForHeight(banners, a.height, 5)
+	return max(a.height-len(banners)-1-inputHeight, 0)
+}
+
+// isTerminalTooSmall reports whether the terminal is below the minimum size (40×10).
+func (a *App) isTerminalTooSmall() bool {
+	return a.width < 40 || a.height < 10
 }
 
 // answerLineCount is the length of the unclipped answer tab.
@@ -880,8 +894,15 @@ func (a *App) scrollAnswer(delta int) {
 func (a *App) View() string {
 	w := a.width
 
-	// Get banners and strip.
+	// When the terminal is too small, show a resize message
+	if a.isTerminalTooSmall() {
+		msg := fmt.Sprintf("Terminal too small. Minimum 40×10; current %d×%d. Please resize.", w, a.height)
+		return msg
+	}
+
+	// Get banners and strip, limiting banners to leave at least 5 lines for the tab area
 	banners := renderBanners(a.state)
+	banners = capBannersForHeight(banners, a.height, 5)
 	strip := renderStrip(a.state, w, a.now())
 
 	bodyHeight := a.bodyHeight()

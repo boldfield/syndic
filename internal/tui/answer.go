@@ -16,6 +16,7 @@ type answerInput struct {
 	candidateID    string
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
+	plainMode      bool   // true when colors should not be used
 }
 
 // answerTurn picks the turn the answer tab is about: the open turn, else the
@@ -155,7 +156,13 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 
 	default:
 		if refs := answerRefs(s, turnID, in); in.drafts && len(refs) > 0 {
-			lines = append(lines, draftBanner.Render("UNREVIEWED DRAFT"), body(in.content, refs[0]))
+			draftText := "UNREVIEWED DRAFT"
+			if in.plainMode {
+				draftText = "!! UNREVIEWED DRAFT !!"
+			} else {
+				draftText = draftBanner.Render(draftText)
+			}
+			lines = append(lines, draftText, body(in.content, refs[0]))
 		} else {
 			lines = append(lines, "turn in progress")
 		}
