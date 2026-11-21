@@ -474,13 +474,28 @@ func TestStartupProbeFailureLeavesEngineAvailable(t *testing.T) {
 			if got := env.lastStarted().Unprobed; len(got) != 1 || got[0] != "reviewer" {
 				t.Fatalf("engine_started.unprobed = %v", got)
 			}
-			// No usable record was written, and recovery and reads work: the
-			// request that failed definitively holds nothing.
-			if env.count(`SELECT COUNT(*) FROM capacity_holds`) != 0 {
-				t.Fatal("a definitive failure left a hold")
+			// No usable record was written, and recovery and reads work. A
+			// transport failure after the request was recorded may have
+			// reached the server, so it leaves a hold; an incomplete probe
+			// got its responses and holds nothing.
+			wantHolds := 1
+			if tc.reason == "incomplete" {
+				wantHolds = 0
+			}
+			if got := env.count(`SELECT COUNT(*) FROM capacity_holds`); got != wantHolds {
+				t.Fatalf("holds = %d, want %d", got, wantHolds)
 			}
 			if env.count(`SELECT COUNT(*) FROM attempts WHERE state != 'completed'`) != 0 {
 				t.Fatal("a settled request left its attempt pending")
+			}
+			if wantHolds == 1 {
+				// Restart never resends to the held pool.
+				env.spies["reviewer"].fail = nil
+				before := len(env.spies["reviewer"].probed())
+				env.start(nil)
+				if got := len(env.spies["reviewer"].probed()); got != before {
+					t.Fatalf("restart probed the held pool again (%d -> %d)", before, got)
+				}
 			}
 			if _, err := eng.Status(); err != nil {
 				t.Fatalf("status: %v", err)

@@ -346,10 +346,11 @@ func (d *probeDispatch) beforeSend(req *transport.ProbeRequest) error {
 }
 
 // settle ends the probe's last request after the adapter returned err. A
-// request that provably reached no server, or got a definite answer, completes
-// its attempt and frees the slot; any other failure after a possible send
-// completes the attempt as interrupted and opens an uncertain-capacity hold on
-// the pool, which keeps the slot taken. It reports whether a hold was opened.
+// request that provably reached no server (ErrNotSent), or got a response,
+// completes its attempt and frees the slot; every other failure after a
+// possible send opens an uncertain-capacity hold on the pool, which keeps the
+// slot taken, so a restart never resends. Classified failures keep their
+// transport status for reporting. It reports whether a hold was opened.
 func (d *probeDispatch) settle(err error) (held bool) {
 	if d.current == "" {
 		return false
@@ -362,11 +363,11 @@ func (d *probeDispatch) settle(err error) (held bool) {
 	case errors.Is(err, transport.ErrNotSent):
 		status, transportStatus = string(transport.StatusError), statusNotSentPrefix+err.Error()
 	case errors.Is(err, transport.ErrUnreachable):
-		status, transportStatus = string(transport.StatusError), transport.TransportStatusUnreachable
+		status, transportStatus, hold = string(transport.StatusError), transport.TransportStatusUnreachable, true
 	case errors.Is(err, transport.ErrUnauthorized):
-		status, transportStatus = string(transport.StatusError), transport.TransportStatusUnauthorized
+		status, transportStatus, hold = string(transport.StatusError), transport.TransportStatusUnauthorized, true
 	case errors.Is(err, transport.ErrModelUnavailable):
-		status, transportStatus = string(transport.StatusError), transport.TransportStatusModelUnavailable
+		status, transportStatus, hold = string(transport.StatusError), transport.TransportStatusModelUnavailable, true
 	default:
 		// ErrUncertain and anything unclassified: the request may have been
 		// processed, so its slot stays held.
@@ -524,14 +525,16 @@ func (e *Engine) writeProbeEvidence(record transport.CapabilityRecord, ep config
 // probeFailureReason is the reason a probe error leaves in probe_failed:<reason>.
 func probeFailureReason(err error, held bool) string {
 	switch {
-	case held:
-		return probeReasonHold
 	case errors.Is(err, transport.ErrUnauthorized):
 		return probeReasonUnauthorized
 	case errors.Is(err, transport.ErrModelUnavailable):
 		return probeReasonModelUnavailable
 	case errors.Is(err, transport.ErrIncompleteProbe):
 		return probeReasonIncomplete
+	case errors.Is(err, transport.ErrUnreachable):
+		return probeReasonUnreachable
+	case held:
+		return probeReasonHold
 	}
 	return probeReasonUnreachable
 }
