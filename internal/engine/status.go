@@ -47,6 +47,7 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 		RosterHash:           e.built.RosterHash,
 		RosterFileChanged:    changed,
 		DefaultPreset:        r.DefaultPreset,
+		Presets:              presetNames(r),
 		DeadlinesProvisional: r.Deadlines.Provisional != nil && *r.Deadlines.Provisional,
 		Participants:         make([]wire.Participant, 0, len(r.Participants)),
 		Pools:                []wire.Pool{},
@@ -209,4 +210,15 @@ func wireBudgets(b config.Budgets) *wire.Budgets {
 		DeliveryMaxTokens:       i64(b.DeliveryMaxTokens),
 		TurnMaxEstimatedTokens:  i64(b.TurnMaxEstimatedTokens),
 	}
+}
+
+// presetNames is the roster's preset names, sorted, so a client can check a
+// preset before submitting it.
+func presetNames(r *config.Roster) []string {
+	names := make([]string, 0, len(r.Presets))
+	for name := range r.Presets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

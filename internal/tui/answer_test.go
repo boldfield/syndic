@@ -85,7 +85,8 @@ func turnIn(t *testing.T, r *rig, state string) string {
 	t.Helper()
 	return r.until(t, "a turn in "+state, func(a *App) (string, bool) {
 		id := answerTurn(a.state)
-		return id, id != "" && a.state.Turns[id].State == state
+		// The submit reply clears the input; a following typeLine must not append to the question.
+		return id, id != "" && a.state.Turns[id].State == state && a.input.Value() == ""
 	})
 }
 
@@ -345,5 +346,18 @@ func TestContentCacheRetriesFailuresOnly(t *testing.T) {
 	cc.Store("a", "text", nil)
 	if cc.Need("a") || cc.Get("a").Data != "text" {
 		t.Fatal("a successful fetch is fetched again")
+	}
+}
+
+// Two turns submitted within the same second are ordered by journal sequence,
+// not by their random ids.
+func TestAnswerTurnOrdersBySubmitSeq(t *testing.T) {
+	at := time.Unix(1700000000, 0)
+	s := State{Turns: map[string]TurnInfo{
+		"zzz": {ID: "zzz", SubmittedAt: at, SubmitSeq: 5},
+		"aaa": {ID: "aaa", SubmittedAt: at, SubmitSeq: 9},
+	}}
+	if got := answerTurn(s); got != "aaa" {
+		t.Fatalf("answerTurn = %q, want the later submission aaa", got)
 	}
 }

@@ -618,6 +618,7 @@ func TestStatusReplyJSON(t *testing.T) {
 		"roster_hash":           true,
 		"roster_file_changed":   true,
 		"default_preset":        true,
+		"presets":               true,
 		"deadlines_provisional": true,
 		"participants":          true,
 		"pools":                 true,

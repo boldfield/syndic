@@ -289,6 +289,7 @@ type StatusReply struct {
 	RosterHash           string         `json:"roster_hash"`
 	RosterFileChanged    bool           `json:"roster_file_changed"`
 	DefaultPreset        string         `json:"default_preset"`
+	Presets              []string       `json:"presets"`
 	DeadlinesProvisional bool           `json:"deadlines_provisional"`
 	Participants         []Participant  `json:"participants"`
 	Pools                []Pool         `json:"pools"`
@@ -375,6 +376,7 @@ type VerdictRecord struct {
 	AttemptID        string `json:"attempt_id"`
 	Parsed           bool   `json:"parsed"`
 	ValidationStatus string `json:"validation_status"`
+	Reason           string `json:"reason,omitempty"`
 }
 
 type OpenBlock struct {

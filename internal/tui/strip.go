@@ -24,6 +24,9 @@ func renderStrip(s State, width int, now time.Time) string {
 		segments := []string{}
 		if s.Status != nil {
 			segments = append(segments, fmt.Sprintf("[%s]", s.Status.DefaultPreset))
+			if s.NextPreset != "" {
+				segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
+			}
 			segments = append(segments, "[idle]")
 		}
 		return strings.Join(segments, " ")
@@ -39,6 +42,9 @@ func renderStrip(s State, width int, now time.Time) string {
 
 	// [preset]
 	segments = append(segments, fmt.Sprintf("[%s]", ti.Preset))
+	if s.NextPreset != "" {
+		segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
+	}
 
 	// [quick:<name>] when one governs
 	if ti.QuickProfile != nil && *ti.QuickProfile != "" {

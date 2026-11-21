@@ -55,6 +55,7 @@ type TurnInfo struct {
 	Preset          string
 	QuickProfile    *string
 	SubmittedAt     time.Time
+	SubmitSeq       int64         // journal seq of turn_submitted; orders turns submitted within one second
 	TurnDeadline    *time.Time    // submit time plus DeadlineDur
 	DeadlineDur     time.Duration // the configured turn deadline
 	EstimatedTokens int64
@@ -149,6 +150,7 @@ type State struct {
 	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
 	UnapprovedProfile   *string
+	NextPreset          string // set by /mode: the preset of the next submit only
 }
 
 // NewState returns a fresh State.
@@ -199,6 +201,7 @@ func apply(s State, f wire.Frame) State {
 				Preset:          body.Preset,
 				QuickProfile:    body.QuickProfile,
 				SubmittedAt:     frameTime,
+				SubmitSeq:       f.Seq,
 				EstimatedTokens: body.EstimatedTokens,
 				ReviewerStates:  make(map[string]string),
 			}
