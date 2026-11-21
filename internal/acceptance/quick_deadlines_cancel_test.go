@@ -67,7 +67,7 @@ func qdcRoster(attempt, turn string, reviewers []string, extra string) string {
 	toml = toml[:start] + toml[strings.Index(toml, "[[endpoints]]"):]
 	var participants, quoted []string
 	for _, id := range reviewers {
-		participants = append(participants, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"p\"\n")
+		participants = append(participants, "[[participants]]\nid = \""+id+"\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"p\"\naccept_unknown_truncation = true\n")
 		quoted = append(quoted, `"`+id+`"`)
 	}
 	toml = strings.Replace(toml, "[[endpoints]]", strings.Join(participants, "\n")+"\n[[endpoints]]", 1)

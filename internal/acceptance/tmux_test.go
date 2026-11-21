@@ -92,6 +92,7 @@ eligible_roles = ["reviewer"]
 pool = "default"
 context_tokens = 32768
 bytes_per_token = 4.0
+accept_unknown_truncation = true
 
 [[endpoints]]
 name = "author-ep"

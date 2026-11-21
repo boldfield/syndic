@@ -471,6 +471,7 @@ route = "api"
 endpoint = "local"
 eligible_roles = ["reviewer"]
 pool = "default"
+accept_unknown_truncation = true
 
 [[endpoints]]`, 1)
 	s := newSuite(t, roster, runsScripts("author", "reviewer", "reviewer2"))
@@ -886,7 +887,7 @@ func nRolesTOML(n, turnMax int, selfPreset bool) string {
 		id := fmt.Sprintf("r%d", i)
 		ids = append(ids, fmt.Sprintf("%q", id))
 		models = append(models, fmt.Sprintf("%q", "m-"+id))
-		fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\n\n", id, "m-"+id)
+		fmt.Fprintf(&b, "[[participants]]\nid = %q\nmodel = %q\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\naccept_unknown_truncation = true\n\n", id, "m-"+id)
 	}
 	fmt.Fprintf(&b, `[[endpoints]]
 name = "local"
