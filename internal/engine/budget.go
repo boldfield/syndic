@@ -45,13 +45,15 @@ var (
 // budgetRecord is the turn's budget_json. Charged is the running total the
 // turn limit applies to: usage reported for completed attempts plus the
 // reservations still outstanding, of which Reserved is the part not yet
-// reconciled.
+// reconciled. Projected is the first-round estimate; WorstCaseProjected is
+// the worst case across all configured rounds.
 type budgetRecord struct {
-	Projected int  `json:"projected"`
-	Reserved  int  `json:"reserved"`
-	Charged   int  `json:"charged"`
-	Limit     int  `json:"limit"`
-	Exhausted bool `json:"exhausted"`
+	Projected          int  `json:"projected"`
+	WorstCaseProjected int  `json:"worst_case_projected"`
+	Reserved           int  `json:"reserved"`
+	Charged            int  `json:"charged"`
+	Limit              int  `json:"limit"`
+	Exhausted          bool `json:"exhausted"`
 }
 
 func readBudget(turn *journal.TurnRow) (budgetRecord, bool, error) {
@@ -179,8 +181,10 @@ func budgetError(kind string) *wire.Error {
 }
 
 // projectBudget runs the submit-time budget checks and returns the record to
-// store on the turn.
-func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document) (budgetRecord, error) {
+// store on the turn. It computes the first-round projection and reports the
+// worst-case projection across all configured rounds, refusing only on the
+// first-round projection.
+func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int) (budgetRecord, error) {
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
@@ -277,7 +281,61 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 		err.Limit = i64Ptr(limit)
 		return budgetRecord{}, err
 	}
-	return budgetRecord{Projected: total, Limit: limit}, nil
+
+	firstRound := total
+	worstCase := firstRound
+
+	// For the worst case across all rounds, add the cost of additional revision
+	// rounds. Each round (beyond the first) adds: an author revision attempt,
+	// review attempts for all reviewers, and repair for all reviewers.
+	if eff.Preset.Mode != modeSolo && maxRounds > 0 {
+		candidate := consts[eff.Preset.Author].standIn(author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens))
+		review := prompt.ReviewInput{
+			Request:       input,
+			Candidate:     candidate,
+			CandidateHash: standInHash,
+			AttemptID:     standInToken,
+			Delimiter:     standInToken,
+			History:       doc,
+		}
+
+		// Cost of an author revision attempt (uses same author output bound as first attempt).
+		authorRevisionMsgs := prompt.AuthorWithHistory(doc, input)
+		authorRevisionCost := 0
+		for _, id := range ids {
+			pb := consts[id]
+			out := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
+			authorRevisionCost = satAdd(authorRevisionCost, satAdd(pb.estimate(authorRevisionMsgs), out))
+		}
+
+		// Cost of one round of review and repair (per reviewer).
+		oneRoundCost := 0
+		for _, id := range eff.Preset.RequiredReviewers {
+			rv := consts[id]
+			out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+			output := rv.standIn(out)
+
+			msgs, err := prompt.Reviewer(review)
+			if err != nil {
+				return budgetRecord{}, err
+			}
+			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(msgs), out))
+
+			repair, err := prompt.Repair(review, output, standInToken)
+			if err != nil {
+				return budgetRecord{}, err
+			}
+			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(repair), out))
+		}
+
+		// Add the cost of additional rounds.
+		additionalRoundCost := satAdd(authorRevisionCost, oneRoundCost)
+		for round := 1; round < maxRounds; round++ {
+			worstCase = satAdd(worstCase, additionalRoundCost)
+		}
+	}
+
+	return budgetRecord{Projected: firstRound, WorstCaseProjected: worstCase, Limit: limit}, nil
 }
 
 func satAdd(a, b int) int {

@@ -287,7 +287,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if err != nil {
 			return err
 		}
-		if rec, err = e.projectBudget(eff, req.Input, doc); err != nil {
+		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
 			return err
 		}
 		budgetJSON, err := json.Marshal(rec)

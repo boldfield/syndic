@@ -27,11 +27,12 @@ const (
 var testOverheads = budget.Overheads{MessageTokens: 8, RequestTokens: 16}
 
 type recordView struct {
-	Projected int  `json:"projected"`
-	Reserved  int  `json:"reserved"`
-	Charged   int  `json:"charged"`
-	Limit     int  `json:"limit"`
-	Exhausted bool `json:"exhausted"`
+	Projected          int  `json:"projected"`
+	WorstCaseProjected int  `json:"worst_case_projected"`
+	Reserved           int  `json:"reserved"`
+	Charged            int  `json:"charged"`
+	Limit              int  `json:"limit"`
+	Exhausted          bool `json:"exhausted"`
 }
 
 func budgetOf(t *testing.T, h *enginetest.Harness, turnID string) recordView {
@@ -633,5 +634,62 @@ spending_control = "external"`)
 	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
 	if calls := h.Adapters["author"].Calls(); len(calls) != 1 {
 		t.Fatalf("author should have one call, got %d", len(calls))
+	}
+}
+
+// With max_rounds=0, worst-case projection equals first-round projection.
+func TestBudgetWorstCaseProjectionMaxRoundsZero(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if rec.Projected == 0 || rec.WorstCaseProjected != rec.Projected {
+		t.Fatalf("with max_rounds=0: projected=%d, worst_case_projected=%d, want them equal", rec.Projected, rec.WorstCaseProjected)
+	}
+}
+
+// With max_rounds>0, worst-case projection accounts for additional rounds.
+func TestBudgetWorstCaseProjectionMultipleRounds(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if rec.Projected == 0 {
+		t.Fatal("projected should be non-zero")
+	}
+	if rec.WorstCaseProjected <= rec.Projected {
+		t.Fatalf("with max_rounds=2: worst_case_projected=%d should be > projected=%d", rec.WorstCaseProjected, rec.Projected)
+	}
+}
+
+// Worst-case projection respects the override and differs by max_rounds.
+func TestBudgetWorstCaseProjectionOverride(t *testing.T) {
+	h0 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply0, err := h0.Engine.Submit(wire.SubmitRequest{SubmissionID: "s0", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec0 := budgetOf(t, h0, reply0.TurnID)
+
+	h2 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	reply2, err := h2.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: testInput, MaxRounds: &two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2 := budgetOf(t, h2, reply2.TurnID)
+
+	if rec0.WorstCaseProjected != rec0.Projected {
+		t.Fatalf("override max_rounds=0: worst_case=%d, projected=%d, want them equal", rec0.WorstCaseProjected, rec0.Projected)
+	}
+	if rec2.WorstCaseProjected <= rec0.Projected {
+		t.Fatalf("override max_rounds=2: worst_case=%d should be > override max_rounds=0: projected=%d", rec2.WorstCaseProjected, rec0.Projected)
 	}
 }
