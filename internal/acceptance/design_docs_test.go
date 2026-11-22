@@ -28,6 +28,8 @@ func init() {
 	cover(designDocsPara, "adding a new file under docs/design/ in a subdirectory passes when nothing else changes", "TestDesignDocs_AddingSubdirectoryRatificationPasses")
 	cover(designDocsPara, "modifying an existing design document with a non-ASCII name and external changes fails", "TestDesignDocs_ModifyingNonASCIIDesignDocWithExternalChangesFails")
 	cover(designDocsPara, "modifying an existing design document and adding a new one fails", "TestDesignDocs_ModifyingWithAddingDesignDocFails")
+	cover(designDocsPara, "modifying a design document with a tab in its name and external changes fails", "TestDesignDocs_ModifyingDesignDocWithTabInNameFails")
+	cover(designDocsPara, "deleting open-questions.md with external changes passes", "TestDesignDocs_DeletingOpenQuestionsWithOtherChangesPasses")
 }
 
 func TestDesignDocs_ProtectedDocsFail(t *testing.T) {
@@ -877,6 +879,141 @@ func TestDesignDocs_ModifyingWithAddingDesignDocFails(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "M	docs/design/v6-existing.md") {
 		t.Fatalf("Expected output to list modified file with status M, got:\n%s", output)
+	}
+}
+
+func TestDesignDocs_ModifyingDesignDocWithTabInNameFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	// Create a file with a tab in its name
+	tabFile := filepath.Join(designDir, "file\twith\ttabs.md")
+	if err := os.WriteFile(tabFile, []byte("# Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write design file with tabs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testRepo, "README.md"), []byte("# Readme\n"), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	// Modify the design doc with tabs in name
+	content, err := os.ReadFile(tabFile)
+	if err != nil {
+		t.Fatalf("Failed to read design file: %v", err)
+	}
+	if err := os.WriteFile(tabFile, append(content, []byte("\nModified\n")...), 0644); err != nil {
+		t.Fatalf("Failed to modify design file: %v", err)
+	}
+
+	// Also modify README
+	readmeFile := filepath.Join(testRepo, "README.md")
+	readmeContent, err := os.ReadFile(readmeFile)
+	if err != nil {
+		t.Fatalf("Failed to read README: %v", err)
+	}
+	if err := os.WriteFile(readmeFile, append(readmeContent, []byte("\nUpdated\n")...), 0644); err != nil {
+		t.Fatalf("Failed to update README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Modify design with tabs and readme")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for modifying design doc with tabs in name but it succeeded")
+	}
+
+	output := stdout.String()
+	// Check that the file is mentioned in output (may be with tabs or escaped)
+	if !strings.Contains(output, "docs/design/file") || !strings.Contains(output, "tabs.md") {
+		t.Fatalf("Expected output to list modified design file with tabs, got:\n%s", output)
+	}
+	// Check that status is listed
+	if !strings.Contains(output, "M	docs/design/") {
+		t.Fatalf("Expected output to list file with status M, got:\n%s", output)
+	}
+}
+
+func TestDesignDocs_DeletingOpenQuestionsWithOtherChangesPasses(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testRepo, "README.md"), []byte("# Readme\n"), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	// Delete open-questions.md
+	if err := os.Remove(filepath.Join(designDir, "open-questions.md")); err != nil {
+		t.Fatalf("Failed to delete open-questions.md: %v", err)
+	}
+
+	// Modify README
+	readmeFile := filepath.Join(testRepo, "README.md")
+	readmeContent, err := os.ReadFile(readmeFile)
+	if err != nil {
+		t.Fatalf("Failed to read README: %v", err)
+	}
+	if err := os.WriteFile(readmeFile, append(readmeContent, []byte("\nUpdated\n")...), 0644); err != nil {
+		t.Fatalf("Failed to update README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Delete open-questions and modify readme")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Expected script to succeed for deleting open-questions.md with external changes but got error: %v", err)
 	}
 }
 
