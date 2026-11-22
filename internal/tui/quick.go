@@ -172,7 +172,7 @@ func getDevID(fi os.FileInfo) uint64 {
 		return 0
 	}
 	// stat.Dev is uint64 on Linux and int32 on macOS, so we always cast.
-	return uint64(stat.Dev) //nolint:unconvertible
+	return uint64(stat.Dev)
 }
 
 // parseQuickToml parses .syndic/quick.toml. Returns the profile name, an error string if invalid, or ("", "").
