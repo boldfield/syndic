@@ -289,40 +289,77 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	// rounds. Each round (beyond the first) adds: an author revision attempt,
 	// review attempts for all reviewers, and repair for all reviewers.
 	if eff.Preset.Mode != modeSolo && maxRounds > 0 {
-		candidate := consts[eff.Preset.Author].standIn(author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens))
-		review := prompt.ReviewInput{
-			Request:       input,
-			Candidate:     candidate,
-			CandidateHash: standInHash,
-			AttemptID:     standInToken,
-			Delimiter:     standInToken,
-			History:       doc,
-		}
-
-		// Cost of an author revision attempt (uses same author output bound as first attempt).
-		authorRevisionMsgs := prompt.AuthorWithHistory(doc, input)
 		pb := consts[eff.Preset.Author]
-		out := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-		authorRevisionCost := satAdd(pb.estimate(authorRevisionMsgs), out)
+		authorOut := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
 
-		// Cost of one round of review and repair (per reviewer).
+		// Cost of an author revision attempt using revision prompts with max-sized feedback.
+		previousCandidate := pb.standIn(authorOut)
+		reviewerFeedback := make([]prompt.RevisionFeedback, len(eff.Preset.RequiredReviewers))
+		for i, id := range eff.Preset.RequiredReviewers {
+			rv := consts[id]
+			out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+			reviewerFeedback[i] = prompt.RevisionFeedback{
+				Output:  rv.standIn(out),
+				Results: make(map[string]string),
+			}
+		}
+		// Use empty history for worst-case projection to avoid delimiter collisions
+		// and match the behavior of roundProjection in revision.go
+		emptyHistory := history.New()
+		authorRevisionInput := prompt.AuthorRevisionInput{
+			Input:             input,
+			PreviousCandidate: previousCandidate,
+			ReviewerFeedback:  reviewerFeedback,
+			Delimiter:         standInToken,
+			HistoryDoc:        emptyHistory,
+		}
+		authorRevisionMsgs, err := prompt.AuthorRevision(authorRevisionInput)
+		if err != nil {
+			return budgetRecord{}, err
+		}
+		authorRevisionCost := satAdd(pb.estimate(authorRevisionMsgs), authorOut)
+
+		// Cost of one round of review and repair (per reviewer) using revision prompts.
 		oneRoundCost := 0
 		for _, id := range eff.Preset.RequiredReviewers {
 			rv := consts[id]
-			out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
-			output := rv.standIn(out)
+			reviewerOut := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
 
-			msgs, err := prompt.Reviewer(review)
+			// Build stand-in open blocks for a revision round (assume worst case: one block).
+			// Use standIn format for Evidence/Remedy to ensure no delimiter collision.
+			standInBlock := rv.standIn(reviewerOut)
+			openBlocks := []prompt.OpenBlockForRevision{
+				{
+					BlockID:  "block",
+					Severity: "SEVERE",
+					Evidence: standInBlock,
+					Remedy:   standInBlock,
+				},
+			}
+
+			reviewerRevisionInput := prompt.ReviewerRevisionInput{
+				Request:       input,
+				Candidate:     previousCandidate,
+				CandidateHash: standInHash,
+				OpenBlocks:    openBlocks,
+				AttemptID:     standInToken,
+				Delimiter:     standInToken,
+				Round:         1,
+				HistoryDoc:    emptyHistory,
+			}
+			reviewerRevisionMsgs, err := prompt.ReviewerRevision(reviewerRevisionInput)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(msgs), out))
+			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(reviewerRevisionMsgs), reviewerOut))
 
-			repair, err := prompt.Repair(review, output, standInToken)
+			// Repair using the revision prompt with max-sized output from the previous reviewer attempt.
+			reviewerOutput := rv.standIn(reviewerOut)
+			repairRevisionMsgs, err := prompt.RepairRevision(reviewerRevisionInput, reviewerOutput, standInToken)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(repair), out))
+			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(repairRevisionMsgs), reviewerOut))
 		}
 
 		// Add the cost of additional rounds.
