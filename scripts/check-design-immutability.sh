@@ -30,28 +30,41 @@ if ! git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
 	exit 1
 fi
 
-# Get all changed files with status codes (A=added, M=modified, D=deleted)
-# --no-renames treats renames as separate deletion and addition
-all_changes=$(
-	git diff --name-status --no-renames "${base_ref}...HEAD"
-)
+# Get all changed files with status codes.
+# Use -c core.quotePath=false to prevent path quoting for special characters.
+# --no-renames treats renames as separate deletion and addition.
+all_changes=$(git -c core.quotePath=false diff --name-status --no-renames "${base_ref}...HEAD")
 
 # Separate design and non-design changes
-design_changes=$(echo "$all_changes" | grep "^[AMD]	docs/design/" || true)
-non_design_changes=$(echo "$all_changes" | grep -v "^[AMD]	docs/design/" || true)
+design_changes=$(echo "$all_changes" | awk '/^[A-Z]\tdocs\/design\// {print}' || true)
+non_design_changes=$(echo "$all_changes" | awk '!/^[A-Z]\tdocs\/design\// {print}' || true)
 
 # Check if there are any non-design changes
 if [[ -n "$non_design_changes" ]]; then
 	# There are changes outside docs/design/, so not a ratification
 	# Check if there are problematic design changes
-	problematic_design=$(echo "$design_changes" | grep -v "^A	docs/design/open-questions.md" | grep -v "^M	docs/design/open-questions.md" || true)
+	problematic_design=$(
+		echo "$design_changes" |
+		grep -v "^A	docs/design/open-questions.md" |
+		grep -v "^M	docs/design/open-questions.md" || true
+	)
+	# Check if there are any added design documents
+	added_design=$(
+		echo "$design_changes" |
+		grep "^A	docs/design/" || true
+	)
 
-	if [[ -n "$problematic_design" ]]; then
+	if [[ -n "$problematic_design" ]] || [[ -n "$added_design" ]]; then
 		echo "ERROR: Design documents cannot be modified in implementation PRs."
 		echo "Only docs/design/open-questions.md may be changed."
 		echo ""
-		echo "Modified files:"
-		echo "$problematic_design" | sed 's/^[A-Z]	/  /'
+		if [[ -n "$problematic_design" ]]; then
+			echo "Modified files:"
+			echo "$problematic_design"
+		fi
+		if [[ -n "$added_design" ]]; then
+			echo "A ratification pull request must contain only design documents."
+		fi
 		exit 1
 	fi
 	# If only non-problematic design or no design changes, pass
@@ -67,18 +80,18 @@ fi
 
 # Check each design change
 problematic_files=""
-added_design_docs=""
 
 while IFS=$'\t' read -r status file; do
+	[[ -z "$status" ]] && continue
+
 	if [[ "$file" == "docs/design/open-questions.md" ]]; then
 		# open-questions.md can be added or modified
 		continue
 	elif [[ "$status" == "A" ]]; then
 		# Newly added design document is OK in ratification
-		added_design_docs="${added_design_docs}${file}
-"
+		continue
 	else
-		# Modified (M), deleted (D), or renamed (R) design document fails
+		# Any status other than A is problematic (M, D, T, etc.)
 		problematic_files="${problematic_files}${status}	${file}
 "
 	fi
@@ -89,7 +102,7 @@ if [[ -n "$problematic_files" ]]; then
 	echo "Only docs/design/open-questions.md may be changed."
 	echo ""
 	echo "Modified files:"
-	echo "$problematic_files" | sed 's/^[A-Z]	/  /'
+	echo "$problematic_files"
 	exit 1
 fi
 

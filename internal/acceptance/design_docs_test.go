@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,8 @@ func init() {
 	cover(designDocsPara, "deleting an existing design document fails", "TestDesignDocs_DeletingDesignDocFails")
 	cover(designDocsPara, "renaming an existing design document fails", "TestDesignDocs_RenamingDesignDocFails")
 	cover(designDocsPara, "adding a new file under docs/design/ in a subdirectory passes when nothing else changes", "TestDesignDocs_AddingSubdirectoryRatificationPasses")
+	cover(designDocsPara, "modifying an existing design document with a non-ASCII name and external changes fails", "TestDesignDocs_ModifyingNonASCIIDesignDocWithExternalChangesFails")
+	cover(designDocsPara, "modifying an existing design document and adding a new one fails", "TestDesignDocs_ModifyingWithAddingDesignDocFails")
 }
 
 func TestDesignDocs_ProtectedDocsFail(t *testing.T) {
@@ -548,8 +551,21 @@ func TestDesignDocs_AddingRatificationWithExternalChangesFails(t *testing.T) {
 	cmd.Dir = testRepo
 	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
 
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+
 	if err := cmd.Run(); err == nil {
 		t.Fatal("Expected script to fail for ratification with external changes but it succeeded")
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "A ratification pull request must contain only design documents") {
+		t.Fatalf("Expected output to contain ratification error message, got:\n%s", output)
+	}
+	if !strings.Contains(output, "A	docs/design/v6-new.md") {
+		t.Fatalf("Expected output to list added file with status, got:\n%s", output)
 	}
 }
 
@@ -726,6 +742,141 @@ func TestDesignDocs_AddingSubdirectoryRatificationPasses(t *testing.T) {
 
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Expected script to succeed for ratification in subdirectory but got error: %v", err)
+	}
+}
+
+func TestDesignDocs_ModifyingNonASCIIDesignDocWithExternalChangesFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	// Use UTF-8 filename with non-ASCII character
+	cafeFile := filepath.Join(designDir, "café.md")
+	if err := os.WriteFile(cafeFile, []byte("# Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write non-ASCII design file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testRepo, "README.md"), []byte("# Readme\n"), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	// Modify the non-ASCII design doc
+	content, err := os.ReadFile(cafeFile)
+	if err != nil {
+		t.Fatalf("Failed to read design file: %v", err)
+	}
+	if err := os.WriteFile(cafeFile, append(content, []byte("\nModified\n")...), 0644); err != nil {
+		t.Fatalf("Failed to modify design file: %v", err)
+	}
+
+	// Also modify README to make it not a design-only change
+	readmeFile := filepath.Join(testRepo, "README.md")
+	readmeContent, err := os.ReadFile(readmeFile)
+	if err != nil {
+		t.Fatalf("Failed to read README: %v", err)
+	}
+	if err := os.WriteFile(readmeFile, append(readmeContent, []byte("\nUpdated\n")...), 0644); err != nil {
+		t.Fatalf("Failed to update README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Modify non-ASCII design and readme")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for modifying non-ASCII design doc with external changes but it succeeded")
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "docs/design/café.md") && !strings.Contains(output, "docs/design/caf") {
+		t.Fatalf("Expected output to list modified non-ASCII design file, got:\n%s", output)
+	}
+}
+
+func TestDesignDocs_ModifyingWithAddingDesignDocFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v6-existing.md"), []byte("# Existing\n"), 0644); err != nil {
+		t.Fatalf("Failed to write existing design: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	// Modify an existing design doc
+	existingFile := filepath.Join(designDir, "v6-existing.md")
+	content, err := os.ReadFile(existingFile)
+	if err != nil {
+		t.Fatalf("Failed to read existing design: %v", err)
+	}
+	if err := os.WriteFile(existingFile, append(content, []byte("\nModified\n")...), 0644); err != nil {
+		t.Fatalf("Failed to modify design: %v", err)
+	}
+
+	// Also add a new design doc
+	if err := os.WriteFile(filepath.Join(designDir, "v6-new.md"), []byte("# New Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Modify and add designs")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail when modifying existing design and adding new one but it succeeded")
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "M	docs/design/v6-existing.md") {
+		t.Fatalf("Expected output to list modified file with status M, got:\n%s", output)
 	}
 }
 
