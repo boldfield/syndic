@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Check that design documents (except open-questions.md) are not modified
-# in pull requests. This enforces the adopted Process clause in the v5 delta.
+# Check that a pull request leaves the design documents alone. This enforces
+# the Process clause in the v5 delta, as read by OQ-6 in
+# docs/design/open-questions.md. A pull request passes when either:
+#   1. it changes no file under docs/design/ other than open-questions.md; or
+#   2. it is a ratification: every file it changes is under docs/design/, and
+#      every one of those other than open-questions.md is newly added. It
+#      modifies, deletes and renames no existing design document and changes
+#      nothing outside docs/design/.
+# Every other pull request that touches docs/design/ fails.
 
 # Determine the base ref for the comparison
 if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
@@ -22,23 +29,50 @@ if ! git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
 	exit 1
 fi
 
-# Get the list of changed files in docs/design/ excluding open-questions.md
-# We separate git diff from grep so we only tolerate grep's exit status (1 for no match),
-# not git's errors. This prevents failing open when git diff itself errors.
-changed_design_files=$(
-	git diff --name-only --no-renames "${base_ref}...HEAD" -- "docs/design/"
-)
-changed_design_files=$(
-	echo "$changed_design_files" | grep -vxF "docs/design/open-questions.md" || true
-)
-
-if [[ -n "$changed_design_files" ]]; then
-	echo "ERROR: Design documents cannot be modified in implementation PRs."
-	echo "Only docs/design/open-questions.md may be changed."
-	echo ""
-	echo "Modified files:"
-	echo "$changed_design_files" | sed 's/^/  /'
+# Read the diff NUL-delimited so paths are never quoted, and into a file so a
+# git failure is not hidden (failing closed rather than open).
+diff_file=$(mktemp)
+trap 'rm -f "$diff_file"' EXIT
+if ! git diff -z --name-status --no-renames "${base_ref}...HEAD" >"$diff_file"; then
+	echo "ERROR: git diff failed against ${base_ref}"
 	exit 1
 fi
 
-exit 0
+offending=()      # "<status> <path>" for design documents that may not change
+added_design=()   # "A <path>" for newly added design documents
+outside_count=0   # files changed outside docs/design/
+
+while IFS= read -r -d '' status; do
+	IFS= read -r -d '' path || true
+	if [[ $path != docs/design/* ]]; then
+		outside_count=$((outside_count + 1))
+	elif [[ $path == docs/design/open-questions.md ]]; then
+		continue
+	elif [[ $status == A ]]; then
+		added_design+=("$status $path")
+	else
+		offending+=("$status $path")
+	fi
+done <"$diff_file"
+
+# Added design documents alongside files outside docs/design/ also offend.
+if ((${#added_design[@]} > 0 && outside_count > 0)); then
+	offending+=("${added_design[@]}")
+	ratification_mixed=1
+fi
+
+if ((${#offending[@]} == 0)); then
+	exit 0
+fi
+
+echo "ERROR: Design documents cannot be modified in implementation PRs."
+echo "Only docs/design/open-questions.md may be changed."
+if [[ -n "${ratification_mixed:-}" ]]; then
+	echo "A ratification pull request must contain only design documents."
+fi
+echo ""
+echo "Offending files (status path):"
+for entry in "${offending[@]}"; do
+	printf '  %s\n' "$entry"
+done
+exit 1
