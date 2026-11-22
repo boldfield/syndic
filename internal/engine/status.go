@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -123,13 +124,32 @@ func poolName(p config.Participant) string {
 
 func buildRetryCommandForParticipant(p config.Participant, rosterPath string) string {
 	cmd := "syndic probe --endpoint " + p.Endpoint + " --model " + p.Model
-	if rosterPath != "" && rosterPath != "roster.toml" {
-		cmd = cmd + " --roster " + rosterPath
+	if rosterPath != "" {
+		cmd = cmd + " --roster " + shQuote(rosterPath)
 	}
 	if p.ContextTokens != nil {
 		cmd = cmd + " --context-tokens " + fmt.Sprint(*p.ContextTokens)
 	}
 	return cmd
+}
+
+// shQuote escapes a string for safe shell use.
+func shQuote(s string) string {
+	// If the string contains no special characters, return as-is
+	if len(s) > 0 && !needsQuoting(s) {
+		return s
+	}
+	// Otherwise, use single quotes and escape any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func needsQuoting(s string) bool {
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/') {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) participantStatus(p config.Participant) wire.Participant {

@@ -832,13 +832,13 @@ func TestStatusSurfacesRetryCommand(t *testing.T) {
 		t.Fatal("RetryCommand should not be nil for unprobed participant")
 	}
 
-	// Verify retry command format includes the endpoint and model
+	// Verify retry command format includes the endpoint, model, and roster
 	cmd := *authorParticipant.RetryCommand
 	if !strings.Contains(cmd, "syndic probe") || !strings.Contains(cmd, "--endpoint local") || !strings.Contains(cmd, "--model llama2") {
 		t.Errorf("RetryCommand = %q, want to contain 'syndic probe', '--endpoint local', '--model llama2'", cmd)
 	}
-	// If roster path is non-default, it should be included
-	if !strings.HasPrefix(cmd, "syndic probe --endpoint local --model llama2") {
-		t.Errorf("RetryCommand = %q, want to start with expected command", cmd)
+	// Roster path should always be included
+	if !strings.Contains(cmd, "--roster") {
+		t.Errorf("RetryCommand = %q, want to include '--roster' flag", cmd)
 	}
 }
