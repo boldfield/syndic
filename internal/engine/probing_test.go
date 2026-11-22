@@ -1039,11 +1039,13 @@ func TestStatusSurfacesProbeFailureDetail(t *testing.T) {
 func TestStatusProbeFailureStepIsTheFailedOne(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		okChats  int // chat requests answered before the connection is reset
+		okChats  int  // chat requests answered before the connection is reset
+		first400 bool // the first chat request gets a tolerated 400
 		wantStep string
 	}{
-		{"max_tokens reset (retried as max_completion_tokens)", 0, "max_completion_tokens"},
-		{"system_role reset", 1, "system_role"},
+		{"max_tokens reset (not retried)", 0, false, "max_tokens"},
+		{"max_tokens 400 then max_completion_tokens reset", 1, true, "max_completion_tokens"},
+		{"system_role reset", 1, false, "system_role"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var chats int
@@ -1058,6 +1060,10 @@ func TestStatusProbeFailureStepIsTheFailedOne(t *testing.T) {
 					if err == nil {
 						_ = conn.Close()
 					}
+					return
+				}
+				if tc.first400 && chats == 1 {
+					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
