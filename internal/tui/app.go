@@ -20,10 +20,16 @@ import (
 type tab int
 
 const (
-	tabAnswer tab = iota
+	tabChat tab = iota
 	tabTranscript
 	tabParticipants
 	numTabs
+)
+
+// tabBarHeight and stripHeight are the one-line regions at the top and bottom.
+const (
+	tabBarHeight = 1
+	stripHeight  = 1
 )
 
 // inputHeight is the bottom region: a refusal line and the input line.
@@ -64,6 +70,8 @@ type App struct {
 	workDir              string          // where the quick profile search starts; the process directory when empty
 	answerScrollRow      int             // first visible line of the answer tab
 	candidateIDByTurn    map[string]string
+	inputs               map[string]string           // what the user typed for each turn submitted by this process
+	answerFollow         bool                        // the chat shows its last lines until the user scrolls up
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
@@ -129,7 +137,7 @@ func WithConversation(id string, turnIDs []string) Option {
 		a.openTurns = turnIDs
 		scope := &TurnScope{ConversationID: id, Turns: map[string]bool{}, Submissions: map[string]bool{}}
 		for _, t := range turnIDs {
-			scope.Turns[t] = true
+			scope.add(t)
 		}
 		a.state.Scope = scope
 	}
@@ -140,6 +148,7 @@ func WithRounds(n int) Option {
 	return func(a *App) {
 		a.rounds = n
 		a.roundsIsSet = true
+		a.state.RoundLimit = &n
 	}
 }
 
@@ -151,12 +160,14 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		cancel:            cancel,
 		socket:            socketPath,
 		input:             newInput(),
+		answerFollow:      true,
 		width:             80,
 		height:            24,
 		state:             NewState(),
 		now:               time.Now,
 		content:           NewContentCache(),
 		candidateIDByTurn: make(map[string]string),
+		inputs:            make(map[string]string),
 		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
 		overrideReasons:   make(map[string]string),
 		quarantined:       make(map[string]bool),
@@ -212,13 +223,18 @@ func (a *App) answerIn(turnID string) answerInput {
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
+		now:            a.now(),
 	}
+}
+
+// chatIn gathers what the chat tab needs.
+func (a *App) chatIn() chatInput {
+	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content}
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
 func (a *App) fetchAnswerContent() tea.Cmd {
-	turnID := answerTurn(a.state)
-	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, chatRefs(a.state, a.chatIn()))...)
 }
 
 // transcriptIn gathers what the transcript tab needs.
@@ -432,12 +448,12 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		a.panel = nil
 		a.tab = (a.tab + 1) % numTabs
-		a.answerScrollRow = 0
+		a.answerScrollRow, a.answerFollow = 0, true
 		return a, nil
 	case "shift+tab":
 		a.panel = nil
 		a.tab = (a.tab + numTabs - 1) % numTabs
-		a.answerScrollRow = 0
+		a.answerScrollRow, a.answerFollow = 0, true
 		return a, nil
 	case "enter":
 		return a, a.enter()
@@ -450,7 +466,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 	}
-	if a.tab == tabAnswer {
+	if a.tab == tabChat {
 		page := max(a.answerHeight()-1, 1)
 		switch msg.String() {
 		case "up":
@@ -533,6 +549,10 @@ func (a *App) enter() tea.Cmd {
 	if a.roundsIsSet {
 		maxRounds = &a.rounds
 	}
+	var contextFrom *string
+	if a.state.ContextFrom != "" {
+		contextFrom = &a.state.ContextFrom
+	}
 	return a.send(submission{
 		input:            line,
 		preset:           a.state.NextPreset,
@@ -541,6 +561,7 @@ func (a *App) enter() tea.Cmd {
 		workspace:        a.workDir,
 		conversationID:   conversationID,
 		maxRounds:        maxRounds,
+		contextFromTurn:  contextFrom,
 	})
 }
 
@@ -601,8 +622,9 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		}
 	}
 	if a.state.Scope != nil {
-		a.state.Scope.Turns[msg.turnID] = true
+		a.state.Scope.add(msg.turnID)
 	}
+	a.inputs[msg.turnID] = msg.sub.input
 	a.convTurns++
 	a.input.SetValue("")
 	a.state.NextPreset = "" // /mode applies to one submit
@@ -612,7 +634,7 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	oldTurn := a.state.CurrentTurn
 	a.state.CurrentTurn = msg.turnID
 	if oldTurn != msg.turnID {
-		a.answerScrollRow = 0
+		a.answerScrollRow, a.answerFollow = 0, true
 	}
 	a.ensureTurnInfo()
 	return a.ensureTick()
@@ -637,18 +659,17 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 	}
-	if open == "" && len(a.openTurns) > 0 {
-		// Nothing of the conversation is open: show its latest turn.
-		last := a.openTurns[len(a.openTurns)-1]
-		if _, ok := a.state.Turns[last]; !ok {
-			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, last))
+	// The chat shows every turn of the conversation, so each turn's record is read.
+	for _, id := range a.openTurns {
+		if _, ok := a.state.Turns[id]; !ok && id != open {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, id))
 		}
 	}
 	if open != "" {
 		oldTurn := a.state.CurrentTurn
 		a.state.CurrentTurn = open
 		if oldTurn != a.state.CurrentTurn {
-			a.answerScrollRow = 0
+			a.answerScrollRow, a.answerFollow = 0, true
 		}
 		a.ensureTurnInfo()
 		// The limit and deadline of a turn that is already open come from its record.
@@ -661,9 +682,9 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // conversationHeader names the open conversation by id prefix and turn count.
 func (a *App) conversationHeader() string {
 	if a.conversationID == "" {
-		return "conversation: new (created at the first submit)"
+		return "conversation: new (created at the first submit) · workspace " + a.workDir
 	}
-	return fmt.Sprintf("conversation %s, %d turns", shortID(a.conversationID), a.convTurns)
+	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, a.workDir)
 }
 
 // shortID is the first eight characters of an id.
@@ -954,11 +975,12 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// bodyHeight is the number of lines left for the active tab.
+// bodyHeight is the number of lines left for the active tab: what the tab
+// bar, the banners, the input and the status line leave.
 func (a *App) bodyHeight() int {
 	banners := renderBanners(a.state)
 	banners = capBannersForHeight(banners, a.height, 5)
-	return max(a.height-len(banners)-1-inputHeight, 0)
+	return max(a.height-len(banners)-tabBarHeight-stripHeight-inputHeight, 0)
 }
 
 // isTerminalTooSmall reports whether the terminal is below the minimum size (40×10).
@@ -966,24 +988,62 @@ func (a *App) isTerminalTooSmall() bool {
 	return a.width < 40 || a.height < 10
 }
 
-// answerHeight is the lines of the answer tab below its conversation header.
+// answerHeight is the lines of the chat tab below its conversation header.
 func (a *App) answerHeight() int {
 	return max(a.bodyHeight()-1, 0)
 }
 
-// answerLineCount is the length of the unclipped answer tab.
-func (a *App) answerLineCount() int {
-	turnID := answerTurn(a.state)
-	return len(strings.Split(renderAnswer(a.state, turnID, a.answerIn(turnID)), "\n"))
+// chatStart is the first line of the chat the tab shows, given its line
+// count and where the newest turn starts. The tab follows the newest turn
+// until the user scrolls: its end when it fits, else its first line.
+func (a *App) chatStart(total, lastTurn int) int {
+	maxStart := max(total-a.answerHeight(), 0)
+	if a.answerFollow {
+		return min(lastTurn, maxStart)
+	}
+	return min(a.answerScrollRow, maxStart)
 }
 
-// scrollAnswer moves the answer tab by delta lines, staying within the text.
+// scrollAnswer moves the chat tab by delta lines, staying within the text.
 func (a *App) scrollAnswer(delta int) {
-	maxStart := max(a.answerLineCount()-a.answerHeight(), 0)
-	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
+	lines, lastTurn := chatLines(a.state, a.chatIn())
+	total := len(lines)
+	maxStart := max(total-a.answerHeight(), 0)
+	row := min(max(a.chatStart(total, lastTurn)+delta, 0), maxStart)
+	a.answerScrollRow = row
+	// Scrolling back to where following would stand resumes it, so that a
+	// newer turn comes into view; at the bottom of a long turn it would not.
+	a.answerFollow = row == min(lastTurn, maxStart)
 }
 
-// View lays out banners, strip, the active tab and the input line.
+// tabBar names the tabs, the active one in brackets.
+func (a *App) tabBar() string {
+	names := []string{"chat", "transcript", "participants"}
+	parts := make([]string, len(names))
+	for i, n := range names {
+		if tab(i) == a.tab {
+			n = "[" + n + "]"
+		}
+		parts[i] = n
+	}
+	return strings.Join(parts, "  ")
+}
+
+// keyHint sits at the right edge of the status line.
+const keyHint = "tab: switch  /help"
+
+// statusLine is the strip with the key hint at its right edge, w cells wide.
+// The strip compacts itself to leave room for the hint.
+func (a *App) statusLine(w int) string {
+	hw := ansi.StringWidth(keyHint)
+	if w < hw+20 {
+		return ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
+	}
+	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true), w-hw-1, "")
+	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-hw) + keyHint
+}
+
+// View lays out the tab bar, the active tab, banners, the input and, last, the status line.
 func (a *App) View() string {
 	w := a.width
 
@@ -996,7 +1056,7 @@ func (a *App) View() string {
 		return ansi.Truncate(msg, w, "")
 	}
 
-	// Get banners and strip, limiting banners to leave at least 5 lines for the tab area
+	// Banners are limited to leave at least 5 lines for the tab area
 	banners := renderBanners(a.state)
 	banners = capBannersForHeight(banners, a.height, 5)
 
@@ -1005,16 +1065,15 @@ func (a *App) View() string {
 		banners[i] = ansi.Truncate(banner, w, "")
 	}
 
-	strip := renderStrip(a.state, w, a.now())
-	strip = ansi.Truncate(strip, w, "")
-
 	bodyHeight := a.bodyHeight()
 
 	var tabView string
+	lastTurn := 0
 	switch a.tab {
-	case tabAnswer:
-		turnID := answerTurn(a.state)
-		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
+	case tabChat:
+		var chat []string
+		chat, lastTurn = chatLines(a.state, a.chatIn())
+		tabView = strings.Join(chat, "\n")
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
@@ -1032,8 +1091,8 @@ func (a *App) View() string {
 	}
 	lines := strings.Split(tabView, "\n")
 
-	if a.tab == tabAnswer && len(a.panel) == 0 {
-		start := min(a.answerScrollRow, max(len(lines)-a.answerHeight(), 0))
+	if a.tab == tabChat && len(a.panel) == 0 {
+		start := a.chatStart(len(lines), lastTurn)
 		lines = lines[start:]
 		for len(lines) < a.answerHeight() {
 			lines = append(lines, "")
@@ -1059,12 +1118,12 @@ func (a *App) View() string {
 	}
 	inputLines = strings.Join(inputLinesList, "\n")
 
-	// Build output: banners, strip, body, input.
-	var output []string
-	output = append(output, banners...)
-	output = append(output, strip)
+	// Build output: tab bar, tab, banners, input, status line.
+	output := []string{ansi.Truncate(a.tabBar(), w, "")}
 	output = append(output, lines...)
+	output = append(output, banners...)
 	output = append(output, inputLines)
+	output = append(output, a.statusLine(w))
 	return strings.Join(output, "\n")
 }
 

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
@@ -124,6 +125,29 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 
 	if turn.TerminalReason != "" {
 		reply.TerminalReason = &turn.TerminalReason
+	}
+
+	ref, err := store.TurnInputRef(turnID)
+	if err != nil {
+		return nil, err
+	}
+	if ref != "" {
+		reply.InputRef = &ref
+	}
+	if turn.ContextHash != nil {
+		from, err := contextFromTurn(store, *turn.ContextHash)
+		if err != nil {
+			return nil, err
+		}
+		reply.ContextFromTurn = &from
+	}
+	if turn.Mode != "solo" {
+		reply.MaxRounds = turn.MaxRoundsInEffect
+		info, err := store.GetRoundInfo(turnID)
+		if err != nil {
+			return nil, err
+		}
+		reply.Round = info.CurrentRound
 	}
 
 	// Build attempt records and collect aggregates
@@ -313,6 +337,25 @@ func getContent(store *journal.Store, ref string, offset, limit int64) (*wire.Co
 		Total:  total,
 		SHA256: sha256sum,
 	}, nil
+}
+
+// contextFromTurn is the first earlier turn the frozen history document under
+// hash carries: the trim point the turn was submitted with, or the
+// conversation's first turn when nothing was trimmed.
+func contextFromTurn(store *journal.Store, hash string) (string, error) {
+	b, err := store.HistoryDocument(hash)
+	if err != nil {
+		return "", err
+	}
+	doc, err := history.Parse(b)
+	if err != nil {
+		return "", fmt.Errorf("history document %s: %w", hash, err)
+	}
+	included := doc.Included()
+	if len(included) == 0 {
+		return "", fmt.Errorf("history document %s carries no turn", hash)
+	}
+	return included[0].ID, nil
 }
 
 // errReplyTooLarge reports a reply that cannot fit in one frame even trimmed

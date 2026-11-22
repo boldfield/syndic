@@ -452,6 +452,17 @@ type TurnReply struct {
 	OpenBlocks            []OpenBlock     `json:"open_blocks"`
 	TerminalReason        *string         `json:"terminal_reason,omitempty"`
 	Budget                BudgetRecord    `json:"budget"`
+	// InputRef is the content ref of what the user typed, when it is journaled.
+	InputRef *string `json:"input_ref,omitempty"`
+	// Round is the revision round of the newest candidate: 0 for the first.
+	Round int `json:"round,omitempty"`
+	// MaxRounds is the round limit the turn was submitted with; absent for a
+	// turn that has no revision loop.
+	MaxRounds *int `json:"max_rounds,omitempty"`
+	// ContextFromTurn is the first earlier turn the turn's history included:
+	// the context_from_turn it was submitted with, or the conversation's first
+	// turn when nothing was trimmed. Absent for a turn with no history.
+	ContextFromTurn *string `json:"context_from_turn,omitempty"`
 }
 
 type TranscriptRequest struct {

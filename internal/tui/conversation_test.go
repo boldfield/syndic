@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -63,8 +64,8 @@ func header(d *driver) string {
 }
 
 func TestChatHeaderNamesTheOpenConversation(t *testing.T) {
-	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}))
-	if got, want := header(d), "conversation 01234567, 3 turns"; got != want {
+	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}), WithWorkDir("/ws/x"))
+	if got, want := header(d), "conversation 01234567, 3 turns · workspace /ws/x"; got != want {
 		t.Fatalf("first line of the chat = %q, want %q\n%s", got, want, d.app.View())
 	}
 }
@@ -175,12 +176,14 @@ func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
 	}
 
 	re := start(WithWorkDir("/ws/a"), WithConversation(a.app.conversationID, turns))
-	re.until("the earlier answer", func(v string) bool { return strings.Contains(v, "ALPHA-ANSWER") })
+	re.until("the earlier answer and input", func(v string) bool {
+		return strings.Contains(v, "ALPHA-ANSWER") && strings.Contains(v, "you: alpha question")
+	})
 	v := re.app.View()
 	if strings.Contains(v, "BRAVO-ANSWER") {
 		t.Errorf("the other conversation's answer is shown:\n%s", v)
 	}
-	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns"; got != want {
+	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns · workspace /ws/a"; got != want {
 		t.Errorf("header = %q, want %q", got, want)
 	}
 
@@ -188,5 +191,116 @@ func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
 	fresh := start(WithWorkDir("/ws/c"), WithConversation("", nil))
 	if v := fresh.app.View(); strings.Contains(v, "ALPHA-ANSWER") || strings.Contains(v, "BRAVO-ANSWER") {
 		t.Errorf("an empty conversation shows other turns:\n%s", v)
+	}
+}
+
+// A turn submitted with context_from_turn leaves the turns before it out of
+// context. An app that opens the conversation afterwards learns the trim point
+// from the turn records and marks only those turns.
+func TestReopenedTrimmedConversationMarksTurnsNotInContext(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(answerText), enginetest.Reply(answerText), enginetest.Reply(answerText), enginetest.Reply(answerText), enginetest.Reply(answerText), enginetest.Reply(answerText)},
+		"reviewer": {approve(), approve(), approve(), approve(), approve(), approve()},
+	})
+	paths := newPaths(t)
+	startServer(t, paths, h.Engine, h)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	start := func(opts ...Option) *driver {
+		d := &driver{t: t, app: NewApp(ctx, paths.Socket, opts...), msgs: make(chan tea.Msg, 1024)}
+		d.app.Update(resizeMsg(80, 24))
+		d.run(d.app.Init())
+		d.until("connected", func(string) bool { return d.app.state.ConnState == ConnStateConnected && d.strip() != "" })
+		return d
+	}
+	a := start(WithWorkDir("/ws/a"), WithConversation("", nil))
+	runTurn(t, a, "first question")
+	runTurn(t, a, "second question")
+	conv := a.app.conversationID
+	order := append([]string(nil), a.app.state.Scope.Order...)
+	if len(order) != 2 {
+		t.Fatalf("scope order %v, want two turns", order)
+	}
+
+	// Reopened untrimmed, every turn is in context.
+	plain := start(WithWorkDir("/ws/a"), WithConversation(conv, order))
+	plain.until("both turns approved", func(v string) bool {
+		return strings.Count(v, "approved by") == 2 && strings.Contains(v, "you: second question")
+	})
+	if v := plain.app.View(); strings.Contains(v, notInContext) {
+		t.Fatalf("an untrimmed conversation shows %q:\n%s", notInContext, v)
+	}
+
+	// The first turn has no history; the second's starts at the first.
+	cl := dial(t, paths)
+	for i, want := range []string{"", order[0]} {
+		turn, err := cl.Turn(ctx, order[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := turn.ContextFromTurn; (want == "") != (got == nil) || (got != nil && *got != want) {
+			t.Errorf("turn %d context_from_turn = %v, want %q", i+1, got, want)
+		}
+	}
+
+	// Another client submits the third turn from the second onward.
+	reply, err := cl.Submit(ctx, wire.SubmitRequest{SubmissionID: "trimmed-third", Input: "third question", Workspace: "/ws/a", ConversationID: &conv, ContextFromTurn: &order[1]})
+	if err != nil {
+		t.Fatalf("trimmed submit: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		turn, err := cl.Turn(ctx, reply.TurnID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if turn.State == engine.StateApproved {
+			if turn.ContextFromTurn == nil || *turn.ContextFromTurn != order[1] {
+				t.Fatalf("turn record context_from_turn = %v, want %q", turn.ContextFromTurn, order[1])
+			}
+			break
+		}
+		if turn.State == "incomplete" || turn.State == "cancelled" || time.Now().After(deadline) {
+			t.Fatalf("trimmed turn never approved; state %q, reason %v", turn.State, turn.TerminalReason)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	re := start(WithWorkDir("/ws/a"), WithConversation(conv, append(order, reply.TurnID)))
+	re.until("the trimmed turn marked", func(v string) bool {
+		return strings.Count(v, "approved by") == 3 && strings.Contains(v, notInContext) &&
+			strings.Contains(v, "you: first question") && strings.Contains(v, "you: second question") && strings.Contains(v, "you: third question")
+	})
+	lines := strings.Split(re.app.View(), "\n")
+	first, second, marker := -1, -1, -1
+	marked := 0
+	for i, l := range lines {
+		switch {
+		case strings.Contains(l, "you: first question"):
+			first = i
+		case strings.Contains(l, "you: second question"):
+			second = i
+		case strings.Contains(l, notInContext):
+			marker = i
+			marked++
+		}
+	}
+	if marked != 1 || first < 0 || second < 0 || marker < first || marker > second {
+		t.Errorf("marker line %d (%d marked), want one between the first turn (%d) and the second (%d):\n%s", marker, marked, first, second, strings.Join(lines, "\n"))
+	}
+}
+
+// A trim point the app holds goes out as context_from_turn with the next submit.
+func TestSubmitCarriesTheTrimPoint(t *testing.T) {
+	d, rec := startRigWith(t, WithWorkDir(t.TempDir()), WithConversation("", nil))
+	runTurn(t, d, "first")
+	if r := rec.requests()[0]; r.ContextFromTurn != nil {
+		t.Errorf("untrimmed submit context_from_turn = %q, want none", *r.ContextFromTurn)
+	}
+	first := d.app.state.Scope.Order[0]
+	d.app.state.ContextFrom = first
+	runTurn(t, d, "second")
+	if r := rec.requests()[1]; r.ContextFromTurn == nil || *r.ContextFromTurn != first {
+		t.Errorf("trimmed submit context_from_turn = %v, want %q", r.ContextFromTurn, first)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/lipgloss"
@@ -17,6 +18,7 @@ type answerInput struct {
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
 	plainMode      bool   // true when colors should not be used
+	now            time.Time
 }
 
 // answerTurn picks the turn the answer tab is about: the open turn, else the
@@ -119,7 +121,11 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if ti.CandidateHash != nil {
 			hash := *ti.CandidateHash
 			hash = hash[:min(12, len(hash))]
-			lines = append(lines, fmt.Sprintf("approved by %s against %s", strings.Join(approvers(s, turnID), ", "), hash))
+			by := strings.Join(approvers(s, turnID), ", ")
+			if ti.Round > 0 {
+				by += fmt.Sprintf(" after %d revisions", ti.Round)
+			}
+			lines = append(lines, fmt.Sprintf("approved by %s against %s", by, hash))
 		}
 
 	case "solo_complete":
@@ -137,6 +143,9 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		lines = append(lines, blockLines(in.openBlocks)...)
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
+		}
+		lines = append(lines, noApprovedAnswer(ti.State))
+		if ti.CandidateHash != nil {
 			candidate()
 		}
 
@@ -150,10 +159,10 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 
 	case "cancelled":
 		if ti.CandidateHash == nil {
-			lines = append(lines, "cancelled before candidate")
+			lines = append(lines, "cancelled before candidate", noApprovedAnswer(ti.State))
 			break
 		}
-		lines = append(lines, "CANCELLED, not approved")
+		lines = append(lines, "CANCELLED, not approved", noApprovedAnswer(ti.State))
 		lines = append(lines, blockLines(in.openBlocks)...)
 		candidate()
 
@@ -166,11 +175,38 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 				draftText = draftBanner.Render(draftText)
 			}
 			lines = append(lines, draftText, body(in.content, refs[0]))
-		} else {
-			lines = append(lines, "turn in progress")
 		}
+		lines = append(lines, progressLine(ti, in.now))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// noApprovedAnswer is the line later turns see in place of the answer of a
+// turn that ended without one.
+func noApprovedAnswer(state string) string {
+	return "no approved answer (" + state + ")"
+}
+
+// progressLine is the one line a running turn shows: phase, round,
+// elapsed time and participant states, the last of which a narrow terminal
+// cuts first.
+func progressLine(ti TurnInfo, now time.Time) string {
+	parts := []string{"turn in progress: " + ti.State}
+	if ti.MaxRounds > 0 {
+		parts = append(parts, fmt.Sprintf("round %d/%d", ti.Round, ti.MaxRounds))
+	}
+	if !ti.SubmittedAt.IsZero() && !now.IsZero() {
+		parts = append(parts, formatDuration(max(now.Sub(ti.SubmittedAt), 0)))
+	}
+	if ti.Author != "" {
+		parts = append(parts, ti.Author+" "+ti.AuthorState)
+	}
+	if len(ti.Reviewers) > 0 {
+		for _, id := range ti.Reviewers {
+			parts = append(parts, id+" "+ti.ReviewerStates[id])
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))

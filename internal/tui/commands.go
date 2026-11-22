@@ -76,7 +76,7 @@ func cmdHelp(a *App, _ []string) tea.Cmd {
 
 func cmdParticipants(a *App, _ []string) tea.Cmd {
 	a.tab = tabParticipants
-	a.answerScrollRow = 0
+	a.answerScrollRow, a.answerFollow = 0, true
 	a.panel = nil
 	return nil
 }

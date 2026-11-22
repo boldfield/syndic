@@ -212,14 +212,16 @@ func TestFourBannersCollapseAt80x24(t *testing.T) {
 	}
 	assertFits(t, "four banners", v, 80, 24)
 	lines := strings.Split(v, "\n")
-	if lines[0] != "deadlines: provisional" || lines[1] != "+3 more" {
-		t.Errorf("banner region = %q, %q; want the first banner and +3 more", lines[0], lines[1])
+	// tab bar, tab area, banners, input, status line.
+	at := 1 + body
+	if lines[at] != "deadlines: provisional" || lines[at+1] != "+3 more" {
+		t.Errorf("banner region = %q, %q; want the first banner and +3 more", lines[at], lines[at+1])
 	}
 	if body < 5 {
 		t.Errorf("tab area has %d lines, want at least 5", body)
 	}
-	// strip, tab area and input fill the rest of the frame.
-	if want := 2 + 1 + body + inputHeight; len(lines) != want {
+	// tab bar, tab area, banners, input and status line fill the frame.
+	if want := tabBarHeight + body + 2 + inputHeight + stripHeight; len(lines) != want {
 		t.Errorf("frame has %d lines, want %d", len(lines), want)
 	}
 }
@@ -243,7 +245,7 @@ func TestResizeBelowMinimumAndBack(t *testing.T) {
 	v := view(t, p.rig)
 	assertFits(t, "restored", v, 80, 24)
 	lines := strings.Split(v, "\n")
-	if len(lines) != 24 || !strings.HasPrefix(lines[0], "[") || !strings.HasPrefix(lines[23], "> ") {
+	if len(lines) != 24 || lines[0] != "[chat]  transcript  participants" || !strings.HasPrefix(lines[22], "> ") || !strings.HasPrefix(lines[23], "[") {
 		t.Errorf("layout not restored:\n%s", v)
 	}
 }
