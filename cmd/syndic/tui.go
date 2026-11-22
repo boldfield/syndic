@@ -13,7 +13,17 @@ import (
 )
 
 func cmdTUI(fs *flag.FlagSet, args []string) int {
+	newConversation := fs.Bool("new", false, "start with a new conversation")
+	conversationID := fs.String("conversation", "", "open a named conversation (accepts unique prefix)")
+	rounds := fs.Int("rounds", 0, "set the round limit for this process")
+
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	// Validate mutually exclusive flags
+	if *newConversation && *conversationID != "" {
+		fmt.Fprintf(os.Stderr, "error: --new and --conversation are mutually exclusive\n")
 		return 2
 	}
 
@@ -44,7 +54,19 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	app := tui.NewApp(ctx, paths.Socket, tui.WithTerminalCapabilities(caps))
+	opts := []tui.Option{tui.WithTerminalCapabilities(caps)}
+
+	if *newConversation {
+		opts = append(opts, tui.WithNewConversation())
+	}
+	if *conversationID != "" {
+		opts = append(opts, tui.WithConversationID(*conversationID))
+	}
+	if *rounds > 0 {
+		opts = append(opts, tui.WithRounds(*rounds))
+	}
+
+	app := tui.NewApp(ctx, paths.Socket, opts...)
 
 	tui.ApplyTerminalCapabilities(caps)
 

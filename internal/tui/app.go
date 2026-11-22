@@ -85,6 +85,11 @@ type App struct {
 	pSelected   int                       // index of the selected row of the participants tab, in id order
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
+
+	// Conversation startup options
+	newConversation bool   // start with a new conversation
+	conversationID  string // conversation ID prefix to open
+	rounds          int    // round limit for this process
 }
 
 // Option configures an App.
@@ -109,6 +114,21 @@ func WithWorkDir(dir string) Option {
 // WithTerminalCapabilities sets the terminal rendering capabilities.
 func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) { a.terminalCapabilities = caps }
+}
+
+// WithNewConversation starts with a new conversation.
+func WithNewConversation() Option {
+	return func(a *App) { a.newConversation = true }
+}
+
+// WithConversationID opens a conversation by ID prefix.
+func WithConversationID(id string) Option {
+	return func(a *App) { a.conversationID = id }
+}
+
+// WithRounds sets the round limit for this process.
+func WithRounds(n int) Option {
+	return func(a *App) { a.rounds = n }
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -493,11 +513,22 @@ func (a *App) enter() tea.Cmd {
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
 	}
+	var conversationID *string
+	if a.conversationID != "" {
+		conversationID = &a.conversationID
+	}
+	var maxRounds *int
+	if a.rounds > 0 {
+		maxRounds = &a.rounds
+	}
 	return a.send(submission{
 		input:            line,
 		preset:           a.state.NextPreset,
 		quickProfile:     a.quickSelection.selected(profiles),
 		allowProvisional: a.allowProvisional,
+		workspace:        a.workDir,
+		conversationID:   conversationID,
+		maxRounds:        maxRounds,
 	})
 }
 

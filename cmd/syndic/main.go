@@ -36,6 +36,14 @@ func main() {
 		}
 		exitCode := cmdProbe(probeCmd, args)
 		os.Exit(exitCode)
+	case "conversations":
+		convCmd := flag.NewFlagSet("conversations", flag.ContinueOnError)
+		convCmd.Usage = func() {
+			fmt.Fprintf(os.Stderr, "usage: syndic conversations [options]\n")
+			convCmd.PrintDefaults()
+		}
+		exitCode := cmdConversations(convCmd, args)
+		os.Exit(exitCode)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcommand)
 		os.Exit(2)

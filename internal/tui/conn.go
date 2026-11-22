@@ -96,12 +96,15 @@ type submission struct {
 	preset           string
 	quickProfile     *string
 	allowProvisional bool
+	workspace        string
+	conversationID   *string
+	maxRounds        *int
 }
 
 // submitCmd sends the submission, first showing the request to observe if it is set.
 func submitCmd(ctx context.Context, cl *client.Client, sub submission, observe func(wire.SubmitRequest)) tea.Cmd {
 	return func() tea.Msg {
-		req := wire.SubmitRequest{SubmissionID: sub.id, Input: sub.input, QuickProfile: sub.quickProfile}
+		req := wire.SubmitRequest{SubmissionID: sub.id, Input: sub.input, QuickProfile: sub.quickProfile, Workspace: sub.workspace, ConversationID: sub.conversationID, MaxRounds: sub.maxRounds}
 		if sub.preset != "" {
 			req.Preset = &sub.preset
 		}
