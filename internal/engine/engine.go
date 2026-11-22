@@ -726,14 +726,18 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		return nil
 	}
 	t := &openTurn{
-		id:            row.ID,
-		mode:          row.Mode,
-		author:        eff.Preset.Author,
-		eff:           eff,
-		candidateHash: cand.ContentHash,
-		outputs:       make(map[string]string),
-		stopAttempt:   make(map[string]func() bool),
-		pending:       make(map[string]time.Time),
+		id:                   row.ID,
+		mode:                 row.Mode,
+		author:               eff.Preset.Author,
+		eff:                  eff,
+		candidateHash:        cand.ContentHash,
+		outputs:              make(map[string]string),
+		stopAttempt:          make(map[string]func() bool),
+		pending:              make(map[string]time.Time),
+		blockIDs:             []string{},
+		reviewerFeedbackByID: make(map[string]string),
+		reviewerResultsByID:  make(map[string]map[string]string),
+		reviewerAttempts:     make(map[string]int),
 	}
 	texts, err := e.store.AttemptTexts(row.ID)
 	if err != nil {

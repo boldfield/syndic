@@ -293,6 +293,106 @@ func authorFailedStatus(res transport.CompleteResult, gate error) string {
 	return fmt.Sprintf("gate:%v", gate)
 }
 
+// dispatchRevisionAuthor builds the revision prompt and records the revision attempt.
+// e.mu is held.
+func (e *Engine) dispatchRevisionAuthor(t *openTurn) (transport.CompleteRequest, string, error) {
+	var p config.Participant
+	for _, candidate := range e.roster.Participants {
+		if candidate.ID == t.author {
+			p = candidate
+			break
+		}
+	}
+
+	// Build revision feedback from each reviewer
+	feedback := make([]prompt.RevisionFeedback, len(t.required))
+	for i, reviewerID := range t.required {
+		feedback[i].Output = t.reviewerFeedbackByID[reviewerID]
+		feedback[i].Results = t.reviewerResultsByID[reviewerID]
+	}
+
+	delimiter, err := prompt.NewDelimiter(e.rand)
+	if err != nil {
+		return transport.CompleteRequest{}, "", err
+	}
+
+	msgs, err := prompt.AuthorRevision(prompt.AuthorRevisionInput{
+		Input:             t.input,
+		PreviousCandidate: t.candidate,
+		ReviewerFeedback:  feedback,
+		Delimiter:         delimiter,
+		HistoryDoc:        t.history,
+	})
+	if err != nil {
+		return transport.CompleteRequest{}, "", err
+	}
+
+	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
+	deadline := e.attemptDeadline(t)
+
+	var req transport.CompleteRequest
+	var attemptID string
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		turn, err := tx.GetTurn(t.id)
+		if err != nil {
+			return err
+		}
+		estimated, err := e.reserve(tx, t, t.author, msgs, maxOut)
+		if err != nil {
+			return err
+		}
+		attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
+			TurnID:                t.id,
+			Participant:           t.author,
+			Phase:                 phaseAuthor,
+			Epoch:                 turn.Epoch,
+			Deadline:              &deadline,
+			MaxOutputTokens:       maxOut,
+			EstimatedPromptTokens: estimated,
+		})
+		if err != nil {
+			return err
+		}
+		if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
+			AttemptID:             attemptID,
+			Participant:           t.author,
+			Phase:                 phaseAuthor,
+			Epoch:                 int64(turn.Epoch),
+			Deadline:              deadline.Format(time.RFC3339Nano),
+			MaxOutputTokens:       int64(maxOut),
+			EstimatedPromptTokens: int64(estimated),
+		}); err != nil {
+			return err
+		}
+		if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{
+			Participant: t.author,
+			State:       ParticipantRunning,
+		}); err != nil {
+			return err
+		}
+		req = transport.CompleteRequest{
+			Envelope: transport.AttemptEnvelope{
+				Participant: t.author,
+				TurnID:      t.id,
+				Phase:       phaseAuthor,
+				Epoch:       turn.Epoch,
+				AttemptID:   attemptID,
+			},
+			Model:           p.Model,
+			Messages:        msgs,
+			MaxOutputTokens: maxOut,
+			Deadline:        deadline,
+		}
+		return nil
+	})
+	if err != nil {
+		return transport.CompleteRequest{}, "", err
+	}
+	e.markRunning(t.author)
+	e.armAttempt(t, attemptID, deadline)
+	return req, attemptID, nil
+}
+
 func identityString(id transport.ModelIdentity) string {
 	if id.Value == "" {
 		return id.Kind

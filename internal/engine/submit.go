@@ -45,6 +45,16 @@ type openTurn struct {
 	// for the terminal delivery.
 	outputs map[string]string
 
+	// Revision state, owned by Engine.mu.
+	maxRounds            int                          // maximum revision rounds allowed
+	currentRound         int                          // current revision round (0 for initial review)
+	blockIDs             []string                     // open blocks from current round
+	hasBlock             bool                         // whether at least one block or revision_request exists
+	hasRevReq            bool                         // whether at least one revision_request exists
+	reviewerFeedbackByID map[string]string            // feedback from each reviewer, by attempt id
+	reviewerResultsByID  map[string]map[string]string // tool results cited in feedback, by reviewer id
+	reviewerAttempts     map[string]int               // number of attempts per reviewer (includes quarantined)
+
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
 	delivering    bool
@@ -310,20 +320,33 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, fmt.Errorf("engine: submit: %w", err)
 	}
 
+	maxRounds := 0
+	if eff.Preset.Revision != nil && eff.Preset.Revision.MaxRounds != nil {
+		maxRounds = *eff.Preset.Revision.MaxRounds
+	}
+
 	t := &openTurn{
-		id:              turnID,
-		mode:            eff.Preset.Mode,
-		author:          eff.Preset.Author,
-		input:           req.Input,
-		history:         doc,
-		contextHash:     contextHash,
-		eff:             eff,
-		attemptDeadline: attempt,
-		turnDeadline:    turnDeadline,
-		required:        eff.Preset.RequiredReviewers,
-		approved:        map[string]bool{},
-		stopAttempt:     map[string]func() bool{},
-		pending:         map[string]time.Time{},
+		id:                   turnID,
+		mode:                 eff.Preset.Mode,
+		author:               eff.Preset.Author,
+		input:                req.Input,
+		history:              doc,
+		contextHash:          contextHash,
+		eff:                  eff,
+		attemptDeadline:      attempt,
+		turnDeadline:         turnDeadline,
+		required:             eff.Preset.RequiredReviewers,
+		approved:             map[string]bool{},
+		stopAttempt:          map[string]func() bool{},
+		pending:              map[string]time.Time{},
+		maxRounds:            maxRounds,
+		currentRound:         0,
+		blockIDs:             []string{},
+		hasBlock:             false,
+		hasRevReq:            false,
+		reviewerFeedbackByID: map[string]string{},
+		reviewerResultsByID:  map[string]map[string]string{},
+		reviewerAttempts:     map[string]int{},
 	}
 	e.open = t
 	e.armTurn(t)

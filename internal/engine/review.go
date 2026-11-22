@@ -170,13 +170,46 @@ func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.releaseLocked(d.participant)
-	if repair == nil || e.open != t {
+	if e.open != t {
 		return
 	}
-	err := e.schedule(t, d.participant, func() { e.startRepair(t, d, *repair) })
-	if err != nil {
-		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
+
+	// If repair is needed, schedule it
+	if repair != nil {
+		err := e.schedule(t, d.participant, func() { e.startRepair(t, d, *repair) })
+		if err != nil {
+			e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
+		}
+		return
 	}
+
+	// Check if all reviewers have completed
+	if !e.allReviewersCompleted(t) {
+		return
+	}
+
+	// All reviewers completed - but turn might be already terminal
+	// (approval or early termination already called e.endIn)
+	if e.open != t {
+		return
+	}
+
+	// All reviewers completed and turn is still open - decide on revision
+	if e.shouldStartRevision(t) {
+		// Start revision round
+		if err := e.schedule(t, t.author, func() { e.startRevisionAuthor(t) }); err != nil {
+			e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		}
+	} else if t.hasBlock || t.hasRevReq {
+		// No more rounds allowed, end with blocks open
+		if len(t.blockIDs) > 0 {
+			reason := reasonBlock + t.blockIDs[0]
+			e.finishLocked(t, StateIncomplete, reason)
+		} else {
+			e.finishLocked(t, StateIncomplete, reasonRoundsExhausted)
+		}
+	}
+	// If no blocks/revisions and all approved, approval is already set
 }
 
 // startRepair begins the repair attempt for a malformed verdict and calls the
@@ -491,6 +524,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if held, err = e.failedIn(tx, emit, d.participant, d.attemptID, fail); err != nil {
 			return err
 		}
+
+		// Track that this reviewer has attempted completion (regardless of outcome)
+		t.reviewerAttempts[d.participant]++
+
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)
 			term, err = e.endIn(tx, emit, t, endState, endReason)
@@ -538,6 +575,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 
+		// Track this reviewer's feedback for revision round processing
+		t.reviewerFeedbackByID[d.participant] = res.Text
+
 		switch parsed.Classification {
 		case verdict.Valid:
 			if v.Decision == "block" {
@@ -548,6 +588,8 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				if err := emit(t.id, wire.EventKindBlockOpened, wire.EvBlockOpened{BlockID: blockID, Severity: v.Severity}); err != nil {
 					return err
 				}
+				t.hasBlock = true
+				t.blockIDs = append(t.blockIDs, blockID)
 				endState, endReason = StateIncomplete, reasonBlock+blockID
 				break
 			}
@@ -556,6 +598,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				endState, endReason = StateApproved, reasonAllApproved
 			}
 		case verdict.RevisionRequest:
+			t.hasRevReq = true
 			endState, endReason = StateIncomplete, reasonRevision+d.participant
 		case verdict.Rejected:
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":rejected"
@@ -571,11 +614,16 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			}
 		}
 
-		if endState == "" {
-			return nil
+		// End immediately for failures, blocks, and approvals
+		// Defer revision decision for revision requests only
+		if endState != "" {
+			term, err = e.endIn(tx, emit, t, endState, endReason)
+			return err
 		}
-		term, err = e.endIn(tx, emit, t, endState, endReason)
-		return err
+
+		// No terminal state yet - either revision_request or partial approval
+		// Decision will be made in runReviewer after all reviewers complete
+		return nil
 	})
 	e.attemptDone(t, d.attemptID)
 	if err == nil && exceeded {
@@ -667,4 +715,158 @@ func emitCompleted(emit hub.Emit, turnID, attemptID string, res transport.Comple
 		TransportStatus: res.TransportStatus,
 		Usage:           usage,
 	})
+}
+
+// shouldStartRevision checks if conditions are met to start a revision round:
+// - at least one block or revision request
+// - rounds remain
+// - budget can accommodate another round
+// Called with e.mu held after all required reviewers have completed.
+func (e *Engine) shouldStartRevision(t *openTurn) bool {
+	if t.mode != modeReview {
+		return false
+	}
+	if !t.hasBlock && !t.hasRevReq {
+		return false
+	}
+	if t.currentRound >= t.maxRounds {
+		return false
+	}
+	// Budget check would be done in dispatchRevisionAuthor
+	return true
+}
+
+// allReviewersCompleted checks if all required reviewers have attempted completion.
+func (e *Engine) allReviewersCompleted(t *openTurn) bool {
+	for _, id := range t.required {
+		if t.reviewerAttempts[id] == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// startRevisionAuthor begins the author's revision attempt and calls the adapter
+// on its own goroutine. It runs with e.mu held and the pool slot taken.
+func (e *Engine) startRevisionAuthor(t *openTurn) {
+	req, attemptID, err := e.dispatchRevisionAuthor(t)
+	if err != nil {
+		if r, ok := asRefusal(err); ok {
+			e.finishBudget(t, r)
+			e.releaseLocked(t.author)
+			return
+		}
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		e.releaseLocked(t.author)
+		return
+	}
+	go e.runRevisionAuthor(t, req, attemptID)
+}
+
+// runRevisionAuthor calls the author with revision feedback, handles its result.
+func (e *Engine) runRevisionAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
+	res, fail := e.complete(t, t.author, req)
+	proceed := e.completeRevisionAuthor(t, attemptID, req, res, fail)
+	e.release(t.author)
+	if proceed {
+		e.runReviewers(t)
+	}
+}
+
+// completeRevisionAuthor runs accept and gate for the author's revision result,
+// checks for unchanged revision, and freezes the new candidate.
+func (e *Engine) completeRevisionAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	expected := e.built.Participants[t.author].Expected
+	gate := transport.CheckResult(req, res, expected)
+
+	var hash string
+	var quarantined, unchanged, exceeded bool
+	var term *terminal
+	var held *hold
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		hash, quarantined, unchanged, exceeded = "", false, false, false
+		term, held = nil, nil
+		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
+		if err != nil {
+			return err
+		}
+		if !accepted {
+			quarantined = true
+			exceeded, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+			return err
+		}
+		if exceeded, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
+			return err
+		}
+		if err := recordCompletion(tx, emit, t.id, t.author, attemptID, res, gate, fail, e.lastInflight(t.author)); err != nil {
+			return err
+		}
+		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
+			return err
+		}
+		if gate != nil {
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			return err
+		}
+
+		// Check for unchanged revision
+		if res.Text == t.candidate {
+			unchanged = true
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonRevisionUnchanged)
+			return err
+		}
+
+		hash, err = candidate.Hash(candidate.Identity{
+			ManifestHash:    e.manifestHash,
+			TurnID:          t.id,
+			AuthorAttemptID: attemptID,
+			ContextHash:     t.contextHash,
+			Content:         []byte(res.Text),
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.FreezeCandidate(t.id, res.Text, hash); err != nil {
+			return err
+		}
+		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{TurnID: t.id, CandidateHash: hash}); err != nil {
+			return err
+		}
+		t.currentRound++
+		if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateRevisionDispatched}); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	e.attemptDone(t, attemptID)
+	if err == nil && exceeded {
+		e.markExceeded(t.author)
+	}
+	if err != nil {
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		return false
+	}
+	if quarantined {
+		e.lateCommitted(attemptID, res)
+		return false
+	}
+	e.failedCommitted(t.author, fail, held)
+	if e.lastInflight(t.author) {
+		delete(e.running, t.author)
+	}
+	if unchanged {
+		e.commitTerminal(t, term)
+		e.launchCancels(term)
+		return false
+	}
+	t.candidate = res.Text
+	t.candidateHash = hash
+	t.hasBlock = false
+	t.hasRevReq = false
+	t.blockIDs = []string{}
+	return true
 }
