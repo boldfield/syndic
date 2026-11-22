@@ -44,10 +44,13 @@ func TestGetBlocksByState(t *testing.T) {
 
 func TestAllBlocksForTurn(t *testing.T) {
 	f := newBlockFixture(t)
-	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate: %v", err)
+	}
 	f.openBlock(t, "b1", "H1")
 
-	_, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate: %v", err)
 	}
@@ -70,10 +73,13 @@ func TestAllBlocksForTurn(t *testing.T) {
 
 func TestWithdrawnBlocksAgainstHash(t *testing.T) {
 	f := newBlockFixture(t)
-	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate: %v", err)
+	}
 	f.openBlock(t, "b1", "H1")
 
-	_, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate: %v", err)
 	}
@@ -128,7 +134,10 @@ func TestBlocksForCandidate(t *testing.T) {
 
 func TestBlockStatePersistence(t *testing.T) {
 	f := newBlockFixture(t)
-	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate: %v", err)
+	}
 	f.openBlock(t, "b1", "H1")
 
 	state1, err := f.store.GetBlockState("b1")

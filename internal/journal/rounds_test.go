@@ -1,6 +1,7 @@
 package journal_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -33,8 +34,8 @@ func TestGetRoundInfo(t *testing.T) {
 	if info.CurrentRound != 0 {
 		t.Fatalf("expected CurrentRound=0, got %d", info.CurrentRound)
 	}
-	if info.MaxRoundsCeiling != 5 {
-		t.Fatalf("expected MaxRoundsCeiling=5, got %d", info.MaxRoundsCeiling)
+	if info.MaxRoundsCeiling != 0 {
+		t.Fatalf("expected unset MaxRoundsCeiling=0, got %d", info.MaxRoundsCeiling)
 	}
 }
 
@@ -59,7 +60,7 @@ func TestLatestCandidate(t *testing.T) {
 		t.Fatalf("expected empty candidate, got %s", candidateID1)
 	}
 
-	cid, err := f.store.CreateCandidate(f.turnID, "c1", "H1")
+	cid, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	if err != nil {
 		t.Fatalf("CreateCandidate: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestBlocksForRound(t *testing.T) {
 		t.Fatalf("BeginAttempt: %v", err)
 	}
 
-	cid, err := f.store.CreateCandidate(f.turnID, "c1", "H1")
+	_, err = f.store.CreateCandidate(f.turnID, "c1", "H1")
 	if err != nil {
 		t.Fatalf("CreateCandidate: %v", err)
 	}
@@ -132,7 +133,6 @@ func TestBlocksForRound(t *testing.T) {
 		t.Fatalf("expected b1, got %s", blocks[0].ID)
 	}
 
-	_ = cid
 }
 
 func TestAdvanceRoundBumpsEpoch(t *testing.T) {
@@ -148,7 +148,7 @@ func TestAdvanceRoundBumpsEpoch(t *testing.T) {
 		t.Fatalf("query initial epoch: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 1: %v", err)
 	}
@@ -162,7 +162,6 @@ func TestAdvanceRoundBumpsEpoch(t *testing.T) {
 		t.Fatalf("expected epoch to bump from %d to %d, got %d", initialEpoch, initialEpoch+1, newEpoch)
 	}
 
-	_ = cid2
 }
 
 func TestBlocksPersistAcrossRounds(t *testing.T) {
@@ -195,20 +194,38 @@ func TestBlocksPersistAcrossRounds(t *testing.T) {
 		t.Fatalf("expected 1 block in round 0, got %d", len(blocksRound0))
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 1: %v", err)
 	}
 
-	blocksRound0After, err := f.store.BlocksForRound(f.turnID, 0)
+	open, err := f.store.GetBlocksByState(f.turnID, "open")
 	if err != nil {
-		t.Fatalf("BlocksForRound round 0 after advance: %v", err)
+		t.Fatalf("GetBlocksByState after advance: %v", err)
 	}
-	if len(blocksRound0After) != 1 {
-		t.Fatalf("expected block to persist in round 0, got %d", len(blocksRound0After))
+	if len(open) != 1 || open[0].ID != "b1" {
+		t.Fatalf("expected b1 to stay open after round advance, got %v", open)
+	}
+	err = f.store.Tx(func(tx *journal.Tx) error {
+		ok, err := tx.AllApproved(f.turnID, nil)
+		if err != nil {
+			return err
+		}
+		if ok {
+			t.Fatal("open block must keep the turn from being approved after advance")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("AllApproved: %v", err)
+	}
+	if err := f.store.WithdrawBlock("b1", "reviewer1", "H2"); err != nil {
+		t.Fatalf("owner withdrawal against H2: %v", err)
+	}
+	if open, _ = f.store.GetBlocksByState(f.turnID, "open"); len(open) != 0 {
+		t.Fatalf("expected no open blocks after withdrawal, got %v", open)
 	}
 
-	_ = cid2
 }
 
 func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
@@ -218,51 +235,92 @@ func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginAttempt round 0: %v", err)
 	}
-
 	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 0: %v", err)
 	}
-
-	_, err = f.store.RecordVerdict(attemptID1, "H1", "approve", "good", "valid")
-	if err != nil {
+	if _, err := f.store.RecordVerdict(attemptID1, "H1", "approve", "good", "valid"); err != nil {
 		t.Fatalf("RecordVerdict round 0 approve: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	approved, err := f.store.ApprovedParticipants(f.turnID)
 	if err != nil {
+		t.Fatalf("ApprovedParticipants round 0: %v", err)
+	}
+	if len(approved) != 1 || approved[0] != "reviewer1" {
+		t.Fatalf("expected reviewer1 approving round 0, got %v", approved)
+	}
+
+	if _, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1); err != nil {
 		t.Fatalf("SetLatestCandidate round 1: %v", err)
+	}
+
+	approved, err = f.store.ApprovedParticipants(f.turnID)
+	if err != nil {
+		t.Fatalf("ApprovedParticipants round 1: %v", err)
+	}
+	if len(approved) != 0 {
+		t.Fatalf("round 0 approval transferred to round 1: %v", approved)
+	}
+	err = f.store.Tx(func(tx *journal.Tx) error {
+		ok, err := tx.AllApproved(f.turnID, []string{"reviewer1"})
+		if err != nil {
+			return err
+		}
+		if ok {
+			t.Fatal("AllApproved true for round 1 with only a round 0 approval")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("AllApproved: %v", err)
 	}
 
 	attemptID2, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 1, nil, "")
 	if err != nil {
 		t.Fatalf("BeginAttempt round 1: %v", err)
 	}
+	if _, err := f.store.RecordVerdict(attemptID2, "H2", "approve", "good", "valid"); err != nil {
+		t.Fatalf("RecordVerdict round 1 approve: %v", err)
+	}
+	err = f.store.Tx(func(tx *journal.Tx) error {
+		ok, err := tx.AllApproved(f.turnID, []string{"reviewer1"})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatal("AllApproved false after a round 1 approval")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("AllApproved: %v", err)
+	}
+}
 
-	var approveCount int
-	if err := f.db.Conn().QueryRow(`
-		SELECT COUNT(*) FROM verdicts
-		WHERE candidate_hash = ? AND parsed_verdict = 'approve'
-	`, "H1").Scan(&approveCount); err != nil {
-		t.Fatalf("count verdicts for H1: %v", err)
+func TestLatestCandidateFollowsTurnPointer(t *testing.T) {
+	f := newRoundFixture(t)
+
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate: %v", err)
 	}
-	if approveCount != 1 {
-		t.Fatalf("expected 1 approval verdict for H1 (round 0), got %d", approveCount)
+	// A row that exists without the pointer moving to it is not current.
+	err = f.store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.CreateCandidateWithRound(f.turnID, "c2", "H2", 1, cid1)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateWithRound: %v", err)
 	}
 
-	var approveH2Count int
-	if err := f.db.Conn().QueryRow(`
-		SELECT COUNT(*) FROM verdicts
-		WHERE candidate_hash = ? AND parsed_verdict = 'approve'
-	`, "H2").Scan(&approveH2Count); err != nil {
-		t.Fatalf("count verdicts for H2: %v", err)
+	id, round, err := f.store.LatestCandidate(f.turnID)
+	if err != nil {
+		t.Fatalf("LatestCandidate: %v", err)
 	}
-	if approveH2Count != 0 {
-		t.Fatalf("expected 0 approval verdicts for H2 (new round), got %d", approveH2Count)
+	if id != cid1 || round != 0 {
+		t.Fatalf("expected pointed candidate %s round 0, got %s round %d", cid1, id, round)
 	}
-
-	_ = cid2
-	_ = attemptID2
 }
 
 func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
@@ -287,7 +345,7 @@ func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
 		t.Fatalf("OpenBlock: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 1: %v", err)
 	}
@@ -297,7 +355,7 @@ func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
 		t.Fatal("expected error when wrong reviewer withdraws block")
 	}
 
-	if !contains(err.Error(), "only the reviewer who opened the block") {
+	if !strings.Contains(err.Error(), "only the reviewer who opened the block") {
 		t.Fatalf("expected ownership error, got: %v", err)
 	}
 
@@ -306,7 +364,6 @@ func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
 		t.Fatalf("expected withdrawal to succeed for correct reviewer: %v", err)
 	}
 
-	_ = cid2
 }
 
 func TestWithdrawBlockRejectsStaleHash(t *testing.T) {
@@ -317,7 +374,7 @@ func TestWithdrawBlockRejectsStaleHash(t *testing.T) {
 		t.Fatalf("BeginAttempt: %v", err)
 	}
 
-	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	_, err = f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 0: %v", err)
 	}
@@ -336,11 +393,10 @@ func TestWithdrawBlockRejectsStaleHash(t *testing.T) {
 		t.Fatal("expected error when withdrawing against same hash as opened")
 	}
 
-	if !contains(err.Error(), "cannot withdraw block against the same candidate hash") {
+	if !strings.Contains(err.Error(), "cannot withdraw block against the same candidate hash") {
 		t.Fatalf("expected stale hash error, got: %v", err)
 	}
 
-	_ = cid1
 }
 
 func TestLateResultsAreQuarantinedAfterRoundAdvance(t *testing.T) {
@@ -356,7 +412,7 @@ func TestLateResultsAreQuarantinedAfterRoundAdvance(t *testing.T) {
 		t.Fatalf("SetLatestCandidate round 0: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 1 (advances epoch): %v", err)
 	}
@@ -395,14 +451,4 @@ func TestLateResultsAreQuarantinedAfterRoundAdvance(t *testing.T) {
 		t.Fatal("expected attempt to be quarantined")
 	}
 
-	_ = cid2
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

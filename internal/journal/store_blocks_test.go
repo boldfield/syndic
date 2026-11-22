@@ -58,7 +58,7 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.openBlock(t, "b1", "H1")
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,6 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock H2: %v", err)
 	}
-	_ = cid2
 	if ids := f.openIDs(t); len(ids) != 0 {
 		t.Fatalf("expected no open blocks, got %v", ids)
 	}

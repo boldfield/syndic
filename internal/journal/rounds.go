@@ -37,9 +37,7 @@ func (tx *Tx) GetRoundInfo(turnID string) (*RoundInfo, error) {
 	}
 
 	info := &RoundInfo{
-		CurrentRound:      0,
-		MaxRoundsInEffect: 0,
-		MaxRoundsCeiling:  5,
+		CurrentRound: 0,
 	}
 
 	if currentCandidateID.Valid {
@@ -61,9 +59,6 @@ func (tx *Tx) GetRoundInfo(turnID string) (*RoundInfo, error) {
 
 	if maxRoundsCeiling.Valid {
 		info.MaxRoundsCeiling = int(maxRoundsCeiling.Int64)
-	} else {
-		// Default to configured value if not set on turn
-		info.MaxRoundsCeiling = 5
 	}
 
 	return info, nil
@@ -178,23 +173,89 @@ func (s *Store) LatestCandidate(turnID string) (candidateID string, round int, e
 	return candidateID, round, err
 }
 
-// LatestCandidate retrieves the latest candidate for a turn.
+// LatestCandidate retrieves the turn's current candidate through the
+// authoritative turns.candidate_id pointer. Candidate rows that exist without
+// the pointer moving to them are not current. Returns "" when none is set.
 func (tx *Tx) LatestCandidate(turnID string) (string, int, error) {
-	var candidateID sql.NullString
+	var candidateID string
 	var round int
+	err := tx.tx.QueryRow(`
+		SELECT c.id, c.round FROM turns t
+		JOIN candidates c ON c.id = t.candidate_id
+		WHERE t.id = ?
+	`, turnID).Scan(&candidateID, &round)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("query latest candidate: %w", err)
+	}
+	return candidateID, round, nil
+}
 
-	if err := tx.tx.QueryRow(`
-		SELECT id, round FROM candidates WHERE turn_id = ? ORDER BY round DESC LIMIT 1
-	`, turnID).Scan(&candidateID, &round); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", 0, fmt.Errorf("query latest candidate: %w", err)
+// ApprovedParticipants returns the participants holding a valid approve verdict
+// on the turn's current candidate hash. Approvals recorded against an earlier
+// round's candidate never count, so they do not transfer across a round advance.
+func (s *Store) ApprovedParticipants(turnID string) ([]string, error) {
+	var ids []string
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		ids, txErr = tx.ApprovedParticipants(turnID)
+		return txErr
+	})
+	return ids, err
+}
+
+// ApprovedParticipants returns the participants holding a valid approve verdict
+// on the turn's current candidate hash.
+func (tx *Tx) ApprovedParticipants(turnID string) ([]string, error) {
+	rows, err := tx.tx.Query(`
+		SELECT DISTINCT a.participant
+		FROM turns t
+		JOIN candidates c ON c.id = t.candidate_id
+		JOIN attempts a ON a.turn_id = t.id
+		JOIN verdicts v ON v.attempt_id = a.id AND v.candidate_hash = c.content_hash
+		WHERE t.id = ? AND v.parsed_verdict = 'approve' AND v.validation_status = 'valid'
+		ORDER BY a.participant
+	`, turnID)
+	if err != nil {
+		return nil, fmt.Errorf("query approvals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan approval: %w", err)
 		}
-		return "", 0, nil
+		ids = append(ids, id)
 	}
-
-	if !candidateID.Valid {
-		return "", 0, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate approvals: %w", err)
 	}
+	return ids, nil
+}
 
-	return candidateID.String, round, nil
+// AllApproved reports whether every required participant approves the current
+// candidate and no open block remains on the turn.
+func (tx *Tx) AllApproved(turnID string, required []string) (bool, error) {
+	approved, err := tx.ApprovedParticipants(turnID)
+	if err != nil {
+		return false, err
+	}
+	have := make(map[string]bool, len(approved))
+	for _, id := range approved {
+		have[id] = true
+	}
+	for _, id := range required {
+		if !have[id] {
+			return false, nil
+		}
+	}
+	open, err := tx.GetBlocksByState(turnID, "open")
+	if err != nil {
+		return false, err
+	}
+	return len(open) == 0, nil
 }

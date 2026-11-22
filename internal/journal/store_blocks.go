@@ -2,7 +2,6 @@ package journal
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 )
 
@@ -18,6 +17,38 @@ type BlockState struct {
 	ReviewerBlockID      *string
 }
 
+// blockStateColumns is the column list scanned by scanBlockStates.
+const blockStateColumns = `b.id, b.state, b.candidate_hash, b.withdrawn_against_hash, b.severity, b.evidence, b.remedy, b.reviewer_block_id`
+
+// queryBlockStates runs a query selecting blockStateColumns and scans every row.
+func (tx *Tx) queryBlockStates(what, query string, args ...any) ([]BlockState, error) {
+	rows, err := tx.tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var blocks []BlockState
+	for rows.Next() {
+		var b BlockState
+		var withdrawnAgainstHash, reviewerBlockID sql.NullString
+		if err := rows.Scan(&b.ID, &b.State, &b.CandidateHash, &withdrawnAgainstHash, &b.Severity, &b.Evidence, &b.Remedy, &reviewerBlockID); err != nil {
+			return nil, fmt.Errorf("scan block: %w", err)
+		}
+		if withdrawnAgainstHash.Valid {
+			b.WithdrawnAgainstHash = &withdrawnAgainstHash.String
+		}
+		if reviewerBlockID.Valid {
+			b.ReviewerBlockID = &reviewerBlockID.String
+		}
+		blocks = append(blocks, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+	return blocks, nil
+}
+
 // GetBlockState retrieves the state of a specific block.
 func (s *Store) GetBlockState(blockID string) (*BlockState, error) {
 	var state *BlockState
@@ -31,29 +62,21 @@ func (s *Store) GetBlockState(blockID string) (*BlockState, error) {
 
 // GetBlockState retrieves the state of a specific block.
 func (tx *Tx) GetBlockState(blockID string) (*BlockState, error) {
-	var state BlockState
-	var withdrawnAgainstHash sql.NullString
-	var reviewerBlockID sql.NullString
-
-	if err := tx.tx.QueryRow(`
-		SELECT id, state, candidate_hash, withdrawn_against_hash, severity, evidence, remedy, reviewer_block_id
-		FROM blocks WHERE id = ?
-	`, blockID).Scan(&state.ID, &state.State, &state.CandidateHash, &withdrawnAgainstHash, &state.Severity, &state.Evidence, &state.Remedy, &reviewerBlockID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("block not found")
-		}
-		return nil, fmt.Errorf("query block state: %w", err)
+	blocks, err := tx.queryBlockStates("block state", `SELECT `+blockStateColumns+` FROM blocks b WHERE b.id = ?`, blockID)
+	if err != nil {
+		return nil, err
 	}
-
-	if withdrawnAgainstHash.Valid {
-		state.WithdrawnAgainstHash = &withdrawnAgainstHash.String
+	if len(blocks) == 0 {
+		return nil, fmt.Errorf("block not found")
 	}
-	if reviewerBlockID.Valid {
-		state.ReviewerBlockID = &reviewerBlockID.String
-	}
-
-	return &state, nil
+	return &blocks[0], nil
 }
+
+const turnBlocksFrom = `
+	FROM blocks b
+	JOIN verdicts v ON b.verdict_id = v.id
+	JOIN attempts a ON v.attempt_id = a.id
+`
 
 // GetBlocksByState retrieves all blocks for a turn in a specific state.
 func (s *Store) GetBlocksByState(turnID, state string) ([]BlockState, error) {
@@ -68,44 +91,8 @@ func (s *Store) GetBlocksByState(turnID, state string) ([]BlockState, error) {
 
 // GetBlocksByState retrieves all blocks for a turn in a specific state.
 func (tx *Tx) GetBlocksByState(turnID, state string) ([]BlockState, error) {
-	rows, err := tx.tx.Query(`
-		SELECT b.id, b.state, b.candidate_hash, b.withdrawn_against_hash, b.severity, b.evidence, b.remedy, b.reviewer_block_id
-		FROM blocks b
-		JOIN verdicts v ON b.verdict_id = v.id
-		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ? AND b.state = ?
-		ORDER BY b.id
-	`, turnID, state)
-	if err != nil {
-		return nil, fmt.Errorf("query blocks: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var blocks []BlockState
-	for rows.Next() {
-		var b BlockState
-		var withdrawnAgainstHash sql.NullString
-		var reviewerBlockID sql.NullString
-
-		if err := rows.Scan(&b.ID, &b.State, &b.CandidateHash, &withdrawnAgainstHash, &b.Severity, &b.Evidence, &b.Remedy, &reviewerBlockID); err != nil {
-			return nil, fmt.Errorf("scan block: %w", err)
-		}
-
-		if withdrawnAgainstHash.Valid {
-			b.WithdrawnAgainstHash = &withdrawnAgainstHash.String
-		}
-		if reviewerBlockID.Valid {
-			b.ReviewerBlockID = &reviewerBlockID.String
-		}
-
-		blocks = append(blocks, b)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	return blocks, nil
+	return tx.queryBlockStates("blocks", `SELECT `+blockStateColumns+turnBlocksFrom+`
+		WHERE a.turn_id = ? AND b.state = ? ORDER BY b.id`, turnID, state)
 }
 
 // AllBlocksForTurn retrieves all blocks for a turn, regardless of state.
@@ -121,44 +108,8 @@ func (s *Store) AllBlocksForTurn(turnID string) ([]BlockState, error) {
 
 // AllBlocksForTurn retrieves all blocks for a turn, regardless of state.
 func (tx *Tx) AllBlocksForTurn(turnID string) ([]BlockState, error) {
-	rows, err := tx.tx.Query(`
-		SELECT b.id, b.state, b.candidate_hash, b.withdrawn_against_hash, b.severity, b.evidence, b.remedy, b.reviewer_block_id
-		FROM blocks b
-		JOIN verdicts v ON b.verdict_id = v.id
-		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ?
-		ORDER BY b.id
-	`, turnID)
-	if err != nil {
-		return nil, fmt.Errorf("query all blocks: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var blocks []BlockState
-	for rows.Next() {
-		var b BlockState
-		var withdrawnAgainstHash sql.NullString
-		var reviewerBlockID sql.NullString
-
-		if err := rows.Scan(&b.ID, &b.State, &b.CandidateHash, &withdrawnAgainstHash, &b.Severity, &b.Evidence, &b.Remedy, &reviewerBlockID); err != nil {
-			return nil, fmt.Errorf("scan block: %w", err)
-		}
-
-		if withdrawnAgainstHash.Valid {
-			b.WithdrawnAgainstHash = &withdrawnAgainstHash.String
-		}
-		if reviewerBlockID.Valid {
-			b.ReviewerBlockID = &reviewerBlockID.String
-		}
-
-		blocks = append(blocks, b)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	return blocks, nil
+	return tx.queryBlockStates("all blocks", `SELECT `+blockStateColumns+turnBlocksFrom+`
+		WHERE a.turn_id = ? ORDER BY b.id`, turnID)
 }
 
 // WithdrawnBlocksAgainstHash retrieves all blocks withdrawn against a specific hash.
@@ -174,44 +125,8 @@ func (s *Store) WithdrawnBlocksAgainstHash(turnID, hash string) ([]BlockState, e
 
 // WithdrawnBlocksAgainstHash retrieves all blocks withdrawn against a specific hash.
 func (tx *Tx) WithdrawnBlocksAgainstHash(turnID, hash string) ([]BlockState, error) {
-	rows, err := tx.tx.Query(`
-		SELECT b.id, b.state, b.candidate_hash, b.withdrawn_against_hash, b.severity, b.evidence, b.remedy, b.reviewer_block_id
-		FROM blocks b
-		JOIN verdicts v ON b.verdict_id = v.id
-		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ? AND b.state = 'withdrawn' AND b.withdrawn_against_hash = ?
-		ORDER BY b.id
-	`, turnID, hash)
-	if err != nil {
-		return nil, fmt.Errorf("query withdrawn blocks: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var blocks []BlockState
-	for rows.Next() {
-		var b BlockState
-		var withdrawnAgainstHash sql.NullString
-		var reviewerBlockID sql.NullString
-
-		if err := rows.Scan(&b.ID, &b.State, &b.CandidateHash, &withdrawnAgainstHash, &b.Severity, &b.Evidence, &b.Remedy, &reviewerBlockID); err != nil {
-			return nil, fmt.Errorf("scan block: %w", err)
-		}
-
-		if withdrawnAgainstHash.Valid {
-			b.WithdrawnAgainstHash = &withdrawnAgainstHash.String
-		}
-		if reviewerBlockID.Valid {
-			b.ReviewerBlockID = &reviewerBlockID.String
-		}
-
-		blocks = append(blocks, b)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	return blocks, nil
+	return tx.queryBlockStates("withdrawn blocks", `SELECT `+blockStateColumns+turnBlocksFrom+`
+		WHERE a.turn_id = ? AND b.state = 'withdrawn' AND b.withdrawn_against_hash = ? ORDER BY b.id`, turnID, hash)
 }
 
 // BlocksForCandidate retrieves all open blocks for a specific candidate.
@@ -227,42 +142,6 @@ func (s *Store) BlocksForCandidate(turnID, candidateHash string) ([]BlockState, 
 
 // BlocksForCandidate retrieves all open blocks for a specific candidate.
 func (tx *Tx) BlocksForCandidate(turnID, candidateHash string) ([]BlockState, error) {
-	rows, err := tx.tx.Query(`
-		SELECT b.id, b.state, b.candidate_hash, b.withdrawn_against_hash, b.severity, b.evidence, b.remedy, b.reviewer_block_id
-		FROM blocks b
-		JOIN verdicts v ON b.verdict_id = v.id
-		JOIN attempts a ON v.attempt_id = a.id
-		WHERE a.turn_id = ? AND b.candidate_hash = ? AND b.state = 'open'
-		ORDER BY b.id
-	`, turnID, candidateHash)
-	if err != nil {
-		return nil, fmt.Errorf("query blocks for candidate: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var blocks []BlockState
-	for rows.Next() {
-		var b BlockState
-		var withdrawnAgainstHash sql.NullString
-		var reviewerBlockID sql.NullString
-
-		if err := rows.Scan(&b.ID, &b.State, &b.CandidateHash, &withdrawnAgainstHash, &b.Severity, &b.Evidence, &b.Remedy, &reviewerBlockID); err != nil {
-			return nil, fmt.Errorf("scan block: %w", err)
-		}
-
-		if withdrawnAgainstHash.Valid {
-			b.WithdrawnAgainstHash = &withdrawnAgainstHash.String
-		}
-		if reviewerBlockID.Valid {
-			b.ReviewerBlockID = &reviewerBlockID.String
-		}
-
-		blocks = append(blocks, b)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rows: %w", err)
-	}
-
-	return blocks, nil
+	return tx.queryBlockStates("blocks for candidate", `SELECT `+blockStateColumns+turnBlocksFrom+`
+		WHERE a.turn_id = ? AND b.candidate_hash = ? AND b.state = 'open' ORDER BY b.id`, turnID, candidateHash)
 }
