@@ -57,6 +57,7 @@ type Calibration struct {
 	BytesPerToken        float64
 	ObservedPromptTokens int
 	BaselinePromptTokens int
+	BaselineBytes        int
 }
 
 // ModelIdentity represents the identity of a model as observed from the server.

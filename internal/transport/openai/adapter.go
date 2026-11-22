@@ -44,6 +44,10 @@ const AdapterVersion = "openai-v1"
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
+// calibrationBaselineNonEmpty is the fallback baseline content, sent only when
+// the endpoint refuses an empty message.
+const calibrationBaselineNonEmpty = "."
+
 // calibrationText is a fixed 4096-byte text used for token calibration.
 // It contains a mix of English prose, source code, and multi-byte UTF-8 characters.
 const calibrationText = `The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.
@@ -328,7 +332,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, stepError(err, rawSteps, "calibration", "calibration_baseline")
+			return record, stepError(err, rawSteps, "calibration", "calibration_baseline_nonempty", "calibration_baseline")
 		}
 	}
 
@@ -1324,6 +1328,20 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		return baselineErr
 	}
 
+	// Some endpoints refuse empty message content. Only an HTTP response with a
+	// non-2xx status triggers the one-byte fallback baseline.
+	baselineBytes := 0
+	if baselineErr == nil && baselineStatusCode != 0 && (baselineStatusCode < 200 || baselineStatusCode >= 300) {
+		fbStatus, fbHeaders, fbBody, fbReqBody, fbErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationBaselineNonEmpty, maxTokensField, opts, secrets)
+		recordRawStepWithRequest(rawSteps, "calibration_baseline_nonempty", "/chat/completions", fbStatus, fbHeaders, fbBody, fbReqBody)
+		if fbErr != nil && (errors.Is(fbErr, transport.ErrNotSent) || errors.Is(fbErr, transport.ErrUncertain)) {
+			record.Calibration.Available = false
+			return fbErr
+		}
+		baselineStatusCode, baselineBody, baselineErr = fbStatus, fbBody, fbErr
+		baselineBytes = len(calibrationBaselineNonEmpty)
+	}
+
 	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, opts, secrets)
 	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
 
@@ -1377,7 +1395,8 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	record.Calibration.Available = true
 	record.Calibration.BaselinePromptTokens = baselineTokens
 	record.Calibration.ObservedPromptTokens = calibrationTokens
-	record.Calibration.BytesPerToken = float64(len([]byte(calibrationText))) / float64(calibrationTokens-baselineTokens)
+	record.Calibration.BaselineBytes = baselineBytes
+	record.Calibration.BytesPerToken = float64(len([]byte(calibrationText))-baselineBytes) / float64(calibrationTokens-baselineTokens)
 
 	return nil
 }
@@ -1410,8 +1429,11 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 	}
 
 	stepName := "calibration"
-	if messageContent == "" {
+	switch messageContent {
+	case "":
 		stepName = "calibration_baseline"
+	case calibrationBaselineNonEmpty:
+		stepName = "calibration_baseline_nonempty"
 	}
 	if opts.BeforeSend != nil {
 		if err := opts.BeforeSend(&transport.ProbeRequest{
