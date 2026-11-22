@@ -47,7 +47,7 @@ type Engine interface {
 	Release(wire.ReleaseRequest) (wire.ReleaseReply, error)
 	Stopping() <-chan struct{}
 	Conversations(workspace *string, cursor string, limit int) ([]wire.ConversationSummary, string, error)
-	Conversation(idPrefix string) ([]wire.ConversationTurnSummary, error)
+	Conversation(idPrefix string) (string, []wire.ConversationTurnSummary, error)
 }
 
 // Options configures a Server.
@@ -807,8 +807,17 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		if !c.decode(frame, &req, "id") {
 			return
 		}
-		turns, err := c.server.engine.Conversation(req.ID)
-		reply := &wire.ConversationReply{ID: req.ID, Turns: turns}
+		convID, turns, err := c.server.engine.Conversation(req.ID)
+		reply := &wire.ConversationReply{ID: convID, Turns: turns}
+		if err == nil && len(turns) > 0 {
+			// Check if reply would exceed frame size limit
+			if encoded, encErr := json.Marshal(reply); encErr == nil {
+				if len(encoded) > wire.MaxFrameBytes {
+					c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
+					return
+				}
+			}
+		}
 		c.respond(frame.ID, "conversation", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})

@@ -648,12 +648,8 @@ func (e *Engine) Hello() wire.HelloReply {
 }
 
 // Conversations returns a page of conversations filtered by workspace, ordered by latest activity first.
+// Works during probing and after the engine has started.
 func (e *Engine) Conversations(workspace *string, cursor string, limit int) ([]wire.ConversationSummary, string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.started {
-		return nil, "", errors.New("engine: not started")
-	}
 	conversations, nextCursor, err := e.store.ListConversations(workspace, cursor, limit)
 	if err != nil {
 		return nil, "", fmt.Errorf("engine: list conversations: %w", err)
@@ -677,26 +673,22 @@ func (e *Engine) Conversations(workspace *string, cursor string, limit int) ([]w
 	return summaries, nextCursor, nil
 }
 
-// Conversation returns the turns in a conversation by prefix-matched ID.
-func (e *Engine) Conversation(idPrefix string) ([]wire.ConversationTurnSummary, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.started {
-		return nil, errors.New("engine: not started")
-	}
+// Conversation returns the turns in a conversation by prefix-matched ID, along with the resolved ID.
+// Works during probing and after the engine has started.
+func (e *Engine) Conversation(idPrefix string) (string, []wire.ConversationTurnSummary, error) {
 	conv, err := e.store.GetConversation(idPrefix)
 	if err != nil {
 		if errors.Is(err, journal.ErrAmbiguousConversationID) {
-			return nil, &wire.Error{Code: wire.ErrorCodeAmbiguous}
+			return "", nil, &wire.Error{Code: wire.ErrorCodeAmbiguous}
 		}
 		if errors.Is(err, journal.ErrNoSuchContent) {
-			return nil, &wire.Error{Code: wire.ErrorCodeNotFound}
+			return "", nil, &wire.Error{Code: wire.ErrorCodeNotFound}
 		}
-		return nil, fmt.Errorf("engine: get conversation: %w", err)
+		return "", nil, fmt.Errorf("engine: get conversation: %w", err)
 	}
 	turns, err := e.store.GetConversationTurns(conv.ID)
 	if err != nil {
-		return nil, fmt.Errorf("engine: get conversation turns: %w", err)
+		return "", nil, fmt.Errorf("engine: get conversation turns: %w", err)
 	}
 	summaries := make([]wire.ConversationTurnSummary, len(turns))
 	for i, t := range turns {
@@ -709,7 +701,7 @@ func (e *Engine) Conversation(idPrefix string) ([]wire.ConversationTurnSummary, 
 			State: state,
 		}
 	}
-	return summaries, nil
+	return conv.ID, summaries, nil
 }
 
 // Override marks an incomplete turn that has a candidate as overridden and
