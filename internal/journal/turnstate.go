@@ -238,11 +238,20 @@ func (tx *Tx) SetLatestCandidate(turnID, content, hash string, round int, supers
 		return "", fmt.Errorf("create candidate: %w", err)
 	}
 
-	// Atomically update the turn's candidate_id to point to the new candidate
-	if _, err := tx.tx.Exec(`
-		UPDATE turns SET candidate_id = ? WHERE id = ?
-	`, candidateID, turnID); err != nil {
-		return "", fmt.Errorf("update turn candidate_id: %w", err)
+	// Atomically update the turn's candidate_id to point to the new candidate,
+	// and bump the epoch when round > 0 (to atomically reject late previous-round results)
+	if round > 0 {
+		if _, err := tx.tx.Exec(`
+			UPDATE turns SET candidate_id = ?, epoch = epoch + 1 WHERE id = ?
+		`, candidateID, turnID); err != nil {
+			return "", fmt.Errorf("update turn candidate_id and epoch: %w", err)
+		}
+	} else {
+		if _, err := tx.tx.Exec(`
+			UPDATE turns SET candidate_id = ? WHERE id = ?
+		`, candidateID, turnID); err != nil {
+			return "", fmt.Errorf("update turn candidate_id: %w", err)
+		}
 	}
 
 	return candidateID, nil
