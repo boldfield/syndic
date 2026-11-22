@@ -51,6 +51,8 @@ type ParticipantInfo struct {
 	ServerStatus             string
 	RetryCommand             string
 	ProbeAtStart             bool
+	AcceptUnknownTruncation  bool
+	InDefaultPreset          bool
 }
 
 // TurnInfo holds information about the current turn.
@@ -629,6 +631,8 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 			ServerStatus:             serverStatus,
 			RetryCommand:             retryCommand,
 			ProbeAtStart:             p.ProbeAtStart,
+			AcceptUnknownTruncation:  p.AcceptUnknownTruncation,
+			InDefaultPreset:          p.InDefaultPreset,
 		}
 	}
 	s.Participants = participants

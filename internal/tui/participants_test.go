@@ -700,3 +700,161 @@ func TestParticipantDetailShowsExternalSpendingControl(t *testing.T) {
 		t.Fatalf("flat detail should not show spending control as 'metered, external spending control':\n%s", line3)
 	}
 }
+
+func TestUnprobedBannerInDefaultPresetOnly(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "unprobed", InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "unprobed", InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["spare"] = ParticipantInfo{
+		ID: "spare", State: "unprobed", InDefaultPreset: false, ReportedModel: "other", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["probed-spare"] = ParticipantInfo{
+		ID: "probed-spare", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: false, ReportedModel: "third", EligibleRoles: []string{"reviewer"},
+	}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
+	s.CurrentTurn = "t1"
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "author", now)
+
+	if !strings.Contains(out, "participants: 2 unprobed") {
+		t.Fatalf("banner should show 2 unprobed (author and reviewer in preset), got:\n%s", out)
+	}
+}
+
+func TestUnprobedBannerHiddenWhenNone(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
+	s.CurrentTurn = "t1"
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "author", now)
+
+	if strings.Contains(out, "participants:") {
+		t.Fatalf("banner should not show when no participants are unprobed, got:\n%s", out)
+	}
+}
+
+func TestUnknownTruncationAcceptanceShown(t *testing.T) {
+	s := NewState()
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["accepted"] = ParticipantInfo{
+		ID: "accepted", State: "idle", ProbeObservedAt: &observed,
+		EligibleRequiredReviewer: "unknown", EligibleRoles: []string{"reviewer"},
+		AcceptUnknownTruncation: true,
+	}
+	s.Participants["not-accepted"] = ParticipantInfo{
+		ID: "not-accepted", State: "idle", ProbeObservedAt: &observed,
+		EligibleRequiredReviewer: "unknown", EligibleRoles: []string{"reviewer"},
+		AcceptUnknownTruncation: false,
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	detail1 := participantDetail(s, s.Participants["accepted"], now)
+	line1 := strings.Join(detail1, "\n")
+	if !strings.Contains(line1, "truncation: unknown (accepted)") {
+		t.Fatalf("accepted detail should show 'truncation: unknown (accepted)', got:\n%s", line1)
+	}
+
+	detail2 := participantDetail(s, s.Participants["not-accepted"], now)
+	line2 := strings.Join(detail2, "\n")
+	if !strings.Contains(line2, "truncation: unknown") || strings.Contains(line2, "(accepted)") {
+		t.Fatalf("not-accepted detail should show 'truncation: unknown' without (accepted), got:\n%s", line2)
+	}
+}
+
+func TestProbeAtStartMarkerShown(t *testing.T) {
+	s := NewState()
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["probed-at-start"] = ParticipantInfo{
+		ID: "probed-at-start", State: "idle", ProbeObservedAt: &observed, ProbeAtStart: true,
+		EligibleRoles: []string{"author"},
+	}
+	s.Participants["not-at-start"] = ParticipantInfo{
+		ID: "not-at-start", State: "idle", ProbeObservedAt: &observed, ProbeAtStart: false,
+		EligibleRoles: []string{"author"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	detail1 := participantDetail(s, s.Participants["probed-at-start"], now)
+	line1 := strings.Join(detail1, "\n")
+	if !strings.Contains(line1, "probed at start") {
+		t.Fatalf("probed-at-start detail should contain 'probed at start', got:\n%s", line1)
+	}
+
+	detail2 := participantDetail(s, s.Participants["not-at-start"], now)
+	line2 := strings.Join(detail2, "\n")
+	if strings.Contains(line2, "probed at start") {
+		t.Fatalf("not-at-start detail should not contain 'probed at start', got:\n%s", line2)
+	}
+}
+
+func TestProbeFailureDetailsShown(t *testing.T) {
+	s := NewState()
+
+	s.Participants["failed"] = ParticipantInfo{
+		ID: "failed", State: "unprobed", Detail: "probe_failed:hold",
+		FailingStep: "over_length_test", ServerStatus: "504 Service Unavailable",
+		RetryCommand:  "syndic probe --endpoint local --model llama3",
+		EligibleRoles: []string{"reviewer"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	detail := participantDetail(s, s.Participants["failed"], now)
+	line := strings.Join(detail, "\n")
+
+	if !strings.Contains(line, "probe failed at: over_length_test") {
+		t.Fatalf("detail should show failing step, got:\n%s", line)
+	}
+	if !strings.Contains(line, "server status: 504 Service Unavailable") {
+		t.Fatalf("detail should show server status, got:\n%s", line)
+	}
+	if !strings.Contains(line, "retry: syndic probe --endpoint local --model llama3") {
+		t.Fatalf("detail should show retry command, got:\n%s", line)
+	}
+	if !strings.Contains(line, "probe observed_at: none") {
+		t.Fatalf("detail should show no probe observed time for failed probe, got:\n%s", line)
+	}
+}
+
+func TestNoControlCharactersInRendering(t *testing.T) {
+	s := NewState()
+
+	s.Participants["p1"] = ParticipantInfo{
+		ID: "p1", State: "idle", ReportedModel: "llama3",
+		RetryCommand:  "syndic probe --endpoint local --model llama3\x1b[2J",
+		ServerStatus:  "auth_error\x00status",
+		EligibleRoles: []string{"author"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	detail := participantDetail(s, s.Participants["p1"], now)
+	line := strings.Join(detail, "\n")
+
+	if strings.Contains(line, "\x1b") || strings.Contains(line, "\x00") {
+		t.Fatalf("detail should sanitize control characters, got:\n%s", line)
+	}
+	if !strings.Contains(line, "·") {
+		t.Fatalf("detail should replace control characters with middle dot, got:\n%s", line)
+	}
+}

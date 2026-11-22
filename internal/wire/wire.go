@@ -280,6 +280,8 @@ type Participant struct {
 	ServerStatus             *string  `json:"server_status,omitempty"`
 	RetryCommand             *string  `json:"retry_command,omitempty"`
 	ProbeAtStart             bool     `json:"probe_at_start,omitempty"`
+	AcceptUnknownTruncation  bool     `json:"accept_unknown_truncation,omitempty"`
+	InDefaultPreset          bool     `json:"in_default_preset,omitempty"`
 }
 
 type Pool struct {
