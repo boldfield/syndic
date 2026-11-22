@@ -15,7 +15,7 @@ import (
 func (e *Engine) Status() (wire.StatusReply, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.started {
+	if !e.started && e.runState != "probing" {
 		return wire.StatusReply{}, errors.New("engine: not started")
 	}
 

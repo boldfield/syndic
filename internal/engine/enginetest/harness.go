@@ -273,6 +273,9 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		RosterPath:    rosterPath,
 		EngineVersion: EngineVersion,
 		Clock:         crashClock{inner: hn.Clock, dead: &hn.dead},
+		// The harness seeds the records it wants; start-time probing would
+		// replace the states SkipProbe sets up.
+		NoStartupProbes: true,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {

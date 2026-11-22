@@ -905,3 +905,26 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster)
 		}
 	}
 }
+
+// TestProbeEvidenceDirDefaults checks that start-time probes write their raw
+// record and export where `syndic probe` does unless told otherwise.
+func TestProbeEvidenceDirDefaults(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/xdg/data")
+	if got, want := resolveProbeRawDir(""), filepath.Join("/xdg/data", "syndic", "evidence-raw"); got != want {
+		t.Fatalf("raw dir default = %q, want %q", got, want)
+	}
+	if got := resolveProbeExportDir(""); got != "./docs/evidence" {
+		t.Fatalf("export dir default = %q, want ./docs/evidence", got)
+	}
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "/home/op")
+	if got, want := resolveProbeRawDir(""), filepath.Join("/home/op", ".local", "share", "syndic", "evidence-raw"); got != want {
+		t.Fatalf("raw dir without XDG_DATA_HOME = %q, want %q", got, want)
+	}
+	if got := resolveProbeRawDir("/r"); got != "/r" {
+		t.Fatalf("explicit raw dir = %q", got)
+	}
+	if got := resolveProbeExportDir("/e"); got != "/e" {
+		t.Fatalf("explicit export dir = %q", got)
+	}
+}

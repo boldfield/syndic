@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/boldfield/syndic/internal/config"
 	"os"
 	"testing"
 	"time"
@@ -53,4 +54,16 @@ func EnableDelivery() (restore func()) {
 	old := deliveryOff
 	deliveryOff = false
 	return func() { deliveryOff = old }
+}
+
+// RefereeIdentity is the endpoint and model of a referee, for tests of
+// start-time probing of referee identities.
+type RefereeIdentity = refereeIdentity
+
+// SetRefereeIdentities replaces the roster's referee identities for engines
+// started afterwards and returns a function that restores them.
+func SetRefereeIdentities(f func(*config.Roster) []RefereeIdentity) (restore func()) {
+	old := refereeIdentities
+	refereeIdentities = f
+	return func() { refereeIdentities = old }
 }

@@ -136,10 +136,18 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transp
 			return transport.CapabilityRecord{}, fmt.Errorf("%w: fake probe failure after send at %s", transport.ErrUncertain, step)
 		}
 	}
-	if a.capability.ReportedModel == "" || a.capability.MaxTokensField == "" {
-		return a.capability, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+	// Like the real adapter, the record names the endpoint and model probed.
+	rec := a.capability
+	if rec.Endpoint == "" {
+		rec.Endpoint = endpoint
 	}
-	return a.capability, nil
+	if rec.Model == "" {
+		rec.Model = model
+	}
+	if rec.ReportedModel == "" || rec.MaxTokensField == "" {
+		return rec, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+	}
+	return rec, nil
 }
 
 // Complete consumes one step from the script and returns the result.

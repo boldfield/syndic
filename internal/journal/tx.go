@@ -359,6 +359,7 @@ func (tx *Tx) AppendEvent(kind string, payload json.RawMessage) error {
 // GetAttempt retrieves an attempt by ID.
 func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 	var row AttemptRow
+	var turnID sql.NullString
 	var dispatchedAtStr string
 	var deadlineStr sql.NullString
 	var status sql.NullString
@@ -380,7 +381,7 @@ func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 		SELECT id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, status, cancellation_state, quarantined, raw_output, scrub_count, observed_identity, native_finish, transport_status, repair_of, gate_error, commentary, delimiter, max_output_tokens, estimated_prompt_tokens, usage_prompt, usage_completion, retry_count
 		FROM attempts WHERE id = ?
 	`, attemptID).Scan(
-		&row.ID, &row.TurnID, &row.Participant, &row.Phase, &row.Epoch, &dispatchedAtStr, &deadlineStr, &row.State,
+		&row.ID, &turnID, &row.Participant, &row.Phase, &row.Epoch, &dispatchedAtStr, &deadlineStr, &row.State,
 		&status, &row.CancellationState, &row.Quarantined, &row.RawOutput, &scrubCount, &observedIdentity, &nativeFinish, &transportStatus, &repairOf,
 		&gateError, &commentary, &delimiter, &maxOutputTokens, &estimatedPromptTokens, &usagePrompt, &usageCompletion, &retryCount,
 	); err != nil {
@@ -395,6 +396,7 @@ func (tx *Tx) GetAttempt(attemptID string) (*AttemptRow, error) {
 		return nil, fmt.Errorf("parse dispatched_at: %w", err)
 	}
 	row.DispatchedAt = t
+	row.TurnID = turnID.String
 
 	if deadlineStr.Valid {
 		t, err := parseTime(deadlineStr.String)

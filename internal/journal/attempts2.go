@@ -473,3 +473,114 @@ func (s *Store) AttemptTexts(turnID string) (map[string]string, error) {
 	})
 	return out, err
 }
+
+// ProbeAttemptParams contains parameters for BeginProbeAttempt.
+type ProbeAttemptParams struct {
+	RunID string
+	// Participant is the roster participant the probe is for; empty for a
+	// referee identity that no participant names.
+	Participant string
+	Endpoint    string
+	Model       string
+	Pool        string
+	// Group is the pool's {endpoint, model} members, which an uncertain-capacity
+	// hold on this request would carry.
+	Group []GroupMember
+	// Step is the probe step the request belongs to.
+	Step string
+}
+
+// ProbeAttempt is what a probe attempt row records about the request it
+// stands for.
+type ProbeAttempt struct {
+	AttemptID   string
+	RunID       string
+	Participant string
+	Endpoint    string
+	Model       string
+	Pool        string
+	Group       []GroupMember
+	Step        string
+}
+
+// BeginProbeAttempt inserts a pending attempt of phase "probe" for one probe
+// request. It belongs to the run rather than to a turn.
+func (tx *Tx) BeginProbeAttempt(p ProbeAttemptParams) (string, error) {
+	if p.RunID == "" || p.Endpoint == "" || p.Model == "" {
+		return "", fmt.Errorf("probe attempt needs a run, an endpoint and a model")
+	}
+	attemptID, err := generateID()
+	if err != nil {
+		return "", err
+	}
+	sorted := make([]GroupMember, len(p.Group))
+	copy(sorted, p.Group)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].EndpointName != sorted[j].EndpointName {
+			return sorted[i].EndpointName < sorted[j].EndpointName
+		}
+		return sorted[i].Model < sorted[j].Model
+	})
+	groupJSON, err := json.Marshal(sorted)
+	if err != nil {
+		return "", fmt.Errorf("marshal group: %w", err)
+	}
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", err
+	}
+	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.tx.Exec(`
+		INSERT INTO attempts (id, participant, phase, epoch, dispatched_at, state, journal_seq,
+			probe_run_id, probe_endpoint, probe_model, probe_pool, probe_group, probe_step)
+		VALUES (?, ?, 'probe', 1, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+	`, attemptID, p.Participant, dispatchedAt, journalSeq,
+		p.RunID, p.Endpoint, p.Model, p.Pool, string(groupJSON), p.Step); err != nil {
+		return "", fmt.Errorf("insert probe attempt: %w", err)
+	}
+	if _, err := tx.tx.Exec(`
+		INSERT INTO attempt_dispatches (attempt_id, dispatch_index, dispatched_at)
+		VALUES (?, 0, ?)
+	`, attemptID, dispatchedAt); err != nil {
+		return "", fmt.Errorf("insert attempt dispatch: %w", err)
+	}
+	return attemptID, nil
+}
+
+// GetProbeAttempt returns what a probe attempt row records. found is false for
+// an attempt that is not a probe attempt.
+func (tx *Tx) GetProbeAttempt(attemptID string) (pa ProbeAttempt, found bool, err error) {
+	var runID, endpoint, model, pool, group, step sql.NullString
+	err = tx.tx.QueryRow(`
+		SELECT participant, probe_run_id, probe_endpoint, probe_model, probe_pool, probe_group, probe_step
+		FROM attempts WHERE id = ?
+	`, attemptID).Scan(&pa.Participant, &runID, &endpoint, &model, &pool, &group, &step)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProbeAttempt{}, false, nil
+	}
+	if err != nil {
+		return ProbeAttempt{}, false, fmt.Errorf("query probe attempt: %w", err)
+	}
+	if !runID.Valid {
+		return ProbeAttempt{}, false, nil
+	}
+	pa.AttemptID = attemptID
+	pa.RunID = runID.String
+	pa.Endpoint = endpoint.String
+	pa.Model = model.String
+	pa.Pool = pool.String
+	pa.Step = step.String
+	if group.Valid && group.String != "" {
+		if err := json.Unmarshal([]byte(group.String), &pa.Group); err != nil {
+			return ProbeAttempt{}, false, fmt.Errorf("unmarshal probe group: %w", err)
+		}
+	}
+	return pa, true, nil
+}
+
+// CompleteProbeAttempt ends a pending probe attempt whose request is settled,
+// releasing its slot: the response came back, or nothing was sent. status is
+// "complete" or "error"; transportStatus says why.
+func (tx *Tx) CompleteProbeAttempt(attemptID, status, transportStatus string) error {
+	return tx.CompleteAttempt(attemptID, "", 0, "", status, "", transportStatus)
+}
