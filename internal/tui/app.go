@@ -87,13 +87,10 @@ type App struct {
 	pScroll     int                       // first line shown while pScrolled
 
 	// Conversation startup options
-	newConversation    bool   // start with a new conversation
-	conversationID     string // conversation ID to open
-	loadDefaultConv    bool   // load the latest conversation for the workspace on first connection
-	defaultConvLoaded  bool   // whether we've already attempted to load the default conversation
-	defaultConvPending bool   // whether a default conversation load is currently in flight
-	roundsIsSet        bool   // rounds was explicitly set via flag
-	rounds             int    // round limit for this process
+	conversationID string // the open conversation; empty until the first submit creates one
+	convTurns      int    // turns the open conversation holds
+	roundsIsSet    bool   // rounds was explicitly set via flag
+	rounds         int    // round limit for this process
 }
 
 // Option configures an App.
@@ -120,14 +117,14 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) { a.terminalCapabilities = caps }
 }
 
-// WithNewConversation starts with a new conversation.
-func WithNewConversation() Option {
-	return func(a *App) { a.newConversation = true }
-}
-
-// WithConversationID opens a conversation by ID prefix.
-func WithConversationID(id string) Option {
-	return func(a *App) { a.conversationID = id }
+// WithConversation opens the conversation id, which holds turns turns. The
+// caller has already resolved the id and checked its workspace; without this
+// option the first submit creates a conversation.
+func WithConversation(id string, turns int) Option {
+	return func(a *App) {
+		a.conversationID = id
+		a.convTurns = turns
+	}
 }
 
 // WithRounds sets the round limit for this process.
@@ -160,10 +157,6 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
 		o(a)
-	}
-	// If no specific conversation was requested, load the default (latest) one
-	if !a.newConversation && a.conversationID == "" {
-		a.loadDefaultConv = true
 	}
 	var errs []error
 	if a.workDir == "" {
@@ -211,8 +204,6 @@ func (a *App) answerIn(turnID string) answerInput {
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
-		conversationID: a.conversationID,
-		turnCount:      len(a.state.Turns),
 	}
 }
 
@@ -388,8 +379,6 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onContent(msg)
 	case transcriptMsg:
 		return a.onTranscript(msg)
-	case defaultConvMsg:
-		return a.onDefaultConvLoaded(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -454,7 +443,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if a.tab == tabAnswer {
-		page := max(a.bodyHeight()-1, 1)
+		page := max(a.answerHeight()-1, 1)
 		switch msg.String() {
 		case "up":
 			a.scrollAnswer(-1)
@@ -522,10 +511,6 @@ func (a *App) enter() tea.Cmd {
 	}
 	if a.cl == nil {
 		a.refusal = "engine: not connected"
-		return nil
-	}
-	if a.defaultConvPending {
-		a.refusal = "loading conversation..."
 		return nil
 	}
 	var profiles []wire.QuickProfile
@@ -597,10 +582,11 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		a.refusal = formatRefusal(msg.err)
 		return nil
 	}
-	// Store the conversation ID from the submit reply to use in subsequent submits
+	// The reply names the conversation the turn joined; later submits continue it.
 	if msg.conversationID != "" {
 		a.conversationID = msg.conversationID
 	}
+	a.convTurns++
 	a.input.SetValue("")
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
@@ -637,30 +623,24 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 		// The limit and deadline of a turn that is already open come from its record.
 		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
 	}
-	// Load the default conversation if needed
-	if a.loadDefaultConv && !a.defaultConvLoaded {
-		a.defaultConvLoaded = true
-		a.defaultConvPending = true
-		cmds = append(cmds, defaultConvCmd(a.ctx, a.gen, a.cl, a.workDir))
-	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
 }
 
-// onDefaultConvLoaded handles the result of loading the default conversation.
-func (a *App) onDefaultConvLoaded(msg defaultConvMsg) (tea.Model, tea.Cmd) {
-	// Always clear the pending flag, even if the message is from a stale generation
-	a.defaultConvPending = false
-	if msg.gen != a.gen {
-		return a, nil
+// conversationHeader names the open conversation by id prefix and turn count.
+func (a *App) conversationHeader() string {
+	if a.conversationID == "" {
+		return "conversation: new (created at the first submit)"
 	}
-	if msg.err != nil {
-		// If we can't load the default conversation, just start fresh
-		a.conversationID = ""
-	} else if msg.conversationID != "" {
-		a.conversationID = msg.conversationID
+	return fmt.Sprintf("conversation %s, %d turns", shortID(a.conversationID), a.convTurns)
+}
+
+// shortID is the first eight characters of an id.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
 	}
-	return a, nil
+	return id
 }
 
 // updateQuickProfileState sets the quick profile banners from the project
@@ -955,6 +935,11 @@ func (a *App) isTerminalTooSmall() bool {
 	return a.width < 40 || a.height < 10
 }
 
+// answerHeight is the lines of the answer tab below its conversation header.
+func (a *App) answerHeight() int {
+	return max(a.bodyHeight()-1, 0)
+}
+
 // answerLineCount is the length of the unclipped answer tab.
 func (a *App) answerLineCount() int {
 	turnID := answerTurn(a.state)
@@ -963,7 +948,7 @@ func (a *App) answerLineCount() int {
 
 // scrollAnswer moves the answer tab by delta lines, staying within the text.
 func (a *App) scrollAnswer(delta int) {
-	maxStart := max(a.answerLineCount()-a.bodyHeight(), 0)
+	maxStart := max(a.answerLineCount()-a.answerHeight(), 0)
 	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
 }
 
@@ -1017,8 +1002,13 @@ func (a *App) View() string {
 	lines := strings.Split(tabView, "\n")
 
 	if a.tab == tabAnswer && len(a.panel) == 0 {
-		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
+		start := min(a.answerScrollRow, max(len(lines)-a.answerHeight(), 0))
 		lines = lines[start:]
+		for len(lines) < a.answerHeight() {
+			lines = append(lines, "")
+		}
+		// The first line of the chat names the open conversation.
+		lines = append([]string{a.conversationHeader()}, lines[:a.answerHeight()]...)
 	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")

@@ -46,13 +46,6 @@ type submitMsg struct {
 // tickMsg is sent every second for elapsed time updates.
 type tickMsg struct{}
 
-// defaultConvMsg carries the result of loading the default conversation for the workspace.
-type defaultConvMsg struct {
-	gen            int
-	conversationID string
-	err            error
-}
-
 // connectCmd dials until it succeeds, then fetches status and subscribes after
 // sinceSeq. It touches no shared state; everything it learns travels in the
 // returned message.
@@ -249,21 +242,5 @@ func transcriptCmd(ctx context.Context, gen int, cl *client.Client, turnID strin
 			}
 			cursor = *reply.NextCursor
 		}
-	}
-}
-
-// defaultConvCmd loads the latest conversation for the given workspace, if any.
-// If there are no conversations for the workspace, it returns an empty ID (meaning start fresh).
-func defaultConvCmd(ctx context.Context, gen int, cl *client.Client, workspace string) tea.Cmd {
-	return func() tea.Msg {
-		reply, err := cl.Conversations(ctx, &workspace, "", 1)
-		if err != nil {
-			return defaultConvMsg{gen: gen, err: err}
-		}
-		if len(reply.Items) == 0 {
-			// No conversations for this workspace; start fresh
-			return defaultConvMsg{gen: gen, conversationID: ""}
-		}
-		return defaultConvMsg{gen: gen, conversationID: reply.Items[0].ID}
 	}
 }
