@@ -69,8 +69,9 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
-	Round           int // revisions started so far: one per revision_dispatched
-	MaxRounds       int // the round limit the turn runs with; 0 when not known
+	Round           int    // revisions started so far: one per revision_dispatched
+	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
+	InputRef        string // content ref of what the user typed, once the record says
 }
 
 // AttemptInfo holds information about one attempt.
@@ -676,6 +677,18 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	// The reply's figure sums the attempts it holds, while turn_submitted
 	// carries the whole-turn projection. A terminal reply is authoritative; an
 	// open one only fills a missing estimate.
+	// The turn record is where a reopened or reattached turn gets its round
+	// count, limit and input; events only cover what this process watched.
+	ti.Round = max(ti.Round, turn.Round)
+	switch {
+	case turn.Mode == "solo":
+		ti.MaxRounds = 0
+	case turn.MaxRounds != nil:
+		ti.MaxRounds = *turn.MaxRounds
+	}
+	if turn.InputRef != nil {
+		ti.InputRef = *turn.InputRef
+	}
 	if turn.EstimatedPromptTokens > 0 && (final || ti.EstimatedTokens == 0) {
 		ti.EstimatedTokens = turn.EstimatedPromptTokens
 	}

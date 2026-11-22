@@ -229,7 +229,7 @@ func (a *App) answerIn(turnID string) answerInput {
 
 // chatIn gathers what the chat tab needs.
 func (a *App) chatIn() chatInput {
-	return chatInput{answer: a.answerIn, inputs: a.inputs}
+	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content}
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
@@ -677,9 +677,9 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // conversationHeader names the open conversation by id prefix and turn count.
 func (a *App) conversationHeader() string {
 	if a.conversationID == "" {
-		return "conversation: new (created at the first submit)"
+		return "conversation: new (created at the first submit) · workspace " + a.workDir
 	}
-	return fmt.Sprintf("conversation %s, %d turns", shortID(a.conversationID), a.convTurns)
+	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, a.workDir)
 }
 
 // shortID is the first eight characters of an id.
@@ -1029,13 +1029,14 @@ const keyHint = "tab: switch  /help"
 
 // statusLine is the strip with the key hint at its right edge, w cells wide.
 func (a *App) statusLine(w int) string {
-	hint := keyHint
-	room := w - ansi.StringWidth(hint) - 1
-	if room < 10 {
-		return ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
+	full := ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
+	// The hint takes the right edge only when the strip keeps all it shows
+	// without it; participant state is worth more than the hint.
+	gap := w - ansi.StringWidth(full) - ansi.StringWidth(keyHint)
+	if gap < 1 {
+		return full
 	}
-	strip := ansi.Truncate(renderStrip(a.state, room, a.now()), room, "")
-	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-ansi.StringWidth(hint)) + hint
+	return full + strings.Repeat(" ", gap) + keyHint
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.

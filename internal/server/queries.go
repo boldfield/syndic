@@ -126,6 +126,22 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		reply.TerminalReason = &turn.TerminalReason
 	}
 
+	ref, err := store.TurnInputRef(turnID)
+	if err != nil {
+		return nil, err
+	}
+	if ref != "" {
+		reply.InputRef = &ref
+	}
+	if turn.Mode != "solo" {
+		reply.MaxRounds = turn.MaxRoundsInEffect
+		info, err := store.GetRoundInfo(turnID)
+		if err != nil {
+			return nil, err
+		}
+		reply.Round = info.CurrentRound
+	}
+
 	// Build attempt records and collect aggregates
 	var totalScrubCount int
 	var totalEstimatedPrompt int64

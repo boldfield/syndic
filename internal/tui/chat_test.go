@@ -307,3 +307,50 @@ func TestChatOnlyShowsTurnsOfTheScope(t *testing.T) {
 		t.Errorf("scope order not used:\n%s", chat)
 	}
 }
+
+func TestChatHeaderNamesTheWorkspace(t *testing.T) {
+	a := chatApp(t)
+	a.workDir = "/ws/alpha"
+	lineOf(t, chatView(a), "conversation: new (created at the first submit) · workspace /ws/alpha")
+	a.conversationID, a.convTurns = "0123456789abcdef", 3
+	lineOf(t, chatView(a), "conversation 01234567, 3 turns · workspace /ws/alpha")
+}
+
+func TestChatRecordLoadedTurnShowsRevisionsAndInput(t *testing.T) {
+	a := chatApp(t)
+	addTurn(a, "t1", 1, "approved", "", "the answer")
+	approveBy(a, "t1", "rev")
+	two := 2
+	ref := "msg:m1"
+	a.state = MergeTurn(a.state, "t1", &wire.TurnReply{State: "approved", Mode: "review", Preset: "review", Round: 2, MaxRounds: &two, InputRef: &ref, CandidateHash: a.state.Turns["t1"].CandidateHash}, chatNow)
+	if got := a.state.Turns["t1"]; got.Round != 2 || got.MaxRounds != 2 || got.InputRef != ref {
+		t.Fatalf("turn after merge = %+v, want round 2 of 2 and the input ref", got)
+	}
+	lineOf(t, chatView(a), "you: loading…")
+	refs := chatRefs(a.state, a.chatIn())
+	found := false
+	for _, r := range refs {
+		found = found || r == ref
+	}
+	if !found {
+		t.Errorf("refs = %v, want the input ref among them", refs)
+	}
+	a.content.Store(ref, "what was typed", nil)
+	lines := chatView(a)
+	lineOf(t, lines, "you: what was typed")
+	lineOf(t, lines, "approved by rev after 2 revisions against abcdef123456")
+}
+
+func TestMergeTurnSoloHasNoRoundLimit(t *testing.T) {
+	s := NewState()
+	s.Turns["t1"] = TurnInfo{ID: "t1", MaxRounds: 2}
+	three := 3
+	s = MergeTurn(s, "t1", &wire.TurnReply{State: "author_dispatched", Mode: "solo", MaxRounds: &three}, chatNow)
+	if got := s.Turns["t1"].MaxRounds; got != 0 {
+		t.Errorf("solo MaxRounds = %d, want 0", got)
+	}
+	s = MergeTurn(s, "t1", &wire.TurnReply{State: "author_dispatched", Mode: "review", MaxRounds: &three}, chatNow)
+	if got := s.Turns["t1"].MaxRounds; got != 3 {
+		t.Errorf("review MaxRounds = %d, want the turn's own 3", got)
+	}
+}

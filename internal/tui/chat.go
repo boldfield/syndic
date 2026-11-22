@@ -9,8 +9,9 @@ import (
 
 // chatInput is everything the chat tab needs beyond the State.
 type chatInput struct {
-	answer func(turnID string) answerInput // what the answer part of one turn needs
-	inputs map[string]string               // what the user typed, for the turns this process submitted
+	answer  func(turnID string) answerInput // what the answer part of one turn needs
+	inputs  map[string]string               // what the user typed, for the turns this process submitted
+	content *ContentCache                   // bodies of the inputs of the other turns
 }
 
 // notInContext marks a turn that /trim dropped from the history later turns see.
@@ -82,6 +83,9 @@ func chatRefs(s State, in chatInput) []string {
 	var refs []string
 	for _, id := range chatTurns(s) {
 		refs = append(refs, answerRefs(s, id, in.answer(id))...)
+		if _, ok := in.inputs[id]; !ok && s.Turns[id].InputRef != "" {
+			refs = append(refs, s.Turns[id].InputRef)
+		}
 	}
 	return refs
 }
@@ -101,7 +105,11 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 		lastTurn = len(lines)
 		ai := in.answer(id)
 		var turn []string
-		if text, ok := in.inputs[id]; ok {
+		text, ok := in.inputs[id]
+		if !ok && s.Turns[id].InputRef != "" && in.content != nil {
+			text, ok = body(in.content, s.Turns[id].InputRef), true
+		}
+		if ok {
 			turn = append(turn, "you: "+strings.ReplaceAll(text, "\n", "\n     "))
 		} else {
 			turn = append(turn, "you: (input not loaded)")

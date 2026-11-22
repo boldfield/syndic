@@ -259,3 +259,25 @@ func (tx *Tx) AllApproved(turnID string, required []string) (bool, error) {
 	}
 	return len(open) == 0, nil
 }
+
+// TurnInputRef returns the content ref of the first message the user sent in
+// the turn, which is what they typed, or "" when none is journaled yet.
+func (s *Store) TurnInputRef(turnID string) (string, error) {
+	var id string
+	err := s.Tx(func(tx *Tx) error {
+		err := tx.tx.QueryRow(`
+			SELECT id FROM messages WHERE turn_id = ? AND sender = 'user' AND phase = 'author' ORDER BY sequence LIMIT 1
+		`, turnID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return "", fmt.Errorf("query turn input: %w", err)
+	}
+	if id == "" {
+		return "", nil
+	}
+	return "msg:" + id, nil
+}
