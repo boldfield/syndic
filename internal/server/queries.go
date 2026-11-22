@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -312,4 +313,105 @@ func getContent(store *journal.Store, ref string, offset, limit int64) (*wire.Co
 		Total:  total,
 		SHA256: sha256sum,
 	}, nil
+}
+
+// errReplyTooLarge reports a reply that cannot fit in one frame even trimmed
+// as far as its contract allows; it is answered error{code: "frame"}.
+var errReplyTooLarge = errors.New("reply exceeds the frame limit")
+
+// replyFits reports whether body, sent as the reply to id, encodes into one
+// frame the way the wire Writer writes it (version set, newline included).
+func replyFits(id string, body any) bool {
+	f, err := wire.NewReply(id, body)
+	if err != nil {
+		return false
+	}
+	f.V = wire.ProtocolVersion
+	data, err := json.Marshal(f)
+	return err == nil && len(data)+1 <= wire.MaxFrameBytes
+}
+
+// fitConversationsPage keeps the longest prefix of items whose reply fits in
+// one frame. A page that is cut resumes after the last kept item, through
+// itemCursors[i]; one that is not keeps next. A first item that does not fit
+// alone is errReplyTooLarge.
+func fitConversationsPage(id string, items []wire.ConversationSummary, itemCursors []string, next string) (*wire.ConversationsReply, error) {
+	reply := &wire.ConversationsReply{Items: items}
+	if next != "" {
+		reply.NextCursor = &next
+	}
+	if replyFits(id, reply) {
+		return reply, nil
+	}
+	// Frame size grows with the item count, so the longest fitting prefix is found by bisection.
+	lo, hi := 0, len(items)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		cursor := itemCursors[mid-1]
+		if replyFits(id, &wire.ConversationsReply{Items: items[:mid], NextCursor: &cursor}) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 {
+		return nil, errReplyTooLarge
+	}
+	cursor := itemCursors[lo-1]
+	return &wire.ConversationsReply{Items: items[:lo], NextCursor: &cursor}, nil
+}
+
+// listConversations answers a conversations request from the journal.
+func listConversations(store *journal.Store, id string, workspace *string, cursor string, limit int) (*wire.ConversationsReply, error) {
+	page, err := store.ListConversationsPage(workspace, cursor, limit)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]wire.ConversationSummary, len(page.Rows))
+	for i, c := range page.Rows {
+		lastSubmittedAt := ""
+		if c.LastSubmittedAt != nil {
+			lastSubmittedAt = c.LastSubmittedAt.Format(time.RFC3339)
+		}
+		items[i] = wire.ConversationSummary{
+			ID:              c.ID,
+			CreatedAt:       c.CreatedAt.Format(time.RFC3339),
+			Workspace:       c.Workspace,
+			LastSubmittedAt: lastSubmittedAt,
+			TurnCount:       c.TurnCount,
+			Running:         c.Running,
+			Preview:         c.Preview,
+		}
+	}
+	return fitConversationsPage(id, items, page.ItemCursors, page.NextCursor)
+}
+
+// getConversation answers a conversation request from the journal. The id may
+// be any unique prefix; the reply names the full id. A turn that has not
+// ended reports its latest journaled turn_state.
+func getConversation(store *journal.Store, openState func(turnID string) (string, error), id, prefix string) (*wire.ConversationReply, error) {
+	conv, err := store.GetConversation(prefix)
+	if err != nil {
+		return nil, err
+	}
+	turns, err := store.GetConversationTurns(conv.ID)
+	if err != nil {
+		return nil, err
+	}
+	reply := &wire.ConversationReply{ID: conv.ID, Turns: make([]wire.ConversationTurnSummary, len(turns))}
+	for i, t := range turns {
+		state := ""
+		if t.TerminalState != nil {
+			state = *t.TerminalState
+		} else if state, err = openState(t.ID); err != nil {
+			return nil, err
+		} else if state == "" {
+			state = "submitted"
+		}
+		reply.Turns[i] = wire.ConversationTurnSummary{ID: t.ID, State: state}
+	}
+	if !replyFits(id, reply) {
+		return nil, errReplyTooLarge
+	}
+	return reply, nil
 }

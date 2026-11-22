@@ -327,6 +327,54 @@ func (c *Client) Content(ctx context.Context, ref string) ([]byte, error) {
 	return result, nil
 }
 
+func (c *Client) Conversations(ctx context.Context, workspace *string, cursor string, limit int) (wire.ConversationsReply, error) {
+	var reply wire.ConversationsReply
+	var cursorPtr *string
+	if cursor != "" {
+		cursorPtr = &cursor
+	}
+	body, err := c.doRequest(ctx, wire.RequestConversations, wire.ConversationsRequest{
+		Workspace: workspace,
+		Cursor:    cursorPtr,
+		Limit:     &limit,
+	})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal conversations reply: %w", err)
+	}
+	return reply, nil
+}
+
+func (c *Client) Conversation(ctx context.Context, idPrefix string) (wire.ConversationReply, error) {
+	var reply wire.ConversationReply
+	body, err := c.doRequest(ctx, wire.RequestConversation, wire.ConversationRequest{
+		ID: idPrefix,
+	})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal conversation reply: %w", err)
+	}
+	return reply, nil
+}
+
+// SubmitToConversation resolves prefix, any unique prefix of a conversation
+// id, and submits req to the conversation it names. An unknown or ambiguous
+// prefix is returned before anything is sent: no submit frame is written. A
+// workspace that differs from the conversation's is refused by the engine as
+// workspace_mismatch, which journals nothing.
+func (c *Client) SubmitToConversation(ctx context.Context, prefix string, req wire.SubmitRequest) (wire.SubmitReply, error) {
+	conv, err := c.Conversation(ctx, prefix)
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+	req.ConversationID = &conv.ID
+	return c.Submit(ctx, req)
+}
+
 func (c *Client) Subscribe(ctx context.Context, sinceSeq int64) (int64, error) {
 	c.eventMu.Lock()
 	if c.accepting {

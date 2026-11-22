@@ -784,6 +784,25 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		limit := min(req.Limit, wire.MaxContentPageBytes)
 		reply, err := getContent(c.server.store, req.Ref, req.Offset, limit)
 		c.respond(frame.ID, "content", reply, err)
+	case wire.RequestConversations:
+		// Reads go to the journal, not the engine, so they answer in every run state.
+		var req wire.ConversationsRequest
+		if !c.decode(frame, &req) {
+			return
+		}
+		cursor := ""
+		if req.Cursor != nil {
+			cursor = *req.Cursor
+		}
+		reply, err := listConversations(c.server.store, frame.ID, req.Workspace, cursor, wire.ConversationListLimit(req.Limit))
+		c.respond(frame.ID, "conversations", reply, err)
+	case wire.RequestConversation:
+		var req wire.ConversationRequest
+		if !c.decode(frame, &req, "id") {
+			return
+		}
+		reply, err := getConversation(c.server.store, c.server.openTurnState, frame.ID, req.ID)
+		c.respond(frame.ID, "conversation", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}
@@ -827,7 +846,11 @@ func (c *connection) respond(id, op string, body any, err error) {
 			c.sendError(id, wireErr)
 		case errors.Is(err, journal.ErrTurnNotFound), errors.Is(err, journal.ErrNoSuchContent):
 			c.sendError(id, &wire.Error{Code: "not_found"})
-		case errors.Is(err, journal.ErrOutOfRange):
+		case errors.Is(err, journal.ErrAmbiguousConversationID):
+			c.sendError(id, &wire.Error{Code: wire.ErrorCodeAmbiguous})
+		case errors.Is(err, errReplyTooLarge):
+			c.sendError(id, &wire.Error{Code: wire.ErrorCodeFrame})
+		case errors.Is(err, journal.ErrOutOfRange), errors.Is(err, journal.ErrMalformedCursor):
 			c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest})
 		default:
 			fmt.Fprintf(os.Stderr, "%s: %v\n", op, err)
