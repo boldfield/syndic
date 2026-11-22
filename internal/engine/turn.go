@@ -90,7 +90,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		}
 	}
 
-	msgs := prompt.Author(t.input)
+	msgs := prompt.AuthorWithHistory(t.history, t.input)
 	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
 	deadline := e.attemptDeadline(t)
 
@@ -244,6 +244,11 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			return err
 		}
 		if gate == nil {
+			// The solo answer is not a candidate; keep its text so later
+			// turns' history can carry it.
+			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
+				return err
+			}
 			term, err = e.endIn(tx, emit, t, StateSoloComplete, reasonSoloOK)
 		} else {
 			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
