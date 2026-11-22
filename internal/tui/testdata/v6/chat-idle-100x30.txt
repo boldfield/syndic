@@ -1,0 +1,30 @@
+syndic   [chat]   transcript   participants
+conversation 7c2e41 · 4 turns · ~/projects/syndic                           ↑ 0 earlier turns · 100%
+
+› what does the gate check before a reviewer result counts?
+  approved by codex, muse against 5d20e9b1 · not in context
+
+› why does TestAdmission flake under -race?
+✓ approved by codex, muse against 3f9a1c2e · 2 reviews
+  The test shares one budget ledger across subtests and runs them in parallel, so two reservations
+  race on the same turn id. Give each subtest its own ledger, or drop t.Parallel() from the table
+  loop.
+
+› make the dispatch retry loop stop on context cancel
+✓ approved by codex, muse after 2 revisions against 81b04d7a · 6 reviews
+  The loop now selects on ctx.Done() before each attempt and before each backoff sleep, and
+  returns ctx.Err() without counting a retry.
+
+› can we drop the second repair attempt for malformed verdicts?
+! INCOMPLETE, not approved · rounds_exhausted · 2 open blocks · 6 reviews
+  Yes. Repair runs once per reviewer per round, so the second attempt is already unreachable and
+  its branch can be deleted.
+  block b1 codex maintained  the branch is reachable after a gate failure
+  block b3 muse  maintained  no test shows the branch is dead
+  no approved answer (incomplete)
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+┃
+review · idle · ░░░░░░░░░░ 0k/120k                               ctrl+o: reviews  tab: switch  /help

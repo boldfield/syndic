@@ -1,0 +1,30 @@
+syndic   [chat]   transcript   participants
+conversation 2a90f3 · 4 turns · ~/projects/syndic                           ↑ 0 earlier turns · 100%
+
+› which go test flag turns on the race detector?
+· UNREVIEWED (solo)
+  Pass -race to go test.
+
+› can we drop the second repair attempt for malformed verdicts?
+! HUMAN OVERRIDE: the branch is covered by TestRepairOnce · 6 reviews
+  Yes. Repair runs once per reviewer per round, so the second attempt is already unreachable and
+  its branch can be deleted.
+  block b1 codex overridden  the branch is reachable after a gate failure
+  block b3 muse  overridden  no test shows the branch is dead
+
+› rewrite the scheduler section of the README
+× CANCELLED, not approved · 1 block gathered · 1 reviews
+  The scheduler starts only after recovery has committed, so it never dispatches into a pool whose
+  hold is not yet recorded.
+  block b1 codex opened      the section drops the one-request-per-pool default
+  no approved answer (cancelled)
+
+› explain why detach never cancels a turn
+  UNREVIEWED DRAFT
+  The engine is a separate process and the TUI is only a socket client, so closing the client
+  changes nothing the engine is doing. /cancel is the only cancel.
+⣾ review · round 0/2 ○○ · ✓ claude · ⣾ codex reviewing · ○ muse queued · 0:18
+identity: unknown(name-matched) codex
+deadlines: provisional
+┃
+review · reviewers_dispatched · 0:18/10:00 · █░░░░░░░░░ 12k/120k · round 0/2      tab: switch  /help

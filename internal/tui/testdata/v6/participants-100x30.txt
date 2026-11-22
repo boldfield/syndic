@@ -1,0 +1,30 @@
+syndic   chat   transcript   [participants]
+preset review · turn 5 in review · author claude
+
+id       role      state      pool     reported model  context / out  probed
+────────────────────────────────────────────────────────────────────────────────────────────────────
+claude   author    done       work-a   claude-sonnet   200k / 8k      today 09:14
+codex    reviewer  running    work-b   gpt-codex       128k / 8k      today 09:14
+muse     reviewer  done       work-c   muse            128k / 4k      today 09:15
+haiku    eligible  idle       work-a   claude-haiku    200k / 8k      today 09:14  same-family
+
+── codex ───────────────────────────────────────────────────────────────────────────────────────────
+state               running · verdict attempt a2, 0:24 of 2:00
+identity            unknown(name-matched)
+eligible roles      author, reviewer
+context bound       128k  source: probe
+output bound        8k  source: roster
+bytes_per_token     3.6  source: probe
+billing             subscription  as declared
+spending control    external
+probe observed_at   2026-11-21 09:14:07
+capacity hold       none
+
+
+
+
+
+identity: unknown(name-matched) codex
+roster file changed since start; restart the engine to apply
+┃
+review · reviewers_dispatched · 0:42/10:00 · ███▍░░░░░░ 41k/120k · round 1/2      tab: switch  /help

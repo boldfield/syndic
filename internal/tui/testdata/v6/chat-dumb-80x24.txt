@@ -1,0 +1,24 @@
+syndic   [chat]   transcript   participants
+conversation 7c2e41 · 5 turns
+
+› make the dispatch retry loop stop on context cancel
+✓ approved by codex, muse after 2 revisions against 81b04d7a · 6 reviews
+  The loop now selects on ctx.Done() before each attempt and before each
+  backoff sleep, and returns ctx.Err() without counting a retry.
+
+› can we drop the second repair attempt for malformed verdicts?
+! INCOMPLETE, not approved · rounds_exhausted · 2 open blocks · 6 reviews
+  Yes. Repair runs once per reviewer per round, so the second attempt is
+  already unreachable and its branch can be deleted.
+  block b1 codex maintained  the branch is reachable after a gate failure
+  block b3 muse  maintained  no test shows the branch is dead
+  no approved answer (incomplete)
+
+› add a table test for max_rounds above the ceiling
+  review · round 1/2 · claude done · codex reviewing · muse done · 0:42
+
+
+
+--------------------------------------------------------------------------------
+>
+review · reviewers_dispatched · 0:42/10:00 · 41k/120k         tab: switch  /help
