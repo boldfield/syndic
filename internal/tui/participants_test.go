@@ -584,12 +584,13 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 	}
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
-	send(r, resizeMsg(80, 15)) // one row more than before: the tab bar takes one
+	// This fixture has unprobed default-preset participants, so the unprobed banner takes a head line: 16 rows give the same overflow 15 did.
+	send(r, resizeMsg(80, 16)) // height adjusted for the new unprobed banner line
 	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilPartsView(t, r, "/release rpool "+m[1])
-	if n := len(strings.Split(v, "\n")); n > 15 {
-		t.Errorf("view is %d lines at 15 rows", n)
+	if n := len(strings.Split(v, "\n")); n > 16 {
+		t.Errorf("view is %d lines at 16 rows", n)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
 	untilPartsView(t, r, "more lines (PgDn)")
@@ -698,5 +699,296 @@ func TestParticipantDetailShowsExternalSpendingControl(t *testing.T) {
 	}
 	if strings.Contains(line3, "external spending control") {
 		t.Fatalf("flat detail should not show spending control as 'metered, external spending control':\n%s", line3)
+	}
+}
+
+func TestUnprobedBannerInDefaultPresetOnly(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "unprobed", InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "unprobed", InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["spare"] = ParticipantInfo{
+		ID: "spare", State: "unprobed", InDefaultPreset: false, ReportedModel: "other", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["probed-spare"] = ParticipantInfo{
+		ID: "probed-spare", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: false, ReportedModel: "third", EligibleRoles: []string{"reviewer"},
+	}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
+	s.CurrentTurn = "t1"
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "author", now)
+
+	if !strings.Contains(out, "participants: 2 unprobed") {
+		t.Fatalf("banner should show 2 unprobed (author and reviewer in preset), got:\n%s", out)
+	}
+}
+
+func TestUnprobedBannerHiddenWhenNone(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "idle", ProbeObservedAt: &observed, InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
+	s.CurrentTurn = "t1"
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "author", now)
+
+	if strings.Contains(out, "participants:") {
+		t.Fatalf("banner should not show when no participants are unprobed, got:\n%s", out)
+	}
+}
+
+func TestUnknownTruncationAcceptanceShown(t *testing.T) {
+	s := NewState()
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["accepted"] = ParticipantInfo{
+		ID: "accepted", State: "idle", ProbeObservedAt: &observed,
+		EligibleRequiredReviewer: "unknown", EligibleRoles: []string{"reviewer"},
+		AcceptUnknownTruncation: true,
+	}
+	s.Participants["not-accepted"] = ParticipantInfo{
+		ID: "not-accepted", State: "idle", ProbeObservedAt: &observed,
+		EligibleRequiredReviewer: "unknown", EligibleRoles: []string{"reviewer"},
+		AcceptUnknownTruncation: false,
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	detail1 := participantDetail(s, s.Participants["accepted"], now)
+	line1 := strings.Join(detail1, "\n")
+	if !strings.Contains(line1, "truncation: unknown (accepted)") {
+		t.Fatalf("accepted detail should show 'truncation: unknown (accepted)', got:\n%s", line1)
+	}
+
+	detail2 := participantDetail(s, s.Participants["not-accepted"], now)
+	line2 := strings.Join(detail2, "\n")
+	if !strings.Contains(line2, "truncation: unknown") || strings.Contains(line2, "(accepted)") {
+		t.Fatalf("not-accepted detail should show 'truncation: unknown' without (accepted), got:\n%s", line2)
+	}
+}
+
+func TestProbeAtStartMarkerShown(t *testing.T) {
+	s := NewState()
+	observed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+	s.Participants["probed-at-start"] = ParticipantInfo{
+		ID: "probed-at-start", State: "idle", ProbeObservedAt: &observed, ProbeAtStart: true,
+		EligibleRoles: []string{"author"},
+	}
+	s.Participants["not-at-start"] = ParticipantInfo{
+		ID: "not-at-start", State: "idle", ProbeObservedAt: &observed, ProbeAtStart: false,
+		EligibleRoles: []string{"author"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	detail1 := participantDetail(s, s.Participants["probed-at-start"], now)
+	line1 := strings.Join(detail1, "\n")
+	if !strings.Contains(line1, "probed at start") {
+		t.Fatalf("probed-at-start detail should contain 'probed at start', got:\n%s", line1)
+	}
+
+	detail2 := participantDetail(s, s.Participants["not-at-start"], now)
+	line2 := strings.Join(detail2, "\n")
+	if strings.Contains(line2, "probed at start") {
+		t.Fatalf("not-at-start detail should not contain 'probed at start', got:\n%s", line2)
+	}
+}
+
+func TestProbeFailureDetailsShown(t *testing.T) {
+	s := NewState()
+
+	s.Participants["failed"] = ParticipantInfo{
+		ID: "failed", State: "unprobed", Detail: "probe_failed:hold",
+		FailingStep: "over_length_test", ServerStatus: "504 Service Unavailable",
+		RetryCommand:  "syndic probe --endpoint local --model llama3",
+		EligibleRoles: []string{"reviewer"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	detail := participantDetail(s, s.Participants["failed"], now)
+	line := strings.Join(detail, "\n")
+
+	if !strings.Contains(line, "probe failed at: over_length_test") {
+		t.Fatalf("detail should show failing step, got:\n%s", line)
+	}
+	if !strings.Contains(line, "server status: 504 Service Unavailable") {
+		t.Fatalf("detail should show server status, got:\n%s", line)
+	}
+	if !strings.Contains(line, "retry: syndic probe --endpoint local --model llama3") {
+		t.Fatalf("detail should show retry command, got:\n%s", line)
+	}
+	if !strings.Contains(line, "probe observed_at: none") {
+		t.Fatalf("detail should show no probe observed time for failed probe, got:\n%s", line)
+	}
+}
+
+func TestNoControlCharactersInRendering(t *testing.T) {
+	s := NewState()
+
+	s.Participants["p1"] = ParticipantInfo{
+		ID: "p1", State: "idle", ReportedModel: "llama3",
+		RetryCommand:  "syndic probe --endpoint local --model llama3\x1b[2J",
+		ServerStatus:  "auth_error\x00status",
+		EligibleRoles: []string{"author"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	detail := participantDetail(s, s.Participants["p1"], now)
+	line := strings.Join(detail, "\n")
+
+	if strings.Contains(line, "\x1b") || strings.Contains(line, "\x00") {
+		t.Fatalf("detail should sanitize control characters, got:\n%s", line)
+	}
+	if !strings.Contains(line, "·") {
+		t.Fatalf("detail should replace control characters with middle dot, got:\n%s", line)
+	}
+}
+
+func TestUnprobedBannerWithoutCurrentTurn(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "unprobed", InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "unprobed", InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["spare"] = ParticipantInfo{
+		ID: "spare", State: "unprobed", InDefaultPreset: false, ReportedModel: "other", EligibleRoles: []string{"reviewer"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "", now)
+
+	if !strings.Contains(out, "participants: 2 unprobed") {
+		t.Fatalf("banner should show 2 unprobed (author and reviewer in preset) even with no current turn, got:\n%s", out)
+	}
+}
+
+// TestParticipantsStatusToView drives the engine's real status through MergeStatus
+// into the rendered tab with no open turn. r2 has no record and is in the
+// default preset; nofp is unprobed but outside it. The endpoint carries a
+// credential reference whose value must reach neither status nor view.
+func TestParticipantsStatusToView(t *testing.T) {
+	const secret = "sk-test-credential-do-not-leak"
+	t.Setenv("SYNDIC_TEST_PAID_TOKEN", secret)
+	roster := strings.Replace(partRoster(), "declared_billing = \"flat\"", "declared_billing = \"flat\"\nauth = { source = \"env\", name = \"SYNDIC_TEST_PAID_TOKEN\" }", 1)
+	bound := 4096
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author": {reporting(enginetest.Reply(answerText), "llama3.2:8b")},
+	}, enginetest.ClockStart(farFutureTime()), enginetest.NoStart(), enginetest.SkipProbe("author"), enginetest.SkipProbe("r1"), enginetest.SkipProbe("r2"),
+		enginetest.SkipProbe("nofp"), enginetest.SkipProbe("mism"), enginetest.SkipProbe("norec"))
+	seedRecord(t, h, "local", "llama2", "llama3.2:8b", seedFull, &bound)
+	seedRecord(t, h, "local", "llama3", "llama3.1:70b", seedNoBounds, nil)
+	if err := h.Engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	status, err := h.Engine.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded wire.StatusReply
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	s := MergeStatus(NewState(), &decoded)
+	if s.CurrentTurn != "" {
+		t.Fatalf("a turn is open: %q", s.CurrentTurn)
+	}
+	now := h.Clock.Now()
+
+	list := renderParticipants(s, 120, 60, "r2", now)
+	wantParts(t, "r2 view", list,
+		"participants: 1 unprobed",
+		"detail: r2",
+		"retry: syndic probe --endpoint paid --model qwen --roster ")
+	if strings.Contains(list, "participants: 2 unprobed") || strings.Contains(list, "participants: 4 unprobed") {
+		t.Errorf("banner counts participants outside the default preset:\n%s", list)
+	}
+	r1 := renderParticipants(s, 120, 60, "r1", now)
+	wantParts(t, "r1 view", r1, "truncation: unknown (accepted)")
+	if strings.Contains(renderParticipants(s, 120, 60, "author", now), "(accepted)") {
+		t.Error("author shows an accepted truncation it never chose")
+	}
+	for name, out := range map[string]string{"status": string(raw), "r1 view": r1, "r2 view": list} {
+		if strings.Contains(out, secret) {
+			t.Errorf("%s holds the credential", name)
+		}
+	}
+}
+
+// TestProbeSubjectRendering feeds a referee probe subject through the wire
+// encoding and MergeStatus. It is shown without roles, with its failure and
+// retry command, and it goes away when the status no longer lists it.
+func TestProbeSubjectRendering(t *testing.T) {
+	str := func(v string) *string { return &v }
+	reply := wire.StatusReply{
+		Participants: []wire.Participant{{ID: "a", State: "idle", EligibleRoles: []string{"author"}}},
+		Pools:        []wire.Pool{{Name: "default", Concurrency: 1}},
+		ProbeSubjects: []wire.ProbeSubject{{
+			Kind: "referee", Identity: "referee:ep:judge", Endpoint: "ep", Model: "judge", State: "unprobed",
+			Detail: str("probe_failed:unauthorized"), FailingStep: str("max_tokens"), ServerStatus: str("HTTP 401"),
+			RetryCommand: str("syndic probe --endpoint ep --model judge --roster /r.toml"),
+		}},
+	}
+	raw, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded wire.StatusReply
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	s := MergeStatus(NewState(), &decoded)
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 100, 40, "a", now)
+	wantParts(t, "view", out, "probe subjects:", "referee ep/judge: unprobed:probe_failed:unauthorized",
+		"probe failed at: max_tokens", "server status: HTTP 401", "retry: syndic probe --endpoint ep --model judge --roster /r.toml")
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "judge") && strings.Contains(l, "roles") {
+			t.Errorf("referee line implies a role: %q", l)
+		}
+	}
+	if strings.Contains(strings.Join(participantIDs(s), ","), "judge") {
+		t.Error("referee listed as a participant")
+	}
+
+	// Every height renders without panicking; once the table and detail fit,
+	// the cut pools and subjects fit too and leave their marker.
+	for h := 1; h <= 40; h++ {
+		got := renderParticipants(s, 100, h, "a", now)
+		if lines := strings.Count(got, "\n") + 1; lines > h && h >= 11 {
+			t.Errorf("height %d rendered %d lines", h, lines)
+		}
+	}
+	if got := renderParticipants(s, 100, 8, "a", now); !strings.Contains(got, "more lines (PgDn)") {
+		t.Errorf("short view lacks the more-lines marker:\n%s", got)
+	}
+
+	reply.ProbeSubjects = nil
+	s = MergeStatus(s, &reply)
+	if out := renderParticipants(s, 100, 40, "a", now); strings.Contains(out, "judge") {
+		t.Errorf("stale subject remained:\n%s", out)
 	}
 }

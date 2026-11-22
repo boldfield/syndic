@@ -68,6 +68,15 @@ type probeTarget struct {
 	adapter      transport.Adapter
 }
 
+// subjects is the key each result map holds for the target: its participants,
+// or the referee label when no participant names the identity.
+func (t *probeTarget) subjects() []string {
+	if len(t.participants) > 0 {
+		return t.participants
+	}
+	return t.labels()
+}
+
 // label names the target in probe events: its participants, or the referee.
 func (t *probeTarget) labels() []string {
 	if len(t.participants) > 0 {
@@ -295,7 +304,7 @@ func (e *Engine) finishBlocked(t *probeTarget, res *probeResult) {
 			Detail:      strPtr(probeReasonHold),
 		})
 	}
-	for _, id := range t.participants {
+	for _, id := range t.subjects() {
 		res.failed[id] = probeFailureDetail{reason: probeReasonHold}
 	}
 }
@@ -435,7 +444,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 				Detail:      strPtr(reason),
 			})
 		}
-		for _, id := range t.participants {
+		for _, id := range t.subjects() {
 			res.failed[id] = probeFailureDetail{
 				reason:      reason,
 				failingStep: failingStep,
@@ -516,7 +525,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	}
 	res.wrote = true
 	// Mark participants as successfully probed
-	for _, id := range t.participants {
+	for _, id := range t.subjects() {
 		res.probed[id] = true
 	}
 	return true

@@ -56,6 +56,17 @@ func currentAuthor(s State) (ParticipantInfo, bool) {
 	return p, true
 }
 
+// countUnprobed returns the number of participants in the default preset that are unprobed.
+func countUnprobed(s State) int {
+	count := 0
+	for _, p := range s.Participants {
+		if p.InDefaultPreset && p.State == "unprobed" {
+			count++
+		}
+	}
+	return count
+}
+
 // markedSameFamily reports whether p is a reviewer of the current turn whose
 // reported model is in the author's family.
 func markedSameFamily(s State, p ParticipantInfo) bool {
@@ -75,6 +86,9 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 	if author, ok := currentAuthor(s); ok {
 		head = []string{fmt.Sprintf("author: %s (%s)", plain(author.ID), plain(orDash(author.ReportedModel)))}
 	}
+	if unprobed := countUnprobed(s); unprobed > 0 {
+		head = append(head, fmt.Sprintf("participants: %d unprobed", unprobed))
+	}
 	ids := participantIDs(s)
 	selIdx := 0
 	if len(ids) == 0 {
@@ -90,7 +104,9 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 			detail = participantDetail(s, p, now)
 		}
 	}
-	pools = poolLines(s, now)
+	// Probe subjects are listed in full below the pools, since they are not
+	// participants and so cannot be selected; the same cut applies to both.
+	pools = append(poolLines(s, now), probeSubjectLines(s, now)...)
 
 	// Fit the height: the table scrolls around the selection first, and the
 	// pools are cut last, leaving a marker that PgDn reaches the rest.
@@ -236,9 +252,22 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 		lines = append(lines, "  same-family: reported model is in the author's family")
 	}
 	if p.ProbeObservedAt != nil {
-		lines = append(lines, fmt.Sprintf("  probe observed_at: %s (%s ago)", p.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*p.ProbeObservedAt))))
+		probeTime := fmt.Sprintf("  probe observed_at: %s (%s ago)", p.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*p.ProbeObservedAt)))
+		if p.ProbeAtStart {
+			probeTime += ", probed at start"
+		}
+		lines = append(lines, probeTime)
 	} else {
 		lines = append(lines, "  probe observed_at: none")
+		if p.FailingStep != "" {
+			lines = append(lines, "  probe failed at: "+plain(p.FailingStep))
+		}
+		if p.ServerStatus != "" {
+			lines = append(lines, "  server status: "+plain(p.ServerStatus))
+		}
+	}
+	if p.RetryCommand != "" {
+		lines = append(lines, "  retry: "+plain(p.RetryCommand))
 	}
 	// The design takes the output bound from the probe record alone.
 	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource)+"  output bound: "+bound(p.OutputBound, "probe"))
@@ -251,7 +280,11 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 	}
 	lines = append(lines, "  bytes per token: "+bpt)
 	if p.EligibleRequiredReviewer == "unknown" && hasRole(p, "reviewer") {
-		lines = append(lines, "  truncation: unknown")
+		truncationLine := "  truncation: unknown"
+		if p.AcceptUnknownTruncation {
+			truncationLine += " (accepted)"
+		}
+		lines = append(lines, truncationLine)
 	}
 	return lines
 }
@@ -358,4 +391,47 @@ func clipCells(s string, width int) string {
 		return s
 	}
 	return runewidth.Truncate(s, width, "…")
+}
+
+// probeSubjectLines lists each probe subject (a referee identity) with its
+// probe state. A subject is no participant, so no roles are shown for it.
+func probeSubjectLines(s State, now time.Time) []string {
+	if len(s.ProbeSubjects) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(s.ProbeSubjects))
+	for k := range s.ProbeSubjects {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	lines := []string{"probe subjects:"}
+	for _, k := range keys {
+		subj := s.ProbeSubjects[k]
+		state := subj.State
+		if subj.Detail != "" {
+			state += ":" + subj.Detail
+		}
+		lines = append(lines, fmt.Sprintf("  %s %s/%s: %s", plain(subj.Kind), plain(subj.Endpoint), plain(subj.Model), plain(state)))
+		if subj.ProbeObservedAt != nil {
+			at := fmt.Sprintf("    probe observed_at: %s (%s ago)", subj.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*subj.ProbeObservedAt)))
+			if subj.ProbeAtStart {
+				at += ", probed at start"
+			}
+			lines = append(lines, at)
+		} else if subj.ProbeAtStart {
+			lines = append(lines, "    probed at start")
+		} else if subj.State != "probed" {
+			lines = append(lines, "    probe observed_at: none")
+		}
+		if subj.FailingStep != "" {
+			lines = append(lines, "    probe failed at: "+plain(subj.FailingStep))
+		}
+		if subj.ServerStatus != "" {
+			lines = append(lines, "    server status: "+plain(subj.ServerStatus))
+		}
+		if subj.RetryCommand != "" {
+			lines = append(lines, "    retry: "+plain(subj.RetryCommand))
+		}
+	}
+	return lines
 }

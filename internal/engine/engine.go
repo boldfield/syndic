@@ -202,7 +202,8 @@ type Engine struct {
 	pstate        map[string]string // cancelling or unknown last reported, per participant
 	failed        map[string]string // failure state of the last dispatch, per participant
 	deliveries    map[string]*openTurn
-	probed        map[string]bool // participants whose usable record was written by this start's probes
+	probed        map[string]bool               // participants whose usable record was written by this start's probes
+	probeFailed   map[string]probeFailureDetail // start-time probe failures, by participant id or referee label
 	stop          *stopRun
 	stopping      bool
 	stoppingCh    chan struct{}
@@ -554,6 +555,7 @@ func (e *Engine) Start() error {
 		for id := range res.probed {
 			e.probed[id] = true
 		}
+		e.probeFailed = res.failed
 		e.mu.Unlock()
 	}
 	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions, progress)
@@ -574,6 +576,7 @@ func (e *Engine) Start() error {
 	for id := range probed.probed {
 		e.probed[id] = true
 	}
+	e.probeFailed = probed.failed
 	unprobed = unprobed[:0]
 	for _, p := range roster.Participants {
 		if !built.Participants[p.ID].Usable {

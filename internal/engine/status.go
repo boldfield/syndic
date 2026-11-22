@@ -68,6 +68,8 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 		poolNames[poolName(p)] = true
 	}
 
+	reply.ProbeSubjects = e.probeSubjects()
+
 	names := make([]string, 0, len(poolNames))
 	for name := range poolNames {
 		names = append(names, name)
@@ -125,15 +127,19 @@ func poolName(p config.Participant) string {
 // retryCommand is the exact `syndic probe` invocation that would record the
 // participant's endpoint and model in the journal this daemon reads.
 func (e *Engine) retryCommand(p config.Participant) string {
-	cmd := "syndic probe --endpoint " + shQuote(p.Endpoint) + " --model " + shQuote(p.Model) + " --roster " + shQuote(e.rosterAbs)
+	return e.retryCommandFor(p.Endpoint, p.Model, p.ContextTokens)
+}
+
+func (e *Engine) retryCommandFor(endpoint, model string, contextTokens *int) string {
+	cmd := "syndic probe --endpoint " + shQuote(endpoint) + " --model " + shQuote(model) + " --roster " + shQuote(e.rosterAbs)
 	if e.journalPath != "" {
 		cmd += " --journal " + shQuote(e.journalPath)
 	}
 	if e.secretsDir != "" {
 		cmd += " --secrets-dir " + shQuote(e.secretsDir)
 	}
-	if p.ContextTokens != nil {
-		cmd += " --context-tokens " + fmt.Sprint(*p.ContextTokens)
+	if contextTokens != nil {
+		cmd += " --context-tokens " + fmt.Sprint(*contextTokens)
 	}
 	return cmd
 }
@@ -221,6 +227,25 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	ws.ServerStatus = mp.ServerStatus
 	ws.ProbeAtStart = e.probed[p.ID]
 
+	// Populate accept_unknown_truncation from config
+	if p.AcceptUnknownTruncation != nil {
+		ws.AcceptUnknownTruncation = *p.AcceptUnknownTruncation
+	}
+
+	// Check if participant is in the default preset (author or required reviewer)
+	if preset, ok := e.roster.Presets[e.roster.DefaultPreset]; ok {
+		if p.ID == preset.Author {
+			ws.InDefaultPreset = true
+		} else {
+			for _, rr := range preset.RequiredReviewers {
+				if p.ID == rr {
+					ws.InDefaultPreset = true
+					break
+				}
+			}
+		}
+	}
+
 	// Build retry command for unprobed participants
 	if !mp.Usable {
 		cmd := e.retryCommand(p)
@@ -231,6 +256,46 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.Estimate = estimateExceeded
 	}
 	return ws
+}
+
+// probeSubjects reports the referee identities the roster names. They carry
+// probe state only: a referee is no participant, so it has no eligible roles.
+func (e *Engine) probeSubjects() []wire.ProbeSubject {
+	var out []wire.ProbeSubject
+	for _, r := range refereeIdentities(e.roster) {
+		ep := endpointOf(e.roster, r.Endpoint)
+		if ep == nil {
+			continue
+		}
+		label := "referee:" + r.Endpoint + ":" + r.Model
+		subj := wire.ProbeSubject{
+			Kind:         "referee",
+			Identity:     label,
+			Endpoint:     r.Endpoint,
+			Model:        r.Model,
+			State:        ParticipantUnprobed,
+			ProbeAtStart: e.probed[label],
+		}
+		usable := false
+		if _, version, err := e.newAdapter(config.Participant{ID: label, Endpoint: r.Endpoint, Model: r.Model, Route: "api"}, *ep); err == nil {
+			usable, _ = e.recordUsable(*ep, r.Model, version)
+		}
+		if usable {
+			subj.State = "probed"
+		} else {
+			if f, ok := e.probeFailed[label]; ok {
+				detail := probeFailedPrefix + f.reason
+				subj.Detail = &detail
+				subj.FailingStep = f.failingStep
+				subj.ServerStatus = f.serverStat
+			}
+			cmd := e.retryCommandFor(r.Endpoint, r.Model, nil)
+			subj.RetryCommand = &cmd
+		}
+		out = append(out, subj)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Identity < out[j].Identity })
+	return out
 }
 
 func (e *Engine) endpoint(name string) config.EndpointProfile {
