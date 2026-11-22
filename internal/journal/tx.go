@@ -567,16 +567,23 @@ func (tx *Tx) OpenBlock(verdictID, blockID, candidateHash, severity, evidence, r
 }
 
 // WithdrawBlock withdraws a block against a new candidate hash.
-func (tx *Tx) WithdrawBlock(blockID, againstCandidateHash string) error {
+// Rejects unless: (1) the caller is the reviewer who opened the block,
+// (2) the hash is not the original hash, and (3) the hash is the current candidate.
+func (tx *Tx) WithdrawBlock(blockID, reviewer, againstCandidateHash string) error {
 	if againstCandidateHash == "" {
 		return fmt.Errorf("againstCandidateHash cannot be empty")
 	}
 
+	if reviewer == "" {
+		return fmt.Errorf("reviewer cannot be empty")
+	}
+
 	var state string
 	var originalHash string
+	var verdictID string
 	if err := tx.tx.QueryRow(`
-		SELECT state, candidate_hash FROM blocks WHERE id = ?
-	`, blockID).Scan(&state, &originalHash); err != nil {
+		SELECT state, candidate_hash, verdict_id FROM blocks WHERE id = ?
+	`, blockID).Scan(&state, &originalHash, &verdictID); err != nil {
 		return fmt.Errorf("query block: %w", err)
 	}
 
@@ -586,6 +593,50 @@ func (tx *Tx) WithdrawBlock(blockID, againstCandidateHash string) error {
 
 	if againstCandidateHash == originalHash {
 		return fmt.Errorf("cannot withdraw block against the same candidate hash")
+	}
+
+	var attemptID string
+	if err := tx.tx.QueryRow(`
+		SELECT attempt_id FROM verdicts WHERE id = ?
+	`, verdictID).Scan(&attemptID); err != nil {
+		return fmt.Errorf("query verdict: %w", err)
+	}
+
+	var turnID string
+	var blockReviewer string
+	if err := tx.tx.QueryRow(`
+		SELECT turn_id, participant FROM attempts WHERE id = ?
+	`, attemptID).Scan(&turnID, &blockReviewer); err != nil {
+		return fmt.Errorf("query attempt: %w", err)
+	}
+
+	if blockReviewer != reviewer {
+		return fmt.Errorf("only the reviewer who opened the block can withdraw it (block opened by %q, withdrawal attempted by %q)", blockReviewer, reviewer)
+	}
+
+	var currentCandidateID sql.NullString
+	if err := tx.tx.QueryRow(`
+		SELECT candidate_id FROM turns WHERE id = ?
+	`, turnID).Scan(&currentCandidateID); err != nil {
+		return fmt.Errorf("query turn: %w", err)
+	}
+
+	if !currentCandidateID.Valid {
+		return fmt.Errorf("turn has no current candidate")
+	}
+
+	var currentCandidateHash string
+	if err := tx.tx.QueryRow(`
+		SELECT content_hash FROM candidates WHERE id = ?
+	`, currentCandidateID.String).Scan(&currentCandidateHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("current candidate does not exist")
+		}
+		return fmt.Errorf("query current candidate: %w", err)
+	}
+
+	if againstCandidateHash != currentCandidateHash {
+		return fmt.Errorf("can only withdraw against current candidate (got %q, current is %q)", againstCandidateHash, currentCandidateHash)
 	}
 
 	if _, err := tx.tx.Exec(`
