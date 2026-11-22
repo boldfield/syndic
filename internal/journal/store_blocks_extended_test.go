@@ -51,7 +51,7 @@ func TestAllBlocksForTurn(t *testing.T) {
 		t.Fatalf("CreateCandidate: %v", err)
 	}
 
-	if err := f.store.WithdrawBlock("b1", "H2"); err != nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestWithdrawnBlocksAgainstHash(t *testing.T) {
 		t.Fatalf("CreateCandidate: %v", err)
 	}
 
-	if err := f.store.WithdrawBlock("b1", "H2"); err != nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestBlockStatePersistence(t *testing.T) {
 		t.Fatalf("CreateCandidate: %v", err)
 	}
 
-	if err := f.store.WithdrawBlock("b1", "H2"); err != nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock: %v", err)
 	}
 

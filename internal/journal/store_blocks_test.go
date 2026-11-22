@@ -65,7 +65,7 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 	}
 
 	for _, bad := range []string{"H1", ""} {
-		if err := f.store.WithdrawBlock("b1", bad); err == nil {
+		if err := f.store.WithdrawBlock("b1", "reviewer", bad); err == nil {
 			t.Fatalf("WithdrawBlock(%q) should error", bad)
 		}
 	}
@@ -73,7 +73,7 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 		t.Fatalf("block should stay open after rejected withdrawals, got %v", ids)
 	}
 
-	if err := f.store.WithdrawBlock("b1", "H2"); err != nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock H2: %v", err)
 	}
 	if ids := f.openIDs(t); len(ids) != 0 {
@@ -89,7 +89,7 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 		t.Fatalf("got state=%q against=%v orig=%v", state, against, orig)
 	}
 
-	if err := f.store.WithdrawBlock("b1", "H3"); err == nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H3"); err == nil {
 		t.Fatal("WithdrawBlock on withdrawn block should error")
 	}
 	if err := f.store.OverrideBlock("b1"); err == nil {
@@ -109,7 +109,7 @@ func TestOverrideBlock(t *testing.T) {
 	if err := f.store.OverrideBlock("b1"); err == nil {
 		t.Fatal("second OverrideBlock should error")
 	}
-	if err := f.store.WithdrawBlock("b1", "H2"); err == nil {
+	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err == nil {
 		t.Fatal("WithdrawBlock on overridden block should error")
 	}
 	if err := f.store.OverrideBlock("missing"); err == nil {

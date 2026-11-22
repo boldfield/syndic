@@ -134,3 +134,228 @@ func TestBlocksForRound(t *testing.T) {
 
 	_ = cid
 }
+
+func TestAdvanceRoundBumpsEpoch(t *testing.T) {
+	f := newRoundFixture(t)
+
+	cid, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate: %v", err)
+	}
+
+	var initialEpoch int
+	if err := f.db.Conn().QueryRow(`SELECT epoch FROM turns WHERE id = ?`, f.turnID).Scan(&initialEpoch); err != nil {
+		t.Fatalf("query initial epoch: %v", err)
+	}
+
+	if err := f.store.AdvanceRound(f.turnID); err != nil {
+		t.Fatalf("AdvanceRound: %v", err)
+	}
+
+	var newEpoch int
+	if err := f.db.Conn().QueryRow(`SELECT epoch FROM turns WHERE id = ?`, f.turnID).Scan(&newEpoch); err != nil {
+		t.Fatalf("query new epoch: %v", err)
+	}
+
+	if newEpoch != initialEpoch+1 {
+		t.Fatalf("expected epoch to bump from %d to %d, got %d", initialEpoch, initialEpoch+1, newEpoch)
+	}
+
+	_ = cid
+}
+
+func TestBlocksPersistAcrossRounds(t *testing.T) {
+	f := newRoundFixture(t)
+
+	attemptID1, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 0, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt round 0: %v", err)
+	}
+
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 0: %v", err)
+	}
+
+	vid1, err := f.store.RecordVerdict(attemptID1, "H1", "block", "bad", "valid")
+	if err != nil {
+		t.Fatalf("RecordVerdict: %v", err)
+	}
+
+	if err := f.store.OpenBlock(vid1, "b1", "H1", "high", "ev", "fix"); err != nil {
+		t.Fatalf("OpenBlock: %v", err)
+	}
+
+	blocksRound0, err := f.store.BlocksForRound(f.turnID, 0)
+	if err != nil {
+		t.Fatalf("BlocksForRound round 0: %v", err)
+	}
+	if len(blocksRound0) != 1 {
+		t.Fatalf("expected 1 block in round 0, got %d", len(blocksRound0))
+	}
+
+	if err := f.store.AdvanceRound(f.turnID); err != nil {
+		t.Fatalf("AdvanceRound: %v", err)
+	}
+
+	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 1: %v", err)
+	}
+
+	blocksRound0After, err := f.store.BlocksForRound(f.turnID, 0)
+	if err != nil {
+		t.Fatalf("BlocksForRound round 0 after advance: %v", err)
+	}
+	if len(blocksRound0After) != 1 {
+		t.Fatalf("expected block to persist in round 0, got %d", len(blocksRound0After))
+	}
+
+	_ = cid2
+}
+
+func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
+	f := newRoundFixture(t)
+
+	attemptID1, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 0, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt round 0: %v", err)
+	}
+
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 0: %v", err)
+	}
+
+	vid1, err := f.store.RecordVerdict(attemptID1, "H1", "approve", "good", "valid")
+	if err != nil {
+		t.Fatalf("RecordVerdict round 0 approve: %v", err)
+	}
+
+	if err := f.store.AdvanceRound(f.turnID); err != nil {
+		t.Fatalf("AdvanceRound: %v", err)
+	}
+
+	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 1: %v", err)
+	}
+
+	attemptID2, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 1, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt round 1: %v", err)
+	}
+
+	var approveCount int
+	if err := f.db.Conn().QueryRow(`
+		SELECT COUNT(*) FROM verdicts
+		WHERE candidate_hash = ? AND parsed_verdict = 'approve'
+	`, "H1").Scan(&approveCount); err != nil {
+		t.Fatalf("count verdicts for H1: %v", err)
+	}
+	if approveCount != 1 {
+		t.Fatalf("expected 1 approval verdict for H1 (round 0), got %d", approveCount)
+	}
+
+	var approveH2Count int
+	if err := f.db.Conn().QueryRow(`
+		SELECT COUNT(*) FROM verdicts
+		WHERE candidate_hash = ? AND parsed_verdict = 'approve'
+	`, "H2").Scan(&approveH2Count); err != nil {
+		t.Fatalf("count verdicts for H2: %v", err)
+	}
+	if approveH2Count != 0 {
+		t.Fatalf("expected 0 approval verdicts for H2 (new round), got %d", approveH2Count)
+	}
+
+	_ = cid2
+	_ = attemptID2
+	_ = vid1
+}
+
+func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
+	f := newRoundFixture(t)
+
+	attemptID, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 0, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt: %v", err)
+	}
+
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 0: %v", err)
+	}
+
+	vid, err := f.store.RecordVerdict(attemptID, "H1", "block", "bad", "valid")
+	if err != nil {
+		t.Fatalf("RecordVerdict: %v", err)
+	}
+
+	if err := f.store.OpenBlock(vid, "b1", "H1", "high", "ev", "fix"); err != nil {
+		t.Fatalf("OpenBlock: %v", err)
+	}
+
+	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 1: %v", err)
+	}
+
+	err = f.store.WithdrawBlock("b1", "reviewer2", "H2")
+	if err == nil {
+		t.Fatal("expected error when wrong reviewer withdraws block")
+	}
+
+	if !contains(err.Error(), "only the reviewer who opened the block") {
+		t.Fatalf("expected ownership error, got: %v", err)
+	}
+
+	err = f.store.WithdrawBlock("b1", "reviewer1", "H2")
+	if err != nil {
+		t.Fatalf("expected withdrawal to succeed for correct reviewer: %v", err)
+	}
+
+	_ = cid2
+}
+
+func TestWithdrawBlockRejectsStaleHash(t *testing.T) {
+	f := newRoundFixture(t)
+
+	attemptID, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 0, nil, "")
+	if err != nil {
+		t.Fatalf("BeginAttempt: %v", err)
+	}
+
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
+		t.Fatalf("SetLatestCandidate round 0: %v", err)
+	}
+
+	vid, err := f.store.RecordVerdict(attemptID, "H1", "block", "bad", "valid")
+	if err != nil {
+		t.Fatalf("RecordVerdict: %v", err)
+	}
+
+	if err := f.store.OpenBlock(vid, "b1", "H1", "high", "ev", "fix"); err != nil {
+		t.Fatalf("OpenBlock: %v", err)
+	}
+
+	err = f.store.WithdrawBlock("b1", "reviewer1", "H1")
+	if err == nil {
+		t.Fatal("expected error when withdrawing against same hash as opened")
+	}
+
+	if !contains(err.Error(), "cannot withdraw block against the same candidate hash") {
+		t.Fatalf("expected stale hash error, got: %v", err)
+	}
+
+	_ = cid1
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

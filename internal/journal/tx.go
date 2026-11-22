@@ -565,16 +565,22 @@ func (tx *Tx) OpenBlock(verdictID, blockID, candidateHash, severity, evidence, r
 }
 
 // WithdrawBlock withdraws a block against a new candidate hash.
-func (tx *Tx) WithdrawBlock(blockID, againstCandidateHash string) error {
+// Rejects unless the caller is the reviewer who opened the block.
+func (tx *Tx) WithdrawBlock(blockID, reviewer, againstCandidateHash string) error {
 	if againstCandidateHash == "" {
 		return fmt.Errorf("againstCandidateHash cannot be empty")
 	}
 
+	if reviewer == "" {
+		return fmt.Errorf("reviewer cannot be empty")
+	}
+
 	var state string
 	var originalHash string
+	var verdictID string
 	if err := tx.tx.QueryRow(`
-		SELECT state, candidate_hash FROM blocks WHERE id = ?
-	`, blockID).Scan(&state, &originalHash); err != nil {
+		SELECT state, candidate_hash, verdict_id FROM blocks WHERE id = ?
+	`, blockID).Scan(&state, &originalHash, &verdictID); err != nil {
 		return fmt.Errorf("query block: %w", err)
 	}
 
@@ -584,6 +590,24 @@ func (tx *Tx) WithdrawBlock(blockID, againstCandidateHash string) error {
 
 	if againstCandidateHash == originalHash {
 		return fmt.Errorf("cannot withdraw block against the same candidate hash")
+	}
+
+	var attemptID string
+	if err := tx.tx.QueryRow(`
+		SELECT attempt_id FROM verdicts WHERE id = ?
+	`, verdictID).Scan(&attemptID); err != nil {
+		return fmt.Errorf("query verdict: %w", err)
+	}
+
+	var blockReviewer string
+	if err := tx.tx.QueryRow(`
+		SELECT participant FROM attempts WHERE id = ?
+	`, attemptID).Scan(&blockReviewer); err != nil {
+		return fmt.Errorf("query attempt: %w", err)
+	}
+
+	if blockReviewer != reviewer {
+		return fmt.Errorf("only the reviewer who opened the block can withdraw it (block opened by %q, withdrawal attempted by %q)", blockReviewer, reviewer)
 	}
 
 	if _, err := tx.tx.Exec(`

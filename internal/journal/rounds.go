@@ -2,6 +2,7 @@ package journal
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -46,7 +47,7 @@ func (tx *Tx) GetRoundInfo(turnID string) (*RoundInfo, error) {
 		if err := tx.tx.QueryRow(`
 			SELECT round FROM candidates WHERE id = ?
 		`, currentCandidateID.String).Scan(&round); err != nil {
-			if err != sql.ErrNoRows {
+			if !errors.Is(err, sql.ErrNoRows) {
 				return nil, fmt.Errorf("query current candidate round: %w", err)
 			}
 		} else {
@@ -88,7 +89,7 @@ func (tx *Tx) CanAdvanceRound(turnID string) (bool, error) {
 }
 
 // BlocksForRound retrieves all blocks that are open for a turn at a specific round.
-// A block is considered open for a round if its state is 'open'.
+// A block is considered open for a round if it was opened in that round (candidate_hash matches the round's candidate).
 func (s *Store) BlocksForRound(turnID string, round int) ([]Block, error) {
 	var blocks []Block
 	err := s.Tx(func(tx *Tx) error {
@@ -106,9 +107,10 @@ func (tx *Tx) BlocksForRound(turnID string, round int) ([]Block, error) {
 		FROM blocks b
 		JOIN verdicts v ON b.verdict_id = v.id
 		JOIN attempts a ON v.attempt_id = a.id
+		JOIN candidates c ON b.candidate_hash = c.content_hash AND c.turn_id = ? AND c.round = ?
 		WHERE a.turn_id = ? AND b.state = 'open'
 		ORDER BY b.id
-	`, turnID)
+	`, turnID, round, turnID)
 	if err != nil {
 		return nil, fmt.Errorf("query blocks: %w", err)
 	}
@@ -181,10 +183,10 @@ func (tx *Tx) LatestCandidate(turnID string) (string, int, error) {
 	if err := tx.tx.QueryRow(`
 		SELECT id, round FROM candidates WHERE turn_id = ? ORDER BY round DESC LIMIT 1
 	`, turnID).Scan(&candidateID, &round); err != nil {
-		if err == sql.ErrNoRows {
-			return "", 0, nil
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", 0, fmt.Errorf("query latest candidate: %w", err)
 		}
-		return "", 0, fmt.Errorf("query latest candidate: %w", err)
+		return "", 0, nil
 	}
 
 	if !candidateID.Valid {
@@ -192,4 +194,46 @@ func (tx *Tx) LatestCandidate(turnID string) (string, int, error) {
 	}
 
 	return candidateID.String, round, nil
+}
+
+// AdvanceRound atomically advances a turn to the next round and bumps epoch.
+// This rejects late previous-round results by advancing the epoch.
+func (s *Store) AdvanceRound(turnID string) error {
+	return s.Tx(func(tx *Tx) error {
+		return tx.AdvanceRound(turnID)
+	})
+}
+
+// AdvanceRound atomically advances a turn to the next round and bumps epoch.
+func (tx *Tx) AdvanceRound(turnID string) error {
+	var currentEpoch int
+	var currentCandidateID sql.NullString
+
+	if err := tx.tx.QueryRow(`
+		SELECT epoch, candidate_id FROM turns WHERE id = ?
+	`, turnID).Scan(&currentEpoch, &currentCandidateID); err != nil {
+		return fmt.Errorf("query turn: %w", err)
+	}
+
+	if !currentCandidateID.Valid {
+		return fmt.Errorf("cannot advance round: turn has no current candidate")
+	}
+
+	var currentRound int
+	if err := tx.tx.QueryRow(`
+		SELECT round FROM candidates WHERE id = ?
+	`, currentCandidateID.String).Scan(&currentRound); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("cannot advance round: current candidate does not exist")
+		}
+		return fmt.Errorf("query current candidate: %w", err)
+	}
+
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET epoch = epoch + 1 WHERE id = ?
+	`, turnID); err != nil {
+		return fmt.Errorf("bump epoch: %w", err)
+	}
+
+	return nil
 }
