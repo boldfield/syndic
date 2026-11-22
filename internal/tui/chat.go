@@ -141,35 +141,65 @@ func renderChatTurn(s State, turnID string, in chatInput, width int) []string {
 
 	var lines []string
 
-	// Show user input (from the first user message in this turn's transcript).
-	inputLines := getChatTurnInput(s, turnID)
-	if len(inputLines) > 0 {
-		lines = append(lines, inputLines...)
-	}
+	// Helper to get the candidate content for this turn.
+	getCandidate := func() string {
+		// Find the latest completed attempt for this turn to display.
+		// For approved/solo/terminal turns, find the review or author attempt.
+		// For in-progress turns, find the author attempt if drafts are enabled.
+		var bestAttempt string
+		var bestEpoch int64 = -1
 
-	// Get open blocks and override reason for this turn.
-	openBlocks := in.blockDetail
-	overrideReason := ""
-
-	// Show the turn's outcome based on its state.
-	candidate := func() {
-		if refs := answerRefs(s, turnID, answerInput{
-			content:        in.content,
-			drafts:         in.drafts,
-			candidateID:    candidateIDForTurn(s, turnID),
-			openBlocks:     blockSlice(openBlocks),
-			overrideReason: overrideReason,
-			plainMode:      in.plainMode,
-		}); len(refs) > 0 {
-			lines = append(lines, body(in.content, refs[0]))
-		} else if ti.CandidateHash != nil {
-			lines = append(lines, "loading…")
+		switch ti.State {
+		case "approved", "incomplete", "overridden", "cancelled":
+			// For terminal states, use the latest attempt (review or author).
+			for id, ai := range s.Attempts {
+				if ai.TurnID != turnID || ai.Status != "complete" {
+					continue
+				}
+				if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
+					bestAttempt = id
+					bestEpoch = ai.Epoch
+				}
+			}
+		case "solo_complete":
+			// For solo, use the author attempt.
+			for id, ai := range s.Attempts {
+				if ai.TurnID != turnID || ai.Phase != "author" || ai.Status != "complete" {
+					continue
+				}
+				if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
+					bestAttempt = id
+					bestEpoch = ai.Epoch
+				}
+			}
+		default:
+			// For in-progress turns, use author attempt if drafts enabled.
+			if in.drafts {
+				for id, ai := range s.Attempts {
+					if ai.TurnID != turnID || ai.Phase != "author" || ai.Status != "complete" {
+						continue
+					}
+					if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
+						bestAttempt = id
+						bestEpoch = ai.Epoch
+					}
+				}
+			}
 		}
+
+		if bestAttempt != "" {
+			return body(in.content, "attempt:"+bestAttempt)
+		} else if ti.CandidateHash != nil {
+			return "loading…"
+		}
+		return ""
 	}
 
 	switch ti.State {
 	case "approved":
-		candidate()
+		if content := getCandidate(); content != "" {
+			lines = append(lines, content)
+		}
 		if ti.CandidateHash != nil {
 			hash := *ti.CandidateHash
 			if len(hash) > 12 {
@@ -189,24 +219,30 @@ func renderChatTurn(s State, turnID string, in chatInput, width int) []string {
 
 	case "solo_complete":
 		lines = append(lines, "UNREVIEWED (solo)")
-		candidate()
+		if content := getCandidate(); content != "" {
+			lines = append(lines, content)
+		}
 
 	case "incomplete":
 		if ti.TerminalReason != nil {
 			lines = append(lines, *ti.TerminalReason)
 		}
-		lines = append(lines, blockLines(blockSlice(openBlocks))...)
+		lines = append(lines, blockLines(blockSlice(in.blockDetail))...)
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
-			candidate()
+			if content := getCandidate(); content != "" {
+				lines = append(lines, content)
+			}
 		} else {
 			lines = append(lines, "no approved answer (incomplete)")
 		}
 
 	case "overridden":
-		candidate()
-		reason := overrideReason
-		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
+		if content := getCandidate(); content != "" {
+			lines = append(lines, content)
+		}
+		reason := ""
+		if ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
 		lines = append(lines, "HUMAN OVERRIDE: "+reason)
@@ -214,53 +250,28 @@ func renderChatTurn(s State, turnID string, in chatInput, width int) []string {
 	case "cancelled":
 		lines = append(lines, "CANCELLED, not approved")
 		if ti.CandidateHash != nil {
-			candidate()
+			if content := getCandidate(); content != "" {
+				lines = append(lines, content)
+			}
 		}
 
 	default:
 		// Turn in progress - show draft banner if drafts enabled.
-		if s.CurrentTurn == turnID {
-			if in.drafts {
-				if refs := answerRefs(s, turnID, answerInput{
-					content:        in.content,
-					drafts:         true,
-					candidateID:    "",
-					openBlocks:     blockSlice(openBlocks),
-					overrideReason: "",
-					plainMode:      in.plainMode,
-				}); len(refs) > 0 {
-					draftText := "UNREVIEWED DRAFT"
-					if in.plainMode {
-						draftText = "!! UNREVIEWED DRAFT !!"
-					} else {
-						draftText = draftBanner.Render(draftText)
-					}
-					lines = append(lines, draftText, body(in.content, refs[0]))
-				}
+		if s.CurrentTurn == turnID && in.drafts {
+			draftText := "UNREVIEWED DRAFT"
+			if in.plainMode {
+				draftText = "!! UNREVIEWED DRAFT !!"
 			} else {
-				lines = append(lines, "turn in progress")
+				draftText = draftBanner.Render(draftText)
+			}
+			lines = append(lines, draftText)
+			if content := getCandidate(); content != "" {
+				lines = append(lines, content)
 			}
 		}
 	}
 
 	return lines
-}
-
-// getChatTurnInput retrieves the user input for a turn from the transcript.
-func getChatTurnInput(s State, turnID string) []string {
-	// Look for user input in messages (this would typically come from transcript).
-	// For now, return empty - this will be populated once transcript loading is working.
-	return []string{}
-}
-
-// candidateIDForTurn returns the candidate ID for a turn, if available.
-func candidateIDForTurn(s State, turnID string) string {
-	for id, ai := range s.Attempts {
-		if ai.TurnID == turnID && ai.Phase == "review" && ai.Status == "complete" {
-			return id
-		}
-	}
-	return ""
 }
 
 // blockSlice converts a map to a slice of OpenBlocks.

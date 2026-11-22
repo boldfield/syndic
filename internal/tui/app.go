@@ -956,8 +956,8 @@ func (a *App) quit() tea.Cmd {
 // bodyHeight is the number of lines left for the active tab.
 func (a *App) bodyHeight() int {
 	banners := renderBanners(a.state)
-	banners = capBannersForHeight(banners, a.height, 5)
-	return max(a.height-len(banners)-1-inputHeight, 0)
+	banners = capBannersForHeight(banners, a.height-1-5-inputHeight-1, 0)
+	return max(a.height-1-len(banners)-inputHeight-1, 0)
 }
 
 // isTerminalTooSmall reports whether the terminal is below the minimum size (40×10).
