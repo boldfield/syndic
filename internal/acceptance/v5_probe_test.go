@@ -1,19 +1,23 @@
 package acceptance
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/transport/openai"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -31,180 +35,208 @@ func init() {
 	cover(correctionsAndBudgetPara, "a turn whose revisions, tool attempts and referee decisions exceed `turn_max_estimated_tokens` ends `budget:turn`", "TestBudget_TurnExceedsBudget")
 }
 
-// TestCorrections_UnknownEligibilityOnProbe verifies that a probe response
-// containing both marker values yields unknown eligibility.
+var probeHexMarker = regexp.MustCompile(`[0-9a-f]{32}`)
+
+// probeOverLength answers the over-length request of a probe: it is handed
+// the markers the probe put in the prompt and returns the status and body.
+type probeOverLength func(markers []string) (status int, body string)
+
+// probeCompletion is the 2xx body of a chat completion with the content.
+func probeCompletion(content string) string {
+	b, _ := json.Marshal(map[string]any{
+		"model": "m1",
+		"choices": []any{map[string]any{
+			"message":       map[string]any{"role": "assistant", "content": content},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+	})
+	return string(b)
+}
+
+// probeEndpoint runs the real openai adapter's probe against an httptest
+// endpoint that answers every step normally except the over-length one, which
+// over answers, and returns the record the probe produced.
+func probeEndpoint(t *testing.T, over probeOverLength, opts transport.ProbeOptions) transport.CapabilityRecord {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
+	})
+	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		var user string
+		for _, m := range req.Messages {
+			if m.Role != "system" {
+				user = m.Content
+			}
+		}
+		if len(user) > 100000 {
+			status, body := over(probeHexMarker.FindAllString(user, -1))
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		promptTokens := 1
+		switch {
+		case user == "":
+			promptTokens = 10
+		case len(user) == 4096:
+			promptTokens = 1034
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": "m1",
+			"choices": []any{map[string]any{
+				"message":       map[string]any{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": promptTokens, "completion_tokens": 1},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	a := openai.New(config.EndpointProfile{Name: "probed", BaseURL: srv.URL}, nil)
+	if opts.AssumedContextLen == 0 {
+		opts.AssumedContextLen = 131072
+	}
+	rec, err := a.Probe(context.Background(), "probed", "m1", opts)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	return rec
+}
+
+// wantProbeOutcome requires the probe's over-length outcome and eligibility.
+func wantProbeOutcome(t *testing.T, rec transport.CapabilityRecord, overLength string, eligible transport.Tri) {
+	t.Helper()
+	if rec.OverLength != overLength {
+		t.Errorf("OverLength = %q, want %q", rec.OverLength, overLength)
+	}
+	if rec.EligibleRequiredReviewer != eligible {
+		t.Errorf("EligibleRequiredReviewer = %v, want %v", rec.EligibleRequiredReviewer, eligible)
+	}
+}
+
+// TestCorrections_UnknownEligibilityOnProbe drives the real probe against an
+// httptest endpoint: only a reply that contains both markers, in any
+// surrounding text, a reply with one or none, or a probe that never ran the
+// over-length step, all leave the eligibility unknown.
 func TestCorrections_UnknownEligibilityOnProbe(t *testing.T) {
 	t.Parallel()
-	// httptest server simulates a probe endpoint that returns both marker values
-	server := httptest.NewServer(probeHandlerBothMarkers(randomMarker(), randomMarker()))
-	t.Cleanup(server.Close)
-
-	s := newSuite(t, correctionsRosterOf("r1", map[string]string{
-		"r1": "accept_unknown_truncation = false\n",
-	}, server.URL), map[string][]fake.Step{
-		"author": repeat(2),
-		"r1":     repeat(2),
-	}, enginetest.WithEligibleRequiredReviewer("r1", transport.TriUnknown))
-
-	c := s.Dial(t)
-	sr, err := c.Status(s.ctx())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-
-	for _, p := range sr.Participants {
-		if p.ID == "r1" {
-			if p.EligibleRequiredReviewer != "unknown" {
-				t.Errorf("r1.EligibleRequiredReviewer = %q, want unknown", p.EligibleRequiredReviewer)
+	t.Run("both_markers_in_surrounding_text", func(t *testing.T) {
+		rec := probeEndpoint(t, func(m []string) (int, string) {
+			if len(m) < 2 {
+				t.Errorf("the over-length prompt carried %d markers, want 2", len(m))
+				return 500, ""
 			}
-		}
-	}
+			return 200, probeCompletion(fmt.Sprintf("see (%s) between ... and %s!", m[0], m[len(m)-1]))
+		}, transport.ProbeOptions{})
+		wantProbeOutcome(t, rec, "accepted_whole", transport.TriUnknown)
+	})
+	t.Run("one_marker", func(t *testing.T) {
+		rec := probeEndpoint(t, func(m []string) (int, string) {
+			return 200, probeCompletion("only " + m[0])
+		}, transport.ProbeOptions{})
+		wantProbeOutcome(t, rec, "markers_missing", transport.TriUnknown)
+	})
+	t.Run("no_markers", func(t *testing.T) {
+		rec := probeEndpoint(t, func([]string) (int, string) {
+			return 200, probeCompletion("ok")
+		}, transport.ProbeOptions{})
+		wantProbeOutcome(t, rec, "markers_missing", transport.TriUnknown)
+	})
+	t.Run("not_run", func(t *testing.T) {
+		rec := probeEndpoint(t, func([]string) (int, string) {
+			t.Error("the over-length request was sent although that step is disabled")
+			return 500, ""
+		}, transport.ProbeOptions{DisableOverLength: true})
+		wantProbeOutcome(t, rec, "not_run:skipped", transport.TriUnknown)
+	})
 }
 
-// TestCorrections_YesEligibilityOnContextRejection verifies that a probe result
-// with yes eligibility from context rejection is listed in status.
+// TestCorrections_YesEligibilityOnContextRejection drives the real probe
+// against an endpoint that refuses the over-length prompt with a 400 naming
+// the context length: the only way to eligibility yes.
 func TestCorrections_YesEligibilityOnContextRejection(t *testing.T) {
 	t.Parallel()
-	// httptest server simulates a probe endpoint that returns context rejection (400 with context length error)
-	server := httptest.NewServer(probeHandlerContextRejection())
-	t.Cleanup(server.Close)
-
-	s := newSuite(t, correctionsRosterOf("r1", map[string]string{}, server.URL), map[string][]fake.Step{
-		"author": repeat(2),
-		"r1":     repeat(2),
-	}, enginetest.WithEligibleRequiredReviewer("r1", transport.TriYes))
-
-	c := s.Dial(t)
-	sr, err := c.Status(s.ctx())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-
-	for _, p := range sr.Participants {
-		if p.ID == "r1" {
-			if p.EligibleRequiredReviewer != "yes" {
-				t.Errorf("r1.EligibleRequiredReviewer = %q, want yes", p.EligibleRequiredReviewer)
-			}
-		}
-	}
+	rec := probeEndpoint(t, func([]string) (int, string) {
+		return http.StatusBadRequest, `{"error":{"message":"This model's maximum context length is 8192 tokens"}}`
+	}, transport.ProbeOptions{})
+	wantProbeOutcome(t, rec, "rejected:context", transport.TriYes)
 }
 
-// TestCorrections_UnknownEligibilityOnOtherRejections verifies that probes
-// with other rejections (401, 429, content policy) yield unknown eligibility.
+// TestCorrections_UnknownEligibilityOnOtherRejections drives the real probe
+// once per refusal that does not name the context length.
 func TestCorrections_UnknownEligibilityOnOtherRejections(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(probeHandlerOtherRejections())
-	t.Cleanup(server.Close)
-
-	s := newSuite(t, correctionsRosterOf("r1", map[string]string{
-		"r1": "accept_unknown_truncation = false\n",
-	}, server.URL), map[string][]fake.Step{
-		"author": repeat(2),
-		"r1":     repeat(2),
-	}, enginetest.NoStart())
-
-	if err := s.Engine.Start(); err != nil {
-		t.Fatalf("engine.Start: %v", err)
-	}
-
-	c := s.Dial(t)
-	sr, err := c.Status(s.ctx())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-
-	for _, p := range sr.Participants {
-		if p.ID == "r1" {
-			if p.EligibleRequiredReviewer != "unknown" {
-				t.Errorf("r1.EligibleRequiredReviewer = %q, want unknown", p.EligibleRequiredReviewer)
-			}
-		}
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"401", http.StatusUnauthorized, `{"error":{"message":"invalid api key"}}`},
+		{"429", http.StatusTooManyRequests, `{"error":{"message":"rate limit reached"}}`},
+		{"400_content_policy", http.StatusBadRequest, `{"error":{"message":"blocked by the content policy"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := probeEndpoint(t, func([]string) (int, string) { return tc.status, tc.body }, transport.ProbeOptions{})
+			wantProbeOutcome(t, rec, "rejected:other", transport.TriUnknown)
+		})
 	}
 }
 
-// TestCorrections_UnknownReviewerAcceptance verifies that an unknown reviewer
-// is refused without accept_unknown_truncation and accepted with it.
+// TestCorrections_UnknownReviewerAcceptance takes the eligibility of the
+// required reviewer from a real probe whose reply carries both markers, so it
+// is unknown, and submits through the engine: refused without
+// accept_unknown_truncation and nothing dispatched, dispatched with it.
 func TestCorrections_UnknownReviewerAcceptance(t *testing.T) {
 	t.Parallel()
+	rec := probeEndpoint(t, func(m []string) (int, string) {
+		return 200, probeCompletion(strings.Join(m, " "))
+	}, transport.ProbeOptions{})
+	wantProbeOutcome(t, rec, "accepted_whole", transport.TriUnknown)
 
-	// Test case 1: unknown reviewer without accept_unknown_truncation
-	// The preset is invalid because the reviewer is required but unknown and doesn't accept unknown truncation
-	t.Run("without_accept_unknown", func(t *testing.T) {
-		server := httptest.NewServer(probeHandlerBothMarkers(randomMarker(), randomMarker()))
-		t.Cleanup(server.Close)
+	scripts := func() map[string][]fake.Step {
+		return map[string][]fake.Step{"author": budgetsScript(4), "r1": budgetsScript(4)}
+	}
 
-		s := newSuite(t, correctionsRosterOf("reviewer", map[string]string{
-			"reviewer": "accept_unknown_truncation = false\n",
-		}, server.URL), map[string][]fake.Step{
-			"author":   repeat(4),
-			"reviewer": repeat(4),
-		}, enginetest.WithEligibleRequiredReviewer("reviewer", transport.TriUnknown))
-
-		// The roster should fail to load because the preset names an unknown reviewer
-		// without accept_unknown_truncation
-		sr, err := s.Dial(t).Status(s.ctx())
-		if err != nil {
-			// This is expected - the preset is invalid
-			t.Logf("Status failed as expected: %v", err)
-		} else {
-			// If status succeeds, verify the participant has unknown eligibility
-			for _, p := range sr.Participants {
-				if p.ID == "reviewer" && p.EligibleRequiredReviewer == "unknown" {
-					t.Log("Reviewer has unknown eligibility as expected")
-				}
+	t.Run("without_accept_unknown_truncation", func(t *testing.T) {
+		s := newSuite(t, correctionsRosterOf("r1", map[string]string{
+			"r1": "accept_unknown_truncation = false\n",
+		}), scripts(), enginetest.WithEligibleRequiredReviewer("r1", rec.EligibleRequiredReviewer))
+		c := s.Dial(t)
+		_, err := s.budgetsTrySubmit(c, "unaccepted", "test input", "review", "")
+		var we *wire.Error
+		if !errors.As(err, &we) || we.Code != wire.ErrorCodePresetInvalid ||
+			we.Detail == nil || *we.Detail != "unknown_required_reviewer_not_accepted:r1" {
+			t.Fatalf("submit = %v, want preset_invalid with detail unknown_required_reviewer_not_accepted:r1", err)
+		}
+		s.budgetsWantNoTurn(t, c)
+		for _, id := range []string{"author", "r1"} {
+			if n := len(s.Adapters[id].Calls()); n != 0 {
+				t.Errorf("%s received %d requests of a refused submit", id, n)
 			}
 		}
 	})
 
-	// Test case 2: unknown reviewer with accept_unknown_truncation
-	// The roster loads successfully, and dispatch proceeds
-	t.Run("with_accept_unknown", func(t *testing.T) {
-		server := httptest.NewServer(probeHandlerBothMarkers(randomMarker(), randomMarker()))
-		t.Cleanup(server.Close)
-
-		s := newSuite(t, correctionsRosterOf("reviewer", map[string]string{
-			"reviewer": "accept_unknown_truncation = true\n",
-		}, server.URL), map[string][]fake.Step{
-			"author":   repeat(4),
-			"reviewer": repeat(4),
-		}, enginetest.WithEligibleRequiredReviewer("reviewer", transport.TriUnknown))
-
+	t.Run("with_accept_unknown_truncation", func(t *testing.T) {
+		s := newSuite(t, correctionsRosterOf("r1", map[string]string{
+			"r1": "accept_unknown_truncation = true\n",
+		}), scripts(), enginetest.WithEligibleRequiredReviewer("r1", rec.EligibleRequiredReviewer))
 		c := s.Dial(t)
-		sr, err := c.Status(s.ctx())
-		if err != nil {
-			t.Fatalf("Status: %v", err)
+		reply := s.budgetsSubmit(t, c, "accepted", "test input", "review", "")
+		turn := s.budgetsSettled(t, c, reply.TurnID)
+		wantTurn(t, turn, engine.StateApproved, "all_approved")
+		if len(budgetsAttempts(turn, "r1", "review")) == 0 || len(s.budgetsCalls("r1", reply.TurnID, "review")) == 0 {
+			t.Errorf("the unknown reviewer was not dispatched: %+v", turn.Attempts)
 		}
-
-		found := false
-		for _, p := range sr.Participants {
-			if p.ID == "reviewer" {
-				found = true
-				if !p.AcceptUnknownTruncation {
-					t.Errorf("reviewer.AcceptUnknownTruncation = false, want true")
-				}
-				if p.EligibleRequiredReviewer != "unknown" {
-					t.Errorf("reviewer.EligibleRequiredReviewer = %q, want unknown", p.EligibleRequiredReviewer)
-				}
-			}
-		}
-		if !found {
-			t.Error("reviewer not found in participants")
-		}
-
-		preset := "review"
-		sr2, err := c.Submit(s.ctx(), wire.SubmitRequest{
-			SubmissionID: "with_accept_unknown",
-			Input:        "test input",
-			Preset:       &preset,
-		})
-
-		if err != nil {
-			t.Fatalf("submit with accept_unknown should succeed, got error: %v", err)
-		}
-		if sr2.TurnID == "" {
-			t.Errorf("submit with accept_unknown should return a TurnID")
-		}
-		s.WaitTerminal(sr2.TurnID)
 	})
 }
 
@@ -256,8 +288,8 @@ concurrency = 1
 	if err == nil {
 		t.Fatal("engine start should fail when author is named as required reviewer")
 	}
-	if !strings.Contains(err.Error(), "required reviewer") || !strings.Contains(err.Error(), "author") {
-		t.Errorf("error should mention 'required reviewer' and 'author', got: %v", err)
+	if want := `preset "review": author "author" is also in required reviewers`; !strings.Contains(err.Error(), want) {
+		t.Errorf("start error = %v, want it to contain %q", err, want)
 	}
 }
 
@@ -459,117 +491,32 @@ concurrency = 1
 	}
 }
 
-// TestBudget_TurnExceedsBudget verifies that a turn whose revisions,
-// tool attempts and referee decisions together exceed turn_max_estimated_tokens
-// ends budget:turn at the dispatch that does not fit, and that dispatch is not sent.
+// TestBudget_TurnExceedsBudget runs a turn that is admitted within
+// turn_max_estimated_tokens: the author's reply is larger than the stand-in the
+// projection used, so the review dispatch that follows no longer fits. The turn
+// ends budget:turn and the reviewer is never sent that request.
 func TestBudget_TurnExceedsBudget(t *testing.T) {
 	t.Parallel()
-	gap(t, "budget exhaustion test requires precise token control via scripted budget configuration")
-}
-
-func randomMarker() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
+	limit := budgetsDefaultProjection(budgetsInput)
+	big := strings.Repeat("z", 90000)
+	roster := budgetsRoster(budgetsCfg{tpbm: "1.0", budgets: fmt.Sprintf("turn_max_estimated_tokens = %d", limit)})
+	s := newSuite(t, roster, map[string][]fake.Step{
+		"author":   budgetsScript(4, budgetsStep(big, "", nil)),
+		"reviewer": budgetsScript(4),
+	})
+	c := s.Dial(t)
+	reply := s.budgetsSubmit(t, c, "s1", budgetsInput, "", "")
+	if reply.EstimatedTokens != int64(limit) {
+		t.Fatalf("the projection is %d, want it exactly at the limit %d", reply.EstimatedTokens, limit)
 	}
-	return hex.EncodeToString(b)
-}
-
-func probeHandlerBothMarkers(marker1, marker2 string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/models") {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"object": "list",
-				"data": []map[string]string{
-					{"id": "test-model", "object": "model"},
-				},
-			})
-		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			resp := map[string]interface{}{
-				"model": "test-model",
-				"choices": []map[string]interface{}{{
-					"message": map[string]string{
-						"role":    "assistant",
-						"content": "Response with markers: " + marker1 + " and " + marker2,
-					},
-					"finish_reason": "stop",
-				}},
-				"usage": map[string]int{
-					"prompt_tokens":     100,
-					"completion_tokens": 50,
-				},
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-		} else {
-			http.NotFound(w, r)
-		}
+	turn := s.budgetsSettled(t, c, reply.TurnID)
+	wantTurn(t, turn, engine.StateIncomplete, "budget:turn")
+	if len(budgetsAttempts(turn, "reviewer", "review")) != 0 || len(s.budgetsCalls("reviewer", reply.TurnID, "")) != 0 {
+		t.Fatalf("the reviewer was dispatched past the turn budget: %+v", turn.Attempts)
 	}
-}
-
-func probeHandlerContextRejection() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/models") {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"object": "list",
-				"data": []map[string]string{
-					{"id": "test-model", "object": "model"},
-				},
-			})
-		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error": map[string]string{
-					"message": "Request exceeds token limit or context length",
-					"code":    "context_length_exceeded",
-				},
-			})
-		} else {
-			http.NotFound(w, r)
-		}
-	}
-}
-
-func probeHandlerOtherRejections() http.HandlerFunc {
-	var callCount int
-	return func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/models") {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"object": "list",
-				"data": []map[string]string{
-					{"id": "test-model", "object": "model"},
-				},
-			})
-		} else if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			callCount++
-			switch callCount {
-			case 1:
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]string{
-						"message": "Unauthorized",
-						"code":    "invalid_api_key",
-					},
-				})
-			case 2:
-				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]string{
-						"message": "Rate limit exceeded",
-						"code":    "rate_limit_exceeded",
-					},
-				})
-			default:
-				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]string{
-						"message": "Content policy violation",
-						"code":    "content_policy_violation",
-					},
-				})
-			}
-		} else {
-			http.NotFound(w, r)
-		}
+	over := budgetsEventsOf(s, wire.EventKindBudget, func(wire.EvBudget) bool { return true })
+	if len(over) != 1 || over[0].Budget != "turn_max_estimated_tokens" || over[0].Limit != int64(limit) {
+		t.Fatalf("budget events = %+v, want one turn_max_estimated_tokens refusal at limit %d", over, limit)
 	}
 }
 
