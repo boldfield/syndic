@@ -274,7 +274,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	rawSteps := make(map[string]any)
 
 	if err := a.probeModels(probeCtx, baseURL, &record, &resolvedSecrets, rawSteps, opts); err != nil {
-		return record, err
+		return record, stepError(err, rawSteps, "models")
 	}
 
 	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts)
@@ -286,7 +286,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, step2Err
+		return record, stepError(step2Err, rawSteps, "max_completion_tokens", "max_tokens")
 	}
 
 	if step2Body != nil {
@@ -320,7 +320,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, err
+		return record, stepError(err, rawSteps, "system_role")
 	}
 
 	if !opts.DisableCalibration {
@@ -328,7 +328,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, err
+			return record, stepError(err, rawSteps, "calibration", "calibration_baseline")
 		}
 	}
 
@@ -337,7 +337,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, err
+			return record, stepError(err, rawSteps, "over_length")
 		}
 	}
 
@@ -372,6 +372,27 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	}
 
 	return record, nil
+}
+
+// stepError tags a probe phase's failure with the step it failed on and that
+// step's recorded HTTP status. steps lists the phase's raw-evidence step names,
+// preferred first; the first one recorded is the step reported. An error that
+// already carries a step is returned unchanged.
+func stepError(err error, rawSteps map[string]any, steps ...string) error {
+	var pe *transport.ProbeStepError
+	if errors.As(err, &pe) {
+		return err
+	}
+	step := steps[0]
+	var status int
+	for _, name := range steps {
+		if entry, ok := rawSteps[name].(map[string]any); ok {
+			step = name
+			status, _ = entry["status"].(int)
+			break
+		}
+	}
+	return &transport.ProbeStepError{Step: step, Status: status, Err: err}
 }
 
 // uncertainErr marks a failure after the request was handed to the transport:
@@ -937,13 +958,13 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
 			cancel()
-			return nil, 0, "", err
+			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: err}
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if err := a.addProbeAuth(httpReq, secrets); err != nil {
 			cancel()
-			return nil, 0, "", err
+			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: err}
 		}
 
 		if opts.BeforeSend != nil {
@@ -954,7 +975,7 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 				Timeout: opts.Timeout,
 			}); err != nil {
 				cancel()
-				return nil, 0, "", fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+				return nil, 0, "", &transport.ProbeStepError{Step: field, Err: fmt.Errorf("%w: %w", transport.ErrNotSent, err)}
 			}
 		}
 
@@ -968,19 +989,19 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 					stepName = "max_completion_tokens"
 				}
 				recordRawStep(rawSteps, stepName, "/chat/completions", 0, nil, nil)
-				return nil, 0, "", transport.ErrUnreachable
+				return nil, 0, "", &transport.ProbeStepError{Step: field, Err: transport.ErrUnreachable}
 			}
-			return nil, 0, "", uncertainErr(err)
+			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(err)}
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		closeErr := httpResp.Body.Close()
 		cancel()
 		if readErr != nil {
-			return nil, 0, "", uncertainErr(readErr)
+			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(readErr)}
 		}
 		if closeErr != nil {
-			return nil, 0, "", uncertainErr(closeErr)
+			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(closeErr)}
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
@@ -996,11 +1017,11 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
 			record.AuthMode = "unknown"
-			return nil, latency, serverVersion, transport.ErrUnauthorized
+			return nil, latency, serverVersion, &transport.ProbeStepError{Step: field, Status: httpResp.StatusCode, Err: transport.ErrUnauthorized}
 		}
 
 		if httpResp.StatusCode == 404 {
-			return nil, latency, serverVersion, transport.ErrModelUnavailable
+			return nil, latency, serverVersion, &transport.ProbeStepError{Step: field, Status: httpResp.StatusCode, Err: transport.ErrModelUnavailable}
 		}
 
 		if httpResp.StatusCode == 400 {

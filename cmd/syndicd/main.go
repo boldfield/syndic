@@ -157,6 +157,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		ProbeMissing:   *probeMissing,
 		ProbeRawDir:    *probeRawDir,
 		ProbeExportDir: *probeExportDir,
+		JournalPath:    absPath(*journalPath),
+		SecretsDir:     absPath(*secretsDir),
 		OnRunOpened: func() error {
 			if err := srv.Listen(); err != nil {
 				return fmt.Errorf("server listen: %w", err)
@@ -381,4 +383,13 @@ func resolveProbeExportDir(custom string) string {
 		return custom
 	}
 	return "./docs/evidence"
+}
+
+// absPath resolves p against the working directory, or returns it as given
+// when that fails, so a printed retry command works from anywhere.
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }

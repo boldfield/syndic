@@ -2,7 +2,9 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -120,6 +122,41 @@ func poolName(p config.Participant) string {
 	return p.Pool
 }
 
+// retryCommand is the exact `syndic probe` invocation that would record the
+// participant's endpoint and model in the journal this daemon reads.
+func (e *Engine) retryCommand(p config.Participant) string {
+	cmd := "syndic probe --endpoint " + shQuote(p.Endpoint) + " --model " + shQuote(p.Model) + " --roster " + shQuote(e.rosterAbs)
+	if e.journalPath != "" {
+		cmd += " --journal " + shQuote(e.journalPath)
+	}
+	if e.secretsDir != "" {
+		cmd += " --secrets-dir " + shQuote(e.secretsDir)
+	}
+	if p.ContextTokens != nil {
+		cmd += " --context-tokens " + fmt.Sprint(*p.ContextTokens)
+	}
+	return cmd
+}
+
+// shQuote escapes a string for safe shell use.
+func shQuote(s string) string {
+	// If the string contains no special characters, return as-is
+	if len(s) > 0 && !needsQuoting(s) {
+		return s
+	}
+	// Otherwise, use single quotes and escape any single quotes in the string
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func needsQuoting(s string) bool {
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' && c != '.' && c != '/' {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	mp := e.built.Participants[p.ID]
 	ep := e.endpoint(p.Endpoint)
@@ -180,6 +217,16 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.OutputBound = &v
 	}
 	ws.BytesPerToken = mp.BytesPerToken
+	ws.FailingStep = mp.FailingStep
+	ws.ServerStatus = mp.ServerStatus
+	ws.ProbeAtStart = e.probed[p.ID]
+
+	// Build retry command for unprobed participants
+	if !mp.Usable {
+		cmd := e.retryCommand(p)
+		ws.RetryCommand = &cmd
+	}
+
 	if e.exceeded[p.ID] {
 		ws.Estimate = estimateExceeded
 	}

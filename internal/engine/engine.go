@@ -124,6 +124,11 @@ type Options struct {
 	// The daemon always sets both; empty, used only by tests, writes none.
 	ProbeRawDir    string
 	ProbeExportDir string
+	// JournalPath and SecretsDir are the daemon's resolved journal database
+	// and file-secret directory. Status prints them in the `syndic probe`
+	// retry command so the record lands where this daemon reads it.
+	JournalPath string
+	SecretsDir  string
 	// NoStartupProbes turns start-time probing off, leaving every participant
 	// without a usable record unprobed. It exists for tests of the states a
 	// missing or stale record leaves; the daemon never sets it.
@@ -169,6 +174,8 @@ type Engine struct {
 	cancelers     int        // goroutines calling Adapter.Cancel; Stop waits for none
 	cancelersOut  *sync.Cond // signalled on e.mu when cancelers drops to zero
 	rosterAbs     string
+	journalPath   string
+	secretsDir    string
 	roster        *config.Roster
 	adapters      map[string]transport.Adapter
 	built         manifest.Built
@@ -191,6 +198,7 @@ type Engine struct {
 	pstate        map[string]string // cancelling or unknown last reported, per participant
 	failed        map[string]string // failure state of the last dispatch, per participant
 	deliveries    map[string]*openTurn
+	probed        map[string]bool // participants whose usable record was written by this start's probes
 	stop          *stopRun
 	stopping      bool
 	stoppingCh    chan struct{}
@@ -224,6 +232,8 @@ func New(o Options) (*Engine, error) {
 		probeTimeout:    probeTimeoutOf(o.ProbeTimeout),
 		probeRawDir:     o.ProbeRawDir,
 		probeExportDir:  o.ProbeExportDir,
+		journalPath:     o.JournalPath,
+		secretsDir:      o.SecretsDir,
 		noStartupProbes: o.NoStartupProbes,
 		onRunOpened:     o.OnRunOpened,
 		newAdapter:      o.NewAdapter,
@@ -239,6 +249,7 @@ func New(o Options) (*Engine, error) {
 		pstate:          make(map[string]string),
 		failed:          make(map[string]string),
 		deliveries:      make(map[string]*openTurn),
+		probed:          make(map[string]bool),
 		stoppingCh:      make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
@@ -536,6 +547,9 @@ func (e *Engine) Start() error {
 		readable := withProbeFailures(current, res.failed)
 		e.mu.Lock()
 		e.built = readable
+		for id := range res.probed {
+			e.probed[id] = true
+		}
 		e.mu.Unlock()
 	}
 	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions, progress)
@@ -552,6 +566,10 @@ func (e *Engine) Start() error {
 		}
 	}
 	built = withProbeFailures(built, probed.failed)
+	// Populate the probed map for status reporting under the lock
+	for id := range probed.probed {
+		e.probed[id] = true
+	}
 	unprobed = unprobed[:0]
 	for _, p := range roster.Participants {
 		if !built.Participants[p.ID].Usable {

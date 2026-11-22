@@ -43,6 +43,8 @@ type Participant struct {
 	// CalibratedBytesPerToken is the probe's calibration before the safety
 	// factor; nil unless BytesPerTokenSource is "probe".
 	CalibratedBytesPerToken *float64
+	FailingStep             *string
+	ServerStatus            *string
 }
 
 // Built is the output of Build.

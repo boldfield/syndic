@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/transport/openai"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -954,5 +957,218 @@ func TestStartupOnRunOpenedRunsBeforeProbes(t *testing.T) {
 	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
 	if probesAtOpen != 0 || state != "probing" {
 		t.Fatalf("at run opened: %d probes, state %q; want 0 and probing", probesAtOpen, state)
+	}
+}
+
+func statusParticipant(t *testing.T, eng *engine.Engine, id string) wire.Participant {
+	t.Helper()
+	st, err := eng.Status()
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	for _, p := range st.Participants {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("%s not in status", id)
+	return wire.Participant{}
+}
+
+// TestStatusSurfacesProbeFailureDetail drives the real openai adapter against
+// an httptest server: the failing step and HTTP status in status are the ones
+// the probe recorded, and the retry command names the daemon's own paths.
+func TestStatusSurfacesProbeFailureDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		chatStatus int
+		wantStatus string
+	}{
+		{"unauthorized", 401, "HTTP 401"},
+		{"forbidden", 403, "HTTP 403"},
+		{"model missing", 404, "HTTP 404"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/models") {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(tc.chatStatus)
+			}))
+			t.Cleanup(srv.Close)
+			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+			eng := env.start(func(o *engine.Options) {
+				o.JournalPath = "/var/lib/my journal/j.sqlite"
+				o.SecretsDir = "/etc/syn'dic"
+				o.NewAdapter = func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+					if p.ID == "author" {
+						ep.BaseURL = srv.URL
+						return openai.New(ep, nil), probeAdapterVersion, nil
+					}
+					return env.spies[p.ID], probeAdapterVersion, nil
+				}
+			})
+			author := statusParticipant(t, eng, "author")
+			if author.ProbeAtStart {
+				t.Error("failed probe marked probed at start")
+			}
+			if author.FailingStep == nil || *author.FailingStep != "max_tokens" {
+				t.Errorf("FailingStep = %v, want max_tokens", author.FailingStep)
+			}
+			if author.ServerStatus == nil || *author.ServerStatus != tc.wantStatus {
+				t.Errorf("ServerStatus = %v, want %s", author.ServerStatus, tc.wantStatus)
+			}
+			want := "syndic probe --endpoint ep --model m-author --roster " + env.rosterPath +
+				" --journal '/var/lib/my journal/j.sqlite' --secrets-dir '/etc/syn'\\''dic'"
+			if author.RetryCommand == nil || *author.RetryCommand != want {
+				t.Errorf("RetryCommand = %v, want %q", author.RetryCommand, want)
+			}
+			reviewer := statusParticipant(t, eng, "reviewer")
+			if !reviewer.ProbeAtStart || reviewer.RetryCommand != nil || reviewer.FailingStep != nil {
+				t.Errorf("reviewer = %+v, want probed at start without retry detail", reviewer)
+			}
+		})
+	}
+}
+
+// TestStatusProbeFailureStepIsTheFailedOne checks that a tolerated earlier
+// non-2xx response (/models 404) is never reported as the cause of a later
+// failure: the step is the one that failed, and it has no status when the
+// connection was reset before a response.
+func TestStatusProbeFailureStepIsTheFailedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		okChats  int  // chat requests answered before the connection is reset
+		first400 bool // the first chat request gets a tolerated 400
+		wantStep string
+	}{
+		{"max_tokens reset (not retried)", 0, false, "max_tokens"},
+		{"max_tokens 400 then max_completion_tokens reset", 1, true, "max_completion_tokens"},
+		{"system_role reset", 1, false, "system_role"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var chats int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/models") {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				chats++
+				if chats > tc.okChats {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				if tc.first400 && chats == 1 {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"model":"m-author","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			t.Cleanup(srv.Close)
+			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+			eng := env.start(func(o *engine.Options) {
+				o.NewAdapter = func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+					if p.ID == "author" {
+						ep.BaseURL = srv.URL
+						return openai.New(ep, nil), probeAdapterVersion, nil
+					}
+					return env.spies[p.ID], probeAdapterVersion, nil
+				}
+			})
+			author := statusParticipant(t, eng, "author")
+			if author.FailingStep == nil || *author.FailingStep != tc.wantStep {
+				t.Errorf("FailingStep = %v, want %s", author.FailingStep, tc.wantStep)
+			}
+			if author.ServerStatus != nil {
+				t.Errorf("ServerStatus = %v, want none for a reset connection", *author.ServerStatus)
+			}
+		})
+	}
+}
+
+// TestStatusProbeAtStartDuringProbing blocks the second probe and reads
+// status: the participant probed first already reads probed at start.
+func TestStatusProbeAtStartDuringProbing(t *testing.T) {
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	eng := env.newEngine(nil)
+	var mid wire.Participant
+	var midReviewer wire.Participant
+	env.spies["reviewer"].onProbe = func(string) {
+		mid = statusParticipant(t, eng, "author")
+		midReviewer = statusParticipant(t, eng, "reviewer")
+	}
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+	if !mid.ProbeAtStart || mid.RetryCommand != nil {
+		t.Errorf("author mid-probe = %+v, want probed at start", mid)
+	}
+	if midReviewer.ProbeAtStart || midReviewer.RetryCommand == nil {
+		t.Errorf("reviewer mid-probe = %+v, want unprobed with retry command", midReviewer)
+	}
+}
+
+// TestStatusConcurrentReadDuringProbing verifies that Status can be read
+// concurrently while probing is happening without data races.
+func TestStatusConcurrentReadDuringProbing(t *testing.T) {
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	eng := env.newEngine(nil)
+
+	var statusErrors []error
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	env.spies["author"].onProbe = func(string) {
+		// While the author probe is running, spawn multiple goroutines
+		// to read status concurrently
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				st, err := eng.Status()
+				mu.Lock()
+				if err != nil {
+					statusErrors = append(statusErrors, err)
+				}
+				if err == nil && len(st.Participants) == 0 {
+					statusErrors = append(statusErrors, fmt.Errorf("empty participants"))
+				}
+				mu.Unlock()
+			}()
+		}
+	}
+
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+
+	wg.Wait()
+
+	mu.Lock()
+	if len(statusErrors) > 0 {
+		t.Fatalf("status read errors during probing: %v", statusErrors)
+	}
+	mu.Unlock()
+
+	// Verify final state has all participants marked appropriately
+	st, err := eng.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := 0
+	for _, p := range st.Participants {
+		if p.ProbeAtStart {
+			probed++
+		}
+	}
+	if probed != 2 {
+		t.Fatalf("probed participants = %d, want 2", probed)
 	}
 }
