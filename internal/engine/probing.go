@@ -470,7 +470,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 
 	incomplete := errors.Is(err, transport.ErrIncompleteProbe)
 	if err != nil && !incomplete {
-		step, status := probeFailureInfo(record.Raw)
+		step, status := probeFailureInfo(err)
 		fail(probeFailureReason(err, held), step, status)
 		return false
 	}
@@ -598,33 +598,19 @@ func firstOr(s []string, def string) string {
 	return def
 }
 
-// probeStepOrder is the order the adapter runs its probe requests in.
-var probeStepOrder = []string{"models", "max_tokens", "max_completion_tokens", "system_role", "over_length", "calibration_baseline", "calibration"}
-
-// probeFailureInfo reads the step and HTTP status a failed probe recorded in
-// its raw evidence: the last step, in probe order, that got no response or an
-// error status. It returns nil pointers for whatever was not recorded.
-func probeFailureInfo(raw json.RawMessage) (*string, *string) {
-	var steps map[string]struct {
-		Status int `json:"status"`
-	}
-	if len(raw) == 0 || json.Unmarshal(raw, &steps) != nil {
+// probeFailureInfo reads the step and HTTP status the adapter reported for a
+// failed probe. It returns nil pointers for whatever the adapter did not
+// report; nothing is inferred from other steps.
+func probeFailureInfo(err error) (*string, *string) {
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
 		return nil, nil
 	}
-	var step string
-	var status int
-	for _, name := range probeStepOrder {
-		if st, ok := steps[name]; ok && (st.Status == 0 || st.Status >= 400) {
-			step, status = name, st.Status
-		}
-	}
-	if step == "" {
-		return nil, nil
-	}
-	if status == 0 {
+	step := pe.Step
+	if pe.Status == 0 {
 		return &step, nil
 	}
-	return &step, strPtr("HTTP " + strconv.Itoa(status))
+	return &step, strPtr("HTTP " + strconv.Itoa(pe.Status))
 }
 
 // probeTimeoutOf is the per-request probe timeout an Options value asks for.

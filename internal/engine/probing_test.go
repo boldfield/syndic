@@ -1032,6 +1032,59 @@ func TestStatusSurfacesProbeFailureDetail(t *testing.T) {
 	}
 }
 
+// TestStatusProbeFailureStepIsTheFailedOne checks that a tolerated earlier
+// non-2xx response (/models 404) is never reported as the cause of a later
+// failure: the step is the one that failed, and it has no status when the
+// connection was reset before a response.
+func TestStatusProbeFailureStepIsTheFailedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		okChats  int // chat requests answered before the connection is reset
+		wantStep string
+	}{
+		{"max_tokens reset (retried as max_completion_tokens)", 0, "max_completion_tokens"},
+		{"system_role reset", 1, "system_role"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var chats int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/models") {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				chats++
+				if chats > tc.okChats {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"model":"m-author","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			t.Cleanup(srv.Close)
+			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+			eng := env.start(func(o *engine.Options) {
+				o.NewAdapter = func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+					if p.ID == "author" {
+						ep.BaseURL = srv.URL
+						return openai.New(ep, nil), probeAdapterVersion, nil
+					}
+					return env.spies[p.ID], probeAdapterVersion, nil
+				}
+			})
+			author := statusParticipant(t, eng, "author")
+			if author.FailingStep == nil || *author.FailingStep != tc.wantStep {
+				t.Errorf("FailingStep = %v, want %s", author.FailingStep, tc.wantStep)
+			}
+			if author.ServerStatus != nil {
+				t.Errorf("ServerStatus = %v, want none for a reset connection", *author.ServerStatus)
+			}
+		})
+	}
+}
+
 // TestStatusProbeAtStartDuringProbing blocks the second probe and reads
 // status: the participant probed first already reads probed at start.
 func TestStatusProbeAtStartDuringProbing(t *testing.T) {
