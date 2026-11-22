@@ -361,6 +361,18 @@ func (c *Client) Conversation(ctx context.Context, idPrefix string) (wire.Conver
 	return reply, nil
 }
 
+// ResolveConversationID resolves a conversation prefix to a full ID, returning an error
+// if the prefix is unknown or ambiguous. The resolved ID is returned in the ConversationReply.ID field.
+// This method can be used before Submit to ensure the conversation exists and is unambiguous,
+// guaranteeing that Submit will not fail with unknown/ambiguous errors.
+func (c *Client) ResolveConversationID(ctx context.Context, idPrefix string) (string, error) {
+	reply, err := c.Conversation(ctx, idPrefix)
+	if err != nil {
+		return "", err
+	}
+	return reply.ID, nil
+}
+
 func (c *Client) Subscribe(ctx context.Context, sinceSeq int64) (int64, error) {
 	c.eventMu.Lock()
 	if c.accepting {

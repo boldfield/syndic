@@ -27,6 +27,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -815,11 +817,42 @@ func (c *connection) handleRequest(frame wire.Frame) {
 			}
 			for len(summaries) > 1 {
 				summaries = summaries[:len(summaries)-1]
-				reply := &wire.ConversationsReply{Items: summaries, NextCursor: &cursor}
-				_, fits := checkFrameSize(frame.ID, "conversations", reply)
-				if fits {
-					c.sendReply(frame.ID, reply)
-					return
+				lastSummary := summaries[len(summaries)-1]
+
+				// Build nextCursor from the last item kept, in journal's "snapshot,key,id" format.
+				// Extract snapshot from original nextCursor or request cursor.
+				snap := int64(0)
+				if nextCursor != "" {
+					parts := strings.SplitN(nextCursor, ",", 2)
+					if len(parts) > 0 {
+						if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+							snap = s
+						}
+					}
+				} else if cursor != "" {
+					parts := strings.SplitN(cursor, ",", 2)
+					if len(parts) > 0 {
+						if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+							snap = s
+						}
+					}
+				} else {
+					// First page: query for current snapshot
+					if curSnap, err := c.server.store.QueryMaxTurnRowID(); err == nil {
+						snap = curSnap
+					}
+				}
+
+				// Get cursor key for the last summary kept
+				if key, err := c.server.store.GetConversationCursorKey(lastSummary.ID, snap); err == nil {
+					// Build new cursor
+					trimmedCursor := fmt.Sprintf("%d,%d,%s", snap, key, lastSummary.ID)
+					reply := &wire.ConversationsReply{Items: summaries, NextCursor: &trimmedCursor}
+					_, fits := checkFrameSize(frame.ID, "conversations", reply)
+					if fits {
+						c.sendReply(frame.ID, reply)
+						return
+					}
 				}
 			}
 			c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
@@ -886,7 +919,6 @@ func checkFrameSize(id, op string, body any) (int, bool) {
 		V:    wire.ProtocolVersion,
 		ID:   id,
 		Type: "reply",
-		Kind: op,
 		Body: bodyJSON,
 	}
 	frameJSON, _ := json.Marshal(frame)
@@ -903,7 +935,7 @@ func (c *connection) respond(id, op string, body any, err error) {
 			c.sendError(id, wireErr)
 		case errors.Is(err, journal.ErrTurnNotFound), errors.Is(err, journal.ErrNoSuchContent):
 			c.sendError(id, &wire.Error{Code: "not_found"})
-		case errors.Is(err, journal.ErrOutOfRange):
+		case errors.Is(err, journal.ErrOutOfRange), errors.Is(err, journal.ErrMalformedCursor):
 			c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest})
 		default:
 			fmt.Fprintf(os.Stderr, "%s: %v\n", op, err)

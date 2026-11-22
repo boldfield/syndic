@@ -267,6 +267,29 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	}
 }
 
+// GetConversationCursorKey returns the cursor key (latest turn rowid within a snapshot)
+// for a conversation, used to build pagination cursors after trimming.
+// snapshot is the highest turn rowid at the first page.
+func (s *Store) GetConversationCursorKey(conversationID string, snapshot int64) (int64, error) {
+	var key int64
+	err := s.Tx(func(tx *Tx) error {
+		return tx.tx.QueryRow(`
+			SELECT COALESCE(MAX(rowid), -1) FROM turns
+			WHERE conversation_id = ? AND rowid <= ?
+		`, conversationID, snapshot).Scan(&key)
+	})
+	return key, err
+}
+
+// QueryMaxTurnRowID returns the highest rowid from the turns table (snapshot for pagination).
+func (s *Store) QueryMaxTurnRowID() (int64, error) {
+	var snap int64
+	err := s.Tx(func(tx *Tx) error {
+		return tx.tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM turns`).Scan(&snap)
+	})
+	return snap, err
+}
+
 // GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
 func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	var turns []TurnInConversation
