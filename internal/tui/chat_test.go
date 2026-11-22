@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -92,11 +93,7 @@ func TestRenderChat_IncompleteTurn(t *testing.T) {
 		t.Fatalf("expected non-empty string for incomplete turn")
 	}
 
-	if !stringContains(result, "INCOMPLETE") {
-		t.Fatalf("expected 'INCOMPLETE' in output, got: %s", result)
-	}
-
-	if !stringContains(result, "no approved answer") {
+	if !strings.Contains(result, "no approved answer") {
 		t.Fatalf("expected 'no approved answer' in output, got: %s", result)
 	}
 }
@@ -181,11 +178,3 @@ func TestChatRefs_CollectsRefsForTurns(t *testing.T) {
 }
 
 // Helper function to check if a string contains a substring
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

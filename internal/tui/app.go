@@ -982,7 +982,25 @@ func (a *App) scrollAnswer(delta int) {
 	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
 }
 
-// View lays out banners, strip, the active tab and the input line.
+// renderTabBar returns a one-line tab bar showing available tabs and marking the active one.
+func (a *App) renderTabBar(w int) string {
+	tabs := []string{"chat", "transcript", "participants"}
+	var parts []string
+	for i, name := range tabs {
+		if tab(i) == a.tab {
+			parts = append(parts, "["+name+"]")
+		} else {
+			parts = append(parts, " "+name+" ")
+		}
+	}
+	bar := strings.Join(parts, " ")
+	if ansi.StringWidth(bar) > w {
+		bar = ansi.Truncate(bar, w, "")
+	}
+	return bar
+}
+
+// View lays out banners, tab bar, the active tab, input, and status line.
 func (a *App) View() string {
 	w := a.width
 
@@ -995,28 +1013,37 @@ func (a *App) View() string {
 		return ansi.Truncate(msg, w, "")
 	}
 
-	// Get banners and strip, limiting banners to leave at least 5 lines for the tab area
+	// Render tab bar.
+	tabBar := a.renderTabBar(w)
+	tabBar = ansi.Truncate(tabBar, w, "")
+
+	// Get banners, limiting them to leave space for tab content (at least 5 lines).
 	banners := renderBanners(a.state)
-	banners = capBannersForHeight(banners, a.height, 5)
+	banners = capBannersForHeight(banners, a.height-1-5-inputHeight-1, 0) // -1 tabbar, -5 min content, -inputHeight for input, -1 for strip
 
 	// Clip all banners to width
 	for i, banner := range banners {
 		banners[i] = ansi.Truncate(banner, w, "")
 	}
 
+	// Render status line.
 	strip := renderStrip(a.state, w, a.now())
 	strip = ansi.Truncate(strip, w, "")
 
-	bodyHeight := a.bodyHeight()
+	// Calculate how much space is available for the tab content.
+	// Space = height - tabBar - banners - inputHeight - strip
+	availableForContent := a.height - 1 - len(banners) - inputHeight - 1
+	contentHeight := max(availableForContent, 0)
 
 	var tabView string
 	switch a.tab {
 	case tabChat:
 		tabView = renderChat(a.state, chatInput{
 			content:     a.content,
-			drafts:      false,
+			drafts:      a.drafts != nil && *a.drafts,
 			plainMode:   !a.terminalCapabilities.Color,
 			blockDetail: a.blockDetail,
+			width:       w,
 		}, w)
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
@@ -1025,9 +1052,9 @@ func (a *App) View() string {
 			// A refresh can shorten the content under the offset, so the
 			// start is kept within the last full page as it is now.
 			full := strings.Split(a.participantsFull(w), "\n")
-			tabView = strings.Join(full[min(a.pScroll, max(len(full)-bodyHeight, 0)):], "\n")
+			tabView = strings.Join(full[min(a.pScroll, max(len(full)-contentHeight, 0)):], "\n")
 		} else {
-			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
+			tabView = renderParticipants(a.state, w, contentHeight, a.selectedParticipantID(), a.now())
 		}
 	}
 	if len(a.panel) > 0 {
@@ -1044,10 +1071,10 @@ func (a *App) View() string {
 		// The first line of the chat names the open conversation.
 		lines = append([]string{a.conversationHeader()}, lines[:a.answerHeight()]...)
 	}
-	for len(lines) < bodyHeight {
+	for len(lines) < contentHeight {
 		lines = append(lines, "")
 	}
-	lines = lines[:bodyHeight]
+	lines = lines[:contentHeight]
 
 	// Clip all lines to width to handle wide characters and ANSI sequences
 	for i, line := range lines {
@@ -1062,12 +1089,13 @@ func (a *App) View() string {
 	}
 	inputLines = strings.Join(inputLinesList, "\n")
 
-	// Build output: banners, strip, body, input.
+	// Build output: tabBar, banners, body, input, then strip (always at bottom).
 	var output []string
+	output = append(output, tabBar)
 	output = append(output, banners...)
-	output = append(output, strip)
 	output = append(output, lines...)
 	output = append(output, inputLines)
+	output = append(output, strip)
 	return strings.Join(output, "\n")
 }
 

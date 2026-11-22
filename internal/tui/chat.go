@@ -14,6 +14,7 @@ type chatInput struct {
 	drafts      bool
 	plainMode   bool
 	blockDetail map[string]wire.OpenBlock
+	width       int
 }
 
 // chatRefs lists all content refs the chat tab needs across all turns.
@@ -123,7 +124,7 @@ func renderChat(s State, in chatInput, width int) string {
 	// Render each turn.
 	for _, entry := range turns {
 		turnID := entry.id
-		turnLines := renderChatTurn(s, turnID, in)
+		turnLines := renderChatTurn(s, turnID, in, width)
 		lines = append(lines, turnLines...)
 		lines = append(lines, "") // Separator between turns.
 	}
@@ -132,38 +133,35 @@ func renderChat(s State, in chatInput, width int) string {
 }
 
 // renderChatTurn returns the lines for one turn in the chat tab.
-func renderChatTurn(s State, turnID string, in chatInput) []string {
+func renderChatTurn(s State, turnID string, in chatInput, width int) []string {
 	ti, ok := s.Turns[turnID]
 	if !ok {
 		return nil
 	}
 
 	var lines []string
-	shortID := turnID
-	if len(turnID) > 8 {
-		shortID = turnID[:8]
+
+	// Show user input (from the first user message in this turn's transcript).
+	inputLines := getChatTurnInput(s, turnID)
+	if len(inputLines) > 0 {
+		lines = append(lines, inputLines...)
 	}
 
-	// Show turn identifier.
-	lines = append(lines, fmt.Sprintf("--- Turn %s ---", shortID))
+	// Get open blocks and override reason for this turn.
+	openBlocks := in.blockDetail
+	overrideReason := ""
 
 	// Show the turn's outcome based on its state.
 	candidate := func() {
-		// Find the latest completed attempt to get the candidate.
-		var bestAttempt string
-		var bestEpoch int64 = -1
-		for id, ai := range s.Attempts {
-			if ai.TurnID != turnID || ai.Status != "complete" {
-				continue
-			}
-			if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
-				bestAttempt = id
-				bestEpoch = ai.Epoch
-			}
-		}
-		if bestAttempt != "" {
-			ref := "attempt:" + bestAttempt
-			lines = append(lines, body(in.content, ref))
+		if refs := answerRefs(s, turnID, answerInput{
+			content:        in.content,
+			drafts:         in.drafts,
+			candidateID:    candidateIDForTurn(s, turnID),
+			openBlocks:     blockSlice(openBlocks),
+			overrideReason: overrideReason,
+			plainMode:      in.plainMode,
+		}); len(refs) > 0 {
+			lines = append(lines, body(in.content, refs[0]))
 		} else if ti.CandidateHash != nil {
 			lines = append(lines, "loading…")
 		}
@@ -177,8 +175,11 @@ func renderChatTurn(s State, turnID string, in chatInput) []string {
 			if len(hash) > 12 {
 				hash = hash[:12]
 			}
-			// Count revisions from round count in turn info.
-			revisionCount := countRevisions(s, turnID)
+			// Use ti.Round if set, otherwise fall back to counting revisions from epochs.
+			revisionCount := ti.Round
+			if revisionCount == 0 {
+				revisionCount = countRevisions(s, turnID)
+			}
 			if revisionCount > 0 {
 				lines = append(lines, fmt.Sprintf("approved by %s after %d revisions against %s", strings.Join(approvers(s, turnID), ", "), revisionCount, hash))
 			} else {
@@ -194,6 +195,7 @@ func renderChatTurn(s State, turnID string, in chatInput) []string {
 		if ti.TerminalReason != nil {
 			lines = append(lines, *ti.TerminalReason)
 		}
+		lines = append(lines, blockLines(blockSlice(openBlocks))...)
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
 			candidate()
@@ -203,7 +205,11 @@ func renderChatTurn(s State, turnID string, in chatInput) []string {
 
 	case "overridden":
 		candidate()
-		lines = append(lines, "HUMAN OVERRIDE")
+		reason := overrideReason
+		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
+			reason = *ti.TerminalReason
+		}
+		lines = append(lines, "HUMAN OVERRIDE: "+reason)
 
 	case "cancelled":
 		lines = append(lines, "CANCELLED, not approved")
@@ -212,19 +218,62 @@ func renderChatTurn(s State, turnID string, in chatInput) []string {
 		}
 
 	default:
-		// Turn in progress - show progress line.
+		// Turn in progress - show draft banner if drafts enabled.
 		if s.CurrentTurn == turnID {
-			lines = append(lines, "turn in progress")
-		} else {
-			lines = append(lines, "turn state: "+ti.State)
+			if in.drafts {
+				if refs := answerRefs(s, turnID, answerInput{
+					content:        in.content,
+					drafts:         true,
+					candidateID:    "",
+					openBlocks:     blockSlice(openBlocks),
+					overrideReason: "",
+					plainMode:      in.plainMode,
+				}); len(refs) > 0 {
+					draftText := "UNREVIEWED DRAFT"
+					if in.plainMode {
+						draftText = "!! UNREVIEWED DRAFT !!"
+					} else {
+						draftText = draftBanner.Render(draftText)
+					}
+					lines = append(lines, draftText, body(in.content, refs[0]))
+				}
+			} else {
+				lines = append(lines, "turn in progress")
+			}
 		}
 	}
 
 	return lines
 }
 
+// getChatTurnInput retrieves the user input for a turn from the transcript.
+func getChatTurnInput(s State, turnID string) []string {
+	// Look for user input in messages (this would typically come from transcript).
+	// For now, return empty - this will be populated once transcript loading is working.
+	return []string{}
+}
+
+// candidateIDForTurn returns the candidate ID for a turn, if available.
+func candidateIDForTurn(s State, turnID string) string {
+	for id, ai := range s.Attempts {
+		if ai.TurnID == turnID && ai.Phase == "review" && ai.Status == "complete" {
+			return id
+		}
+	}
+	return ""
+}
+
+// blockSlice converts a map to a slice of OpenBlocks.
+func blockSlice(blocks map[string]wire.OpenBlock) []wire.OpenBlock {
+	var slice []wire.OpenBlock
+	for _, b := range blocks {
+		slice = append(slice, b)
+	}
+	return slice
+}
+
 // countRevisions counts how many revisions were made for a turn.
-// This is determined by counting distinct round values in the attempts for this turn.
+// This is determined by counting distinct epoch values in the attempts for this turn.
 func countRevisions(s State, turnID string) int {
 	rounds := map[int64]bool{}
 	for _, ai := range s.Attempts {
