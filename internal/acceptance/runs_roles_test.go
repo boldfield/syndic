@@ -766,11 +766,12 @@ extra_headers = { X-Org = { source = "file", name = "org-key" } }`, 1)
 	resolver := config.NewEnvFileResolver(secrets)
 	var resolved []string
 	eng, err := engine.New(engine.Options{
-		Store:         h.Store,
-		Hub:           h.Hub,
-		RosterPath:    h.RosterPath,
-		EngineVersion: enginetest.EngineVersion,
-		Clock:         h.Clock,
+		NoStartupProbes: true, // these tests seed the records they need
+		Store:           h.Store,
+		Hub:             h.Hub,
+		RosterPath:      h.RosterPath,
+		EngineVersion:   enginetest.EngineVersion,
+		Clock:           h.Clock,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			key, err := resolver.Resolve(*ep.Auth)
 			if err != nil {

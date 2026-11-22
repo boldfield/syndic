@@ -84,6 +84,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.started {
+		if e.runState == "probing" {
+			return wire.SubmitReply{}, refusal(wire.ErrorCodeProbing)
+		}
 		return wire.SubmitReply{}, errors.New("engine: not started")
 	}
 

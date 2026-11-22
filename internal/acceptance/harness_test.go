@@ -315,11 +315,12 @@ func (s *suite) Restart(rosterTOML string, scripts map[string][]fake.Step) {
 	var mu sync.Mutex
 	adapters := map[string]*fake.Adapter{}
 	eng, err := engine.New(engine.Options{
-		Store:         s.Store,
-		Hub:           s.Hub,
-		RosterPath:    s.RosterPath,
-		EngineVersion: enginetest.EngineVersion,
-		Clock:         s.Clock,
+		NoStartupProbes: true, // these tests seed the records they need
+		Store:           s.Store,
+		Hub:             s.Hub,
+		RosterPath:      s.RosterPath,
+		EngineVersion:   enginetest.EngineVersion,
+		Clock:           s.Clock,
 		NewAdapter: func(p config.Participant, _ config.EndpointProfile) (transport.Adapter, string, error) {
 			a := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: enginetest.DefaultReportedModel})
 			mu.Lock()

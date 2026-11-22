@@ -38,6 +38,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	rosterPath := fs.String("roster", "", "path to roster TOML file")
 	journalPath := fs.String("journal", "", "path to journal database")
 	secretsDir := fs.String("secrets-dir", "", "directory for file secret references")
+	probeMissing := fs.Bool("probe-missing", false, "at start, also probe participants on endpoints declared metered or unknown that have no usable record")
+	probeRawDir := fs.String("probe-raw-dir", "", "directory for raw records of start-time probes (default: $XDG_DATA_HOME/syndic/evidence-raw)")
+	probeExportDir := fs.String("probe-export-dir", "", "directory for redacted exports of start-time probes (default: ./docs/evidence)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -59,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	if *secretsDir == "" {
 		*secretsDir = resolveSecretsDir(*secretsDir)
 	}
+	*probeRawDir = resolveProbeRawDir(*probeRawDir)
+	*probeExportDir = resolveProbeExportDir(*probeExportDir)
 
 	// Get XDG dirs for lockfile resolution
 	xdgRuntimeDir := os.Getenv("XDG_RUNTIME_DIR")
@@ -133,21 +138,49 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		return openai.New(ep, resolver), openai.AdapterVersion, nil
 	}
 
-	// Create the engine
+	// The control socket opens as soon as run_opened is committed, before
+	// any probe, so a client attaching during probing gets hello state
+	// "probing" and the probe events. The engine is created first and the
+	// server is wired to it from the hook.
+	var srv *server.Server
+	serveDone := make(chan error, 1)
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+
 	eng, err := engine.New(engine.Options{
 		Store:         store,
 		Hub:           eventHub,
 		RosterPath:    rosterAbs,
 		EngineVersion: version,
 		NewAdapter:    newAdapterFunc,
+
+		ProbeMissing:   *probeMissing,
+		ProbeRawDir:    *probeRawDir,
+		ProbeExportDir: *probeExportDir,
+		OnRunOpened: func() error {
+			if err := srv.Listen(); err != nil {
+				return fmt.Errorf("server listen: %w", err)
+			}
+			go func() {
+				serveDone <- srv.Serve(serveCtx)
+			}()
+			return nil
+		},
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "create engine: %v\n", err)
 		return 1
 	}
+	srv = server.New(server.Options{
+		Paths:  paths,
+		Engine: eng,
+		Store:  store,
+		Hub:    eventHub,
+	})
 
 	// Start the engine
 	if err := eng.Start(); err != nil {
+		_ = srv.Close()
 		var rosterErr *engine.RosterError
 		if errors.As(err, &rosterErr) {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
@@ -159,28 +192,6 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 
 	// Log external spending control settings at start
 	logExternalSpendingControl(stderr, eng)
-
-	// Create and start the server
-	srv := server.New(server.Options{
-		Paths:  paths,
-		Engine: eng,
-		Store:  store,
-		Hub:    eventHub,
-	})
-
-	if err := srv.Listen(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "server listen: %v\n", err)
-		_ = eng.Stop(context.Background())
-		return 1
-	}
-
-	// Start server in a goroutine
-	serveDone := make(chan error, 1)
-	serveCtx, cancelServe := context.WithCancel(context.Background())
-	defer cancelServe()
-	go func() {
-		serveDone <- srv.Serve(serveCtx)
-	}()
 
 	// Print startup info
 	hello := eng.Hello()
@@ -350,4 +361,24 @@ func resolveSecretsDir(custom string) string {
 		xdgConfig = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 	return filepath.Join(xdgConfig, "syndic", "secrets")
+}
+
+// resolveProbeRawDir and resolveProbeExportDir default the start-time probe
+// evidence directories to those of `syndic probe`.
+func resolveProbeRawDir(custom string) string {
+	if custom != "" {
+		return custom
+	}
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		xdgData = filepath.Join(os.Getenv("HOME"), ".local", "share")
+	}
+	return filepath.Join(xdgData, "syndic", "evidence-raw")
+}
+
+func resolveProbeExportDir(custom string) string {
+	if custom != "" {
+		return custom
+	}
+	return "./docs/evidence"
 }
