@@ -11,7 +11,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/wire"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
@@ -32,7 +32,8 @@ const (
 	stripHeight  = 1
 )
 
-// inputHeight is the bottom region: a refusal line and the input line.
+// inputHeight is the bottom region at its smallest: a refusal line and one
+// input line. A multi-line input takes more; see inputRows.
 const inputHeight = 2
 
 // App is the root Bubble Tea model. All of its state changes in Update; the
@@ -49,9 +50,10 @@ type App struct {
 	width, height int
 	state         State
 	tab           tab
-	input         textinput.Model
+	input         textarea.Model
 	refusal       string         // the one-line message under the body: a refusal, or what a command did
 	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	panelRow      int            // first visible line of the panel; PgUp and PgDn move it
 	question      *question      // the yes/no question being answered: a quick profile approval or provisional deadlines
 	questions     []*question    // questions waiting behind it, or behind confirm
 	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
@@ -75,6 +77,7 @@ type App struct {
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
+	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -97,9 +100,10 @@ type App struct {
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
 	convTurns      int      // turns the open conversation holds
-	openTurns      []string // turns the conversation held at start-up, oldest first
-	roundsIsSet    bool     // rounds was explicitly set via flag
+	openTurns      []string // turns the conversation held when it was opened, oldest first
+	roundsIsSet    bool     // a round limit was set, by --rounds or /rounds
 	rounds         int      // round limit for this process
+	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
 }
 
 // Option configures an App.
@@ -131,24 +135,13 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 // id and checked its workspace. An empty id starts an empty conversation that
 // the first submit creates. The chat shows only this conversation's turns.
 func WithConversation(id string, turnIDs []string) Option {
-	return func(a *App) {
-		a.conversationID = id
-		a.convTurns = len(turnIDs)
-		a.openTurns = turnIDs
-		scope := &TurnScope{ConversationID: id, Turns: map[string]bool{}, Submissions: map[string]bool{}}
-		for _, t := range turnIDs {
-			scope.add(t)
-		}
-		a.state.Scope = scope
-	}
+	return func(a *App) { a.openConversation(id, turnIDs) }
 }
 
 // WithRounds sets the round limit for this process.
 func WithRounds(n int) Option {
 	return func(a *App) {
-		a.rounds = n
-		a.roundsIsSet = true
-		a.state.RoundLimit = &n
+		a.setRounds(n, "--rounds")
 	}
 }
 
@@ -355,7 +348,7 @@ func (a *App) scrollTranscript(key string) {
 
 // Init starts the first connection, from the beginning of the journal.
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
+	return tea.Batch(textarea.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
 }
 
 // Update handles one message, then starts any content fetch the answer tab
@@ -382,6 +375,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
+		a.input.SetWidth(max(a.width, 1))
 		return a, nil
 	case tea.KeyMsg:
 		return a.updateKey(msg)
@@ -399,6 +393,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onCommand(msg)
 	case whyMsg:
 		return a.onWhy(msg)
+	case switchMsg:
+		return a.onSwitch(msg)
+	case conversationsMsg:
+		return a.onConversations(msg)
 	case contentMsg:
 		return a.onContent(msg)
 	case transcriptMsg:
@@ -408,14 +406,16 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.tickRunning = false
 		return a, a.ensureTick()
 	}
-	var cmd tea.Cmd
-	a.input, cmd = a.input.Update(msg)
-	return a, cmd
+	return a, a.updateInput(msg)
 }
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.question != nil {
-		// A question owns the keyboard: only y/n, esc and ctrl+c.
+		// A question owns the keyboard: only y/n, esc and ctrl+c, and the
+		// scroll keys for a panel taller than the tab.
+		if a.scrollPanel(msg.String()) {
+			return a, nil
+		}
 		switch msg.String() {
 		case "y", "Y":
 			return a, a.answer(true)
@@ -427,23 +427,30 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
 		switch msg.String() {
-		case "ctrl+c":
-			return a, a.quit()
+		case "ctrl+c", "ctrl+d":
+			if cmd, ok := a.detachKey(msg.String()); ok {
+				return a, cmd
+			}
 		case "esc":
 			a.cancelConfirm("release cancelled; nothing sent")
 			return a, nil
 		case "enter":
 			return a, a.confirmEnter()
 		}
-		var cmd tea.Cmd
-		a.input, cmd = a.input.Update(msg)
-		return a, cmd
+		return a, a.updateInput(msg)
+	}
+	if msg.Paste {
+		// A paste is text, whatever it contains: line breaks stay as typed.
+		a.input.InsertString(normalizePaste(msg.Runes))
+		return a, a.updateInput(nil)
 	}
 	switch msg.String() {
-	case "ctrl+c":
-		return a, a.quit()
+	case "ctrl+c", "ctrl+d":
+		if cmd, ok := a.detachKey(msg.String()); ok {
+			return a, cmd
+		}
 	case "esc":
-		a.panel, a.refusal = nil, ""
+		a.panel, a.refusal, a.panelRow = nil, "", 0
 		return a, nil
 	case "tab":
 		a.panel = nil
@@ -457,6 +464,14 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "enter":
 		return a, a.enter()
+	}
+
+	if len(a.panel) > 0 {
+		// A panel stands in for the tab, so the scroll keys move it.
+		if !a.scrollPanel(msg.String()) {
+			return a, a.updateInput(msg)
+		}
+		return a, nil
 	}
 
 	if a.tab == tabTranscript {
@@ -513,9 +528,79 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	return a, a.updateInput(msg)
+}
+
+// detachKey handles Ctrl+C and Ctrl+D. Ctrl+C clears a non-empty input;
+// either detaches on an empty one, exactly as /quit. Neither cancels a turn:
+// detaching leaves the engine alone. ok is false when the key is the input's,
+// as Ctrl+D (delete forward) is on a non-empty line.
+func (a *App) detachKey(k string) (cmd tea.Cmd, ok bool) {
+	if a.input.Value() != "" {
+		if k == "ctrl+d" {
+			return nil, false
+		}
+		a.clearInput()
+		return nil, true
+	}
+	return a.quit(), true
+}
+
+// updateInput passes a message to the input. When its text shrinks back to
+// fit, it is laid out again from its first line, so no line above the cursor
+// stays scrolled out of sight.
+func (a *App) updateInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
-	return a, cmd
+	n := inputLines(a.input)
+	if a.inputOverflow && n <= maxInputRows {
+		row, li := a.input.Line(), a.input.LineInfo()
+		a.input.SetValue(a.input.Value())
+		for a.input.Line() > row {
+			a.input.CursorUp()
+		}
+		a.input.SetCursor(li.StartColumn + li.ColumnOffset)
+	}
+	if n > maxInputRows {
+		// The input scrolls to its cursor against the lines it last drew, so
+		// it draws the new ones before scrolling again: a paste of many lines
+		// shows its last line at once.
+		_ = a.input.View()
+		a.input, _ = a.input.Update(nil)
+	}
+	a.inputOverflow = n > maxInputRows
+	return cmd
+}
+
+// scrollPanel moves a shown panel for a scroll key, and reports whether it did.
+func (a *App) scrollPanel(k string) bool {
+	if len(a.panel) == 0 {
+		return false
+	}
+	page := max(a.bodyHeight()-1, 1)
+	switch k {
+	case "up":
+		a.panelRow--
+	case "down":
+		a.panelRow++
+	case "pgup":
+		a.panelRow -= page
+	case "pgdown":
+		a.panelRow += page
+	default:
+		return false
+	}
+	a.panelRow = min(max(a.panelRow, 0), a.maxPanelRow())
+	return true
+}
+
+// setPrompt changes the input's prompt.
+func (a *App) setPrompt(p string) { setInputPrompt(&a.input, p, a.width) }
+
+// clearInput empties the input.
+func (a *App) clearInput() {
+	a.input.Reset()
+	a.inputOverflow = false
 }
 
 // enter runs a command or submits the line. A command clears the line; a
@@ -528,9 +613,9 @@ func (a *App) enter() tea.Cmd {
 	if strings.TrimSpace(line) == "" {
 		return nil
 	}
-	a.refusal, a.panel = "", nil
+	a.refusal, a.panel, a.panelRow = "", nil, 0
 	if isCommand(line) {
-		a.input.SetValue("")
+		a.clearInput()
 		return dispatch(a, line)
 	}
 	if a.cl == nil {
@@ -541,17 +626,19 @@ func (a *App) enter() tea.Cmd {
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
 	}
+	// The request is sent from another goroutine, so it points at copies,
+	// never at fields that later messages change.
 	var conversationID *string
-	if a.conversationID != "" {
-		conversationID = &a.conversationID
+	if id := a.conversationID; id != "" {
+		conversationID = &id
 	}
 	var maxRounds *int
-	if a.roundsIsSet {
-		maxRounds = &a.rounds
+	if n := a.rounds; a.roundsIsSet {
+		maxRounds = &n
 	}
 	var contextFrom *string
-	if a.state.ContextFrom != "" {
-		contextFrom = &a.state.ContextFrom
+	if from := a.state.ContextFrom; from != "" {
+		contextFrom = &from
 	}
 	return a.send(submission{
 		input:            line,
@@ -611,6 +698,11 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		return a.onProvisional(msg.sub)
 	}
 	if msg.err != nil {
+		if errors.As(msg.err, &we) && we.Code == wire.ErrorCodeBusy {
+			// The open turn may be another conversation's, after /new or /switch.
+			a.say(formatRefusal(msg.err) + a.openTurnOwner(we))
+			return nil
+		}
 		a.refusal = formatRefusal(msg.err)
 		return nil
 	}
@@ -625,8 +717,9 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		a.state.Scope.add(msg.turnID)
 	}
 	a.inputs[msg.turnID] = msg.sub.input
+	a.state.TurnConversation = withTurnConversation(a.state.TurnConversation, msg.turnID, msg.conversationID)
 	a.convTurns++
-	a.input.SetValue("")
+	a.clearInput()
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
@@ -980,8 +1073,22 @@ func (a *App) quit() tea.Cmd {
 func (a *App) bodyHeight() int {
 	banners := renderBanners(a.state)
 	banners = capBannersForHeight(banners, a.height, 5)
-	return max(a.height-len(banners)-tabBarHeight-stripHeight-inputHeight, 0)
+	return max(a.height-len(banners)-tabBarHeight-stripHeight-inputHeight-(a.inputRows()-1), 0)
 }
+
+// inputRows is how many lines the input shows: one per line of its text, up
+// to maxInputRows, and never so many that the active tab gets fewer than five.
+func (a *App) inputRows() int {
+	banners := capBannersForHeight(renderBanners(a.state), a.height, 5)
+	room := a.height - len(banners) - tabBarHeight - stripHeight - inputHeight - 5
+	return 1 + min(inputLines(a.input)-1, maxInputRows-1, max(room, 0))
+}
+
+// panelLines is the panel as shown, wrapped to the width.
+func (a *App) panelLines() []string { return strings.Split(renderPanel(a.panel, a.width), "\n") }
+
+// maxPanelRow is the last first-line that still fills the body.
+func (a *App) maxPanelRow() int { return max(len(a.panelLines())-a.bodyHeight(), 0) }
 
 // isTerminalTooSmall reports whether the terminal is below the minimum size (40×10).
 func (a *App) isTerminalTooSmall() bool {
@@ -1086,10 +1193,16 @@ func (a *App) View() string {
 			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
 		}
 	}
-	if len(a.panel) > 0 {
-		tabView = renderPanel(a.panel, w)
-	}
 	lines := strings.Split(tabView, "\n")
+	if len(a.panel) > 0 {
+		lines = a.panelLines()
+		start := min(a.panelRow, a.maxPanelRow())
+		lines = lines[start:]
+		if len(lines) > bodyHeight && bodyHeight > 0 {
+			// The panel goes on below: its last visible line says so.
+			lines = append(lines[:bodyHeight-1], fmt.Sprintf("… %d more lines (PgDn)", len(lines)-bodyHeight+1))
+		}
+	}
 
 	if a.tab == tabChat && len(a.panel) == 0 {
 		start := a.chatStart(len(lines), lastTurn)
@@ -1111,7 +1224,7 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	inputLines := renderInput(a.input, a.refusal, w)
+	inputLines := renderInput(a.input, a.refusal, w, a.inputRows())
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")
