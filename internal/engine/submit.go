@@ -251,7 +251,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 
 		if conv.Workspace != nil && *conv.Workspace != req.Workspace {
-			return wire.SubmitReply{}, refusal("workspace_mismatch")
+			return wire.SubmitReply{}, refusal(wire.ErrorCodeWorkspaceMismatch)
 		}
 
 		turns, err := e.store.GetConversationTurns(convID)
@@ -337,8 +337,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			}
 
 			if conv.Workspace != nil && *conv.Workspace != req.Workspace {
-				conflict := refusal("workspace_mismatch")
-				return conflict
+				return refusal(wire.ErrorCodeWorkspaceMismatch)
 			}
 
 			if conv.Workspace == nil {
@@ -373,6 +372,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			MaxRoundsInEffect: maxRoundsInEffect,
 			MaxRoundsCeiling:  maxRoundsCeiling,
 			ContextHash:       contextHash,
+			Workspace:         req.Workspace,
 		})
 		if err != nil {
 			return err

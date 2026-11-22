@@ -312,6 +312,7 @@ type TurnParams struct {
 	MaxRoundsInEffect *int
 	MaxRoundsCeiling  *int
 	ContextHash       string
+	Workspace         string
 }
 
 // CreateEngineTurn creates a new engine turn with the given parameters.
@@ -323,7 +324,11 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 
 	convID := p.ConversationID
 	if convID == "" {
-		convID, err = tx.CreateConversation(nil)
+		var ws *string
+		if p.Workspace != "" {
+			ws = &p.Workspace
+		}
+		convID, err = tx.CreateConversation(ws)
 		if err != nil {
 			return "", fmt.Errorf("create conversation: %w", err)
 		}
