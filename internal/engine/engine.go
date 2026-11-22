@@ -647,6 +647,71 @@ func (e *Engine) Hello() wire.HelloReply {
 	}
 }
 
+// Conversations returns a page of conversations filtered by workspace, ordered by latest activity first.
+func (e *Engine) Conversations(workspace *string, cursor string, limit int) ([]wire.ConversationSummary, string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.started {
+		return nil, "", errors.New("engine: not started")
+	}
+	conversations, nextCursor, err := e.store.ListConversations(workspace, cursor, limit)
+	if err != nil {
+		return nil, "", fmt.Errorf("engine: list conversations: %w", err)
+	}
+	summaries := make([]wire.ConversationSummary, len(conversations))
+	for i, c := range conversations {
+		lastSubmittedAt := ""
+		if c.LastSubmittedAt != nil {
+			lastSubmittedAt = c.LastSubmittedAt.Format(time.RFC3339)
+		}
+		summaries[i] = wire.ConversationSummary{
+			ID:              c.ID,
+			CreatedAt:       c.CreatedAt.Format(time.RFC3339),
+			Workspace:       c.Workspace,
+			LastSubmittedAt: lastSubmittedAt,
+			TurnCount:       c.TurnCount,
+			Running:         c.Running,
+			Preview:         c.Preview,
+		}
+	}
+	return summaries, nextCursor, nil
+}
+
+// Conversation returns the turns in a conversation by prefix-matched ID.
+func (e *Engine) Conversation(idPrefix string) ([]wire.ConversationTurnSummary, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.started {
+		return nil, errors.New("engine: not started")
+	}
+	conv, err := e.store.GetConversation(idPrefix)
+	if err != nil {
+		if errors.Is(err, journal.ErrAmbiguousConversationID) {
+			return nil, &wire.Error{Code: wire.ErrorCodeAmbiguous}
+		}
+		if errors.Is(err, journal.ErrNoSuchContent) {
+			return nil, &wire.Error{Code: wire.ErrorCodeNotFound}
+		}
+		return nil, fmt.Errorf("engine: get conversation: %w", err)
+	}
+	turns, err := e.store.GetConversationTurns(conv.ID)
+	if err != nil {
+		return nil, fmt.Errorf("engine: get conversation turns: %w", err)
+	}
+	summaries := make([]wire.ConversationTurnSummary, len(turns))
+	for i, t := range turns {
+		state := ""
+		if t.TerminalState != nil {
+			state = *t.TerminalState
+		}
+		summaries[i] = wire.ConversationTurnSummary{
+			ID:    t.ID,
+			State: state,
+		}
+	}
+	return summaries, nil
+}
+
 // Override marks an incomplete turn that has a candidate as overridden and
 // sends its terminal deliveries. Deliveries still running from the incomplete
 // outcome finish on their own; their results no longer pass acceptance.

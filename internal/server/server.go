@@ -46,6 +46,8 @@ type Engine interface {
 	Override(turnID, reason string) error
 	Release(wire.ReleaseRequest) (wire.ReleaseReply, error)
 	Stopping() <-chan struct{}
+	Conversations(workspace *string, cursor string, limit int) ([]wire.ConversationSummary, string, error)
+	Conversation(idPrefix string) ([]wire.ConversationTurnSummary, error)
 }
 
 // Options configures a Server.
@@ -784,6 +786,30 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		limit := min(req.Limit, wire.MaxContentPageBytes)
 		reply, err := getContent(c.server.store, req.Ref, req.Offset, limit)
 		c.respond(frame.ID, "content", reply, err)
+	case wire.RequestConversations:
+		var req wire.ConversationsRequest
+		if !c.decode(frame, &req) {
+			return
+		}
+		limit := wire.ConversationListLimit(req.Limit)
+		cursor := ""
+		if req.Cursor != nil {
+			cursor = *req.Cursor
+		}
+		summaries, nextCursor, err := c.server.engine.Conversations(req.Workspace, cursor, limit)
+		reply := &wire.ConversationsReply{Items: summaries}
+		if nextCursor != "" {
+			reply.NextCursor = &nextCursor
+		}
+		c.respond(frame.ID, "conversations", reply, err)
+	case wire.RequestConversation:
+		var req wire.ConversationRequest
+		if !c.decode(frame, &req, "id") {
+			return
+		}
+		turns, err := c.server.engine.Conversation(req.ID)
+		reply := &wire.ConversationReply{ID: req.ID, Turns: turns}
+		c.respond(frame.ID, "conversation", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}
