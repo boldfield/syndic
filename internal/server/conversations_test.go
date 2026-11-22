@@ -1,491 +1,305 @@
 package server_test
 
 import (
-	"context"
-	"fmt"
+	"errors"
+	"strings"
 	"testing"
-	"time"
 
+	"github.com/boldfield/syndic/internal/client"
+	"github.com/boldfield/syndic/internal/engine"
+	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/server"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-func TestConversationAPIReadsWork(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	c := s.dial()
+// seedConversations creates n conversations with no turns, each in a
+// workspace padded to pad bytes, and returns their ids.
+func seedConversations(t *testing.T, store *journal.Store, n, pad int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ws := "/w/" + strings.Repeat("x", pad)
+		var id string
+		err := store.Tx(func(tx *journal.Tx) (err error) {
+			id, err = tx.CreateConversation(&ws)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	convs, err := c.Conversations(ctx, nil, "", 10)
+// totalTurns counts the turns of every conversation.
+func totalTurns(t *testing.T, store *journal.Store) int {
+	t.Helper()
+	rows, _, err := store.ListConversations(nil, "", 200)
 	if err != nil {
-		t.Fatalf("Conversations failed: %v", err)
+		t.Fatal(err)
 	}
-	if convs.Items == nil {
-		t.Fatal("expected Items to be non-nil slice")
+	n := 0
+	for _, r := range rows {
+		n += r.TurnCount
 	}
-	if len(convs.Items) != 0 {
-		t.Fatalf("expected no conversations initially, got %d", len(convs.Items))
+	return n
+}
+
+func wantCode(t *testing.T, err error, code string) {
+	t.Helper()
+	var we *wire.Error
+	if !errors.As(err, &we) || we.Code != code {
+		t.Fatalf("error = %v, want code %q", err, code)
 	}
 }
 
-func TestUnknownConversationError(t *testing.T) {
+// probingEngine answers as an engine still probing: hello says so and submit
+// is refused, as the real engine does before its run starts.
+type probingEngine struct{ server.Engine }
+
+func (p probingEngine) Hello() wire.HelloReply {
+	h := p.Engine.Hello()
+	h.State = "probing"
+	return h
+}
+
+func (p probingEngine) Submit(wire.SubmitRequest) (wire.SubmitReply, error) {
+	return wire.SubmitReply{}, &wire.Error{Code: wire.ErrorCodeProbing}
+}
+
+func TestConversationReadsWorkDuringProbing(t *testing.T) {
+	h := newHarness(t)
+	ids := seedConversations(t, h.Store, 2, 1)
+	s := serve(t, probingEngine{h.Engine}, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	if hello := c.Hello(); hello.State != "probing" {
+		t.Fatalf("hello state = %q, want probing", hello.State)
+	}
+	list, err := c.Conversations(ctx, nil, "", 10)
+	if err != nil || len(list.Items) != 2 {
+		t.Fatalf("conversations during probing = %+v, %v", list, err)
+	}
+	conv, err := c.Conversation(ctx, ids[0][:12])
+	if err != nil || conv.ID != ids[0] {
+		t.Fatalf("conversation during probing = %+v, %v", conv, err)
+	}
+	_, err = c.Submit(ctx, soloReq("probing-1"))
+	wantCode(t, err, wire.ErrorCodeProbing)
+}
+
+func TestConversationUnknownAndAmbiguousSendNoSubmit(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c := s.dial()
+	ctx := ctxT(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	_, err := c.Conversation(ctx, "unknown-id-prefix")
-	if err == nil {
-		t.Fatal("expected error for unknown conversation")
+	// Hex ids: 17 conversations force two to share a first character.
+	ids := seedConversations(t, h.Store, 17, 1)
+	byFirst := map[string]int{}
+	ambiguous := ""
+	for _, id := range ids {
+		byFirst[id[:1]]++
+		if byFirst[id[:1]] == 2 {
+			ambiguous = id[:1]
+		}
+	}
+	if ambiguous == "" {
+		t.Fatal("no two ids share a first character")
 	}
 
-	var wireErr *wire.Error
-	if !asWireError(err, &wireErr) || wireErr.Code != "not_found" {
-		t.Fatalf("expected not_found error, got %v", err)
+	for _, tc := range []struct{ name, prefix, code string }{
+		{"unknown", "zz-not-an-id", wire.ErrorCodeNotFound},
+		{"ambiguous", ambiguous, wire.ErrorCodeAmbiguous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s.resetFrames()
+			_, err := c.Conversation(ctx, tc.prefix)
+			wantCode(t, err, tc.code)
+			_, err = c.SubmitToConversation(ctx, tc.prefix, soloReq("guarded-"+tc.name))
+			wantCode(t, err, tc.code)
+			if n := totalTurns(t, h.Store); n != 0 {
+				t.Fatalf("%d turns after a failed resolution, want none", n)
+			}
+		})
 	}
 }
 
-func TestConversationReturnsResolvedID(t *testing.T) {
+func TestSubmitToConversationUsesCanonicalID(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c := s.dial()
+	ctx := ctxT(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	sr, err := c.Submit(ctx, soloReq("test-conv-1"))
-	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
+	ids := seedConversations(t, h.Store, 1, 1) // workspace "/w/x"
+	req := soloReq("canon-1")
+	req.Workspace = "/w/other"
+	_, err := c.SubmitToConversation(ctx, ids[0][:10], req)
+	wantCode(t, err, wire.ErrorCodeWorkspaceMismatch)
+	if n := totalTurns(t, h.Store); n != 0 {
+		t.Fatalf("workspace mismatch submitted %d turns", n)
 	}
 
-	cr, err := c.Conversation(ctx, sr.ConversationID[:16])
+	req.Workspace = "/w/x"
+	reply, err := c.SubmitToConversation(ctx, ids[0][:10], req)
 	if err != nil {
-		t.Fatalf("Conversation failed: %v", err)
+		t.Fatal(err)
 	}
-
-	if cr.ID != sr.ConversationID {
-		t.Fatalf("expected full ID %s, got %s", sr.ConversationID, cr.ID)
+	if reply.ConversationID != ids[0] {
+		t.Fatalf("submit went to %s, want %s", reply.ConversationID, ids[0])
+	}
+	conv, err := c.Conversation(ctx, ids[0][:10])
+	if err != nil || conv.ID != ids[0] || len(conv.Turns) != 1 || conv.Turns[0].ID != reply.TurnID {
+		t.Fatalf("conversation = %+v, %v", conv, err)
 	}
 }
 
-func TestReconnectRetrievesLatestState(t *testing.T) {
+func TestReconnectSeesLatestTurnState(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c1 := s.dial()
+	ctx := ctxT(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	// Submit on the first connection
-	sr, err := c1.Submit(ctx, soloReq("test-state-1"))
+	release := h.Hold("author")
+	reply, err := c1.Submit(ctx, reviewReq("recon-1"))
 	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
+		t.Fatal(err)
 	}
+	h.WaitTurnState(reply.TurnID, engine.StateAuthorDispatched)
 
-	// Wait for the turn to complete so we can submit another one
-	for {
-		tr, err := c1.Turn(ctx, sr.TurnID)
-		if err != nil {
-			t.Fatalf("Turn failed: %v", err)
-		}
-		if tr.State != "" && tr.State != "submitted" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Get conversation state on first connection
-	cr1, err := c1.Conversation(ctx, sr.ConversationID)
-	if err != nil {
-		t.Fatalf("Conversation on c1 failed: %v", err)
-	}
-
-	if len(cr1.Turns) != 1 {
-		t.Fatalf("expected 1 turn, got %d", len(cr1.Turns))
-	}
-
-	if cr1.Turns[0].State == "" {
-		t.Fatal("expected non-empty state for turn")
-	}
-
-	// Reconnect with a new client connection
+	// A new connection sees the journaled turn_state of the live turn, and the list marks it running.
 	c2 := s.dial()
-
-	// Get conversation state on the new connection and verify it matches
-	cr2, err := c2.Conversation(ctx, sr.ConversationID)
-	if err != nil {
-		t.Fatalf("Conversation on c2 failed: %v", err)
+	conv, err := c2.Conversation(ctx, reply.ConversationID[:8])
+	if err != nil || len(conv.Turns) != 1 {
+		t.Fatalf("conversation = %+v, %v", conv, err)
+	}
+	if got := conv.Turns[0].State; got != engine.StateAuthorDispatched {
+		t.Fatalf("live turn state = %q, want %q", got, engine.StateAuthorDispatched)
+	}
+	list, err := c2.Conversations(ctx, nil, "", 10)
+	if err != nil || len(list.Items) != 1 || !list.Items[0].Running || list.Items[0].TurnCount != 1 {
+		t.Fatalf("list = %+v, %v", list, err)
 	}
 
-	if len(cr2.Turns) != 1 {
-		t.Fatalf("expected 1 turn on c2, got %d", len(cr2.Turns))
+	// After the turn ends, a later reconnect reports the terminal state.
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+	_ = c2.Close()
+	c3 := s.dial()
+	conv, err = c3.Conversation(ctx, reply.ConversationID)
+	if err != nil || conv.Turns[0].State != row.TerminalState {
+		t.Fatalf("after end: %+v (terminal %q), %v", conv, row.TerminalState, err)
 	}
-
-	if cr2.Turns[0].State != cr1.Turns[0].State {
-		t.Fatalf("state diverged between connections: %s vs %s", cr1.Turns[0].State, cr2.Turns[0].State)
+	list, err = c3.Conversations(ctx, nil, "", 10)
+	if err != nil || list.Items[0].Running {
+		t.Fatalf("list after end = %+v, %v", list, err)
 	}
 }
 
-func TestConversationListPaging(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	c := s.dial()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Create multiple conversations so we can test pagination
-	for i := 0; i < 5; i++ {
-		sr, err := c.Submit(ctx, soloReq(fmt.Sprintf("page-test-%d", i)))
-		if err != nil {
-			t.Fatalf("Submit %d failed: %v", i, err)
-		}
-
-		// Wait for turn to complete so we can submit the next one
-		for {
-			tr, err := c.Turn(ctx, sr.TurnID)
-			if err != nil {
-				t.Fatalf("Turn failed: %v", err)
-			}
-			if tr.State != "" && tr.State != "submitted" {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-
-	// Fetch with limit 2 and walk through all pages using next_cursor
-	seen := make(map[string]bool)
+func walk(t *testing.T, c *client.Client, ws *string, limit int) (pages int, seen []string) {
+	t.Helper()
+	ctx := ctxT(t)
 	cursor := ""
-	pageCount := 0
 	for {
-		pageCount++
-		if pageCount > 10 {
-			t.Fatal("too many pages, likely infinite loop")
+		pages++
+		if pages > 500 {
+			t.Fatal("paging does not terminate")
 		}
-		cr, err := c.Conversations(ctx, nil, cursor, 2)
+		page, err := c.Conversations(ctx, ws, cursor, limit)
 		if err != nil {
-			t.Fatalf("Conversations failed: %v", err)
+			t.Fatal(err)
 		}
-
-		if len(cr.Items) == 0 {
-			break
+		for _, it := range page.Items {
+			seen = append(seen, it.ID)
 		}
-		if len(cr.Items) > 2 {
-			t.Fatalf("expected at most 2 items per page, got %d", len(cr.Items))
+		if page.NextCursor == nil {
+			return pages, seen
 		}
-		for _, item := range cr.Items {
-			if seen[item.ID] {
-				t.Fatalf("conversation %s seen twice, pagination loop detected", item.ID)
-			}
-			seen[item.ID] = true
+		if len(page.Items) == 0 {
+			t.Fatal("empty page with a next cursor")
 		}
-
-		if cr.NextCursor == nil || *cr.NextCursor == "" {
-			break
-		}
-		cursor = *cr.NextCursor
-	}
-
-	if len(seen) != 5 {
-		t.Fatalf("expected to see 5 conversations, saw %d", len(seen))
+		cursor = *page.NextCursor
 	}
 }
 
-func TestConversationFrameLimit(t *testing.T) {
+func assertEach(t *testing.T, seen, want []string) {
+	t.Helper()
+	count := map[string]int{}
+	for _, id := range seen {
+		count[id]++
+	}
+	for _, id := range want {
+		if count[id] != 1 {
+			t.Fatalf("conversation %s returned %d times", id, count[id])
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("returned %d conversations, want %d", len(seen), len(want))
+	}
+}
+
+func TestConversationListPagesByCursor(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c := s.dial()
+	ids := seedConversations(t, h.Store, 7, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	pages, seen := walk(t, c, nil, 3)
+	if pages != 3 {
+		t.Fatalf("%d pages of 3 for 7 conversations, want 3", pages)
+	}
+	assertEach(t, seen, ids)
 
-	// Create a reasonable number of conversations for pagination testing
-	for i := 0; i < 50; i++ {
-		sr, err := c.Submit(ctx, wire.SubmitRequest{
-			SubmissionID: fmt.Sprintf("frame-test-%d", i),
-			Input:        "test input",
-			Preset:       ptrStr("solo"),
-		})
-		if err != nil {
-			t.Fatalf("Submit failed: %v", err)
-		}
-
-		// Wait for turn to complete so we can submit the next one
-		for {
-			tr, err := c.Turn(ctx, sr.TurnID)
-			if err != nil {
-				t.Fatalf("Turn failed: %v", err)
-			}
-			if tr.State != "" && tr.State != "submitted" {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+	// The limit is clamped to the protocol maximum.
+	page, err := c.Conversations(ctxT(t), nil, "", 100000)
+	if err != nil || len(page.Items) != 7 || page.NextCursor != nil {
+		t.Fatalf("clamped page = %+v, %v", page, err)
 	}
 
-	// Test that cursor-based pagination works correctly.
-	// The key fix we're testing is that next_cursor is built from the last item kept,
-	// not echoed from the request, so pagination doesn't loop infinitely.
-	seenIDs := make(map[string]bool)
-	cursor := ""
-	pageCount := 0
-	itemCount := 0
-
-	for {
-		pageCount++
-		if pageCount > 10 {
-			t.Fatal("too many pages - likely infinite loop due to bad next_cursor")
-		}
-
-		cr, err := c.Conversations(ctx, nil, cursor, 10)
-		if err != nil {
-			t.Fatalf("Conversations failed: %v", err)
-		}
-
-		if len(cr.Items) == 0 {
-			break
-		}
-
-		// Verify no duplicate IDs across pages (would indicate a pagination loop)
-		for _, item := range cr.Items {
-			if seenIDs[item.ID] {
-				t.Fatalf("conversation %s seen twice - pagination loop detected", item.ID)
-			}
-			seenIDs[item.ID] = true
-		}
-
-		itemCount += len(cr.Items)
-
-		// If we have more items and there's a next cursor, continue
-		if cr.NextCursor != nil && *cr.NextCursor != "" {
-			cursor = *cr.NextCursor
-		} else {
-			break
-		}
-	}
-
-	// Verify we saw all 50 conversations exactly once
-	if itemCount != 50 {
-		t.Fatalf("expected to see 50 conversations total, saw %d", itemCount)
-	}
+	_, err = c.Conversations(ctxT(t), nil, "not-a-cursor", 3)
+	wantCode(t, err, wire.ErrorCodeBadRequest)
 }
 
-func ptrStr(s string) *string {
-	return &s
-}
-
-func TestPrefixResolution(t *testing.T) {
+// TestConversationListStopsEarlyAtFrameLimit fills a page past the frame
+// limit and walks the next_cursor chain: every conversation arrives exactly
+// once and no frame exceeds the limit.
+func TestConversationListStopsEarlyAtFrameLimit(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c := s.dial()
+	// 150 items of ~12 KiB: one default page of 200 cannot fit in 1 MiB.
+	n := 150
+	if testing.Short() {
+		n = 100 // still over the limit at ~12 KiB each
+	}
+	ids := seedConversations(t, h.Store, n, 12<<10)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	sr, err := c.Submit(ctx, soloReq("test-prefix-1"))
+	s.resetFrames()
+	first, err := c.Conversations(ctxT(t), nil, "", 0)
 	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
+		t.Fatal(err)
 	}
-
-	for i := 8; i <= len(sr.ConversationID); i++ {
-		prefix := sr.ConversationID[:i]
-		cr, err := c.Conversation(ctx, prefix)
-		if err != nil {
-			t.Fatalf("Conversation with prefix %s failed: %v", prefix, err)
-		}
-		if cr.ID != sr.ConversationID {
-			t.Fatalf("prefix %s: expected ID %s, got %s", prefix, sr.ConversationID, cr.ID)
-		}
+	if len(first.Items) == 0 || len(first.Items) >= n || first.NextCursor == nil {
+		t.Fatalf("first page has %d of %d items, next %v; want a trimmed page", len(first.Items), n, first.NextCursor)
 	}
+	if s.maxFrame() > wire.MaxFrameBytes {
+		t.Fatalf("frame of %d bytes exceeds the limit", s.maxFrame())
+	}
+	pages, seen := walk(t, c, nil, 0)
+	if pages < 2 {
+		t.Fatalf("%d pages, want the list split across several", pages)
+	}
+	assertEach(t, seen, ids)
 }
 
-func TestAmbiguousConversationPrefixError(t *testing.T) {
+func TestConversationRefusedWhenOneItemExceedsFrame(t *testing.T) {
 	h := newHarness(t)
 	s := serve(t, h.Engine, h.Store, h.Hub)
 	c := s.dial()
+	seedConversations(t, h.Store, 1, wire.MaxFrameBytes)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Create two conversations with IDs that share a prefix
-	sr1, err := c.Submit(ctx, soloReq("ambig-1"))
-	if err != nil {
-		t.Fatalf("Submit 1 failed: %v", err)
-	}
-
-	// Wait for first turn to complete
-	for {
-		tr, err := c.Turn(ctx, sr1.TurnID)
-		if err != nil {
-			t.Fatalf("Turn 1 failed: %v", err)
-		}
-		if tr.State != "" && tr.State != "submitted" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	sr2, err := c.Submit(ctx, soloReq("ambig-2"))
-	if err != nil {
-		t.Fatalf("Submit 2 failed: %v", err)
-	}
-
-	// Wait for second turn to complete
-	for {
-		tr, err := c.Turn(ctx, sr2.TurnID)
-		if err != nil {
-			t.Fatalf("Turn 2 failed: %v", err)
-		}
-		if tr.State != "" && tr.State != "submitted" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	id1 := sr1.ConversationID
-	id2 := sr2.ConversationID
-
-	// Find a common prefix
-	commonLen := 0
-	for i := 0; i < len(id1) && i < len(id2); i++ {
-		if id1[i] == id2[i] {
-			commonLen = i + 1
-		} else {
-			break
-		}
-	}
-
-	if commonLen == len(id1) || commonLen == len(id2) {
-		t.Skip("unable to create ambiguous prefix in this run")
-	}
-
-	ambiguousPrefix := id1[:commonLen]
-
-	// Try to get conversation with ambiguous prefix - should return ambiguous error
-	_, err = c.Conversation(ctx, ambiguousPrefix)
-	if err == nil {
-		t.Fatal("expected ambiguous error for prefix that matches both conversations")
-	}
-
-	var wireErr *wire.Error
-	if !asWireError(err, &wireErr) || wireErr.Code != wire.ErrorCodeAmbiguous {
-		t.Fatalf("expected ambiguous error, got: %v", err)
-	}
-
-	// Verify we can resolve both full IDs
-	cr1, err := c.Conversation(ctx, id1)
-	if err != nil {
-		t.Fatalf("Conversation with full ID 1 failed: %v", err)
-	}
-	if cr1.ID != id1 {
-		t.Fatalf("expected ID %s, got %s", id1, cr1.ID)
-	}
-
-	cr2, err := c.Conversation(ctx, id2)
-	if err != nil {
-		t.Fatalf("Conversation with full ID 2 failed: %v", err)
-	}
-	if cr2.ID != id2 {
-		t.Fatalf("expected ID %s, got %s", id2, cr2.ID)
-	}
-}
-
-func TestUnknownConversationPrefixNoSubmit(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	c := s.dial()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Try to resolve unknown prefix before submitting
-	_, err := c.ResolveConversationID(ctx, "unknown-prefix-xyz")
-	if err == nil {
-		t.Fatal("expected error for unknown conversation")
-	}
-
-	var wireErr *wire.Error
-	if !asWireError(err, &wireErr) || wireErr.Code != wire.ErrorCodeNotFound {
-		t.Fatalf("expected not_found error, got: %v", err)
-	}
-
-	// Now verify the client can resolve a known conversation
-	sr, err := c.Submit(ctx, soloReq("known-conv"))
-	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
-	}
-
-	// Wait for turn to complete
-	for {
-		tr, err := c.Turn(ctx, sr.TurnID)
-		if err != nil {
-			t.Fatalf("Turn failed: %v", err)
-		}
-		if tr.State != "" && tr.State != "submitted" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	resolved, err := c.ResolveConversationID(ctx, sr.ConversationID[:16])
-	if err != nil {
-		t.Fatalf("ResolveConversationID failed: %v", err)
-	}
-
-	if resolved != sr.ConversationID {
-		t.Fatalf("expected resolved ID %s, got %s", sr.ConversationID, resolved)
-	}
-}
-
-func TestMalformedConversationCursor(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	c := s.dial()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Create a conversation so the store isn't empty
-	sr, err := c.Submit(ctx, soloReq("cursor-test"))
-	if err != nil {
-		t.Fatalf("Submit failed: %v", err)
-	}
-
-	// Wait for turn to complete
-	for {
-		tr, err := c.Turn(ctx, sr.TurnID)
-		if err != nil {
-			t.Fatalf("Turn failed: %v", err)
-		}
-		if tr.State != "" && tr.State != "submitted" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Try with malformed cursor - should return bad_request
-	_, err = c.Conversations(ctx, nil, "invalid-cursor-format", 10)
-	if err == nil {
-		t.Fatal("expected error for malformed cursor")
-	}
-
-	var wireErr *wire.Error
-	if !asWireError(err, &wireErr) || wireErr.Code != wire.ErrorCodeBadRequest {
-		t.Fatalf("expected bad_request error, got: %v", err)
-	}
-}
-
-func asWireError(err error, we **wire.Error) bool {
-	if err == nil {
-		return false
-	}
-	if e, ok := err.(*wire.Error); ok {
-		*we = e
-		return true
-	}
-	return false
+	_, err := c.Conversations(ctxT(t), nil, "", 10)
+	wantCode(t, err, wire.ErrorCodeFrame)
 }

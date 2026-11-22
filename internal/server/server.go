@@ -27,8 +27,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -48,8 +46,6 @@ type Engine interface {
 	Override(turnID, reason string) error
 	Release(wire.ReleaseRequest) (wire.ReleaseReply, error)
 	Stopping() <-chan struct{}
-	Conversations(workspace *string, cursor string, limit int) ([]wire.ConversationSummary, string, error)
-	Conversation(idPrefix string) (string, []wire.ConversationTurnSummary, error)
 }
 
 // Options configures a Server.
@@ -789,94 +785,24 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		reply, err := getContent(c.server.store, req.Ref, req.Offset, limit)
 		c.respond(frame.ID, "content", reply, err)
 	case wire.RequestConversations:
+		// Reads go to the journal, not the engine, so they answer in every run state.
 		var req wire.ConversationsRequest
 		if !c.decode(frame, &req) {
 			return
 		}
-		limit := wire.ConversationListLimit(req.Limit)
 		cursor := ""
 		if req.Cursor != nil {
 			cursor = *req.Cursor
 		}
-		summaries, nextCursor, err := c.server.engine.Conversations(req.Workspace, cursor, limit)
-		if err != nil {
-			c.respond(frame.ID, "conversations", nil, err)
-			return
-		}
-
-		reply := &wire.ConversationsReply{Items: summaries}
-		if nextCursor != "" {
-			reply.NextCursor = &nextCursor
-		}
-
-		_, fits := checkFrameSize(frame.ID, "conversations", reply)
-		if !fits {
-			if len(summaries) == 0 {
-				c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
-				return
-			}
-			for len(summaries) > 1 {
-				summaries = summaries[:len(summaries)-1]
-				lastSummary := summaries[len(summaries)-1]
-
-				// Build nextCursor from the last item kept, in journal's "snapshot,key,id" format.
-				// Extract snapshot from original nextCursor or request cursor.
-				snap := int64(0)
-				if nextCursor != "" {
-					parts := strings.SplitN(nextCursor, ",", 2)
-					if len(parts) > 0 {
-						if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-							snap = s
-						}
-					}
-				} else if cursor != "" {
-					parts := strings.SplitN(cursor, ",", 2)
-					if len(parts) > 0 {
-						if s, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
-							snap = s
-						}
-					}
-				} else {
-					// First page: query for current snapshot
-					if curSnap, err := c.server.store.QueryMaxTurnRowID(); err == nil {
-						snap = curSnap
-					}
-				}
-
-				// Get cursor key for the last summary kept
-				if key, err := c.server.store.GetConversationCursorKey(lastSummary.ID, snap); err == nil {
-					// Build new cursor
-					trimmedCursor := fmt.Sprintf("%d,%d,%s", snap, key, lastSummary.ID)
-					reply := &wire.ConversationsReply{Items: summaries, NextCursor: &trimmedCursor}
-					_, fits := checkFrameSize(frame.ID, "conversations", reply)
-					if fits {
-						c.sendReply(frame.ID, reply)
-						return
-					}
-				}
-			}
-			c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
-			return
-		}
-
-		c.sendReply(frame.ID, reply)
+		reply, err := listConversations(c.server.store, frame.ID, req.Workspace, cursor, wire.ConversationListLimit(req.Limit))
+		c.respond(frame.ID, "conversations", reply, err)
 	case wire.RequestConversation:
 		var req wire.ConversationRequest
 		if !c.decode(frame, &req, "id") {
 			return
 		}
-		convID, turns, err := c.server.engine.Conversation(req.ID)
-		if err != nil {
-			c.respond(frame.ID, "conversation", nil, err)
-			return
-		}
-		reply := &wire.ConversationReply{ID: convID, Turns: turns}
-		_, fits := checkFrameSize(frame.ID, "conversation", reply)
-		if !fits {
-			c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
-			return
-		}
-		c.sendReply(frame.ID, reply)
+		reply, err := getConversation(c.server.store, c.server.openTurnState, frame.ID, req.ID)
+		c.respond(frame.ID, "conversation", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}
@@ -911,21 +837,6 @@ func (c *connection) badRequest(id string, cause error) {
 	c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest, Detail: &detail})
 }
 
-// checkFrameSize checks if a reply body would fit in a frame when fully encoded.
-// Returns the encoded frame size and true if it fits, or the size and false if it exceeds MaxFrameBytes.
-func checkFrameSize(id, op string, body any) (int, bool) {
-	bodyJSON, _ := json.Marshal(body)
-	frame := wire.Frame{
-		V:    wire.ProtocolVersion,
-		ID:   id,
-		Type: "reply",
-		Body: bodyJSON,
-	}
-	frameJSON, _ := json.Marshal(frame)
-	encodedLen := len(frameJSON) + 1
-	return encodedLen, encodedLen <= wire.MaxFrameBytes
-}
-
 // respond sends body as the reply to id, or the error err maps to.
 func (c *connection) respond(id, op string, body any, err error) {
 	if err != nil {
@@ -935,6 +846,10 @@ func (c *connection) respond(id, op string, body any, err error) {
 			c.sendError(id, wireErr)
 		case errors.Is(err, journal.ErrTurnNotFound), errors.Is(err, journal.ErrNoSuchContent):
 			c.sendError(id, &wire.Error{Code: "not_found"})
+		case errors.Is(err, journal.ErrAmbiguousConversationID):
+			c.sendError(id, &wire.Error{Code: wire.ErrorCodeAmbiguous})
+		case errors.Is(err, errReplyTooLarge):
+			c.sendError(id, &wire.Error{Code: wire.ErrorCodeFrame})
 		case errors.Is(err, journal.ErrOutOfRange), errors.Is(err, journal.ErrMalformedCursor):
 			c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest})
 		default:

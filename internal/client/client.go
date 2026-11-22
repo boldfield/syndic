@@ -361,16 +361,18 @@ func (c *Client) Conversation(ctx context.Context, idPrefix string) (wire.Conver
 	return reply, nil
 }
 
-// ResolveConversationID resolves a conversation prefix to a full ID, returning an error
-// if the prefix is unknown or ambiguous. The resolved ID is returned in the ConversationReply.ID field.
-// This method can be used before Submit to ensure the conversation exists and is unambiguous,
-// guaranteeing that Submit will not fail with unknown/ambiguous errors.
-func (c *Client) ResolveConversationID(ctx context.Context, idPrefix string) (string, error) {
-	reply, err := c.Conversation(ctx, idPrefix)
+// SubmitToConversation resolves prefix, any unique prefix of a conversation
+// id, and submits req to the conversation it names. An unknown or ambiguous
+// prefix is returned before anything is sent: no submit frame is written. A
+// workspace that differs from the conversation's is refused by the engine as
+// workspace_mismatch, which journals nothing.
+func (c *Client) SubmitToConversation(ctx context.Context, prefix string, req wire.SubmitRequest) (wire.SubmitReply, error) {
+	conv, err := c.Conversation(ctx, prefix)
 	if err != nil {
-		return "", err
+		return wire.SubmitReply{}, err
 	}
-	return reply.ID, nil
+	req.ConversationID = &conv.ID
+	return c.Submit(ctx, req)
 }
 
 func (c *Client) Subscribe(ctx context.Context, sinceSeq int64) (int64, error) {

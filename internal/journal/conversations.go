@@ -27,7 +27,6 @@ type TurnInConversation struct {
 	ID            string
 	TerminalState *string
 	SubmittedAt   *time.Time
-	Epoch         int64
 }
 
 // ErrAmbiguousConversationID is returned when a prefix matches multiple conversations.
@@ -145,6 +144,36 @@ func (s *Store) ListConversations(workspace *string, cursor string, limit int) (
 // conversation present at the first page appears exactly once across all pages.
 // Cursor format: "snapshot,key,id".
 func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]ConversationRow, string, error) {
+	page, err := tx.ListConversationsPage(workspace, cursor, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	return page.Rows, page.NextCursor, nil
+}
+
+// ConversationPage is one page of ListConversationsPage. ItemCursors[i] is
+// the cursor that resumes after Rows[i] in the same pinned snapshot, so a
+// caller that keeps only a prefix of Rows can still continue exactly after it.
+type ConversationPage struct {
+	Rows        []ConversationRow
+	ItemCursors []string
+	NextCursor  string
+}
+
+// ListConversationsPage is ListConversations plus a resume cursor per row,
+// all taken inside the transaction that picked the snapshot.
+func (s *Store) ListConversationsPage(workspace *string, cursor string, limit int) (page ConversationPage, err error) {
+	err = s.Tx(func(tx *Tx) error {
+		var txErr error
+		page, txErr = tx.ListConversationsPage(workspace, cursor, limit)
+		return txErr
+	})
+	return page, err
+}
+
+// ListConversationsPage implements ListConversations; see there for the
+// cursor and snapshot rules.
+func (tx *Tx) ListConversationsPage(workspace *string, cursor string, limit int) (ConversationPage, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -157,18 +186,18 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 	if cursor != "" {
 		parts := strings.SplitN(cursor, ",", 3)
 		if len(parts) != 3 || parts[2] == "" {
-			return nil, "", fmt.Errorf("invalid cursor format: %w", ErrMalformedCursor)
+			return ConversationPage{}, fmt.Errorf("invalid cursor format: %w", ErrMalformedCursor)
 		}
 		var err error
 		if snap, err = strconv.ParseInt(parts[0], 10, 64); err != nil || snap < 0 {
-			return nil, "", fmt.Errorf("invalid cursor snapshot: %w", ErrMalformedCursor)
+			return ConversationPage{}, fmt.Errorf("invalid cursor snapshot: %w", ErrMalformedCursor)
 		}
 		if cursorKey, err = strconv.ParseInt(parts[1], 10, 64); err != nil || cursorKey < -1 {
-			return nil, "", fmt.Errorf("invalid cursor key: %w", ErrMalformedCursor)
+			return ConversationPage{}, fmt.Errorf("invalid cursor key: %w", ErrMalformedCursor)
 		}
 		cursorID = parts[2]
 	} else if err := tx.tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM turns`).Scan(&snap); err != nil {
-		return nil, "", fmt.Errorf("query snapshot: %w", err)
+		return ConversationPage{}, fmt.Errorf("query snapshot: %w", err)
 	}
 
 	// key: rowid of the conversation's latest turn within the snapshot; -1 when none.
@@ -191,7 +220,7 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 	rows, err := tx.tx.Query(`SELECT `+convColumns+`, `+key+` FROM conversations c WHERE `+where+
 		` ORDER BY `+key+` DESC, c.id ASC LIMIT @limit`, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("query conversations: %w", err)
+		return ConversationPage{}, fmt.Errorf("query conversations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -201,23 +230,27 @@ func (tx *Tx) ListConversations(workspace *string, cursor string, limit int) ([]
 		var k int64
 		c, err := scanConvRow(rows.Scan, &k)
 		if err != nil {
-			return nil, "", fmt.Errorf("scan conversation: %w", err)
+			return ConversationPage{}, fmt.Errorf("scan conversation: %w", err)
 		}
 		conversations = append(conversations, *c)
 		keys = append(keys, k)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("scan conversations: %w", err)
+		return ConversationPage{}, fmt.Errorf("scan conversations: %w", err)
 	}
 
-	var nextCursor string
-	if len(conversations) > limit {
+	more := len(conversations) > limit
+	if more {
 		conversations = conversations[:limit]
-		last := limit - 1
-		nextCursor = fmt.Sprintf("%d,%d,%s", snap, keys[last], conversations[last].ID)
 	}
-
-	return conversations, nextCursor, nil
+	page := ConversationPage{Rows: conversations, ItemCursors: make([]string, len(conversations))}
+	for i, c := range conversations {
+		page.ItemCursors[i] = fmt.Sprintf("%d,%d,%s", snap, keys[i], c.ID)
+	}
+	if more {
+		page.NextCursor = page.ItemCursors[limit-1]
+	}
+	return page, nil
 }
 
 // GetConversation retrieves a conversation by ID or unique prefix.
@@ -267,29 +300,6 @@ func (tx *Tx) GetConversation(idPrefix string) (*ConversationRow, error) {
 	}
 }
 
-// GetConversationCursorKey returns the cursor key (latest turn rowid within a snapshot)
-// for a conversation, used to build pagination cursors after trimming.
-// snapshot is the highest turn rowid at the first page.
-func (s *Store) GetConversationCursorKey(conversationID string, snapshot int64) (int64, error) {
-	var key int64
-	err := s.Tx(func(tx *Tx) error {
-		return tx.tx.QueryRow(`
-			SELECT COALESCE(MAX(rowid), -1) FROM turns
-			WHERE conversation_id = ? AND rowid <= ?
-		`, conversationID, snapshot).Scan(&key)
-	})
-	return key, err
-}
-
-// QueryMaxTurnRowID returns the highest rowid from the turns table (snapshot for pagination).
-func (s *Store) QueryMaxTurnRowID() (int64, error) {
-	var snap int64
-	err := s.Tx(func(tx *Tx) error {
-		return tx.tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM turns`).Scan(&snap)
-	})
-	return snap, err
-}
-
 // GetConversationTurns returns all turns in a conversation ordered by submission time (oldest first).
 func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	var turns []TurnInConversation
@@ -305,7 +315,7 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
 		SELECT t.id, t.terminal_state,
-			t.submitted_at, t.epoch
+			t.submitted_at
 		FROM turns t
 		WHERE t.conversation_id = ?
 		ORDER BY t.rowid ASC
@@ -321,7 +331,7 @@ func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation,
 		var terminalState sql.NullString
 		var submittedAtStr sql.NullString
 
-		if err := rows.Scan(&t.ID, &terminalState, &submittedAtStr, &t.Epoch); err != nil {
+		if err := rows.Scan(&t.ID, &terminalState, &submittedAtStr); err != nil {
 			return nil, fmt.Errorf("scan turn: %w", err)
 		}
 

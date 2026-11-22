@@ -236,20 +236,6 @@ func (tx *Tx) ListBlocks(turnID string) ([]Block, error) {
 	return blocks, nil
 }
 
-// GetLatestAttemptPhase returns the phase of the most recent attempt for a turn, or empty string if no attempts exist.
-func (s *Store) GetLatestAttemptPhase(turnID string) (string, error) {
-	var phase string
-	err := s.Tx(func(tx *Tx) error {
-		return tx.tx.QueryRow(`
-			SELECT phase FROM attempts WHERE turn_id = ? ORDER BY rowid DESC LIMIT 1
-		`, turnID).Scan(&phase)
-	})
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return phase, err
-}
-
 // CandidateRow represents a row from the candidates table.
 type CandidateRow struct {
 	ID          string
