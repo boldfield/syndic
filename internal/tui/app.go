@@ -590,6 +590,10 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		a.refusal = formatRefusal(msg.err)
 		return nil
 	}
+	// Store the conversation ID from the submit reply to use in subsequent submits
+	if msg.conversationID != "" {
+		a.conversationID = msg.conversationID
+	}
 	a.input.SetValue("")
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {

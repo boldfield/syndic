@@ -37,9 +37,10 @@ type eventMsg struct {
 // submitMsg is the outcome of a submit: the accepted turn, or the refusal.
 // It carries the submission so a provisional refusal can be resent as it was.
 type submitMsg struct {
-	sub    submission
-	turnID string
-	err    error
+	sub            submission
+	turnID         string
+	conversationID string
+	err            error
 }
 
 // tickMsg is sent every second for elapsed time updates.
@@ -126,7 +127,7 @@ func submitCmd(ctx context.Context, cl *client.Client, sub submission, observe f
 		if err != nil {
 			return submitMsg{sub: sub, err: err}
 		}
-		return submitMsg{sub: sub, turnID: reply.TurnID}
+		return submitMsg{sub: sub, turnID: reply.TurnID, conversationID: reply.ConversationID}
 	}
 }
 

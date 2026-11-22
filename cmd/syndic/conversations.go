@@ -69,6 +69,8 @@ func cmdConversations(fs *flag.FlagSet, args []string) int {
 			fmt.Printf("%s  %s  %d turns", conv.ID, conv.LastSubmittedAt, conv.TurnCount)
 			if conv.Workspace != nil {
 				fmt.Printf("  %s", *conv.Workspace)
+			} else {
+				fmt.Printf("  (no workspace)")
 			}
 			if conv.Preview != "" {
 				fmt.Printf("  %s", conv.Preview)
