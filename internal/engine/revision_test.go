@@ -454,3 +454,34 @@ func TestRevisionProjectionMustFitSweep(t *testing.T) {
 		})
 	}
 }
+
+// A turn that ends revision_unchanged keeps its reviewed candidate, so its
+// terminal delivery and a later override both carry that round's reviews.
+func TestRevisionUnchangedDeliversAndOverrides(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText), enginetest.Reply(authorText), ack(), ack()},
+		"reviewer": {blockStep("b1"), ack(), ack()},
+	}
+	h := enginetest.New(t, revisionRoster("2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateIncomplete, "revision_unchanged")
+	waitDeliveries(t, h, turnID, 2)
+	delivered := func(marker string) int {
+		seen := 0
+		for _, c := range h.Adapters["author"].Calls() {
+			if c.Request.Envelope.Phase == phaseDelivery && strings.Contains(userContent(c.Request), marker) {
+				if n := strings.Count(userContent(c.Request), "VERDICT v"); n != 1 {
+					t.Fatalf("%s delivery carries %d reviewer outputs, want 1: %q", marker, n, userContent(c.Request))
+				}
+				seen++
+			}
+		}
+		return seen
+	}
+	waitFor(t, "terminal delivery", func() bool { return delivered("revision_unchanged") == 1 })
+	if err := h.Engine.Override(turnID, "false alarm"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "override delivery", func() bool { return delivered("overridden") == 1 })
+}

@@ -58,9 +58,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	var quarantined, ended, exceeded bool
 	var term *terminal
 	var held *hold
+	var endReason string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		hash, candidateID, round, lines = "", "", 0, nil
 		quarantined, ended, exceeded, term, held = false, false, false, nil, nil
+		endReason = ""
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -81,7 +83,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if gate != nil {
 			ended = true
-			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			endReason = reasonAuthorFailed + authorFailedStatus(res, gate)
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
 		lines = authorChangeLines(res)
@@ -89,7 +92,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			// The author produced nothing new; the human decides with the
 			// blocks still open.
 			ended = true
-			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonRevisionUnchanged)
+			endReason = reasonRevisionUnchanged
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
 		if t.revising {
@@ -143,6 +147,9 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	if ended {
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
+		// A revision's author failed or changed nothing: the candidate and its
+		// reviews exist, so the terminal state is delivered (none before one).
+		e.deliverTerminal(t, StateIncomplete, endReason)
 		return false
 	}
 	t.candidate = res.Text
