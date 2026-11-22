@@ -43,7 +43,9 @@ const (
 )
 
 // RosterTOML is a valid roster with an author, a reviewer, a review default
-// preset, a solo preset and a quick profile, and non-provisional deadlines.
+// preset, a solo preset and a quick profile, and non-provisional deadlines. Its
+// round limit is zero, the behaviour before the revision loop: a block or a
+// revision request ends the turn. A test of the loop sets a limit of its own.
 const RosterTOML = `
 default_preset = "review"
 
@@ -52,6 +54,9 @@ attempt     = "300s"
 turn        = "900s"
 delivery    = "60s"
 provisional = false
+
+[revision]
+max_rounds = 0
 
 [[participants]]
 id = "author"

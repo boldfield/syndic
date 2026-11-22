@@ -1481,3 +1481,41 @@ func TestAuthorRevisionV2EvidenceCitesResult(t *testing.T) {
 		t.Fatal("result cited from unparsed v2 output")
 	}
 }
+
+func TestRepairRevision(t *testing.T) {
+	in := ReviewerRevisionInput{
+		HistoryDoc:    buildHistoryDoc(t),
+		Request:       "Please create something.",
+		Candidate:     "Here is the revised version.",
+		CandidateHash: "abc123",
+		OpenBlocks:    []OpenBlockForRevision{{BlockID: "b1", Severity: "high", Evidence: "e", Remedy: "r"}},
+		AttemptID:     "first",
+		Delimiter:     "delim",
+		Round:         1,
+	}
+	msgs, err := RepairRevision(in, "no envelope", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []string{"system", "user", "assistant", "user"}
+	if len(msgs) != len(roles) {
+		t.Fatalf("%d messages, want %d", len(msgs), len(roles))
+	}
+	for i, role := range roles {
+		if msgs[i].Role != role {
+			t.Errorf("message %d role %q, want %q", i, msgs[i].Role, role)
+		}
+	}
+	if !strings.Contains(msgs[0].Content, "second") || !strings.Contains(msgs[0].Content, "The round is: 1") {
+		t.Errorf("system message does not name the repair attempt and round: %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[1].Content, "BEGIN BLOCK b1") {
+		t.Errorf("user message lacks the reviewer's open block")
+	}
+	if msgs[2].Content != "no envelope" || !strings.Contains(msgs[3].Content, "VERDICT v2") || !strings.Contains(msgs[3].Content, "second") {
+		t.Errorf("repair turn = %q / %q", msgs[2].Content, msgs[3].Content)
+	}
+	if _, err := RepairRevision(in, "x", ""); err == nil {
+		t.Error("expected an error for an empty repair attempt id")
+	}
+}

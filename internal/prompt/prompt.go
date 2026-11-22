@@ -555,3 +555,23 @@ func ReviewerRevision(in ReviewerRevisionInput) ([]transport.Message, error) {
 		},
 	}, nil
 }
+
+// RepairRevision returns messages for a repair attempt of a malformed verdict
+// in a revision round: the round's reviewer prompt, the reviewer's own output,
+// and the instruction to return the same review in the v2 envelope.
+func RepairRevision(original ReviewerRevisionInput, originalOutput string, repairAttemptID string) ([]transport.Message, error) {
+	if repairAttemptID == "" {
+		return nil, errors.New("empty repair attempt id")
+	}
+	reviewerMessages, err := ReviewerRevision(original)
+	if err != nil {
+		return nil, err
+	}
+	repairInstruction := fmt.Sprintf(`The output you provided above lacked a valid VERDICT v2 envelope. Please return the same review in the required format shown above, with a block-state line for each of your open blocks. Your earlier output is preserved in the transcript. The attempt ID to echo is now: %s. A changed judgment would be a protocol violation.`, repairAttemptID)
+	return []transport.Message{
+		{Role: "system", Content: reviewerRevisionSystem(repairAttemptID, original.CandidateHash, original.Round)},
+		{Role: "user", Content: reviewerMessages[1].Content},
+		{Role: "assistant", Content: originalOutput},
+		{Role: "user", Content: repairInstruction},
+	}, nil
+}

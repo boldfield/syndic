@@ -90,7 +90,19 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		}
 	}
 
-	msgs := prompt.AuthorWithHistory(t.history, t.input)
+	var msgs []transport.Message
+	state, request := StateAuthorDispatched, t.input
+	if t.revising {
+		var err error
+		if msgs, err = e.authorRevisionMessages(t); err != nil {
+			return transport.CompleteRequest{}, "", err
+		}
+		// The journaled request is the feedback message, as a reviewer's is
+		// its fenced prompt.
+		state, request = StateRevisionDispatched, msgs[len(msgs)-1].Content
+	} else {
+		msgs = prompt.AuthorWithHistory(t.history, t.input)
+	}
 	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
 	deadline := e.attemptDeadline(t)
 
@@ -101,11 +113,16 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		if err != nil {
 			return err
 		}
+		if t.revising {
+			if err := e.checkRoundFits(tx, t, msgs, maxOut); err != nil {
+				return err
+			}
+		}
 		estimated, err := e.reserve(tx, t, t.author, msgs, maxOut)
 		if err != nil {
 			return err
 		}
-		msgID, sum, size, err := tx.AppendMessage(t.id, phaseAuthor, senderUser, []string{t.author}, []byte(t.input), nil)
+		msgID, sum, size, err := tx.AppendMessage(t.id, phaseAuthor, senderUser, []string{t.author}, []byte(request), nil)
 		if err != nil {
 			return err
 		}
@@ -148,7 +165,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		}); err != nil {
 			return err
 		}
-		if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateAuthorDispatched}); err != nil {
+		if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: state}); err != nil {
 			return err
 		}
 		req = transport.CompleteRequest{

@@ -34,6 +34,7 @@ const (
 	StateAuthorDispatched    = "author_dispatched"
 	StateCandidateFrozen     = "candidate_frozen"
 	StateReviewersDispatched = "reviewers_dispatched"
+	StateRevisionDispatched  = "revision_dispatched"
 	StateApproved            = "approved"
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
@@ -68,6 +69,9 @@ const (
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
 	reasonCancelled    = "cancelled"
+
+	reasonRoundsExhausted   = "rounds_exhausted"
+	reasonRevisionUnchanged = "revision_unchanged"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"

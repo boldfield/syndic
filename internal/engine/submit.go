@@ -41,9 +41,20 @@ type openTurn struct {
 	candidate     string
 	candidateHash string
 	approved      map[string]bool
-	// outputs is the Text of each accepted reviewer attempt, by attempt id,
-	// for the terminal delivery.
+	// outputs is the Text of each accepted reviewer attempt of the current
+	// candidate, by attempt id, for the terminal delivery.
 	outputs map[string]string
+
+	// Revision state, owned by Engine.mu. round is the round of the current
+	// candidate, 0 for the first; maxRounds is the limit in force for the turn.
+	// results holds each required reviewer's accepted verdict on the current
+	// candidate and is replaced when a revision is frozen.
+	round       int
+	maxRounds   int
+	candidateID string
+	changeLines []string
+	revising    bool
+	results     map[string]reviewResult
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
@@ -70,6 +81,20 @@ func submissionHash(req wire.SubmitRequest) (string, error) {
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// revisionLimits returns the round limit a turn runs with when the client
+// names none, and the ceiling the client's value is held to, from the resolved
+// revision settings. A solo turn has no loop.
+func revisionLimits(eff config.Effective) (maxRounds, ceiling int) {
+	maxRounds, ceiling = defaultMaxRounds, defaultMaxRoundsCeiling
+	if eff.Revision.MaxRounds != nil {
+		maxRounds = *eff.Revision.MaxRounds
+	}
+	if eff.Revision.MaxRoundsCeiling != nil {
+		ceiling = *eff.Revision.MaxRoundsCeiling
+	}
+	return maxRounds, ceiling
 }
 
 func strPtr(s string) *string { return &s }
@@ -216,6 +241,16 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
+	maxRounds, ceiling := revisionLimits(eff)
+	if req.MaxRounds != nil {
+		if *req.MaxRounds < 0 || *req.MaxRounds > ceiling {
+			bad := refusal(wire.ErrorCodeMaxRounds)
+			bad.Ceiling = &ceiling
+			return wire.SubmitReply{}, bad
+		}
+		maxRounds = *req.MaxRounds
+	}
+
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
 	turnDeadline := e.clock.Now().UTC().Add(turn)
@@ -284,6 +319,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			TurnDeadlineMS:    turn.Milliseconds(),
 			TurnDeadline:      turnDeadline,
 			BudgetJSON:        budgetJSON,
+			MaxRoundsInEffect: &maxRounds,
+			MaxRoundsCeiling:  &ceiling,
 		})
 		if err != nil {
 			return err
@@ -322,6 +359,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		turnDeadline:    turnDeadline,
 		required:        eff.Preset.RequiredReviewers,
 		approved:        map[string]bool{},
+		results:         map[string]reviewResult{},
+		maxRounds:       maxRounds,
 		stopAttempt:     map[string]func() bool{},
 		pending:         map[string]time.Time{},
 	}
