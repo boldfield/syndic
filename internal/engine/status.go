@@ -221,6 +221,25 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	ws.ServerStatus = mp.ServerStatus
 	ws.ProbeAtStart = e.probed[p.ID]
 
+	// Populate accept_unknown_truncation from config
+	if p.AcceptUnknownTruncation != nil {
+		ws.AcceptUnknownTruncation = *p.AcceptUnknownTruncation
+	}
+
+	// Check if participant is in the default preset (author or required reviewer)
+	if preset, ok := e.roster.Presets[e.roster.DefaultPreset]; ok {
+		if p.ID == preset.Author {
+			ws.InDefaultPreset = true
+		} else {
+			for _, rr := range preset.RequiredReviewers {
+				if p.ID == rr {
+					ws.InDefaultPreset = true
+					break
+				}
+			}
+		}
+	}
+
 	// Build retry command for unprobed participants
 	if !mp.Usable {
 		cmd := e.retryCommand(p)

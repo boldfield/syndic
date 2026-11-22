@@ -58,20 +58,9 @@ func currentAuthor(s State) (ParticipantInfo, bool) {
 
 // countUnprobed returns the number of participants in the default preset that are unprobed.
 func countUnprobed(s State) int {
-	author, _ := currentAuthor(s)
-	reviewers := make(map[string]bool)
-	if s.CurrentTurn != "" {
-		if ti, ok := s.Turns[s.CurrentTurn]; ok {
-			for _, id := range ti.Reviewers {
-				reviewers[id] = true
-			}
-		}
-	}
-
 	count := 0
 	for _, p := range s.Participants {
-		inPreset := p.InDefaultPreset || p.ID == author.ID || reviewers[p.ID] || p.ProbeObservedAt != nil
-		if inPreset && p.State == "unprobed" {
+		if p.InDefaultPreset && p.State == "unprobed" {
 			count++
 		}
 	}

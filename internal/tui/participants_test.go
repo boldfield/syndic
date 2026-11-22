@@ -584,12 +584,13 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 	}
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
-	send(r, resizeMsg(80, 15)) // one row more than before: the tab bar takes one
+	// With the unprobed banner, we need height 16 instead of 15 to get the same overflow in renderParticipants.
+	send(r, resizeMsg(80, 16)) // height adjusted for the new unprobed banner line
 	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilPartsView(t, r, "/release rpool "+m[1])
-	if n := len(strings.Split(v, "\n")); n > 15 {
-		t.Errorf("view is %d lines at 15 rows", n)
+	if n := len(strings.Split(v, "\n")); n > 16 {
+		t.Errorf("view is %d lines at 16 rows", n)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
 	untilPartsView(t, r, "more lines (PgDn)")
@@ -856,5 +857,27 @@ func TestNoControlCharactersInRendering(t *testing.T) {
 	}
 	if !strings.Contains(line, "·") {
 		t.Fatalf("detail should replace control characters with middle dot, got:\n%s", line)
+	}
+}
+
+func TestUnprobedBannerWithoutCurrentTurn(t *testing.T) {
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+
+	s.Participants["author"] = ParticipantInfo{
+		ID: "author", State: "unprobed", InDefaultPreset: true, ReportedModel: "llama", EligibleRoles: []string{"author"},
+	}
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID: "reviewer", State: "unprobed", InDefaultPreset: true, ReportedModel: "gpt", EligibleRoles: []string{"reviewer"},
+	}
+	s.Participants["spare"] = ParticipantInfo{
+		ID: "spare", State: "unprobed", InDefaultPreset: false, ReportedModel: "other", EligibleRoles: []string{"reviewer"},
+	}
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	out := renderParticipants(s, 80, 30, "", now)
+
+	if !strings.Contains(out, "participants: 2 unprobed") {
+		t.Fatalf("banner should show 2 unprobed (author and reviewer in preset) even with no current turn, got:\n%s", out)
 	}
 }
