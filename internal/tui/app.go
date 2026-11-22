@@ -87,12 +87,13 @@ type App struct {
 	pScroll     int                       // first line shown while pScrolled
 
 	// Conversation startup options
-	newConversation   bool   // start with a new conversation
-	conversationID    string // conversation ID to open
-	loadDefaultConv   bool   // load the latest conversation for the workspace on first connection
-	defaultConvLoaded bool   // whether we've already attempted to load the default conversation
-	roundsIsSet       bool   // rounds was explicitly set via flag
-	rounds            int    // round limit for this process
+	newConversation    bool   // start with a new conversation
+	conversationID     string // conversation ID to open
+	loadDefaultConv    bool   // load the latest conversation for the workspace on first connection
+	defaultConvLoaded  bool   // whether we've already attempted to load the default conversation
+	defaultConvPending bool   // whether a default conversation load is currently in flight
+	roundsIsSet        bool   // rounds was explicitly set via flag
+	rounds             int    // round limit for this process
 }
 
 // Option configures an App.
@@ -523,6 +524,10 @@ func (a *App) enter() tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
+	if a.defaultConvPending {
+		a.refusal = "loading conversation..."
+		return nil
+	}
 	var profiles []wire.QuickProfile
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
@@ -635,6 +640,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	// Load the default conversation if needed
 	if a.loadDefaultConv && !a.defaultConvLoaded {
 		a.defaultConvLoaded = true
+		a.defaultConvPending = true
 		cmds = append(cmds, defaultConvCmd(a.ctx, a.gen, a.cl, a.workDir))
 	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
@@ -643,6 +649,8 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 
 // onDefaultConvLoaded handles the result of loading the default conversation.
 func (a *App) onDefaultConvLoaded(msg defaultConvMsg) (tea.Model, tea.Cmd) {
+	// Always clear the pending flag, even if the message is from a stale generation
+	a.defaultConvPending = false
 	if msg.gen != a.gen {
 		return a, nil
 	}
