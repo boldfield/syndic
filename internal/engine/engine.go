@@ -554,6 +554,10 @@ func (e *Engine) Start() error {
 		}
 	}
 	built = withProbeFailures(built, probed.failed)
+	// Populate the probed map for status reporting under the lock
+	for id := range probed.probed {
+		e.probed[id] = true
+	}
 	unprobed = unprobed[:0]
 	for _, p := range roster.Participants {
 		if !built.Participants[p.ID].Usable {

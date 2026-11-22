@@ -75,11 +75,20 @@ func (t *probeTarget) labels() []string {
 	return []string{"referee:" + t.endpoint.Name + ":" + t.model}
 }
 
+// probeFailureDetail records why a probe failed for a participant.
+type probeFailureDetail struct {
+	reason      string
+	failingStep *string
+	serverStat  *string
+}
+
 // probeResult is what start-time probing decided for the participants that
-// needed a probe. failed maps each to the reason it stays unprobed; wrote
-// reports that a usable record was journaled, so the manifest must be rebuilt.
+// needed a probe. failed maps each to detailed failure info; wrote reports
+// that a usable record was journaled, so the manifest must be rebuilt.
+// probed lists participants successfully probed at start.
 type probeResult struct {
-	failed map[string]string
+	failed map[string]probeFailureDetail
+	probed map[string]bool
 	wrote  bool
 }
 
@@ -91,7 +100,7 @@ type probeResult struct {
 // that target journaled a usable record, so reads during probing can report
 // records as they stand.
 func (e *Engine) runStartupProbes(ctx context.Context, roster *config.Roster, built manifest.Built, adapters map[string]transport.Adapter, versions map[string]string, progress func(res probeResult, wrote bool)) probeResult {
-	res := probeResult{failed: map[string]string{}}
+	res := probeResult{failed: map[string]probeFailureDetail{}, probed: map[string]bool{}}
 	if e.noStartupProbes {
 		return res
 	}
@@ -286,7 +295,7 @@ func (e *Engine) finishBlocked(t *probeTarget, res *probeResult) {
 		})
 	}
 	for _, id := range t.participants {
-		res.failed[id] = probeReasonHold
+		res.failed[id] = probeFailureDetail{reason: probeReasonHold}
 	}
 }
 
@@ -417,12 +426,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 		e.emitProbe(wire.EventKindProbeStarted, wire.EvProbeStarted{Participant: label})
 	}
 
-	// Mark participants as probed at start
-	for _, id := range t.participants {
-		e.probed[id] = true
-	}
-
-	fail := func(reason string) {
+	fail := func(reason string, failingStep, serverStatus *string) {
 		for _, label := range t.labels() {
 			e.emitProbe(wire.EventKindProbeFinished, wire.EvProbeFinished{
 				Participant: label,
@@ -431,12 +435,16 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 			})
 		}
 		for _, id := range t.participants {
-			res.failed[id] = reason
+			res.failed[id] = probeFailureDetail{
+				reason:      reason,
+				failingStep: failingStep,
+				serverStat:  serverStatus,
+			}
 		}
 	}
 
 	if t.adapter == nil {
-		fail(probeReasonUnreachable)
+		fail(probeReasonUnreachable, strPtr("adapter"), strPtr("adapter initialization failed"))
 		return false
 	}
 	limit, _ := roster.PoolFor(t.pool)
@@ -461,7 +469,8 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 
 	incomplete := errors.Is(err, transport.ErrIncompleteProbe)
 	if err != nil && !incomplete {
-		fail(probeFailureReason(err, held))
+		step, status := probeFailureInfo(err)
+		fail(probeFailureReason(err, held), step, status)
 		return false
 	}
 
@@ -473,7 +482,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 		log.Printf("engine: probe evidence for %s/%s: %v", t.endpoint.Name, t.model, expErr)
 	}
 	if incomplete || record.ReportedModel == "" || record.MaxTokensField == "" || expErr != nil {
-		fail(probeReasonIncomplete)
+		fail(probeReasonIncomplete, strPtr("response_validation"), strPtr("incomplete probe data"))
 		return false
 	}
 
@@ -501,10 +510,14 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	if err != nil {
 		// Nothing was committed, so the identity stays unprobed.
 		log.Printf("engine: record probe %s/%s: %v", t.endpoint.Name, t.model, err)
-		fail(probeReasonIncomplete)
+		fail(probeReasonIncomplete, strPtr("journal"), strPtr(err.Error()))
 		return false
 	}
 	res.wrote = true
+	// Mark participants as successfully probed
+	for _, id := range t.participants {
+		res.probed[id] = true
+	}
 	return true
 }
 
@@ -584,6 +597,28 @@ func firstOr(s []string, def string) string {
 	return def
 }
 
+// probeFailureInfo extracts failing step and server status from a probe error.
+// It returns nil pointers when the information is not available.
+func probeFailureInfo(err error) (*string, *string) {
+	if err == nil {
+		return nil, nil
+	}
+	switch {
+	case errors.Is(err, transport.ErrUnreachable):
+		return strPtr("connection"), strPtr("endpoint unreachable")
+	case errors.Is(err, transport.ErrUnauthorized):
+		return strPtr("authentication"), strPtr("authorization failed (401/403)")
+	case errors.Is(err, transport.ErrModelUnavailable):
+		return strPtr("model_check"), strPtr("model not available")
+	case errors.Is(err, transport.ErrNotSent):
+		return strPtr("request_send"), strPtr(err.Error())
+	case errors.Is(err, transport.ErrUncertain):
+		return strPtr("request_processing"), strPtr("request outcome uncertain")
+	default:
+		return strPtr("unknown"), strPtr(err.Error())
+	}
+}
+
 // probeTimeoutOf is the per-request probe timeout an Options value asks for.
 func probeTimeoutOf(d time.Duration) time.Duration {
 	if d <= 0 {
@@ -593,16 +628,18 @@ func probeTimeoutOf(d time.Duration) time.Duration {
 }
 
 // withProbeFailures returns b with each participant that failed its start-time
-// probe and has no usable record carrying its probe_failed detail. b is not
-// modified, since readers may hold it.
-func withProbeFailures(b manifest.Built, failed map[string]string) manifest.Built {
+// probe and has no usable record carrying its probe_failed detail plus failing
+// step and server status. b is not modified, since readers may hold it.
+func withProbeFailures(b manifest.Built, failed map[string]probeFailureDetail) manifest.Built {
 	if len(failed) == 0 {
 		return b
 	}
 	parts := make(map[string]manifest.Participant, len(b.Participants))
 	for id, mp := range b.Participants {
-		if reason, ok := failed[id]; ok && !mp.Usable {
-			mp.Detail = probeFailedPrefix + reason
+		if detail, ok := failed[id]; ok && !mp.Usable {
+			mp.Detail = probeFailedPrefix + detail.reason
+			mp.FailingStep = detail.failingStep
+			mp.ServerStatus = detail.serverStat
 		}
 		parts[id] = mp
 	}

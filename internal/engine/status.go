@@ -121,8 +121,11 @@ func poolName(p config.Participant) string {
 	return p.Pool
 }
 
-func buildRetryCommandForParticipant(p config.Participant) string {
+func buildRetryCommandForParticipant(p config.Participant, rosterPath string) string {
 	cmd := "syndic probe --endpoint " + p.Endpoint + " --model " + p.Model
+	if rosterPath != "" && rosterPath != "roster.toml" {
+		cmd = cmd + " --roster " + rosterPath
+	}
 	if p.ContextTokens != nil {
 		cmd = cmd + " --context-tokens " + fmt.Sprint(*p.ContextTokens)
 	}
@@ -195,7 +198,7 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 
 	// Build retry command for unprobed participants
 	if !mp.Usable {
-		cmd := buildRetryCommandForParticipant(p)
+		cmd := buildRetryCommandForParticipant(p, e.rosterAbs)
 		ws.RetryCommand = &cmd
 	}
 

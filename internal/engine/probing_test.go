@@ -956,3 +956,163 @@ func TestStartupOnRunOpenedRunsBeforeProbes(t *testing.T) {
 		t.Fatalf("at run opened: %d probes, state %q; want 0 and probing", probesAtOpen, state)
 	}
 }
+
+// TestStatusSurfacesProbeFailureDetail verifies that status includes failing
+// step and server status for failed probes, and probed_at_start for successful ones.
+func TestStatusSurfacesProbeFailureDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		fail             error
+		wantFailingStep  *string
+		wantServerStat   *string
+		wantProbeAtStart bool
+	}{
+		{
+			name:             "successful probe marks probed_at_start",
+			fail:             nil,
+			wantFailingStep:  nil,
+			wantServerStat:   nil,
+			wantProbeAtStart: true,
+		},
+		{
+			name:             "unreachable probe records connection failure",
+			fail:             transport.ErrUnreachable,
+			wantFailingStep:  strPtr("connection"),
+			wantServerStat:   strPtr("endpoint unreachable"),
+			wantProbeAtStart: false,
+		},
+		{
+			name:             "unauthorized probe records authentication failure",
+			fail:             transport.ErrUnauthorized,
+			wantFailingStep:  strPtr("authentication"),
+			wantServerStat:   strPtr("authorization failed (401/403)"),
+			wantProbeAtStart: false,
+		},
+		{
+			name:             "model unavailable records model check failure",
+			fail:             transport.ErrModelUnavailable,
+			wantFailingStep:  strPtr("model_check"),
+			wantServerStat:   strPtr("model not available"),
+			wantProbeAtStart: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+			env.spies["author"].fail = tc.fail
+			eng := env.start(nil)
+
+			st, err := eng.Status()
+			if err != nil {
+				t.Fatalf("status: %v", err)
+			}
+			var author *wire.Participant
+			for i := range st.Participants {
+				if st.Participants[i].ID == "author" {
+					author = &st.Participants[i]
+					break
+				}
+			}
+			if author == nil {
+				t.Fatal("author not in status")
+			}
+
+			// Check ProbeAtStart
+			if author.ProbeAtStart != tc.wantProbeAtStart {
+				t.Fatalf("author.ProbeAtStart = %v, want %v", author.ProbeAtStart, tc.wantProbeAtStart)
+			}
+
+			// Check FailingStep and ServerStatus
+			if tc.wantFailingStep == nil {
+				if author.FailingStep != nil {
+					t.Fatalf("author.FailingStep = %v, want nil", author.FailingStep)
+				}
+			} else {
+				if author.FailingStep == nil || *author.FailingStep != *tc.wantFailingStep {
+					t.Fatalf("author.FailingStep = %v, want %v", author.FailingStep, tc.wantFailingStep)
+				}
+			}
+
+			if tc.wantServerStat == nil {
+				if author.ServerStatus != nil {
+					t.Fatalf("author.ServerStatus = %v, want nil", author.ServerStatus)
+				}
+			} else {
+				if author.ServerStatus == nil || *author.ServerStatus != *tc.wantServerStat {
+					t.Fatalf("author.ServerStatus = %v, want %v", author.ServerStatus, tc.wantServerStat)
+				}
+			}
+
+			// Verify retry command is present for failed probes
+			if tc.fail != nil {
+				if author.RetryCommand == nil {
+					t.Fatal("failed probe should have retry command")
+				}
+				if !strings.Contains(*author.RetryCommand, "syndic probe") {
+					t.Fatalf("retry command = %q, want 'syndic probe' in it", *author.RetryCommand)
+				}
+			}
+		})
+	}
+}
+
+// TestStatusConcurrentReadDuringProbing verifies that Status can be read
+// concurrently while probing is happening without data races.
+func TestStatusConcurrentReadDuringProbing(t *testing.T) {
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	eng := env.newEngine(nil)
+
+	var statusErrors []error
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	env.spies["author"].onProbe = func(string) {
+		// While the author probe is running, spawn multiple goroutines
+		// to read status concurrently
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				st, err := eng.Status()
+				mu.Lock()
+				if err != nil {
+					statusErrors = append(statusErrors, err)
+				}
+				if err == nil && len(st.Participants) == 0 {
+					statusErrors = append(statusErrors, fmt.Errorf("empty participants"))
+				}
+				mu.Unlock()
+			}()
+		}
+	}
+
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+
+	wg.Wait()
+
+	mu.Lock()
+	if len(statusErrors) > 0 {
+		t.Fatalf("status read errors during probing: %v", statusErrors)
+	}
+	mu.Unlock()
+
+	// Verify final state has all participants marked appropriately
+	st, err := eng.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probed := 0
+	for _, p := range st.Participants {
+		if p.ProbeAtStart {
+			probed++
+		}
+	}
+	if probed != 2 {
+		t.Fatalf("probed participants = %d, want 2", probed)
+	}
+}
+
+// strPtr is a helper to create a string pointer.
+func strPtr(s string) *string { return &s }
