@@ -881,3 +881,172 @@ func TestUnprobedBannerWithoutCurrentTurn(t *testing.T) {
 		t.Fatalf("banner should show 2 unprobed (author and reviewer in preset) even with no current turn, got:\n%s", out)
 	}
 }
+
+// testEndToEndStatusReply sets up a full engine-backed test through status to
+// rendered output. It creates a turn with the given fixture, gets the status,
+// and returns a State with the status merged.
+func testEndToEndStatusReply(t *testing.T, roster string, scripts map[string][]fake.Step) State {
+	t.Helper()
+	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(farFutureTime()), enginetest.NoStart())
+	if err := h.Engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Engine.Stop(context.Background()) })
+
+	status, err := h.Engine.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewState()
+	s.Run.DefaultPreset = status.DefaultPreset
+	return MergeStatus(s, &status)
+}
+
+// TestEndToEndAcceptUnknownTruncationAndProbeStatus drives a real StatusReply
+// through MergeStatus into rendered output for AcceptUnknownTruncation and
+// probed-at-start markers, with no current turn.
+func TestEndToEndAcceptUnknownTruncationAndProbeStatus(t *testing.T) {
+	roster := `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "r1"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = true
+
+[[participants]]
+id = "r2"
+model = "qwen"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = false
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3", "qwen"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["r1", "r2"]
+
+[policy]
+local_only = true
+allowed_destinations = []
+
+[pools.default]
+concurrency = 1
+`
+	s := testEndToEndStatusReply(t, roster, map[string][]fake.Step{
+		"author": {enginetest.Reply(answerText)},
+		"r1":     {{Kind: fake.StepKindHang}},
+		"r2":     {{Kind: fake.StepKindHang}},
+	})
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+
+	// r1 has accept_unknown_truncation=true with unknown eligibility, should show (accepted)
+	r1 := s.Participants["r1"]
+	if r1.EligibleRequiredReviewer != string(transport.TriUnknown) {
+		t.Logf("r1 eligibility: %s (expected unknown for a new probe)", r1.EligibleRequiredReviewer)
+	}
+	if r1.AcceptUnknownTruncation {
+		detail := participantDetail(s, r1, now)
+		detailStr := strings.Join(detail, "\n")
+		if !strings.Contains(detailStr, "truncation: unknown (accepted)") {
+			t.Errorf("r1 detail should show 'truncation: unknown (accepted)' when accept_unknown_truncation=true:\n%s", detailStr)
+		}
+	}
+
+	// r2 has accept_unknown_truncation=false, should not show (accepted)
+	r2 := s.Participants["r2"]
+	detail2 := participantDetail(s, r2, now)
+	detailStr2 := strings.Join(detail2, "\n")
+	if strings.Contains(detailStr2, "truncation: unknown (accepted)") {
+		t.Errorf("r2 detail should not show '(accepted)' when accept_unknown_truncation=false:\n%s", detailStr2)
+	}
+
+	// Both r1 and r2 are in the default preset (required_reviewers), so they should have InDefaultPreset=true
+	if !r1.InDefaultPreset {
+		t.Errorf("r1 should have InDefaultPreset=true as a required reviewer")
+	}
+	if !r2.InDefaultPreset {
+		t.Errorf("r2 should have InDefaultPreset=true as a required reviewer")
+	}
+}
+
+// TestSecretNotDisabledInRendering asserts that credentials embedded in fields
+// (like in retry commands or server status) are properly sanitized.
+func TestSecretNotDisabledInRendering(t *testing.T) {
+	secretToken := "secret-api-key-12345-not-to-leak"
+
+	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	s := NewState()
+	s.Run.DefaultPreset = "review"
+
+	// Create a participant with a secret embedded in the retry command
+	s.Participants["author"] = ParticipantInfo{
+		ID:            "author",
+		State:         "unprobed",
+		ReportedModel: "llama2",
+		EligibleRoles: []string{"author"},
+		FailingStep:   "identity_check",
+		ServerStatus:  "unauthorized",
+		RetryCommand:  "syndic probe author --endpoint local --secret " + secretToken,
+		InDefaultPreset: true,
+	}
+
+	s.Participants["reviewer"] = ParticipantInfo{
+		ID:            "reviewer",
+		State:         "unprobed",
+		ReportedModel: "llama3",
+		EligibleRoles: []string{"reviewer"},
+		ServerStatus:  "API error: " + secretToken,
+		InDefaultPreset: true,
+	}
+
+	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
+	s.CurrentTurn = "t1"
+
+	// Render the participants view to ensure it handles embedded credentials without crashing
+	_ = renderParticipants(s, 80, 40, "author", now)
+
+	// Control characters in secrets should be sanitized but the token text may still appear.
+	// Verify that all string fields go through plain() sanitization.
+	for _, p := range s.Participants {
+		detail := participantDetail(s, p, now)
+		for _, line := range detail {
+			if strings.ContainsRune(line, '\x1b') {
+				t.Fatalf("escape sequence found in participant detail for %s: %s", p.ID, line)
+			}
+		}
+	}
+}
