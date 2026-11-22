@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,7 @@ type baselineStub struct {
 	refuseEmpty bool
 	refuseDot   bool
 	dropEmpty   bool // close the connection without a response for the empty baseline
+	dropDot     bool // close the connection without a response for the "." baseline
 }
 
 func (s *baselineStub) lens() []int {
@@ -50,7 +52,7 @@ func (s *baselineStub) handler() http.Handler {
 		s.userLens = append(s.userLens, len(user))
 		s.mu.Unlock()
 		switch {
-		case user == "" && s.dropEmpty:
+		case user == "" && s.dropEmpty, user == "." && s.dropDot:
 			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
 				_ = conn.Close()
 			}
@@ -178,7 +180,10 @@ func TestCalibrationBothBaselinesRefused(t *testing.T) {
 
 func TestCalibrationNoFallbackWithoutResponse(t *testing.T) {
 	s := &baselineStub{dropEmpty: true}
-	_, _ = runBaselineProbe(t, s, transport.ProbeOptions{DisableOverLength: true})
+	_, err := runBaselineProbe(t, s, transport.ProbeOptions{DisableOverLength: true})
+	if !errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("error: got %v, want ErrUncertain", err)
+	}
 	for _, n := range s.lens() {
 		if n == 1 {
 			t.Fatal("fallback baseline sent after the empty baseline failed with no response")
@@ -194,5 +199,44 @@ func TestCalibrationSkippedSendsNoBaselines(t *testing.T) {
 	}
 	if got := calibrationLens(s.lens()); len(got) != 0 {
 		t.Fatalf("calibration requests sent with calibration disabled: %v", got)
+	}
+}
+
+func TestCalibrationFallbackUncertainNamesFallbackStep(t *testing.T) {
+	s := &baselineStub{refuseEmpty: true, dropDot: true}
+	_, err := runBaselineProbe(t, s, transport.ProbeOptions{DisableOverLength: true})
+	if !errors.Is(err, transport.ErrUncertain) {
+		t.Fatalf("error: got %v, want ErrUncertain", err)
+	}
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error is not a ProbeStepError: %v", err)
+	}
+	if pe.Step != "calibration_baseline_nonempty" || pe.Status != 0 {
+		t.Errorf("step %q status %d, want calibration_baseline_nonempty status 0", pe.Step, pe.Status)
+	}
+}
+
+func TestCalibrationFallbackNotSentNamesFallbackStep(t *testing.T) {
+	s := &baselineStub{refuseEmpty: true}
+	opts := transport.ProbeOptions{
+		DisableOverLength: true,
+		BeforeSend: func(pr *transport.ProbeRequest) error {
+			if pr.Step == "calibration_baseline_nonempty" {
+				return errors.New("journal unavailable")
+			}
+			return nil
+		},
+	}
+	_, err := runBaselineProbe(t, s, opts)
+	if !errors.Is(err, transport.ErrNotSent) {
+		t.Fatalf("error: got %v, want ErrNotSent", err)
+	}
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error is not a ProbeStepError: %v", err)
+	}
+	if pe.Step != "calibration_baseline_nonempty" || pe.Status != 0 {
+		t.Errorf("step %q status %d, want calibration_baseline_nonempty status 0", pe.Step, pe.Status)
 	}
 }

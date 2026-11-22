@@ -332,7 +332,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, stepError(err, rawSteps, "calibration", "calibration_baseline")
+			return record, stepError(err, rawSteps, "calibration", "calibration_baseline_nonempty", "calibration_baseline")
 		}
 	}
 
