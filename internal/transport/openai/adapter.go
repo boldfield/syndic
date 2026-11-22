@@ -1140,9 +1140,6 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
-// classifyRejectionError classifies an HTTP error response and returns both the classification and the rule.
-// Context-length errors are status 400/413 with specific error messages indicating token limit exceeded.
-// Returns (classification, rule).
 // contextLengthPhrases are the lower-case phrases that mark a 400 or 413 body as an explicit
 // context-length or token-limit refusal. overLengthClassificationRule is built from it.
 var contextLengthPhrases = []string{
@@ -1228,7 +1225,7 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 }
 
 // rejectionDetail extracts the server's message from an error body: error.message, then message,
-// then the first 200 bytes of the body. The result is cut to 200 bytes on a UTF-8 boundary.
+// then the body. The result is not truncated: the caller scrubs it first, then cuts it.
 func rejectionDetail(body []byte) string {
 	f := parseErrorBody(body)
 	msg := ""
@@ -1245,18 +1242,19 @@ func rejectionDetail(body []byte) string {
 	if msg == "" {
 		msg = string(body)
 	}
-	return truncateUTF8(strings.TrimSpace(msg), overLengthDetailMax)
+	return strings.TrimSpace(msg)
 }
 
 func truncateUTF8(s string, max int) string {
+	s = strings.ToValidUTF8(s, "")
 	if len(s) <= max {
-		return strings.ToValidUTF8(s, "")
+		return s
 	}
-	s = s[:max]
-	for len(s) > 0 && !utf8.ValidString(s) {
-		s = s[:len(s)-1]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s
+	return s[:cut]
 }
 
 func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions) error {

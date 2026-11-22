@@ -163,3 +163,18 @@ func TestOverLengthDetailExportedAndOldExportLoads(t *testing.T) {
 		t.Errorf("unexpected detail %q", old.OverLengthDetail)
 	}
 }
+
+func TestOverLengthDetailSecretAcrossCut(t *testing.T) {
+	for pad := 170; pad <= 200; pad += 5 {
+		msg := "context window " + strings.Repeat("a", pad) + classifySecret
+		rec := probeWithRefusal(t, 400, `{"error":{"message":"`+msg+`"}}`)
+		for n := 8; n <= len(classifySecret); n++ {
+			if strings.Contains(rec.OverLengthDetail, classifySecret[:n]) {
+				t.Fatalf("pad %d: detail leaks secret prefix %q: %q", pad, classifySecret[:n], rec.OverLengthDetail)
+			}
+		}
+		if len(rec.OverLengthDetail) > 200 {
+			t.Errorf("pad %d: detail too long", pad)
+		}
+	}
+}
