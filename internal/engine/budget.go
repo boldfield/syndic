@@ -285,91 +285,91 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	firstRound := total
 	worstCase := firstRound
 
-	// For the worst case across all rounds, add the cost of additional revision
-	// rounds. Each round (beyond the first) adds: an author revision attempt,
-	// review attempts for all reviewers, and repair for all reviewers.
-	if eff.Preset.Mode != modeSolo && maxRounds > 0 {
-		pb := consts[eff.Preset.Author]
-		authorOut := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-
-		// Cost of an author revision attempt using revision prompts with max-sized feedback.
-		previousCandidate := pb.standIn(authorOut)
-		reviewerFeedback := make([]prompt.RevisionFeedback, len(eff.Preset.RequiredReviewers))
-		for i, id := range eff.Preset.RequiredReviewers {
-			rv := consts[id]
-			out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
-			reviewerFeedback[i] = prompt.RevisionFeedback{
-				Output:  rv.standIn(out),
-				Results: make(map[string]string),
-			}
-		}
-		// Use empty history for worst-case projection to avoid delimiter collisions
-		// and match the behavior of roundProjection in revision.go
-		emptyHistory := history.New()
-		authorRevisionInput := prompt.AuthorRevisionInput{
-			Input:             input,
-			PreviousCandidate: previousCandidate,
-			ReviewerFeedback:  reviewerFeedback,
-			Delimiter:         standInToken,
-			HistoryDoc:        emptyHistory,
-		}
-		authorRevisionMsgs, err := prompt.AuthorRevision(authorRevisionInput)
-		if err != nil {
-			return budgetRecord{}, err
-		}
-		authorRevisionCost := satAdd(pb.estimate(authorRevisionMsgs), authorOut)
-
-		// Cost of one round of review and repair (per reviewer) using revision prompts.
-		oneRoundCost := 0
-		for _, id := range eff.Preset.RequiredReviewers {
-			rv := consts[id]
-			reviewerOut := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
-
-			// Build stand-in open blocks for a revision round (assume worst case: one block).
-			// Use standIn format for Evidence/Remedy to ensure no delimiter collision.
-			standInBlock := rv.standIn(reviewerOut)
-			openBlocks := []prompt.OpenBlockForRevision{
-				{
-					BlockID:  "block",
-					Severity: "SEVERE",
-					Evidence: standInBlock,
-					Remedy:   standInBlock,
-				},
-			}
-
-			reviewerRevisionInput := prompt.ReviewerRevisionInput{
-				Request:       input,
-				Candidate:     previousCandidate,
-				CandidateHash: standInHash,
-				OpenBlocks:    openBlocks,
-				AttemptID:     standInToken,
-				Delimiter:     standInToken,
-				Round:         1,
-				HistoryDoc:    emptyHistory,
-			}
-			reviewerRevisionMsgs, err := prompt.ReviewerRevision(reviewerRevisionInput)
-			if err != nil {
-				return budgetRecord{}, err
-			}
-			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(reviewerRevisionMsgs), reviewerOut))
-
-			// Repair using the revision prompt with max-sized output from the previous reviewer attempt.
-			reviewerOutput := rv.standIn(reviewerOut)
-			repairRevisionMsgs, err := prompt.RepairRevision(reviewerRevisionInput, reviewerOutput, standInToken)
-			if err != nil {
-				return budgetRecord{}, err
-			}
-			oneRoundCost = satAdd(oneRoundCost, satAdd(rv.estimate(repairRevisionMsgs), reviewerOut))
-		}
-
-		// Add the cost of additional rounds.
-		additionalRoundCost := satAdd(authorRevisionCost, oneRoundCost)
+	// For the worst case across all rounds, add the cost of every permitted
+	// revision round, from the revision prompt builders over the turn's real
+	// history. See revisionRoundCost for what a round is assumed to carry.
+	if eff.Preset.Mode != modeSolo {
 		for round := 1; round <= maxRounds; round++ {
-			worstCase = satAdd(worstCase, additionalRoundCost)
+			cost, err := revisionRoundCost(eff, consts, input, doc, round)
+			if err != nil {
+				return budgetRecord{}, err
+			}
+			worstCase = satAdd(worstCase, cost)
 		}
 	}
 
 	return budgetRecord{Projected: firstRound, WorstCaseProjected: worstCase, Limit: limit}, nil
+}
+
+// revisionRoundCost is the most the round-th revision round (1-based) can add
+// to the turn's charge: the author's revision with its output bound, and each
+// required reviewer's review and one repair, all built by the revision prompt
+// builders over the turn's history.
+//
+// The candidate and every reviewer output are as long as their output bounds
+// allow. A reviewer's output bound caps the block text one verdict can open,
+// and a block it does not withdraw stays open, so by round N a reviewer may
+// hold N verdicts' worth of open blocks: N blocks, each carrying one output
+// bound of text between its evidence and remedy.
+func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input string, doc *history.Document, round int) (int, error) {
+	if doc == nil {
+		doc = history.New()
+	}
+	author := consts[eff.Preset.Author]
+	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
+	candidate := author.standIn(authorOut)
+
+	feedback := make([]prompt.RevisionFeedback, len(eff.Preset.RequiredReviewers))
+	for i, id := range eff.Preset.RequiredReviewers {
+		rv := consts[id]
+		feedback[i] = prompt.RevisionFeedback{Output: rv.standIn(rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens))}
+	}
+	msgs, err := prompt.AuthorRevision(prompt.AuthorRevisionInput{
+		Input:             input,
+		PreviousCandidate: candidate,
+		ReviewerFeedback:  feedback,
+		Delimiter:         standInToken,
+		HistoryDoc:        doc,
+	})
+	if err != nil {
+		return 0, err
+	}
+	total := satAdd(author.estimate(msgs), authorOut)
+
+	for _, id := range eff.Preset.RequiredReviewers {
+		rv := consts[id]
+		out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+		open := make([]prompt.OpenBlockForRevision, round)
+		for i := range open {
+			open[i] = prompt.OpenBlockForRevision{
+				BlockID:  fmt.Sprintf("block%d", i),
+				Severity: "SEVERE",
+				Evidence: rv.standIn(out / 2),
+				Remedy:   rv.standIn(out - out/2),
+			}
+		}
+		in := prompt.ReviewerRevisionInput{
+			Request:       input,
+			Candidate:     candidate,
+			CandidateHash: standInHash,
+			OpenBlocks:    open,
+			AttemptID:     standInToken,
+			Delimiter:     standInToken,
+			Round:         round,
+			HistoryDoc:    doc,
+		}
+		review, err := prompt.ReviewerRevision(in)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rv.estimate(review), out))
+		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rv.estimate(repair), out))
+	}
+	return total, nil
 }
 
 func satAdd(a, b int) int {

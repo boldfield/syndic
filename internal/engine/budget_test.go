@@ -9,6 +9,7 @@ import (
 	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
@@ -717,30 +718,112 @@ func TestBudgetWorstCaseProjectionMaxRoundsOne(t *testing.T) {
 	}
 }
 
-// Worst-case projection increments consistently per additional round.
-func TestBudgetWorstCaseProjectionConsistentIncrement(t *testing.T) {
-	records := make([]recordView, 4)
-	for maxRounds := 0; maxRounds < 4; maxRounds++ {
-		h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
-		mr := maxRounds
-		reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s" + string(rune('0'+maxRounds)), Input: testInput, MaxRounds: &mr})
-		if err != nil {
-			t.Fatal(err)
-		}
-		records[maxRounds] = budgetOf(t, h, reply.TurnID)
-	}
+// roundCostFromBuilders is the most a revision round may add, summed from the
+// revision prompt builders over the same inputs the projection uses: the
+// author once, then each reviewer's review and repair with one open block per
+// round so far.
+func roundCostFromBuilders(t *testing.T, round int) int {
+	t.Helper()
+	const authorOut, reviewerOut = 4096, 2048
+	zeros64, zeros32 := strings.Repeat("0", 64), strings.Repeat("0", 32)
+	stand := func(n int) string { return strings.Repeat("x", budget.StandInBytes(n, testBytesPerToken)) }
+	candidate := stand(authorOut)
+	doc := history.New()
 
-	// Verify increments are consistent: worst(n) - worst(n-1) should equal worst(1) - worst(0).
-	firstIncrement := records[1].WorstCaseProjected - records[0].Projected
-	for i := 2; i < len(records); i++ {
-		increment := records[i].WorstCaseProjected - records[i-1].WorstCaseProjected
-		if increment != firstIncrement {
-			t.Fatalf("maxRounds=%d: increment=%d does not match first increment=%d", i, increment, firstIncrement)
+	authorMsgs, err := prompt.AuthorRevision(prompt.AuthorRevisionInput{
+		Input:             testInput,
+		PreviousCandidate: candidate,
+		ReviewerFeedback:  []prompt.RevisionFeedback{{Output: stand(reviewerOut)}},
+		Delimiter:         zeros32,
+		HistoryDoc:        doc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := make([]prompt.OpenBlockForRevision, round)
+	for i := range open {
+		open[i] = prompt.OpenBlockForRevision{
+			BlockID:  "block" + strconv.Itoa(i),
+			Severity: "SEVERE",
+			Evidence: stand(reviewerOut / 2),
+			Remedy:   stand(reviewerOut - reviewerOut/2),
 		}
 	}
+	in := prompt.ReviewerRevisionInput{
+		Request: testInput, Candidate: candidate, CandidateHash: zeros64, OpenBlocks: open,
+		AttemptID: zeros32, Delimiter: zeros32, Round: round, HistoryDoc: doc,
+	}
+	review, err := prompt.ReviewerRevision(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repair, err := prompt.RepairRevision(in, stand(reviewerOut), zeros32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return estimate(authorMsgs) + authorOut + estimate(review) + reviewerOut + estimate(repair) + reviewerOut
+}
 
-	// Verify that the increment is positive and reasonable.
-	if firstIncrement <= 0 {
-		t.Fatalf("first increment should be positive, got %d", firstIncrement)
+func worstCaseFor(t *testing.T, maxRounds int) recordView {
+	t.Helper()
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s", Input: testInput, MaxRounds: &maxRounds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return budgetOf(t, h, reply.TurnID)
+}
+
+// Each permitted revision round adds exactly what the revision prompt builders
+// need, and later rounds carry more open blocks, so they cost more.
+func TestBudgetWorstCaseMatchesRevisionBuilders(t *testing.T) {
+	base := worstCaseFor(t, 0)
+	want := base.Projected
+	prev := 0
+	for n := 1; n <= 3; n++ {
+		cost := roundCostFromBuilders(t, n)
+		want += cost
+		if cost <= prev {
+			t.Fatalf("round %d costs %d, not more than round %d's %d", n, cost, n-1, prev)
+		}
+		prev = cost
+		rec := worstCaseFor(t, n)
+		if rec.Projected != base.Projected {
+			t.Fatalf("max_rounds=%d: projected=%d, want first-round %d", n, rec.Projected, base.Projected)
+		}
+		if rec.WorstCaseProjected != want {
+			t.Fatalf("max_rounds=%d: worst_case_projected=%d, want %d", n, rec.WorstCaseProjected, want)
+		}
+	}
+}
+
+// The revision rounds replay the conversation's history to the author and to
+// each reviewer twice, so a longer history raises the worst case beyond the
+// first-round difference.
+func TestBudgetWorstCaseCountsHistory(t *testing.T) {
+	long := strings.Repeat("history word ", 400)
+	one := 1
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(long), enginetest.Reply(authorText)},
+		"reviewer": {approveStep(), approveStep()},
+	})
+	first, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c1", Input: testInput, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, first.TurnID, engine.StateApproved, "all_approved")
+	conv := first.ConversationID
+	second, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c2", Input: testInput, ConversationID: &conv, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHistory := budgetOf(t, h, second.TurnID)
+	fresh := worstCaseFor(t, 1)
+
+	gotRound := withHistory.WorstCaseProjected - withHistory.Projected
+	freshRound := fresh.WorstCaseProjected - fresh.Projected
+	// Three replays of the history: the author's, and the review and the repair.
+	if min := 3 * len(long) / 4; gotRound-freshRound < min {
+		t.Fatalf("revision round with history adds %d, without %d; want at least %d more", gotRound, freshRound, min)
 	}
 }
