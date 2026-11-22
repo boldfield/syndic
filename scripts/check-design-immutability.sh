@@ -55,13 +55,14 @@ while IFS= read -r -d '' status; do
 	fi
 done <"$diff_file"
 
-if ((${#offending[@]} == 0)); then
-	if ((${#added_design[@]} == 0 || outside_count == 0)); then
-		exit 0
-	fi
-	# Added design documents alongside files outside docs/design/.
-	offending=("${added_design[@]}")
+# Added design documents alongside files outside docs/design/ also offend.
+if ((${#added_design[@]} > 0 && outside_count > 0)); then
+	offending+=("${added_design[@]}")
 	ratification_mixed=1
+fi
+
+if ((${#offending[@]} == 0)); then
+	exit 0
 fi
 
 echo "ERROR: Design documents cannot be modified in implementation PRs."

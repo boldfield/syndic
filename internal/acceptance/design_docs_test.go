@@ -598,3 +598,14 @@ func TestDesignDocs_OpenQuestionsAnyStatusExempt(t *testing.T) {
 	})
 	expectDesignPass(t, out, ok)
 }
+
+func TestDesignDocs_ModifyAddAndOutsideListsAll(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, existingDoc, "# Existing\nmodified\n")
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignFail(t, out, ok, "M docs/design/existing.md", "A docs/design/v6.md",
+		"ratification pull request must contain only design documents")
+}
