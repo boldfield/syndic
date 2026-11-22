@@ -229,6 +229,78 @@ func TestDeliveryCarriesOpenBlock(t *testing.T) {
 	}
 }
 
+func TestDeliveryCarriesWithdrawnBlockAfterRevision(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), enginetest.Reply(revisedText), ack()},
+		"r1":     {blockStep("b1"), v2Verdict("1", "approve", "", "b1 withdrawn"), ack()},
+	}
+	h := enginetest.New(t, revisionRoster("1", "r1"), scripts)
+	turnID := submitReview(t, h, "s1")
+	row := waitEnded(t, h, turnID)
+	if row.TerminalState != engine.StateApproved || row.TerminalReason != "all_approved" {
+		t.Fatalf("turn ended %q %q", row.TerminalState, row.TerminalReason)
+	}
+
+	allBlocks, err := h.Store.AllBlocksForTurn(turnID)
+	if err != nil || len(allBlocks) != 1 {
+		t.Fatalf("blocks = %+v, err %v", allBlocks, err)
+	}
+	if allBlocks[0].State != "withdrawn" {
+		t.Fatalf("block state = %q, want withdrawn", allBlocks[0].State)
+	}
+
+	waitDeliveries(t, h, turnID, 2)
+	for _, id := range []string{"author", "r1"} {
+		body := userContent(deliveryCalls(h, id)[0])
+		wants := []string{"approved", "all_approved", "Block ID: " + allBlocks[0].ID, "State: withdrawn", "Severity: high"}
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s delivery lacks %q:\n%s", id, want, body)
+			}
+		}
+	}
+}
+
+func TestDeliveryMultipleBlocksWithFinalStates(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), enginetest.Reply(revisedText), ack()},
+		"r1":     {blockStep("b1"), v2Verdict("1", "approve", "", "b1 withdrawn"), ack()},
+		"r2":     {blockStep("b2"), v2Verdict("1", "approve", "", "b2 withdrawn"), ack()},
+	}
+	h := enginetest.New(t, revisionRoster("1", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	row := waitEnded(t, h, turnID)
+	if row.TerminalState != engine.StateApproved || row.TerminalReason != "all_approved" {
+		t.Fatalf("turn ended %q %q", row.TerminalState, row.TerminalReason)
+	}
+
+	allBlocks, err := h.Store.AllBlocksForTurn(turnID)
+	if err != nil || len(allBlocks) != 2 {
+		t.Fatalf("blocks = %+v, err %v", allBlocks, err)
+	}
+
+	for _, b := range allBlocks {
+		if b.State != "withdrawn" {
+			t.Fatalf("block %s state = %q, want withdrawn", b.ID, b.State)
+		}
+	}
+
+	waitDeliveries(t, h, turnID, 3)
+	for _, id := range []string{"author", "r1", "r2"} {
+		body := userContent(deliveryCalls(h, id)[0])
+		if !strings.Contains(body, "approved") || !strings.Contains(body, "all_approved") {
+			t.Fatalf("%s delivery lacks terminal state info:\n%s", id, body)
+		}
+		for _, b := range allBlocks {
+			if !strings.Contains(body, "Block ID: "+b.ID) || !strings.Contains(body, "State: "+b.State) {
+				t.Fatalf("%s delivery lacks block %s state %q:\n%s", id, b.ID, b.State, body)
+			}
+		}
+	}
+}
+
 func TestDeliveryNoneForSoloCancelledOrNoCandidate(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
 	t.Run("solo", func(t *testing.T) {

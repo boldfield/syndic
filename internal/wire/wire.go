@@ -347,8 +347,11 @@ type SubmitReply struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
-	ConversationID  string  `json:"conversation_id"`
-	ContextHash     string  `json:"context_hash"`
+	// WorstCaseEstimatedTokens is the projection across every configured
+	// revision round; admission uses only EstimatedTokens.
+	WorstCaseEstimatedTokens int64  `json:"worst_case_estimated_tokens"`
+	ConversationID           string `json:"conversation_id"`
+	ContextHash              string `json:"context_hash"`
 }
 
 type CancelRequest struct {
@@ -425,11 +428,12 @@ type OpenBlock struct {
 }
 
 type BudgetRecord struct {
-	Projected *int64 `json:"projected,omitempty"`
-	Reserved  *int64 `json:"reserved,omitempty"`
-	Charged   *int64 `json:"charged,omitempty"`
-	Limit     *int64 `json:"limit,omitempty"`
-	Exhausted bool   `json:"exhausted"`
+	Projected          *int64 `json:"projected,omitempty"`
+	WorstCaseProjected *int64 `json:"worst_case_projected,omitempty"`
+	Reserved           *int64 `json:"reserved,omitempty"`
+	Charged            *int64 `json:"charged,omitempty"`
+	Limit              *int64 `json:"limit,omitempty"`
+	Exhausted          bool   `json:"exhausted"`
 }
 
 type TurnReply struct {

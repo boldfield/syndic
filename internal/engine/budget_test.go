@@ -9,6 +9,7 @@ import (
 	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
@@ -27,11 +28,12 @@ const (
 var testOverheads = budget.Overheads{MessageTokens: 8, RequestTokens: 16}
 
 type recordView struct {
-	Projected int  `json:"projected"`
-	Reserved  int  `json:"reserved"`
-	Charged   int  `json:"charged"`
-	Limit     int  `json:"limit"`
-	Exhausted bool `json:"exhausted"`
+	Projected          int  `json:"projected"`
+	WorstCaseProjected int  `json:"worst_case_projected"`
+	Reserved           int  `json:"reserved"`
+	Charged            int  `json:"charged"`
+	Limit              int  `json:"limit"`
+	Exhausted          bool `json:"exhausted"`
 }
 
 func budgetOf(t *testing.T, h *enginetest.Harness, turnID string) recordView {
@@ -633,5 +635,243 @@ spending_control = "external"`)
 	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
 	if calls := h.Adapters["author"].Calls(); len(calls) != 1 {
 		t.Fatalf("author should have one call, got %d", len(calls))
+	}
+}
+
+// With max_rounds=0, worst-case projection equals first-round projection.
+func TestBudgetWorstCaseProjectionMaxRoundsZero(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if rec.Projected == 0 || rec.WorstCaseProjected != rec.Projected {
+		t.Fatalf("with max_rounds=0: projected=%d, worst_case_projected=%d, want them equal", rec.Projected, rec.WorstCaseProjected)
+	}
+}
+
+// With max_rounds>0, worst-case projection accounts for additional rounds.
+func TestBudgetWorstCaseProjectionMultipleRounds(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if rec.Projected == 0 {
+		t.Fatal("projected should be non-zero")
+	}
+	if rec.WorstCaseProjected <= rec.Projected {
+		t.Fatalf("with max_rounds=2: worst_case_projected=%d should be > projected=%d", rec.WorstCaseProjected, rec.Projected)
+	}
+}
+
+// Worst-case projection respects the override and differs by max_rounds.
+func TestBudgetWorstCaseProjectionOverride(t *testing.T) {
+	h0 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply0, err := h0.Engine.Submit(wire.SubmitRequest{SubmissionID: "s0", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec0 := budgetOf(t, h0, reply0.TurnID)
+
+	h2 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	reply2, err := h2.Engine.Submit(wire.SubmitRequest{SubmissionID: "s2", Input: testInput, MaxRounds: &two})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec2 := budgetOf(t, h2, reply2.TurnID)
+
+	if rec0.WorstCaseProjected != rec0.Projected {
+		t.Fatalf("override max_rounds=0: worst_case=%d, projected=%d, want them equal", rec0.WorstCaseProjected, rec0.Projected)
+	}
+	if rec2.WorstCaseProjected <= rec0.Projected {
+		t.Fatalf("override max_rounds=2: worst_case=%d should be > override max_rounds=0: projected=%d", rec2.WorstCaseProjected, rec0.Projected)
+	}
+}
+
+// Worst-case projection with max_rounds=1 must include exactly one revision round.
+func TestBudgetWorstCaseProjectionMaxRoundsOne(t *testing.T) {
+	h0 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply0, err := h0.Engine.Submit(wire.SubmitRequest{SubmissionID: "s0", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec0 := budgetOf(t, h0, reply0.TurnID)
+
+	h1 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	one := 1
+	reply1, err := h1.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec1 := budgetOf(t, h1, reply1.TurnID)
+
+	if rec1.WorstCaseProjected <= rec0.Projected {
+		t.Fatalf("max_rounds=1: worst_case=%d should be > max_rounds=0: projected=%d", rec1.WorstCaseProjected, rec0.Projected)
+	}
+}
+
+// roundCostFromBuilders is the most a revision round may add, summed from the
+// revision prompt builders over the same inputs the projection uses: the
+// author once, then each reviewer's review and repair with one open block per
+// round so far.
+func roundCostFromBuilders(t *testing.T, round int) int {
+	t.Helper()
+	const authorOut, reviewerOut = 4096, 2048
+	zeros64, zeros32 := strings.Repeat("0", 64), strings.Repeat("0", 32)
+	stand := func(n int) string { return strings.Repeat("x", budget.StandInBytes(n, testBytesPerToken)) }
+	candidate := stand(authorOut)
+	doc := history.New()
+
+	authorMsgs, err := prompt.AuthorRevision(prompt.AuthorRevisionInput{
+		Input:             testInput,
+		PreviousCandidate: candidate,
+		ReviewerFeedback:  []prompt.RevisionFeedback{{Output: stand(reviewerOut)}},
+		Delimiter:         zeros32,
+		HistoryDoc:        doc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := make([]prompt.OpenBlockForRevision, round)
+	for i := range open {
+		open[i] = prompt.OpenBlockForRevision{
+			BlockID:  "reviewer-" + strconv.Itoa(i) + "-" + stand(reviewerOut),
+			Severity: "SEVERE",
+			Evidence: "x",
+			Remedy:   "x",
+		}
+	}
+	in := prompt.ReviewerRevisionInput{
+		Request: testInput, Candidate: candidate, CandidateHash: zeros64, OpenBlocks: open,
+		AttemptID: zeros32, Delimiter: zeros32, Round: round, HistoryDoc: doc,
+	}
+	review, err := prompt.ReviewerRevision(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repair, err := prompt.RepairRevision(in, stand(reviewerOut), zeros32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return estimate(authorMsgs) + authorOut + estimate(review) + reviewerOut + estimate(repair) + reviewerOut
+}
+
+// deliveryDeltaFromBuilders is how much more the terminal delivery costs with
+// one ID-heavy block per reviewer per round (round zero included) than with
+// none, over the author and the reviewer that receive it.
+func deliveryDeltaFromBuilders(t *testing.T, maxRounds int) int {
+	t.Helper()
+	const reviewerOut = 2048
+	stand := func(n int) string { return strings.Repeat("x", budget.StandInBytes(n, testBytesPerToken)) }
+	in := prompt.DeliveryInput{
+		TerminalState:   engine.StateIncomplete,
+		TerminalReason:  "block:" + strings.Repeat("0", 32),
+		CandidateHash:   strings.Repeat("0", 64),
+		ReviewerOutputs: []prompt.ReviewerOutput{{Participant: "reviewer", Output: stand(reviewerOut)}},
+	}
+	bare := estimate(prompt.Delivery(in))
+	for i := 0; i <= maxRounds; i++ {
+		in.OpenBlocks = append(in.OpenBlocks, prompt.OpenBlock{
+			BlockID: "reviewer-" + strconv.Itoa(i) + "-" + stand(reviewerOut), State: "open", Severity: "SEVERE", Evidence: "x", Remedy: "x",
+		})
+	}
+	return 2 * (estimate(prompt.Delivery(in)) - bare)
+}
+
+func worstCaseFor(t *testing.T, maxRounds int) recordView {
+	t.Helper()
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s", Input: testInput, MaxRounds: &maxRounds})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return budgetOf(t, h, reply.TurnID)
+}
+
+// Each permitted revision round adds exactly what the revision prompt builders
+// need, and later rounds carry more open blocks, so they cost more.
+func TestBudgetWorstCaseMatchesRevisionBuilders(t *testing.T) {
+	base := worstCaseFor(t, 0)
+	want := base.Projected
+	prev := 0
+	for n := 1; n <= 3; n++ {
+		cost := roundCostFromBuilders(t, n)
+		want += cost
+		if cost <= prev {
+			t.Fatalf("round %d costs %d, not more than round %d's %d", n, cost, n-1, prev)
+		}
+		prev = cost
+		rec := worstCaseFor(t, n)
+		if rec.Projected != base.Projected {
+			t.Fatalf("max_rounds=%d: projected=%d, want first-round %d", n, rec.Projected, base.Projected)
+		}
+		if got := want + deliveryDeltaFromBuilders(t, n); rec.WorstCaseProjected != got {
+			t.Fatalf("max_rounds=%d: worst_case_projected=%d, want %d", n, rec.WorstCaseProjected, got)
+		}
+	}
+}
+
+// The revision rounds replay the conversation's history to the author and to
+// each reviewer twice, so a longer history raises the worst case beyond the
+// first-round difference.
+func TestBudgetWorstCaseCountsHistory(t *testing.T) {
+	long := strings.Repeat("history word ", 400)
+	one := 1
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(long), enginetest.Reply(authorText)},
+		"reviewer": {approveStep(), approveStep()},
+	})
+	first, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c1", Input: testInput, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, first.TurnID, engine.StateApproved, "all_approved")
+	conv := first.ConversationID
+	second, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c2", Input: testInput, ConversationID: &conv, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHistory := budgetOf(t, h, second.TurnID)
+	fresh := worstCaseFor(t, 1)
+
+	gotRound := withHistory.WorstCaseProjected - withHistory.Projected
+	freshRound := fresh.WorstCaseProjected - fresh.Projected
+	// Three replays of the history: the author's, and the review and the repair.
+	if min := 3 * len(long) / 4; gotRound-freshRound < min {
+		t.Fatalf("revision round with history adds %d, without %d; want at least %d more", gotRound, freshRound, min)
+	}
+}
+
+// The submit reply carries the worst case beside the first-round figure, and
+// a replay of the same submission repeats both.
+func TestBudgetSubmitReplyReportsWorstCase(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	req := wire.SubmitRequest{SubmissionID: "s", Input: testInput, MaxRounds: &two}
+	reply, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if reply.EstimatedTokens != int64(rec.Projected) || reply.WorstCaseEstimatedTokens != int64(rec.WorstCaseProjected) {
+		t.Fatalf("reply reports %d / %d, record holds %d / %d", reply.EstimatedTokens, reply.WorstCaseEstimatedTokens, rec.Projected, rec.WorstCaseProjected)
+	}
+	if reply.WorstCaseEstimatedTokens <= reply.EstimatedTokens {
+		t.Fatalf("worst case %d is not above the first round's %d", reply.WorstCaseEstimatedTokens, reply.EstimatedTokens)
+	}
+	again, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.WorstCaseEstimatedTokens != reply.WorstCaseEstimatedTokens || again.EstimatedTokens != reply.EstimatedTokens {
+		t.Fatalf("replay reports %d / %d, first submit %d / %d", again.EstimatedTokens, again.WorstCaseEstimatedTokens, reply.EstimatedTokens, reply.WorstCaseEstimatedTokens)
 	}
 }

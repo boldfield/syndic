@@ -78,16 +78,16 @@ func (e *Engine) deliverTerminal(t *openTurn, state, reason string) {
 
 // deliveryInput returns the recipients in dispatch order, the author first,
 // and what each is sent: the terminal record, each reviewer attempt's output
-// in dispatch order, and the turn's open blocks.
+// in dispatch order, and all blocks with their final state.
 func (e *Engine) deliveryInput(t *openTurn, state, reason string) ([]string, prompt.DeliveryInput, bool) {
 	attempts, err := e.store.ListAttempts(t.id)
 	if err != nil {
 		log.Printf("engine: turn %s: no delivery, attempts unreadable: %v", t.id, err)
 		return nil, prompt.DeliveryInput{}, false
 	}
-	blocks, err := e.store.OpenBlocks(t.id)
+	allBlocks, err := e.store.AllBlocksForTurn(t.id)
 	if err != nil {
-		log.Printf("engine: turn %s: no delivery, open blocks unreadable: %v", t.id, err)
+		log.Printf("engine: turn %s: no delivery, blocks unreadable: %v", t.id, err)
 		return nil, prompt.DeliveryInput{}, false
 	}
 	in := prompt.DeliveryInput{TerminalState: state, TerminalReason: reason, CandidateHash: t.candidateHash}
@@ -105,8 +105,15 @@ func (e *Engine) deliveryInput(t *openTurn, state, reason string) ([]string, pro
 			in.ReviewerOutputs = append(in.ReviewerOutputs, prompt.ReviewerOutput{Participant: a.Participant, Output: text})
 		}
 	}
-	for _, b := range blocks {
-		in.OpenBlocks = append(in.OpenBlocks, prompt.OpenBlock{BlockID: b.ID, Severity: b.Severity, Evidence: b.Evidence, Remedy: b.Remedy})
+	for _, b := range allBlocks {
+		in.OpenBlocks = append(in.OpenBlocks, prompt.OpenBlock{
+			BlockID:              b.ID,
+			State:                b.State,
+			Severity:             b.Severity,
+			Evidence:             b.Evidence,
+			Remedy:               b.Remedy,
+			WithdrawnAgainstHash: b.WithdrawnAgainstHash,
+		})
 	}
 	return recipients, in, true
 }

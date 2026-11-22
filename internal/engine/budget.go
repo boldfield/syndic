@@ -45,13 +45,15 @@ var (
 // budgetRecord is the turn's budget_json. Charged is the running total the
 // turn limit applies to: usage reported for completed attempts plus the
 // reservations still outstanding, of which Reserved is the part not yet
-// reconciled.
+// reconciled. Projected is the first-round estimate; WorstCaseProjected is
+// the worst case across all configured rounds.
 type budgetRecord struct {
-	Projected int  `json:"projected"`
-	Reserved  int  `json:"reserved"`
-	Charged   int  `json:"charged"`
-	Limit     int  `json:"limit"`
-	Exhausted bool `json:"exhausted"`
+	Projected          int  `json:"projected"`
+	WorstCaseProjected int  `json:"worst_case_projected"`
+	Reserved           int  `json:"reserved"`
+	Charged            int  `json:"charged"`
+	Limit              int  `json:"limit"`
+	Exhausted          bool `json:"exhausted"`
 }
 
 func readBudget(turn *journal.TurnRow) (budgetRecord, bool, error) {
@@ -179,8 +181,10 @@ func budgetError(kind string) *wire.Error {
 }
 
 // projectBudget runs the submit-time budget checks and returns the record to
-// store on the turn.
-func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document) (budgetRecord, error) {
+// store on the turn. It computes the first-round projection and reports the
+// worst-case projection across all configured rounds, refusing only on the
+// first-round projection.
+func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int) (budgetRecord, error) {
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
@@ -221,6 +225,9 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 		total = satAdd(total, satAdd(pb.estimate(msgs), maxOut))
 		return nil
 	}
+
+	var deliveryTemplate *prompt.DeliveryInput
+	deliveryCost := 0
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
@@ -263,12 +270,9 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			}
 			delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
 		}
-		msgs := prompt.Delivery(delivery)
-		for _, id := range ids {
-			pb := consts[id]
-			out := pb.maxOutput(*eff.Budgets.DeliveryMaxTokens)
-			total = satAdd(total, satAdd(pb.estimate(msgs), out))
-		}
+		deliveryCost = deliveryRecipientsCost(eff, consts, ids, delivery, 0)
+		total = satAdd(total, deliveryCost)
+		deliveryTemplate = &delivery
 	}
 
 	if total > limit {
@@ -277,7 +281,139 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 		err.Limit = i64Ptr(limit)
 		return budgetRecord{}, err
 	}
-	return budgetRecord{Projected: total, Limit: limit}, nil
+
+	firstRound := total
+	worstCase := firstRound
+
+	// For the worst case across all rounds, add the cost of every permitted
+	// revision round, from the revision prompt builders over the turn's real
+	// history. See revisionRoundCost for what a round is assumed to carry.
+	if eff.Preset.Mode != modeSolo {
+		for round := 1; round <= maxRounds; round++ {
+			cost, err := revisionRoundCost(eff, consts, input, doc, round)
+			if err != nil {
+				return budgetRecord{}, err
+			}
+			worstCase = satAdd(worstCase, cost)
+		}
+		// The one terminal delivery carries every block of the turn: up to
+		// one per required reviewer per round, round zero included. It
+		// replaces the block-free delivery the first-round figure prices.
+		if maxRounds > 0 && deliveryTemplate != nil {
+			full := deliveryRecipientsCost(eff, consts, ids, *deliveryTemplate, maxRounds+1)
+			worstCase = satAdd(worstCase-deliveryCost, full)
+		}
+	}
+
+	return budgetRecord{Projected: firstRound, WorstCaseProjected: worstCase, Limit: limit}, nil
+}
+
+// deliveryRecipientsCost is the estimate plus output bound of the terminal
+// delivery summed over every recipient, with blocksPerReviewer stand-in blocks
+// for each required reviewer in the delivery.
+func deliveryRecipientsCost(eff config.Effective, consts map[string]partBudget, ids []string, delivery prompt.DeliveryInput, blocksPerReviewer int) int {
+	delivery.OpenBlocks = nil
+	for _, id := range eff.Preset.RequiredReviewers {
+		rv := consts[id]
+		out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+		for i := 0; i < blocksPerReviewer; i++ {
+			delivery.OpenBlocks = append(delivery.OpenBlocks, prompt.OpenBlock{
+				BlockID:  longBlockID(rv, out, id, i),
+				State:    "open",
+				Severity: "SEVERE",
+				Evidence: "x",
+				Remedy:   "x",
+			})
+		}
+	}
+	msgs := prompt.Delivery(delivery)
+	total := 0
+	for _, id := range ids {
+		pb := consts[id]
+		out := pb.maxOutput(*eff.Budgets.DeliveryMaxTokens)
+		total = satAdd(total, satAdd(pb.estimate(msgs), out))
+	}
+	return total
+}
+
+// longBlockID is a block_id that spends a verdict's whole output bound. The
+// verdict parser puts no length limit on block_id, and the revision prompts
+// render it three times (both fences and the Block ID line) against once for
+// evidence or remedy, so an ID-heavy block is the largest a verdict can make.
+// The participant and index keep the IDs distinct.
+func longBlockID(rv partBudget, out int, participant string, i int) string {
+	return fmt.Sprintf("%s-%d-%s", participant, i, rv.standIn(out))
+}
+
+// revisionRoundCost is the most the round-th revision round (1-based) can add
+// to the turn's charge: the author's revision with its output bound, and each
+// required reviewer's review and one repair, all built by the revision prompt
+// builders over the turn's history.
+//
+// The candidate and every reviewer output are as long as their output bounds
+// allow. A reviewer's output bound caps the block text one verdict can open,
+// and a block it does not withdraw stays open, so by round N a reviewer may
+// hold N verdicts' worth of open blocks: N blocks, each carrying one output
+// bound of text between its evidence and remedy.
+func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input string, doc *history.Document, round int) (int, error) {
+	if doc == nil {
+		doc = history.New()
+	}
+	author := consts[eff.Preset.Author]
+	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
+	candidate := author.standIn(authorOut)
+
+	feedback := make([]prompt.RevisionFeedback, len(eff.Preset.RequiredReviewers))
+	for i, id := range eff.Preset.RequiredReviewers {
+		rv := consts[id]
+		feedback[i] = prompt.RevisionFeedback{Output: rv.standIn(rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens))}
+	}
+	msgs, err := prompt.AuthorRevision(prompt.AuthorRevisionInput{
+		Input:             input,
+		PreviousCandidate: candidate,
+		ReviewerFeedback:  feedback,
+		Delimiter:         standInToken,
+		HistoryDoc:        doc,
+	})
+	if err != nil {
+		return 0, err
+	}
+	total := satAdd(author.estimate(msgs), authorOut)
+
+	for _, id := range eff.Preset.RequiredReviewers {
+		rv := consts[id]
+		out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+		open := make([]prompt.OpenBlockForRevision, round)
+		for i := range open {
+			open[i] = prompt.OpenBlockForRevision{
+				BlockID:  longBlockID(rv, out, id, i),
+				Severity: "SEVERE",
+				Evidence: "x",
+				Remedy:   "x",
+			}
+		}
+		in := prompt.ReviewerRevisionInput{
+			Request:       input,
+			Candidate:     candidate,
+			CandidateHash: standInHash,
+			OpenBlocks:    open,
+			AttemptID:     standInToken,
+			Delimiter:     standInToken,
+			Round:         round,
+			HistoryDoc:    doc,
+		}
+		review, err := prompt.ReviewerRevision(in)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rv.estimate(review), out))
+		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rv.estimate(repair), out))
+	}
+	return total, nil
 }
 
 func satAdd(a, b int) int {

@@ -195,12 +195,14 @@ type ReviewerOutput struct {
 	Output      string
 }
 
-// OpenBlock represents an open block to be delivered.
+// OpenBlock represents a block to be delivered with its final state.
 type OpenBlock struct {
-	BlockID  string
-	Severity string
-	Evidence string
-	Remedy   string
+	BlockID              string
+	State                string // "open", "withdrawn", or "overridden"
+	Severity             string
+	Evidence             string
+	Remedy               string
+	WithdrawnAgainstHash *string // non-nil when State is "withdrawn"
 }
 
 // DeliveryInput contains the inputs for building a delivery message.
@@ -214,7 +216,7 @@ type DeliveryInput struct {
 
 // Delivery returns messages for terminal delivery.
 func Delivery(in DeliveryInput) []transport.Message {
-	systemContent := `The turn has ended and this is the final record. This message contains the terminal state, all reviewers' outputs, and all open blocks. No reply is expected and any reply will be discarded unread.`
+	systemContent := `The turn has ended and this is the final record. This message contains the terminal state, all reviewers' outputs, and all blocks with their final state. No reply is expected and any reply will be discarded unread.`
 
 	var userContent string
 	userContent += fmt.Sprintf("Terminal State: %s\n", in.TerminalState)
@@ -228,12 +230,17 @@ func Delivery(in DeliveryInput) []transport.Message {
 	}
 
 	if len(in.OpenBlocks) > 0 {
-		userContent += "Open Blocks:\n"
+		userContent += "Blocks:\n"
 		for _, block := range in.OpenBlocks {
 			userContent += fmt.Sprintf("Block ID: %s\n", block.BlockID)
+			userContent += fmt.Sprintf("State: %s\n", block.State)
 			userContent += fmt.Sprintf("Severity: %s\n", block.Severity)
 			userContent += fmt.Sprintf("Evidence: %s\n", block.Evidence)
-			userContent += fmt.Sprintf("Remedy: %s\n\n", block.Remedy)
+			userContent += fmt.Sprintf("Remedy: %s\n", block.Remedy)
+			if block.WithdrawnAgainstHash != nil {
+				userContent += fmt.Sprintf("Withdrawn Against: %s\n", *block.WithdrawnAgainstHash)
+			}
+			userContent += "\n"
 		}
 	}
 
