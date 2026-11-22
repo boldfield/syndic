@@ -20,7 +20,7 @@ import (
 type tab int
 
 const (
-	tabAnswer tab = iota
+	tabChat tab = iota
 	tabTranscript
 	tabParticipants
 	numTabs
@@ -215,10 +215,9 @@ func (a *App) answerIn(turnID string) answerInput {
 	}
 }
 
-// fetchAnswerContent starts the fetches the answer tab is waiting on.
-func (a *App) fetchAnswerContent() tea.Cmd {
-	turnID := answerTurn(a.state)
-	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, answerRefs(a.state, turnID, a.answerIn(turnID)))...)
+// fetchChatContent starts the fetches the chat tab is waiting on.
+func (a *App) fetchChatContent() tea.Cmd {
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, chatRefs(a.state))...)
 }
 
 // transcriptIn gathers what the transcript tab needs.
@@ -357,7 +356,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	a.refreshTranscript()
 	if _, ok := msg.(contentMsg); !ok {
-		cmds = append(cmds, a.fetchAnswerContent(), a.fetchTranscriptContent())
+		cmds = append(cmds, a.fetchChatContent(), a.fetchTranscriptContent())
 	}
 	return a, tea.Batch(cmds...)
 }
@@ -450,7 +449,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 	}
-	if a.tab == tabAnswer {
+	if a.tab == tabChat {
 		page := max(a.answerHeight()-1, 1)
 		switch msg.String() {
 		case "up":
@@ -1012,9 +1011,13 @@ func (a *App) View() string {
 
 	var tabView string
 	switch a.tab {
-	case tabAnswer:
-		turnID := answerTurn(a.state)
-		tabView = renderAnswer(a.state, turnID, a.answerIn(turnID))
+	case tabChat:
+		tabView = renderChat(a.state, chatInput{
+			content:     a.content,
+			drafts:      false,
+			plainMode:   !a.terminalCapabilities.Color,
+			blockDetail: a.blockDetail,
+		}, w)
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
@@ -1032,7 +1035,7 @@ func (a *App) View() string {
 	}
 	lines := strings.Split(tabView, "\n")
 
-	if a.tab == tabAnswer && len(a.panel) == 0 {
+	if a.tab == tabChat && len(a.panel) == 0 {
 		start := min(a.answerScrollRow, max(len(lines)-a.answerHeight(), 0))
 		lines = lines[start:]
 		for len(lines) < a.answerHeight() {

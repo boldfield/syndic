@@ -69,6 +69,8 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
+	Round           int // current round number (0 for first attempt, incremented for revisions)
+	MaxRounds       int // maximum number of revisions allowed
 }
 
 // AttemptInfo holds information about one attempt.

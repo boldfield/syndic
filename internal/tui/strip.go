@@ -58,6 +58,11 @@ func renderStrip(s State, width int, now time.Time) string {
 	// [turn state]
 	segments = append(segments, fmt.Sprintf("[%s]", ti.State))
 
+	// [round n/m] during revisions
+	if ti.MaxRounds > 0 && ti.Round > 0 {
+		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
+	}
+
 	// [elapsed / turn deadline]
 	if !ti.SubmittedAt.IsZero() {
 		elapsed := formatDuration(max(now.Sub(ti.SubmittedAt), 0))
