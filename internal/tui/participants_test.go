@@ -584,12 +584,12 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 	}
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
-	send(r, resizeMsg(80, 14))
+	send(r, resizeMsg(80, 15)) // one row more than before: the tab bar takes one
 	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilPartsView(t, r, "/release rpool "+m[1])
-	if n := len(strings.Split(v, "\n")); n > 14 {
-		t.Errorf("view is %d lines at 14 rows", n)
+	if n := len(strings.Split(v, "\n")); n > 15 {
+		t.Errorf("view is %d lines at 15 rows", n)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
 	untilPartsView(t, r, "more lines (PgDn)")

@@ -58,6 +58,11 @@ func renderStrip(s State, width int, now time.Time) string {
 	// [turn state]
 	segments = append(segments, fmt.Sprintf("[%s]", ti.State))
 
+	// [round n/m] while revising
+	if ti.Round > 0 && ti.MaxRounds > 0 {
+		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
+	}
+
 	// [elapsed / turn deadline]
 	if !ti.SubmittedAt.IsZero() {
 		elapsed := formatDuration(max(now.Sub(ti.SubmittedAt), 0))
@@ -172,8 +177,7 @@ const bannerHeightDivisor = 8
 // tab area fewer than minTabHeight lines, only the first banner shows,
 // followed by a "+N more" marker.
 func capBannersForHeight(banners []string, height, minTabHeight int) []string {
-	const stripHeight = 1
-	room := height - stripHeight - inputHeight - minTabHeight
+	room := height - tabBarHeight - stripHeight - inputHeight - minTabHeight
 	allowed := min(room, height/bannerHeightDivisor)
 	if len(banners) <= 1 || len(banners) <= allowed {
 		return banners

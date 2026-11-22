@@ -69,6 +69,8 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
+	Round           int // revisions started so far: one per revision_dispatched
+	MaxRounds       int // the round limit the turn runs with; 0 when not known
 }
 
 // AttemptInfo holds information about one attempt.
@@ -156,6 +158,14 @@ type State struct {
 	QuickInvalid        string // "quick: invalid <path>" when the project file cannot be used
 	ModeSubmissionID    string // submission id of the last submit that carried a /mode preset
 
+	// RoundLimit is the limit this process sends with a submit, when it set one.
+	RoundLimit *int
+
+	// ContextFrom is the turn /trim set as the start of the context later
+	// submits see; earlier turns of the chat are not in context. Empty when
+	// nothing is trimmed.
+	ContextFrom string
+
 	// Scope limits which turns the chat shows to the open conversation's. It
 	// is nil when the app was not started on a conversation.
 	Scope *TurnScope
@@ -166,6 +176,28 @@ type TurnScope struct {
 	ConversationID string          // empty until the first submit creates the conversation
 	Turns          map[string]bool // turn ids in the conversation
 	Submissions    map[string]bool // submission ids this process sent
+	Order          []string        // turn ids, oldest first, as far as they are known
+}
+
+// add puts a turn into the scope, once.
+func (sc *TurnScope) add(turnID string) {
+	if sc.Turns[turnID] {
+		return
+	}
+	sc.Turns[turnID] = true
+	sc.Order = append(sc.Order, turnID)
+}
+
+// maxRounds is the round limit a new turn runs with: the one this process
+// sends, else the roster's default.
+func (s State) maxRounds() int {
+	switch {
+	case s.RoundLimit != nil:
+		return *s.RoundLimit
+	case s.Status != nil:
+		return s.Status.Revision.Default
+	}
+	return 0
 }
 
 // inScope reports whether the chat may show the turn.
@@ -214,7 +246,7 @@ func apply(s State, f wire.Frame) State {
 		if json.Unmarshal(f.Body, &body) == nil {
 			s = setTurnState(s, body.TurnID, "submitted")
 			if sc := s.Scope; sc != nil && ((sc.ConversationID != "" && body.ConversationID == sc.ConversationID) || sc.Submissions[body.SubmissionID]) {
-				sc.Turns[body.TurnID] = true
+				sc.add(body.TurnID)
 			}
 			if s.inScope(body.TurnID) {
 				s.CurrentTurn = body.TurnID
@@ -230,6 +262,7 @@ func apply(s State, f wire.Frame) State {
 				SubmitSeq:       f.Seq,
 				EstimatedTokens: body.EstimatedTokens,
 				ReviewerStates:  make(map[string]string),
+				MaxRounds:       s.maxRounds(),
 			}
 			s.Turns = turns
 		}
@@ -241,6 +274,9 @@ func apply(s State, f wire.Frame) State {
 			turns := copyMap(s.Turns)
 			if ti, ok := turns[body.TurnID]; ok {
 				ti.State = body.State
+				if body.State == "revision_dispatched" {
+					ti.Round++
+				}
 				if body.Reason != nil {
 					ti.TerminalReason = body.Reason
 				}
