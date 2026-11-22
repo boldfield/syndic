@@ -301,12 +301,9 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 		// Cost of an author revision attempt (uses same author output bound as first attempt).
 		authorRevisionMsgs := prompt.AuthorWithHistory(doc, input)
-		authorRevisionCost := 0
-		for _, id := range ids {
-			pb := consts[id]
-			out := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-			authorRevisionCost = satAdd(authorRevisionCost, satAdd(pb.estimate(authorRevisionMsgs), out))
-		}
+		pb := consts[eff.Preset.Author]
+		out := pb.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
+		authorRevisionCost := satAdd(pb.estimate(authorRevisionMsgs), out)
 
 		// Cost of one round of review and repair (per reviewer).
 		oneRoundCost := 0
@@ -330,7 +327,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 		// Add the cost of additional rounds.
 		additionalRoundCost := satAdd(authorRevisionCost, oneRoundCost)
-		for round := 1; round < maxRounds; round++ {
+		for round := 1; round <= maxRounds; round++ {
 			worstCase = satAdd(worstCase, additionalRoundCost)
 		}
 	}

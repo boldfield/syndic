@@ -693,3 +693,54 @@ func TestBudgetWorstCaseProjectionOverride(t *testing.T) {
 		t.Fatalf("override max_rounds=2: worst_case=%d should be > override max_rounds=0: projected=%d", rec2.WorstCaseProjected, rec0.Projected)
 	}
 }
+
+// Worst-case projection with max_rounds=1 must include exactly one revision round.
+func TestBudgetWorstCaseProjectionMaxRoundsOne(t *testing.T) {
+	h0 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	zero := 0
+	reply0, err := h0.Engine.Submit(wire.SubmitRequest{SubmissionID: "s0", Input: testInput, MaxRounds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec0 := budgetOf(t, h0, reply0.TurnID)
+
+	h1 := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	one := 1
+	reply1, err := h1.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: testInput, MaxRounds: &one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec1 := budgetOf(t, h1, reply1.TurnID)
+
+	if rec1.WorstCaseProjected <= rec0.Projected {
+		t.Fatalf("max_rounds=1: worst_case=%d should be > max_rounds=0: projected=%d", rec1.WorstCaseProjected, rec0.Projected)
+	}
+}
+
+// Worst-case projection increments consistently per additional round.
+func TestBudgetWorstCaseProjectionConsistentIncrement(t *testing.T) {
+	records := make([]recordView, 4)
+	for maxRounds := 0; maxRounds < 4; maxRounds++ {
+		h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+		mr := maxRounds
+		reply, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s" + string(rune('0'+maxRounds)), Input: testInput, MaxRounds: &mr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		records[maxRounds] = budgetOf(t, h, reply.TurnID)
+	}
+
+	// Verify increments are consistent: worst(n) - worst(n-1) should equal worst(1) - worst(0).
+	firstIncrement := records[1].WorstCaseProjected - records[0].Projected
+	for i := 2; i < len(records); i++ {
+		increment := records[i].WorstCaseProjected - records[i-1].WorstCaseProjected
+		if increment != firstIncrement {
+			t.Fatalf("maxRounds=%d: increment=%d does not match first increment=%d", i, increment, firstIncrement)
+		}
+	}
+
+	// Verify that the increment is positive and reasonable.
+	if firstIncrement <= 0 {
+		t.Fatalf("first increment should be positive, got %d", firstIncrement)
+	}
+}
