@@ -30,20 +30,27 @@ if ! git rev-parse --verify "${base_ref}^{commit}" >/dev/null 2>&1; then
 	exit 1
 fi
 
-# Get all changed files with status codes using NUL-delimited format.
-# -z produces NUL-terminated records: status NUL path NUL status NUL path NUL ...
-# This avoids quoting issues with special characters (tabs, quotes, backslashes, etc.)
-# --no-renames treats renames as separate deletion and addition.
-all_changes=$(git diff -z --name-status --no-renames "${base_ref}...HEAD")
-
 # Parse NUL-delimited git diff output into arrays
 declare -a design_files
 declare -a non_design_files
 
-# Read NUL-terminated status and path pairs
-while IFS= read -r -d '' status; do
+# Check if git diff will work (e.g., check for unrelated histories) using a dry-run first
+# We use --quiet to avoid output, just check exit code and error message
+if ! { git diff -z --name-status --no-renames "${base_ref}...HEAD" > /dev/null 2>&1; } then
+	# Git diff failed - capture and display the error
+	git diff -z --name-status --no-renames "${base_ref}...HEAD" > /dev/null 2>&1 || true
+	echo "ERROR: Unable to compare with base ref ${base_ref}" >&2
+	exit 1
+fi
+
+# Read NUL-terminated status and path pairs directly from git output.
+# Process substitution avoids storing NUL bytes in a variable, which bash cannot handle.
+# -z produces NUL-terminated records: status NUL path NUL status NUL path NUL ...
+# This avoids quoting issues with special characters (tabs, quotes, backslashes, etc.)
+# --no-renames treats renames as separate deletion and addition.
+while IFS= read -r -d $'\0' status; do
 	# Read the corresponding path
-	if ! IFS= read -r -d '' path; then
+	if ! IFS= read -r -d $'\0' path; then
 		# Incomplete record at end of input
 		break
 	fi
@@ -54,10 +61,10 @@ while IFS= read -r -d '' status; do
 	else
 		non_design_files+=("$status" "$path")
 	fi
-done <<< "$all_changes"
+done < <(git diff -z --name-status --no-renames "${base_ref}...HEAD")
 
 # Check if there are any non-design changes
-if [[ ${#non_design_files[@]} -gt 0 ]]; then
+if [[ -v non_design_files ]] && (( ${#non_design_files[@]} > 0 )); then
 	# There are changes outside docs/design/, so not a ratification
 	# Check for problematic design changes
 	declare -a problematic_design
@@ -79,11 +86,16 @@ if [[ ${#non_design_files[@]} -gt 0 ]]; then
 		fi
 	done
 
-	if [[ ${#problematic_design[@]} -gt 0 ]] || [[ ${#added_design[@]} -gt 0 ]]; then
+	has_problematic=0
+	has_added=0
+	[[ -v problematic_design ]] && (( ${#problematic_design[@]} > 0 )) && has_problematic=1 || true
+	[[ -v added_design ]] && (( ${#added_design[@]} > 0 )) && has_added=1 || true
+
+	if (( has_problematic || has_added )); then
 		echo "ERROR: Design documents cannot be modified in implementation PRs."
 		echo "Only docs/design/open-questions.md may be changed."
 		echo ""
-		if [[ ${#problematic_design[@]} -gt 0 ]]; then
+		if [[ -v problematic_design ]] && (( ${#problematic_design[@]} > 0 )); then
 			echo "Modified files:"
 			for ((i = 0; i < ${#problematic_design[@]}; i += 2)); do
 				status="${problematic_design[i]}"
@@ -91,7 +103,16 @@ if [[ ${#non_design_files[@]} -gt 0 ]]; then
 				echo "  ${status}	${path}"
 			done
 		fi
-		if [[ ${#added_design[@]} -gt 0 ]]; then
+		if [[ -v added_design ]] && (( ${#added_design[@]} > 0 )); then
+			if ! [[ -v problematic_design ]] || ! (( ${#problematic_design[@]} > 0 )); then
+				echo "Modified files:"
+			fi
+			for ((i = 0; i < ${#added_design[@]}; i += 2)); do
+				status="${added_design[i]}"
+				path="${added_design[i+1]}"
+				echo "  ${status}	${path}"
+			done
+			echo ""
 			echo "A ratification pull request must contain only design documents."
 		fi
 		exit 1
@@ -102,7 +123,7 @@ fi
 
 # All changes are under docs/design/
 # Check if it's a valid ratification (all changes are either additions of design docs or allowed changes to open-questions.md)
-if [[ ${#design_files[@]} -eq 0 ]]; then
+if ! [[ -v design_files ]] || (( ${#design_files[@]} == 0 )); then
 	# No design changes at all, pass
 	exit 0
 fi
@@ -126,9 +147,9 @@ for ((i = 0; i < ${#design_files[@]}; i += 2)); do
 	fi
 done
 
-if [[ ${#problematic_files[@]} -gt 0 ]]; then
-	echo "ERROR: Design documents cannot be modified in implementation PRs."
-	echo "Only docs/design/open-questions.md may be changed."
+if [[ -v problematic_files ]] && (( ${#problematic_files[@]} > 0 )); then
+	echo "ERROR: Design documents cannot be modified in ratification."
+	echo "Only newly added design documents and docs/design/open-questions.md may be changed."
 	echo ""
 	echo "Modified files:"
 	for ((i = 0; i < ${#problematic_files[@]}; i += 2)); do
