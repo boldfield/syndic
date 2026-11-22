@@ -399,6 +399,12 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onCommand(msg)
 	case whyMsg:
 		return a.onWhy(msg)
+	case conversationsMsg:
+		return a.onConversations(msg)
+	case switchMsg:
+		return a.onSwitch(msg)
+	case budgetMsg:
+		return a.onBudget(msg)
 	case contentMsg:
 		return a.onContent(msg)
 	case transcriptMsg:
@@ -441,7 +447,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "ctrl+c":
+		if a.input.Value() != "" {
+			a.input.SetValue("")
+			return a, nil
+		}
 		return a, a.quit()
+	case "ctrl+d":
+		if a.input.Value() == "" {
+			return a, a.quit()
+		}
+		return a, nil
 	case "esc":
 		a.panel, a.refusal = nil, ""
 		return a, nil
@@ -457,6 +472,11 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "enter":
 		return a, a.enter()
+	case "alt+enter":
+		current := a.input.Value()
+		cursor := a.input.Position()
+		a.input.SetValue(current[:cursor] + "\n" + current[cursor:])
+		return a, nil
 	}
 
 	if a.tab == tabTranscript {

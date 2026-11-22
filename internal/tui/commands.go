@@ -17,17 +17,23 @@ import (
 type commandHandler func(a *App, args []string) tea.Cmd
 
 var commands = map[string]commandHandler{
-	"quit":         cmdQuit,
-	"resume":       cmdResume,
-	"mode":         cmdMode,
-	"quick":        cmdQuick,
-	"participants": cmdParticipants,
-	"cancel":       cmdCancel,
-	"why":          cmdWhy,
-	"override":     cmdOverride,
-	"release":      cmdRelease,
-	"drafts":       cmdDrafts,
-	"help":         cmdHelp,
+	"quit":          cmdQuit,
+	"resume":        cmdResume,
+	"mode":          cmdMode,
+	"quick":         cmdQuick,
+	"participants":  cmdParticipants,
+	"cancel":        cmdCancel,
+	"why":           cmdWhy,
+	"override":      cmdOverride,
+	"release":       cmdRelease,
+	"drafts":        cmdDrafts,
+	"new":           cmdNew,
+	"conversations": cmdConversations,
+	"switch":        cmdSwitch,
+	"trim":          cmdTrim,
+	"rounds":        cmdRounds,
+	"budget":        cmdBudget,
+	"help":          cmdHelp,
 }
 
 // commandHelp is one line per command, in the order /help lists them.
@@ -40,6 +46,12 @@ var commandHelp = []string{
 	"/override <reason>        accept an incomplete turn's candidate, with a reason",
 	"/release <pool> [attempt] release held capacity, after a confirmation",
 	"/drafts on|off            show or hide the author's unreviewed draft",
+	"/new                      start a new conversation",
+	"/conversations            list conversations in the current directory",
+	"/switch <id>              switch to a conversation (by unique prefix)",
+	"/trim <turn>              set the first turn to include in context for later submits",
+	"/rounds [n]               show or set the round limit",
+	"/budget                   show token reservation and usage",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -411,6 +423,224 @@ func approvalNo(ap *approvalPrompt) func(*App) tea.Cmd {
 		a.quickSelection.declined[a.quickSelection.stateKey(ap.definitionSHA256)] = true
 		return nil
 	}
+}
+
+func cmdNew(a *App, _ []string) tea.Cmd {
+	a.conversationID = ""
+	a.convTurns = 0
+	a.openTurns = nil
+	a.state.Scope = &TurnScope{ConversationID: "", Turns: map[string]bool{}, Submissions: map[string]bool{}}
+	a.state.ContextFrom = ""
+	a.answerScrollRow, a.answerFollow = 0, true
+	a.refusal = "new conversation started (creates at first submit)"
+	return nil
+}
+
+// conversationsMsg carries the conversations list fetched by /conversations.
+type conversationsMsg struct {
+	gen   int
+	items []wire.ConversationSummary
+	err   error
+}
+
+func cmdConversations(a *App, _ []string) tea.Cmd {
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+	gen, cl, dir := a.gen, a.cl, a.workDir
+	return func() tea.Msg {
+		reply, err := cl.Conversations(context.Background(), &dir, "", 100)
+		if err != nil {
+			return conversationsMsg{gen: gen, err: err}
+		}
+		return conversationsMsg{gen: gen, items: reply.Items}
+	}
+}
+
+func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		a.refusal = "conversations: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	if len(msg.items) == 0 {
+		a.refusal = "no conversations in this directory"
+		return a, nil
+	}
+	lines := []string{}
+	for _, c := range msg.items {
+		prefix := c.ID[:min(8, len(c.ID))]
+		mark := ""
+		if c.ID == a.conversationID {
+			mark = " ← open"
+		}
+		running := ""
+		if c.Running {
+			running = " (running)"
+		}
+		preview := c.Preview
+		if len(preview) > 40 {
+			preview = preview[:40]
+		}
+		line := fmt.Sprintf("%s  %s turns, %s%s%s", prefix, fmt.Sprint(c.TurnCount), preview, running, mark)
+		lines = append(lines, line)
+	}
+	a.panel = lines
+	return a, nil
+}
+
+func cmdSwitch(a *App, args []string) tea.Cmd {
+	if len(args) != 1 {
+		a.refusal = "usage: /switch <conversation_id>"
+		return nil
+	}
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+	gen, cl := a.gen, a.cl
+	prefix := args[0]
+	return func() tea.Msg {
+		conv, err := cl.Conversation(context.Background(), prefix)
+		if err != nil {
+			return switchMsg{gen: gen, err: err}
+		}
+		return switchMsg{gen: gen, conv: &conv}
+	}
+}
+
+type switchMsg struct {
+	gen  int
+	conv *wire.ConversationReply
+	err  error
+}
+
+func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		a.refusal = "switch: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	a.conversationID = msg.conv.ID
+	a.convTurns = len(msg.conv.Turns)
+	turnIDs := make([]string, len(msg.conv.Turns))
+	for i, t := range msg.conv.Turns {
+		turnIDs[i] = t.ID
+	}
+	a.openTurns = turnIDs
+	scope := &TurnScope{ConversationID: msg.conv.ID, Turns: map[string]bool{}, Submissions: map[string]bool{}}
+	for _, id := range turnIDs {
+		scope.add(id)
+	}
+	a.state.Scope = scope
+	a.state.ContextFrom = ""
+	a.answerScrollRow, a.answerFollow = 0, true
+	prefix := a.conversationID[:min(8, len(a.conversationID))]
+	a.refusal = fmt.Sprintf("switched to conversation %s (%d turns)", prefix, a.convTurns)
+	return a, nil
+}
+
+func cmdTrim(a *App, args []string) tea.Cmd {
+	if len(args) != 1 {
+		a.refusal = "usage: /trim <turn_id>"
+		return nil
+	}
+	turnID := args[0]
+	found := false
+	for _, id := range a.openTurns {
+		if id == turnID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.refusal = "turn not in context; nothing changed"
+		return nil
+	}
+	a.state.ContextFrom = turnID
+	a.refusal = fmt.Sprintf("context trimmed to %s and later", turnID[:min(8, len(turnID))])
+	return nil
+}
+
+func cmdRounds(a *App, args []string) tea.Cmd {
+	if len(args) == 0 {
+		ceiling := 5
+		if a.state.Status != nil && len(a.state.Status.Presets) > 0 {
+			ceiling = 5
+		}
+		a.refusal = fmt.Sprintf("rounds: %d, ceiling: %d", a.rounds, ceiling)
+		return nil
+	}
+	if len(args) != 1 {
+		a.refusal = "usage: /rounds [n]"
+		return nil
+	}
+	var n int
+	_, err := fmt.Sscanf(args[0], "%d", &n)
+	if err != nil || n < 0 || n > 5 {
+		a.refusal = "rounds must be 0-5"
+		return nil
+	}
+	a.rounds = n
+	a.roundsIsSet = true
+	a.refusal = fmt.Sprintf("rounds set to %d for this process", n)
+	return nil
+}
+
+func cmdBudget(a *App, _ []string) tea.Cmd {
+	turn := answerTurn(a.state)
+	if turn == "" {
+		a.refusal = "no turn yet; no budget to show"
+		return nil
+	}
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+	gen, cl := a.gen, a.cl
+	return func() tea.Msg {
+		tr, err := cl.Turn(context.Background(), turn)
+		if err != nil {
+			return budgetMsg{gen: gen, err: err}
+		}
+		return budgetMsg{gen: gen, budget: tr.Budget}
+	}
+}
+
+type budgetMsg struct {
+	gen    int
+	budget wire.BudgetRecord
+	err    error
+}
+
+func (a *App) onBudget(msg budgetMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		a.refusal = "budget: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	lines := []string{"budget for this turn:"}
+	if msg.budget.Reserved != nil {
+		lines = append(lines, fmt.Sprintf("  reserved:  %d tokens", *msg.budget.Reserved))
+	}
+	if msg.budget.Charged != nil {
+		lines = append(lines, fmt.Sprintf("  charged:   %d tokens", *msg.budget.Charged))
+	}
+	if msg.budget.Limit != nil {
+		lines = append(lines, fmt.Sprintf("  limit:     %d tokens", *msg.budget.Limit))
+	}
+	if msg.budget.Projected != nil {
+		lines = append(lines, fmt.Sprintf("  projected: %d tokens", *msg.budget.Projected))
+	}
+	a.panel = lines
+	return a, nil
 }
 
 // whyMsg carries the turn record /why asked for.
