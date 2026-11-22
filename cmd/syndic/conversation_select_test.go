@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,11 +62,15 @@ func (f *fakeAPI) Conversation(_ context.Context, prefix string) (wire.Conversat
 	}
 	switch len(match) {
 	case 0:
-		return wire.ConversationReply{}, errors.New("unknown conversation")
+		return wire.ConversationReply{}, &wire.Error{Code: wire.ErrorCodeNotFound}
 	case 1:
-		return wire.ConversationReply{ID: match[0], Turns: make([]wire.ConversationTurnSummary, f.turns[match[0]])}, nil
+		var turns []wire.ConversationTurnSummary
+		for i := 0; i < f.turns[match[0]]; i++ {
+			turns = append(turns, wire.ConversationTurnSummary{ID: fmt.Sprintf("%s-t%d", match[0], i+1)})
+		}
+		return wire.ConversationReply{ID: match[0], Turns: turns}, nil
 	}
-	return wire.ConversationReply{}, errors.New("ambiguous conversation prefix")
+	return wire.ConversationReply{}, &wire.Error{Code: wire.ErrorCodeAmbiguous}
 }
 
 func conv(id string, workspace *string) wire.ConversationSummary {
@@ -130,7 +135,7 @@ func TestSelectLatestForTheWorkspace(t *testing.T) {
 		turns: map[string]int{"mine2": 4},
 	}
 	open, err := selectConversation(context.Background(), api, startupFlags{}, "/w")
-	if err != nil || open == nil || open.id != "mine2" || open.turns != 4 {
+	if err != nil || open == nil || open.id != "mine2" || len(open.turns) != 4 {
 		t.Fatalf("default: %+v, %v; want mine2 with 4 turns (never the null-workspace one)", open, err)
 	}
 	if len(api.calls) == 0 || api.calls[0] == nil || *api.calls[0] != "/w" {
@@ -159,8 +164,12 @@ func TestSelectLatestWithNoneStartsEmpty(t *testing.T) {
 
 func TestSelectLatestReportsEngineError(t *testing.T) {
 	api := &fakeAPI{err: errors.New("boom")}
-	if _, err := selectConversation(context.Background(), api, startupFlags{}, "/w"); err == nil {
+	_, err := selectConversation(context.Background(), api, startupFlags{}, "/w")
+	if err == nil {
 		t.Error("a failed list was swallowed")
+	}
+	if errors.Is(err, errSelection) {
+		t.Error("an engine failure was reported as a selection error, which exits 2")
 	}
 }
 
@@ -172,16 +181,16 @@ func TestSelectByPrefix(t *testing.T) {
 	sel := func(prefix string) (*openConversation, error) {
 		return selectConversation(context.Background(), api, startupFlags{conversation: prefix}, "/w")
 	}
-	if open, err := sel("xy"); err != nil || open.id != "xyz1" || open.turns != 7 {
+	if open, err := sel("xy"); err != nil || open.id != "xyz1" || len(open.turns) != 7 {
 		t.Errorf("unique prefix: %+v, %v", open, err)
 	}
-	if _, err := sel("abc"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := sel("abc"); !errors.Is(err, errSelection) || !strings.Contains(err.Error(), "ambiguous") {
 		t.Errorf("ambiguous prefix: err = %v", err)
 	}
-	if _, err := sel("nope"); err == nil {
+	if _, err := sel("nope"); !errors.Is(err, errSelection) {
 		t.Error("unknown prefix accepted")
 	}
-	if _, err := sel("far"); err == nil || !strings.Contains(err.Error(), "/x") {
+	if _, err := sel("far"); !errors.Is(err, errSelection) || !strings.Contains(err.Error(), "/x") {
 		t.Errorf("workspace mismatch: err = %v, want a refusal naming /x", err)
 	}
 	// A null-workspace conversation opens from any directory; the first submit adopts it.
@@ -222,5 +231,45 @@ func TestListConversationsFiltersToWorkspace(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "c1") || strings.Contains(got, "c3") {
 		t.Errorf("output = %q, want only /a's conversation", got)
+	}
+}
+
+func TestRouteArgs(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		sub  string
+		rest []string
+		ok   bool
+	}{
+		{nil, "tui", nil, true},
+		{[]string{"--new"}, "tui", []string{"--new"}, true},
+		{[]string{"--rounds", "0"}, "tui", []string{"--rounds", "0"}, true},
+		{[]string{"tui", "--new"}, "tui", []string{"--new"}, true},
+		{[]string{"probe", "-x"}, "probe", []string{"-x"}, true},
+		{[]string{"conversations", "--all"}, "conversations", []string{"--all"}, true},
+		{[]string{"bogus"}, "", nil, false},
+		{[]string{"conversation"}, "", nil, false},
+		{[]string{"garbage", "--new", "--conversation", "x"}, "", nil, false},
+	} {
+		sub, rest, ok := routeArgs(tc.args)
+		if sub != tc.sub || ok != tc.ok || strings.Join(rest, " ") != strings.Join(tc.rest, " ") {
+			t.Errorf("routeArgs(%v) = %q %v %v, want %q %v %v", tc.args, sub, rest, ok, tc.sub, tc.rest, tc.ok)
+		}
+	}
+}
+
+// A positional argument left after the flags is a usage error, exit 2.
+func TestCmdTUIRejectsStrayPositional(t *testing.T) {
+	oldErr := os.Stderr
+	f, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = f
+	t.Cleanup(func() { os.Stderr = oldErr; _ = f.Close() })
+	for _, args := range [][]string{{"--new", "extra"}, {"extra"}} {
+		if code := cmdTUI(flag.NewFlagSet("tui", flag.ContinueOnError), args); code != 2 {
+			t.Errorf("cmdTUI %v = %d, want 2", args, code)
+		}
 	}
 }

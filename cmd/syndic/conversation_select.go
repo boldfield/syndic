@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"strconv"
@@ -11,6 +12,10 @@ import (
 
 // maxRoundsLimit is the most revisions any turn may have (v5 delta section 4).
 const maxRoundsLimit = 5
+
+// errSelection marks a conversation the user named that cannot be opened:
+// unknown, ambiguous, or in another workspace. The command exits 2 for it.
+var errSelection = errors.New("cannot select that conversation")
 
 // conversationAPI is the part of the engine client that choosing a conversation uses.
 type conversationAPI interface {
@@ -61,6 +66,9 @@ func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 	if err := fs.Parse(args); err != nil {
 		return f, err
 	}
+	if fs.NArg() > 0 {
+		return f, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
 	if f.newConversation && f.conversation != "" {
 		return f, fmt.Errorf("--new and --conversation are mutually exclusive")
 	}
@@ -70,7 +78,15 @@ func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 // openConversation is the conversation a start-up selected.
 type openConversation struct {
 	id    string
-	turns int
+	turns []string // turn ids, oldest first
+}
+
+func turnIDs(c wire.ConversationReply) []string {
+	ids := make([]string, 0, len(c.Turns))
+	for _, t := range c.Turns {
+		ids = append(ids, t.ID)
+	}
+	return ids
 }
 
 // selectConversation chooses the conversation to open for workspace, and
@@ -93,6 +109,10 @@ func selectConversation(ctx context.Context, api conversationAPI, f startupFlags
 func selectByPrefix(ctx context.Context, api conversationAPI, prefix, workspace string) (*openConversation, error) {
 	conv, err := api.Conversation(ctx, prefix)
 	if err != nil {
+		var we *wire.Error
+		if errors.As(err, &we) && (we.Code == wire.ErrorCodeNotFound || we.Code == wire.ErrorCodeAmbiguous) {
+			return nil, fmt.Errorf("conversation %q: %s: %w", prefix, we.Code, errSelection)
+		}
 		return nil, fmt.Errorf("conversation %q: %w", prefix, err)
 	}
 	var found *wire.ConversationSummary
@@ -107,12 +127,12 @@ func selectByPrefix(ctx context.Context, api conversationAPI, prefix, workspace 
 		return nil, err
 	}
 	if found == nil {
-		return nil, fmt.Errorf("conversation %q: unknown", prefix)
+		return nil, fmt.Errorf("conversation %q: unknown: %w", prefix, errSelection)
 	}
 	if found.Workspace != nil && *found.Workspace != workspace {
-		return nil, fmt.Errorf("conversation %s belongs to %s, not %s", conv.ID, *found.Workspace, workspace)
+		return nil, fmt.Errorf("conversation %s belongs to %s, not %s: %w", conv.ID, *found.Workspace, workspace, errSelection)
 	}
-	return &openConversation{id: conv.ID, turns: len(conv.Turns)}, nil
+	return &openConversation{id: conv.ID, turns: turnIDs(conv)}, nil
 }
 
 // selectLatest opens the workspace's conversation with the most recent
@@ -133,7 +153,7 @@ func selectLatest(ctx context.Context, api conversationAPI, workspace string) (*
 	if err != nil {
 		return nil, fmt.Errorf("load conversation %s: %w", latest, err)
 	}
-	return &openConversation{id: conv.ID, turns: len(conv.Turns)}, nil
+	return &openConversation{id: conv.ID, turns: turnIDs(conv)}, nil
 }
 
 // eachConversation calls visit for every listed conversation, following

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -57,6 +58,9 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	}
 	if open != nil {
 		opts = append(opts, tui.WithConversation(open.id, open.turns))
+	} else {
+		// An empty conversation: other conversations' turns stay out of the chat.
+		opts = append(opts, tui.WithConversation("", nil))
 	}
 	if flags.rounds.set {
 		opts = append(opts, tui.WithRounds(flags.rounds.value))
@@ -108,7 +112,7 @@ func chooseConversation(ctx context.Context, socket string, f startupFlags, work
 	open, err := selectConversation(ctx, cl, f, workspace)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		if f.conversation != "" {
+		if errors.Is(err, errSelection) {
 			return nil, 2
 		}
 		return nil, 1

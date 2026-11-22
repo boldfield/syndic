@@ -63,7 +63,7 @@ func header(d *driver) string {
 }
 
 func TestChatHeaderNamesTheOpenConversation(t *testing.T) {
-	d, _ := startRigWith(t, WithConversation("0123456789abcdef", 3))
+	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}))
 	if got, want := header(d), "conversation 01234567, 3 turns"; got != want {
 		t.Fatalf("first line of the chat = %q, want %q\n%s", got, want, d.app.View())
 	}
@@ -119,7 +119,7 @@ func TestSubmitWithoutRoundsSendsNone(t *testing.T) {
 
 // An opened conversation's id goes out on the first submit.
 func TestSubmitToOpenedConversation(t *testing.T) {
-	d, rec := startRigWith(t, WithConversation("not-in-journal", 2))
+	d, rec := startRigWith(t, WithConversation("not-in-journal", []string{"t1", "t2"}))
 	d.typeLine("q")
 	d.until("the request", func(string) bool { return len(rec.requests()) == 1 })
 	if r := rec.requests()[0]; r.ConversationID == nil || *r.ConversationID != "not-in-journal" {
@@ -141,4 +141,52 @@ func runTurn(t *testing.T, d *driver, input string) {
 	before := approved()
 	d.typeLine(input)
 	d.until("the turn to be approved", func(string) bool { return approved() > before })
+}
+
+// Two workspaces hold one conversation each on the same engine. An app started
+// on the first shows that conversation's earlier turn, under its header, and
+// nothing of the second.
+func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("ALPHA-ANSWER"), enginetest.Reply("BRAVO-ANSWER")},
+		"reviewer": {approve(), approve()},
+	})
+	paths := newPaths(t)
+	startServer(t, paths, h.Engine, h)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	start := func(opts ...Option) *driver {
+		d := &driver{t: t, app: NewApp(ctx, paths.Socket, opts...), msgs: make(chan tea.Msg, 1024)}
+		d.app.Update(resizeMsg(80, 24))
+		d.run(d.app.Init())
+		d.until("connected", func(string) bool { return d.app.state.ConnState == ConnStateConnected && d.strip() != "" })
+		return d
+	}
+	a := start(WithWorkDir("/ws/a"), WithConversation("", nil))
+	runTurn(t, a, "alpha question")
+	b := start(WithWorkDir("/ws/b"), WithConversation("", nil))
+	runTurn(t, b, "bravo question")
+	if a.app.conversationID == "" || a.app.conversationID == b.app.conversationID {
+		t.Fatalf("conversations a=%q b=%q, want two different ones", a.app.conversationID, b.app.conversationID)
+	}
+	var turns []string
+	for id := range a.app.state.Scope.Turns {
+		turns = append(turns, id)
+	}
+
+	re := start(WithWorkDir("/ws/a"), WithConversation(a.app.conversationID, turns))
+	re.until("the earlier answer", func(v string) bool { return strings.Contains(v, "ALPHA-ANSWER") })
+	v := re.app.View()
+	if strings.Contains(v, "BRAVO-ANSWER") {
+		t.Errorf("the other conversation's answer is shown:\n%s", v)
+	}
+	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns"; got != want {
+		t.Errorf("header = %q, want %q", got, want)
+	}
+
+	// An empty conversation started beside them shows neither answer.
+	fresh := start(WithWorkDir("/ws/c"), WithConversation("", nil))
+	if v := fresh.app.View(); strings.Contains(v, "ALPHA-ANSWER") || strings.Contains(v, "BRAVO-ANSWER") {
+		t.Errorf("an empty conversation shows other turns:\n%s", v)
+	}
 }

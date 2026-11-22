@@ -155,6 +155,22 @@ type State struct {
 	NextPreset          string // set by /mode: the preset of the next submit only
 	QuickInvalid        string // "quick: invalid <path>" when the project file cannot be used
 	ModeSubmissionID    string // submission id of the last submit that carried a /mode preset
+
+	// Scope limits which turns the chat shows to the open conversation's. It
+	// is nil when the app was not started on a conversation.
+	Scope *TurnScope
+}
+
+// TurnScope is the set of turns that belong to the open conversation.
+type TurnScope struct {
+	ConversationID string          // empty until the first submit creates the conversation
+	Turns          map[string]bool // turn ids in the conversation
+	Submissions    map[string]bool // submission ids this process sent
+}
+
+// inScope reports whether the chat may show the turn.
+func (s State) inScope(turnID string) bool {
+	return s.Scope == nil || s.Scope.Turns[turnID]
 }
 
 // NewState returns a fresh State.
@@ -197,7 +213,12 @@ func apply(s State, f wire.Frame) State {
 		var body wire.EvTurnSubmitted
 		if json.Unmarshal(f.Body, &body) == nil {
 			s = setTurnState(s, body.TurnID, "submitted")
-			s.CurrentTurn = body.TurnID
+			if sc := s.Scope; sc != nil && ((sc.ConversationID != "" && body.ConversationID == sc.ConversationID) || sc.Submissions[body.SubmissionID]) {
+				sc.Turns[body.TurnID] = true
+			}
+			if s.inScope(body.TurnID) {
+				s.CurrentTurn = body.TurnID
+			}
 			turns := copyMap(s.Turns)
 			turns[body.TurnID] = TurnInfo{
 				ID:              body.TurnID,

@@ -4,28 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
-	var subcommand string
-	var args []string
-
-	if len(os.Args) < 2 {
-		// Default to tui with no subcommand
-		subcommand = "tui"
-		args = []string{}
-	} else {
-		firstArg := os.Args[1]
-
-		// Check if it's a recognized subcommand
-		if isSubcommand(firstArg) {
-			subcommand = firstArg
-			args = os.Args[2:]
-		} else {
-			// If it's a flag or unrecognized, default to tui
-			subcommand = "tui"
-			args = os.Args[1:]
-		}
+	subcommand, args, ok := routeArgs(os.Args[1:])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", os.Args[1])
+		os.Exit(2)
 	}
 
 	switch subcommand {
@@ -59,6 +45,18 @@ func main() {
 	}
 }
 
-func isSubcommand(arg string) bool {
-	return arg == "probe" || arg == "conversations"
+// routeArgs picks the subcommand. No arguments, or arguments that start with
+// a flag, run the interactive command, which is also named tui. Any other
+// first argument that is not a subcommand is unknown.
+func routeArgs(args []string) (subcommand string, rest []string, ok bool) {
+	if len(args) == 0 {
+		return "tui", nil, true
+	}
+	switch first := args[0]; {
+	case first == "tui" || first == "probe" || first == "conversations":
+		return first, args[1:], true
+	case strings.HasPrefix(first, "-"):
+		return "tui", args, true
+	}
+	return "", nil, false
 }

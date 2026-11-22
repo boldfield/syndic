@@ -87,10 +87,11 @@ type App struct {
 	pScroll     int                       // first line shown while pScrolled
 
 	// Conversation startup options
-	conversationID string // the open conversation; empty until the first submit creates one
-	convTurns      int    // turns the open conversation holds
-	roundsIsSet    bool   // rounds was explicitly set via flag
-	rounds         int    // round limit for this process
+	conversationID string   // the open conversation; empty until the first submit creates one
+	convTurns      int      // turns the open conversation holds
+	openTurns      []string // turns the conversation held at start-up, oldest first
+	roundsIsSet    bool     // rounds was explicitly set via flag
+	rounds         int      // round limit for this process
 }
 
 // Option configures an App.
@@ -117,13 +118,20 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) { a.terminalCapabilities = caps }
 }
 
-// WithConversation opens the conversation id, which holds turns turns. The
-// caller has already resolved the id and checked its workspace; without this
-// option the first submit creates a conversation.
-func WithConversation(id string, turns int) Option {
+// WithConversation starts the app on the conversation id, which holds the
+// turns with the given ids, oldest first. The caller has already resolved the
+// id and checked its workspace. An empty id starts an empty conversation that
+// the first submit creates. The chat shows only this conversation's turns.
+func WithConversation(id string, turnIDs []string) Option {
 	return func(a *App) {
 		a.conversationID = id
-		a.convTurns = turns
+		a.convTurns = len(turnIDs)
+		a.openTurns = turnIDs
+		scope := &TurnScope{ConversationID: id, Turns: map[string]bool{}, Submissions: map[string]bool{}}
+		for _, t := range turnIDs {
+			scope.Turns[t] = true
+		}
+		a.state.Scope = scope
 	}
 }
 
@@ -539,6 +547,9 @@ func (a *App) enter() tea.Cmd {
 // send submits under a new submission id.
 func (a *App) send(sub submission) tea.Cmd {
 	sub.id = uuid.NewString()
+	if a.state.Scope != nil {
+		a.state.Scope.Submissions[sub.id] = true
+	}
 	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
 	if sub.preset != "" {
 		a.state.ModeSubmissionID = sub.id
@@ -585,6 +596,12 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	// The reply names the conversation the turn joined; later submits continue it.
 	if msg.conversationID != "" {
 		a.conversationID = msg.conversationID
+		if a.state.Scope != nil {
+			a.state.Scope.ConversationID = msg.conversationID
+		}
+	}
+	if a.state.Scope != nil {
+		a.state.Scope.Turns[msg.turnID] = true
 	}
 	a.convTurns++
 	a.input.SetValue("")
@@ -613,9 +630,23 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
-	if len(msg.status.TurnsOpen) > 0 {
+	open := ""
+	for _, id := range msg.status.TurnsOpen {
+		if a.state.inScope(id) {
+			open = id
+			break
+		}
+	}
+	if open == "" && len(a.openTurns) > 0 {
+		// Nothing of the conversation is open: show its latest turn.
+		last := a.openTurns[len(a.openTurns)-1]
+		if _, ok := a.state.Turns[last]; !ok {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, last))
+		}
+	}
+	if open != "" {
 		oldTurn := a.state.CurrentTurn
-		a.state.CurrentTurn = msg.status.TurnsOpen[0]
+		a.state.CurrentTurn = open
 		if oldTurn != a.state.CurrentTurn {
 			a.answerScrollRow = 0
 		}
@@ -884,7 +915,7 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
-	return a, nil
+	return a, a.syncTranscript()
 }
 
 // attemptDone reports whether the attempt has a final status.
