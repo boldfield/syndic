@@ -549,6 +549,10 @@ func (a *App) enter() tea.Cmd {
 	if a.roundsIsSet {
 		maxRounds = &a.rounds
 	}
+	var contextFrom *string
+	if a.state.ContextFrom != "" {
+		contextFrom = &a.state.ContextFrom
+	}
 	return a.send(submission{
 		input:            line,
 		preset:           a.state.NextPreset,
@@ -557,6 +561,7 @@ func (a *App) enter() tea.Cmd {
 		workspace:        a.workDir,
 		conversationID:   conversationID,
 		maxRounds:        maxRounds,
+		contextFromTurn:  contextFrom,
 	})
 }
 

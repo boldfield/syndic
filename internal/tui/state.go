@@ -72,6 +72,7 @@ type TurnInfo struct {
 	Round           int    // revisions started so far: one per revision_dispatched
 	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
 	InputRef        string // content ref of what the user typed, once the record says
+	ContextFrom     string // first earlier turn the turn's history included, once the record says
 }
 
 // AttemptInfo holds information about one attempt.
@@ -163,8 +164,9 @@ type State struct {
 	RoundLimit *int
 
 	// ContextFrom is the turn /trim set as the start of the context later
-	// submits see; earlier turns of the chat are not in context. Empty when
-	// nothing is trimmed.
+	// submits see, sent as their context_from_turn; earlier turns of the chat
+	// are not in context. Empty when this process set none, in which case
+	// the newest turn record's trim point holds.
 	ContextFrom string
 
 	// Scope limits which turns the chat shows to the open conversation's. It
@@ -688,6 +690,9 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	}
 	if turn.InputRef != nil {
 		ti.InputRef = *turn.InputRef
+	}
+	if turn.ContextFromTurn != nil {
+		ti.ContextFrom = *turn.ContextFromTurn
 	}
 	if turn.EstimatedPromptTokens > 0 && (final || ti.EstimatedTokens == 0) {
 		ti.EstimatedTokens = turn.EstimatedPromptTokens

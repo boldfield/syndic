@@ -359,3 +359,47 @@ func TestMergeTurnSoloHasNoRoundLimit(t *testing.T) {
 		t.Errorf("review MaxRounds = %d, want the turn's own 3", got)
 	}
 }
+
+// The newest turn record's trim point decides what is in context, and a trim
+// point the app holds for its next submit overrides it.
+func TestChatTrimPointComesFromTheNewestTurnRecord(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+	a := chatApp(t)
+	addTurn(a, "t1", 1, "approved", "one", "answer one")
+	addTurn(a, "t2", 2, "approved", "two", "answer two")
+	addTurn(a, "t3", 3, "approved", "three", "answer three")
+	for _, id := range []string{"t1", "t2", "t3"} {
+		approveBy(a, id, "rev")
+	}
+	merge := func(id, from string) {
+		a.state = MergeTurn(a.state, id, &wire.TurnReply{State: "approved", Mode: "review", Preset: "review", ContextFromTurn: &from, CandidateHash: a.state.Turns[id].CandidateHash}, chatNow)
+	}
+	marked := func() (n int) {
+		for _, l := range chatView(a) {
+			if strings.Contains(l, notInContext) {
+				n++
+			}
+		}
+		return n
+	}
+
+	merge("t3", "t2")
+	if n := marked(); n != 1 {
+		t.Errorf("trimmed from t2: %d turns marked, want 1", n)
+	}
+	if lineOf(t, chatView(a), notInContext) > lineOf(t, chatView(a), "you: two") {
+		t.Error("the marker is not on the first turn")
+	}
+
+	// An older turn's trim does not outlive a newer untrimmed turn.
+	merge("t2", "t1")
+	merge("t3", "t1")
+	if n := marked(); n != 0 {
+		t.Errorf("untrimmed newest turn: %d turns marked, want 0", n)
+	}
+
+	a.state.ContextFrom = "t3"
+	if n := marked(); n != 2 {
+		t.Errorf("held trim from t3: %d turns marked, want 2", n)
+	}
+}

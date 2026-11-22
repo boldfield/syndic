@@ -459,6 +459,10 @@ type TurnReply struct {
 	// MaxRounds is the round limit the turn was submitted with; absent for a
 	// turn that has no revision loop.
 	MaxRounds *int `json:"max_rounds,omitempty"`
+	// ContextFromTurn is the first earlier turn the turn's history included:
+	// the context_from_turn it was submitted with, or the conversation's first
+	// turn when nothing was trimmed. Absent for a turn with no history.
+	ContextFromTurn *string `json:"context_from_turn,omitempty"`
 }
 
 type TranscriptRequest struct {

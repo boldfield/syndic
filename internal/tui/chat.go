@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -54,23 +55,20 @@ func chatTurns(s State) []string {
 	return ids
 }
 
-// trimmedTurns is the set of turns before the trim point.
+// trimmedTurns is the set of turns before the trim point: the one this
+// process set for its next submit, else the one the newest turn that has a
+// history was submitted with.
 func trimmedTurns(s State, ids []string) map[string]bool {
 	out := map[string]bool{}
-	if s.ContextFrom == "" {
-		return out
+	from := s.ContextFrom
+	for i := len(ids) - 1; from == "" && i >= 0; i-- {
+		from = s.Turns[ids[i]].ContextFrom
 	}
-	found := false
-	for _, id := range ids {
-		if id == s.ContextFrom {
-			found = true
-		}
-	}
-	if !found {
+	if from == "" || !slices.Contains(ids, from) {
 		return out
 	}
 	for _, id := range ids {
-		if id == s.ContextFrom {
+		if id == from {
 			break
 		}
 		out[id] = true
