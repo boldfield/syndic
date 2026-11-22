@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,17 @@ func init() {
 	cover(designDocsPara, "a pull request modifying both open-questions.md and a protected doc fails the design immutability check", "TestDesignDocs_MixedChangeFails")
 	cover(designDocsPara, "files similar to open-questions.md are caught as protected documents", "TestDesignDocs_SimilarFilesFail")
 	cover(designDocsPara, "the design immutability check fails when git diff fails due to unrelated histories", "TestDesignDocs_DiffFailsUnrelatedHistories")
+	cover(designDocsPara, "a pull request adding one new design document passes the design immutability check", "TestDesignDocs_RatifyOneAddedPasses")
+	cover(designDocsPara, "a pull request adding two new design documents passes the design immutability check", "TestDesignDocs_RatifyTwoAddedPasses")
+	cover(designDocsPara, "a pull request adding a design document and changing open-questions.md passes the design immutability check", "TestDesignDocs_RatifyWithOpenQuestionsPasses")
+	cover(designDocsPara, "a pull request adding a design document and a file outside docs/design fails and says so", "TestDesignDocs_RatifyWithOutsideFileFails")
+	cover(designDocsPara, "a pull request modifying an existing design document fails, alone or with an added one", "TestDesignDocs_ModifyExistingFails")
+	cover(designDocsPara, "a pull request deleting an existing design document fails", "TestDesignDocs_DeleteExistingFails")
+	cover(designDocsPara, "a pull request renaming an existing design document fails", "TestDesignDocs_RenameExistingFails")
+	cover(designDocsPara, "a pull request adding a design document in a subdirectory passes", "TestDesignDocs_RatifySubdirPasses")
+	cover(designDocsPara, "a pull request changing only files outside docs/design passes, including under a nested docs/design path", "TestDesignDocs_OutsideOnlyPasses")
+	cover(designDocsPara, "design documents with special characters in their names are still protected", "TestDesignDocs_SpecialNamesFail")
+	cover(designDocsPara, "open-questions.md of any status is exempt next to outside changes", "TestDesignDocs_OpenQuestionsAnyStatusExempt")
 }
 
 func TestDesignDocs_ProtectedDocsFail(t *testing.T) {
@@ -376,4 +388,224 @@ func runCmd(t *testing.T, dir string, args ...string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Command failed: %v: %v", args, err)
 	}
+}
+
+// designCheck builds a repository whose origin/main holds base (path ->
+// content), applies change on a feature branch (a nil content deletes the
+// path), commits, and runs the real script. It returns the combined output
+// and whether the script exited zero.
+func designCheck(t *testing.T, base map[string]string, change func(repo string)) (string, bool) {
+	t.Helper()
+	repo := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bare, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bare, "git", "init", "--bare")
+	initGitRepo(t, repo)
+	runCmd(t, repo, "git", "remote", "add", "origin", bare)
+	for path, content := range base {
+		writeDesignFile(t, repo, path, content)
+	}
+	writeDesignFile(t, repo, "README", "readme\n")
+	runCmd(t, repo, "git", "add", ".")
+	runCmd(t, repo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, repo, "git", "push", "origin", "HEAD:main")
+	runCmd(t, repo, "git", "checkout", "-b", "feature")
+	change(repo)
+	runCmd(t, repo, "git", "add", "-A")
+	runCmd(t, repo, "git", "commit", "-m", "Change")
+
+	cmd := exec.Command("bash", filepath.Join(repoRoot(), "scripts/check-design-immutability.sh"))
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+	out, err := cmd.CombinedOutput()
+	return string(out), err == nil
+}
+
+func writeDesignFile(t *testing.T, repo, path, content string) {
+	t.Helper()
+	full := filepath.Join(repo, path)
+	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+		t.Fatalf("Failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write %s: %v", path, err)
+	}
+}
+
+func expectDesignPass(t *testing.T, out string, ok bool) {
+	t.Helper()
+	if !ok {
+		t.Fatalf("Expected script to pass but it failed:\n%s", out)
+	}
+}
+
+func expectDesignFail(t *testing.T, out string, ok bool, want ...string) {
+	t.Helper()
+	if ok {
+		t.Fatalf("Expected script to fail but it passed:\n%s", out)
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("Expected output to contain %q, got:\n%s", w, out)
+		}
+	}
+}
+
+const (
+	existingDoc = "docs/design/existing.md"
+	oqDoc       = "docs/design/open-questions.md"
+)
+
+var existingBase = map[string]string{existingDoc: "# Existing\n", oqDoc: "# Questions\n"}
+
+func TestDesignDocs_RatifyOneAddedPasses(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_RatifyTwoAddedPasses(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, "docs/design/v7.md", "# v7\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_RatifyWithOpenQuestionsPasses(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, oqDoc, "# Questions\nmore\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_RatifyWithOutsideFileFails(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignFail(t, out, ok, "A docs/design/v6.md", "ratification pull request must contain only design documents")
+
+	out, ok = designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, "newfile.txt", "x\n")
+	})
+	expectDesignFail(t, out, ok, "A docs/design/v6.md")
+}
+
+func TestDesignDocs_ModifyExistingFails(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, existingDoc, "# Existing\nmodified\n")
+	})
+	expectDesignFail(t, out, ok, "M docs/design/existing.md",
+		"ERROR: Design documents cannot be modified in implementation PRs.",
+		"Only docs/design/open-questions.md may be changed.")
+
+	out, ok = designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, existingDoc, "# Existing\nmodified\n")
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+	})
+	expectDesignFail(t, out, ok, "M docs/design/existing.md")
+}
+
+func TestDesignDocs_DeleteExistingFails(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		if err := os.Remove(filepath.Join(r, existingDoc)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	expectDesignFail(t, out, ok, "D docs/design/existing.md")
+}
+
+func TestDesignDocs_RenameExistingFails(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		runCmd(t, r, "git", "mv", existingDoc, "docs/design/renamed.md")
+	})
+	expectDesignFail(t, out, ok, "D docs/design/existing.md")
+}
+
+func TestDesignDocs_RatifySubdirPasses(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "docs/design/sub/v6.md", "# v6\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_OutsideOnlyPasses(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignPass(t, out, ok)
+
+	out, ok = designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, "x/docs/design/a.md", "# a\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_SpecialNamesFail(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"docs/design/caf\u00e9.md", "docs/design/c\"d.md", "docs/design/a\tb.md"} {
+		base := map[string]string{name: "# x\n", oqDoc: "# Questions\n"}
+		out, ok := designCheck(t, base, func(r string) {
+			writeDesignFile(t, r, name, "# x\nmodified\n")
+			writeDesignFile(t, r, "README", "changed\n")
+		})
+		expectDesignFail(t, out, ok, "M "+name)
+
+		out, ok = designCheck(t, base, func(r string) {
+			if err := os.Remove(filepath.Join(r, name)); err != nil {
+				t.Fatal(err)
+			}
+		})
+		expectDesignFail(t, out, ok, "D "+name)
+	}
+}
+
+func TestDesignDocs_OpenQuestionsAnyStatusExempt(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, oqDoc, "# Questions\nmore\n")
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignPass(t, out, ok)
+
+	out, ok = designCheck(t, existingBase, func(r string) {
+		if err := os.Remove(filepath.Join(r, oqDoc)); err != nil {
+			t.Fatal(err)
+		}
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignPass(t, out, ok)
+
+	base := map[string]string{existingDoc: "# Existing\n"}
+	out, ok = designCheck(t, base, func(r string) {
+		writeDesignFile(t, r, oqDoc, "# Questions\n")
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignPass(t, out, ok)
+}
+
+func TestDesignDocs_ModifyAddAndOutsideListsAll(t *testing.T) {
+	t.Parallel()
+	out, ok := designCheck(t, existingBase, func(r string) {
+		writeDesignFile(t, r, existingDoc, "# Existing\nmodified\n")
+		writeDesignFile(t, r, "docs/design/v6.md", "# v6\n")
+		writeDesignFile(t, r, "README", "changed\n")
+	})
+	expectDesignFail(t, out, ok, "M docs/design/existing.md", "A docs/design/v6.md",
+		"ratification pull request must contain only design documents")
 }
