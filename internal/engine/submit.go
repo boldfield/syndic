@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport"
@@ -21,6 +22,8 @@ type openTurn struct {
 	mode            string
 	author          string
 	input           string
+	history         *history.Document // frozen at submit; no turns when none
+	contextHash     string            // hash of the frozen history; empty when none
 	eff             config.Effective
 	attemptDeadline time.Duration
 	turnDeadline    time.Time
@@ -54,10 +57,14 @@ type openTurn struct {
 func submissionHash(req wire.SubmitRequest) (string, error) {
 	body, err := json.Marshal(struct {
 		AllowProvisional *bool   `json:"allow_provisional"`
+		ContextFromTurn  *string `json:"context_from_turn"`
+		ConversationID   *string `json:"conversation_id"`
 		Input            string  `json:"input"`
+		MaxRounds        *int    `json:"max_rounds"`
 		Preset           *string `json:"preset"`
 		QuickProfile     *string `json:"quick_profile"`
-	}{req.AllowProvisional, req.Input, req.Preset, req.QuickProfile})
+		Workspace        string  `json:"workspace"`
+	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
 	if err != nil {
 		return "", err
 	}
@@ -104,12 +111,21 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, err
 	}
 	if found {
-		if prior.SubmissionHash != hash {
+		same := prior.SubmissionHash == hash
+		if !same {
+			if same, err = replaysLegacy(req, prior.SubmissionHash); err != nil {
+				return wire.SubmitReply{}, err
+			}
+		}
+		if !same {
 			conflict := refusal(wire.ErrorCodeSubmissionConflict)
 			conflict.TurnID = strPtr(prior.ID)
 			return wire.SubmitReply{}, conflict
 		}
-		reply := wire.SubmitReply{TurnID: prior.ID, Preset: prior.Preset}
+		reply := wire.SubmitReply{TurnID: prior.ID, Preset: prior.Preset, ConversationID: prior.ConversationID}
+		if prior.ContextHash != nil {
+			reply.ContextHash = *prior.ContextHash
+		}
 		stored, ok, err := readBudget(prior)
 		if err != nil {
 			return wire.SubmitReply{}, err
@@ -200,28 +216,64 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
-	rec, err := e.projectBudget(eff, req.Input)
-	if err != nil {
-		return wire.SubmitReply{}, err
-	}
-	budgetJSON, err := json.Marshal(rec)
-	if err != nil {
-		return wire.SubmitReply{}, err
-	}
-
-	if eff.Deadlines.Provisional != nil && *eff.Deadlines.Provisional &&
-		(req.AllowProvisional == nil || !*req.AllowProvisional) {
-		return wire.SubmitReply{}, refusal(wire.ErrorCodeProvisional)
-	}
-
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
 	turnDeadline := e.clock.Now().UTC().Add(turn)
 
-	var turnID string
+	var (
+		turnID, convID, contextHash string
+		doc                         *history.Document
+		rec                         budgetRecord
+	)
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
+		convID, err = tx.AdoptConversation(req.ConversationID, req.Workspace)
+		switch {
+		case errors.Is(err, journal.ErrNoSuchContent):
+			unknown := refusal(wire.ErrorCodeNotFound)
+			unknown.Detail = strPtr("conversation_unknown")
+			return unknown
+		case errors.Is(err, journal.ErrWorkspaceMismatch):
+			return refusal(wire.ErrorCodeWorkspaceMismatch)
+		case err != nil:
+			return err
+		}
+		if req.ConversationID == nil {
+			if err := emit("", wire.EventKindConversationCreated, wire.EvConversationCreated{ConversationID: convID}); err != nil {
+				return err
+			}
+		}
+		// The history is rendered once, here, and admission, the stored
+		// document and the context hash are all taken from these bytes.
+		if doc, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
+			return err
+		}
+		tainted, err := tx.ConversationFileTainted(convID)
+		if err != nil {
+			return err
+		}
+		if rec, err = e.projectBudget(eff, req.Input, doc); err != nil {
+			return err
+		}
+		budgetJSON, err := json.Marshal(rec)
+		if err != nil {
+			return err
+		}
+		if eff.Deadlines.Provisional != nil && *eff.Deadlines.Provisional &&
+			(req.AllowProvisional == nil || !*req.AllowProvisional) {
+			return refusal(wire.ErrorCodeProvisional)
+		}
+		var ctxHash *string
+		if hash, bytes := frozenHistory(doc); bytes != nil {
+			if err := tx.StoreHistoryDocument(hash, bytes); err != nil {
+				return err
+			}
+			contextHash, ctxHash = hash, &hash
+		}
 		turnID, err = tx.CreateEngineTurn(journal.TurnParams{
+			ConversationID:    convID,
+			ContextHash:       ctxHash,
+			FileTainted:       tainted,
 			RunID:             e.runID,
 			Mode:              eff.Preset.Mode,
 			Preset:            eff.PresetName,
@@ -241,6 +293,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			SubmissionID:    req.SubmissionID,
 			Preset:          eff.PresetName,
 			EstimatedTokens: int64(rec.Projected),
+			ConversationID:  convID,
 		}
 		if eff.QuickProfile != "" {
 			submitted.QuickProfile = strPtr(eff.QuickProfile)
@@ -251,6 +304,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return emit(turnID, wire.EventKindTurnState, wire.EvTurnState{TurnID: turnID, State: StateSubmitted})
 	})
 	if err != nil {
+		if we, ok := asWireError(err); ok {
+			return wire.SubmitReply{}, we
+		}
 		return wire.SubmitReply{}, fmt.Errorf("engine: submit: %w", err)
 	}
 
@@ -259,6 +315,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		mode:            eff.Preset.Mode,
 		author:          eff.Preset.Author,
 		input:           req.Input,
+		history:         doc,
+		contextHash:     contextHash,
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
@@ -273,7 +331,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected)}
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), ConversationID: convID, ContextHash: contextHash}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}

@@ -391,3 +391,109 @@ func (tx *Tx) GetMostRecentConversationForWorkspace(workspace string) (*Conversa
 
 	return c, nil
 }
+
+// AdoptConversation resolves the conversation a submit belongs to inside the
+// submit's transaction. A nil id creates one with the given workspace (empty
+// means none). An existing id must name a conversation exactly, else the
+// error satisfies errors.Is(err, ErrNoSuchContent). A conversation with no
+// workspace adopts a non-empty one; one that has a workspace keeps it, and a
+// different non-empty workspace is ErrWorkspaceMismatch. An empty workspace
+// claims nothing.
+func (tx *Tx) AdoptConversation(id *string, workspace string) (string, error) {
+	var ws *string
+	if workspace != "" {
+		ws = &workspace
+	}
+	if id == nil {
+		return tx.CreateConversation(ws)
+	}
+	var current sql.NullString
+	err := tx.tx.QueryRow(`SELECT workspace FROM conversations WHERE id = ?`, *id).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("conversation %q: %w", *id, ErrNoSuchContent)
+	}
+	if err != nil {
+		return "", fmt.Errorf("query conversation: %w", err)
+	}
+	if ws != nil {
+		if err := tx.SetConversationWorkspace(*id, workspace); err != nil {
+			return "", err
+		}
+	}
+	return *id, nil
+}
+
+// HistoryTurn is one finished turn of a conversation as history is built
+// from it: the user's input and the answer the user was shown.
+type HistoryTurn struct {
+	ID    string
+	State string
+	Mode  string
+	Input string
+	// Answer is the frozen candidate, or for a solo turn the author's reply.
+	// It is empty for a turn that ended without one.
+	Answer string
+}
+
+// ConversationHistory returns the conversation's finished turns, oldest
+// first. A turn that is not terminal is not history yet.
+func (tx *Tx) ConversationHistory(conversationID string) ([]HistoryTurn, error) {
+	rows, err := tx.tx.Query(`
+		SELECT t.id, t.terminal_state, t.mode,
+			COALESCE((SELECT m.content FROM messages m
+				WHERE m.turn_id = t.id AND m.phase = 'author' AND m.sender = 'user'
+				ORDER BY m.sequence LIMIT 1), ''),
+			COALESCE((SELECT c.content FROM candidates c WHERE c.id = t.candidate_id),
+				(SELECT a.text FROM attempts a
+					WHERE a.turn_id = t.id AND a.phase = 'author' AND a.text IS NOT NULL
+					ORDER BY a.rowid DESC LIMIT 1), '')
+		FROM turns t
+		WHERE t.conversation_id = ? AND t.terminal_state IS NOT NULL
+		ORDER BY t.rowid ASC
+	`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversation history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var turns []HistoryTurn
+	for rows.Next() {
+		var h HistoryTurn
+		if err := rows.Scan(&h.ID, &h.State, &h.Mode, &h.Input, &h.Answer); err != nil {
+			return nil, fmt.Errorf("scan history turn: %w", err)
+		}
+		turns = append(turns, h)
+	}
+	return turns, rows.Err()
+}
+
+// ConversationFileTainted reports whether any turn of the conversation is
+// file-tainted. It reads every turn, not the history a submit includes, so a
+// trim cannot clear it.
+func (tx *Tx) ConversationFileTainted(conversationID string) (bool, error) {
+	var tainted bool
+	if err := tx.tx.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM turns WHERE conversation_id = ? AND file_tainted)
+	`, conversationID).Scan(&tainted); err != nil {
+		return false, fmt.Errorf("query conversation taint: %w", err)
+	}
+	return tainted, nil
+}
+
+// StoreHistoryDocument stores a frozen history document under its hash. The
+// same hash stored again is a no-op.
+func (tx *Tx) StoreHistoryDocument(hash string, document []byte) error {
+	if _, err := tx.tx.Exec(`INSERT OR IGNORE INTO history_documents (hash, document) VALUES (?, ?)`, hash, document); err != nil {
+		return fmt.Errorf("store history document: %w", err)
+	}
+	return nil
+}
+
+// HistoryDocument returns the document stored under hash.
+func (s *Store) HistoryDocument(hash string) ([]byte, error) {
+	var doc []byte
+	err := s.db.conn.QueryRow(`SELECT document FROM history_documents WHERE hash = ?`, hash).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("history document %s: %w", hash, ErrNoSuchContent)
+	}
+	return doc, err
+}

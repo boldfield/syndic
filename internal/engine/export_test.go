@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/wire"
 	"os"
 	"testing"
 	"time"
@@ -66,4 +67,10 @@ func SetRefereeIdentities(f func(*config.Roster) []RefereeIdentity) (restore fun
 	old := refereeIdentities
 	refereeIdentities = f
 	return func() { refereeIdentities = old }
+}
+
+// LegacySubmissionHash is the four-member hash turns were journaled under
+// before conversations.
+func LegacySubmissionHash(req wire.SubmitRequest) (string, error) {
+	return legacySubmissionHash(req)
 }

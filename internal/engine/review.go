@@ -85,6 +85,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			ManifestHash:    e.manifestHash,
 			TurnID:          t.id,
 			AuthorAttemptID: attemptID,
+			ContextHash:     t.contextHash,
 			Content:         []byte(res.Text),
 		})
 		if err != nil {
@@ -237,6 +238,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 			CandidateHash: t.candidateHash,
 			AttemptID:     attemptID,
 			Delimiter:     delimiter,
+			History:       t.history,
 		})
 		if err != nil {
 			return err
@@ -330,6 +332,7 @@ func (e *Engine) newDelimiter(t *openTurn) (string, error) {
 			CandidateHash: t.candidateHash,
 			AttemptID:     "pending",
 			Delimiter:     delimiter,
+			History:       t.history,
 		})
 		if errors.Is(err, prompt.ErrDelimiterCollision) {
 			continue
@@ -380,6 +383,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 		CandidateHash: t.candidateHash,
 		AttemptID:     originalDispatch.attemptID,
 		Delimiter:     delimiter,
+		History:       t.history,
 	}
 	msgs, err := prompt.Repair(originalReviewInput, originalOutput, repairAttemptID)
 	if err != nil {

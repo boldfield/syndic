@@ -8,6 +8,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/budget"
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
@@ -179,7 +180,7 @@ func budgetError(kind string) *wire.Error {
 
 // projectBudget runs the submit-time budget checks and returns the record to
 // store on the turn.
-func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord, error) {
+func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document) (budgetRecord, error) {
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
@@ -223,7 +224,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.Author(input), authorOut); err != nil {
+	if err := fits(author, prompt.AuthorWithHistory(doc, input), authorOut); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -235,6 +236,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord
 			CandidateHash: standInHash,
 			AttemptID:     standInToken,
 			Delimiter:     standInToken,
+			History:       doc,
 		}
 		delivery := prompt.DeliveryInput{
 			TerminalState:  StateIncomplete,
