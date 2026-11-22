@@ -184,6 +184,7 @@ type CapabilityRecord struct {
 	OverLength               string // "rejected:context", "rejected:other", "accepted_whole", "markers_missing", "errored", "not_run:no_calibration", "not_run:no_context"
 	OverLengthClassifier     string // the classification rule describing how rejections are classified by status and body
 	OverLengthFinishReason   string // the finish reason from the over-length response (empty if no response)
+	OverLengthDetail         string // the server's refusal message (scrubbed, at most 200 bytes) when the over-length request was refused
 	LatencyMillis            *int
 	ToolRestrictions         []string
 	ServerVersion            string
