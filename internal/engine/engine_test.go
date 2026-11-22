@@ -842,3 +842,72 @@ func TestStatusSurfacesRetryCommand(t *testing.T) {
 		t.Errorf("RetryCommand = %q, want to include '--roster' flag", cmd)
 	}
 }
+
+func TestSubmissionHashIncludesConversationAndMaxRounds(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, soloScript)
+	release := h.Hold("author")
+
+	// Create a base request with workspace, conversation_id, context_from_turn, and max_rounds
+	baseReq := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "question",
+		Preset:       strPtr("solo"),
+		Workspace:    "/home/user",
+	}
+
+	// Submit the base request
+	first, err := h.Engine.Submit(baseReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify ConversationID is populated in the reply
+	if first.ConversationID == "" {
+		t.Fatal("ConversationID should be populated in reply")
+	}
+
+	h.WaitTurnState(first.TurnID, engine.StateAuthorDispatched)
+
+	// Same id and content should replay the turn
+	again, err := h.Engine.Submit(baseReq)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if again.TurnID != first.TurnID {
+		t.Fatalf("retry should return same turn, got %s vs %s", again.TurnID, first.TurnID)
+	}
+
+	// Same id but different workspace should be a submission conflict
+	conflictReq := baseReq
+	conflictReq.Workspace = "/different/workspace"
+	_, err = h.Engine.Submit(conflictReq)
+	we := wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+	if we.TurnID == nil || *we.TurnID != first.TurnID {
+		t.Fatalf("conflict should reference original turn")
+	}
+
+	// Same id but different max_rounds should be a submission conflict
+	maxRoundsReq := baseReq
+	maxRounds := 3
+	maxRoundsReq.MaxRounds = &maxRounds
+	_, err = h.Engine.Submit(maxRoundsReq)
+	we = wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+	if we.TurnID == nil || *we.TurnID != first.TurnID {
+		t.Fatalf("conflict should reference original turn")
+	}
+
+	// Same id but different conversation_id should be a submission conflict
+	convReq := baseReq
+	convID := "some-other-conversation"
+	convReq.ConversationID = &convID
+	_, err = h.Engine.Submit(convReq)
+	we = wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+	if we.TurnID == nil || *we.TurnID != first.TurnID {
+		t.Fatalf("conflict should reference original turn")
+	}
+
+	release()
+	h.WaitTurnState(first.TurnID, engine.StateSoloComplete)
+}
+
+func strPtr(s string) *string { return &s }

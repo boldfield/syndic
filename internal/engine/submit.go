@@ -54,10 +54,14 @@ type openTurn struct {
 func submissionHash(req wire.SubmitRequest) (string, error) {
 	body, err := json.Marshal(struct {
 		AllowProvisional *bool   `json:"allow_provisional"`
+		ContextFromTurn  *string `json:"context_from_turn"`
+		ConversationID   *string `json:"conversation_id"`
 		Input            string  `json:"input"`
+		MaxRounds        *int    `json:"max_rounds"`
 		Preset           *string `json:"preset"`
 		QuickProfile     *string `json:"quick_profile"`
-	}{req.AllowProvisional, req.Input, req.Preset, req.QuickProfile})
+		Workspace        string  `json:"workspace"`
+	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
 	if err != nil {
 		return "", err
 	}
@@ -109,7 +113,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			conflict.TurnID = strPtr(prior.ID)
 			return wire.SubmitReply{}, conflict
 		}
-		reply := wire.SubmitReply{TurnID: prior.ID, Preset: prior.Preset}
+		reply := wire.SubmitReply{TurnID: prior.ID, Preset: prior.Preset, ConversationID: prior.ConversationID}
 		stored, ok, err := readBudget(prior)
 		if err != nil {
 			return wire.SubmitReply{}, err
@@ -119,6 +123,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		if prior.QuickProfile != "" {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
+		}
+		if prior.ContextHash != nil {
+			reply.ContextHash = *prior.ContextHash
 		}
 		return reply, nil
 	}
@@ -214,13 +221,31 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, refusal(wire.ErrorCodeProvisional)
 	}
 
+	maxRoundsInEffect := eff.Revision.MaxRounds
+	maxRoundsCeiling := eff.Revision.MaxRoundsCeiling
+	if req.MaxRounds != nil {
+		if *req.MaxRounds < 0 || (maxRoundsCeiling != nil && *req.MaxRounds > *maxRoundsCeiling) {
+			bad := refusal(wire.ErrorCodeMaxRounds)
+			if maxRoundsCeiling != nil {
+				bad.Ceiling = maxRoundsCeiling
+			}
+			return wire.SubmitReply{}, bad
+		}
+		maxRoundsInEffect = req.MaxRounds
+	}
+
 	attempt := eff.Deadlines.Attempt.Duration
-	turn := eff.Deadlines.Turn.Duration
-	turnDeadline := e.clock.Now().UTC().Add(turn)
+	turnDuration := eff.Deadlines.Turn.Duration
+	turnDeadline := e.clock.Now().UTC().Add(turnDuration)
 
 	var turnID string
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
+		convID := ""
+		if req.ConversationID != nil {
+			convID = *req.ConversationID
+		}
+
 		turnID, err = tx.CreateEngineTurn(journal.TurnParams{
 			RunID:             e.runID,
 			Mode:              eff.Preset.Mode,
@@ -229,9 +254,12 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			SubmissionID:      req.SubmissionID,
 			SubmissionHash:    hash,
 			AttemptDeadlineMS: attempt.Milliseconds(),
-			TurnDeadlineMS:    turn.Milliseconds(),
+			TurnDeadlineMS:    turnDuration.Milliseconds(),
 			TurnDeadline:      turnDeadline,
 			BudgetJSON:        budgetJSON,
+			ConversationID:    convID,
+			MaxRoundsInEffect: maxRoundsInEffect,
+			MaxRoundsCeiling:  maxRoundsCeiling,
 		})
 		if err != nil {
 			return err
@@ -254,6 +282,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, fmt.Errorf("engine: submit: %w", err)
 	}
 
+	turn, fetchErr := e.store.GetTurn(turnID)
+	if fetchErr != nil {
+		return wire.SubmitReply{}, fmt.Errorf("engine: get turn: %w", fetchErr)
+	}
+
 	t := &openTurn{
 		id:              turnID,
 		mode:            eff.Preset.Mode,
@@ -273,9 +306,12 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected)}
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), ConversationID: turn.ConversationID}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
+	}
+	if turn.ContextHash != nil {
+		reply.ContextHash = *turn.ContextHash
 	}
 	return reply, nil
 }
