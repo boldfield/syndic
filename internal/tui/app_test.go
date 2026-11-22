@@ -280,14 +280,17 @@ func TestRegionsAndTabs(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("view has %d lines, want 24", len(lines))
 	}
-	if !strings.Contains(lines[0], "idle") || !strings.HasPrefix(lines[0], "[") {
-		t.Errorf("strip region = %q, want [<preset>] [idle] ...", lines[0])
+	if !strings.Contains(lines[0], "chat") {
+		t.Errorf("line 0 (tab bar) = %q, want tab names", lines[0])
 	}
 	if !strings.Contains(lines[1], "no turn yet") {
-		t.Errorf("tab region = %q", lines[1])
+		t.Errorf("line 1 (tab content) = %q, want 'no turn yet'", lines[1])
 	}
-	if !strings.HasPrefix(lines[23], "> ") {
-		t.Errorf("input region = %q", lines[23])
+	if !strings.HasPrefix(lines[22], ">") {
+		t.Errorf("line 22 (input) = %q, want input prompt", lines[22])
+	}
+	if !strings.Contains(lines[23], "idle") || !strings.HasPrefix(lines[23], "[") {
+		t.Errorf("line 23 (strip/status) = %q, want [<preset>] [idle] ...", lines[23])
 	}
 }
 

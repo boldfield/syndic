@@ -84,9 +84,12 @@ func (d *driver) until(what string, cond func(view string) bool) {
 
 // strip is the status strip line of the current View: the first line below the banners.
 func (d *driver) strip() string {
-	for _, l := range strings.Split(d.app.View(), "\n") {
-		if strings.HasPrefix(l, "[") || strings.HasPrefix(l, "engine: connecting") {
-			return l
+	lines := strings.Split(d.app.View(), "\n")
+	if len(lines) > 0 {
+		// The status line is the last line, which contains preset/state info
+		last := lines[len(lines)-1]
+		if strings.HasPrefix(last, "[") || strings.HasPrefix(last, "engine: connecting") {
+			return last
 		}
 	}
 	return ""
