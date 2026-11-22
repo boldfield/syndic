@@ -570,6 +570,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				repair = true
 			}
 		}
+
 		if endState == "" {
 			return nil
 		}

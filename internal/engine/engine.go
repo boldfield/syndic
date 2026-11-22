@@ -34,6 +34,7 @@ const (
 	StateAuthorDispatched    = "author_dispatched"
 	StateCandidateFrozen     = "candidate_frozen"
 	StateReviewersDispatched = "reviewers_dispatched"
+	StateRevisionDispatched  = "revision_dispatched"
 	StateApproved            = "approved"
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
@@ -64,10 +65,12 @@ const (
 
 // Terminal reasons.
 const (
-	reasonSoloOK       = "solo_ok"
-	reasonAuthorFailed = "author_failed:"
-	reasonAllApproved  = "all_approved"
-	reasonCancelled    = "cancelled"
+	reasonSoloOK            = "solo_ok"
+	reasonAuthorFailed      = "author_failed:"
+	reasonAllApproved       = "all_approved"
+	reasonCancelled         = "cancelled"
+	reasonRevisionUnchanged = "revision_unchanged"
+	reasonRoundsExhausted   = "rounds_exhausted"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
