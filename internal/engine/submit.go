@@ -157,6 +157,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		if ok {
 			reply.EstimatedTokens = int64(stored.Projected)
+			reply.WorstCaseEstimatedTokens = int64(stored.WorstCaseProjected)
 		}
 		if prior.QuickProfile != "" {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
@@ -370,7 +371,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), ConversationID: convID, ContextHash: contextHash}
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), WorstCaseEstimatedTokens: int64(rec.WorstCaseProjected), ConversationID: convID, ContextHash: contextHash}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}

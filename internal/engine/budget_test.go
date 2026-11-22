@@ -743,10 +743,10 @@ func roundCostFromBuilders(t *testing.T, round int) int {
 	open := make([]prompt.OpenBlockForRevision, round)
 	for i := range open {
 		open[i] = prompt.OpenBlockForRevision{
-			BlockID:  "block" + strconv.Itoa(i),
+			BlockID:  "reviewer-" + strconv.Itoa(i) + "-" + stand(reviewerOut),
 			Severity: "SEVERE",
-			Evidence: stand(reviewerOut / 2),
-			Remedy:   stand(reviewerOut - reviewerOut/2),
+			Evidence: "x",
+			Remedy:   "x",
 		}
 	}
 	in := prompt.ReviewerRevisionInput{
@@ -762,6 +762,28 @@ func roundCostFromBuilders(t *testing.T, round int) int {
 		t.Fatal(err)
 	}
 	return estimate(authorMsgs) + authorOut + estimate(review) + reviewerOut + estimate(repair) + reviewerOut
+}
+
+// deliveryDeltaFromBuilders is how much more the terminal delivery costs with
+// one ID-heavy block per reviewer per round (round zero included) than with
+// none, over the author and the reviewer that receive it.
+func deliveryDeltaFromBuilders(t *testing.T, maxRounds int) int {
+	t.Helper()
+	const reviewerOut = 2048
+	stand := func(n int) string { return strings.Repeat("x", budget.StandInBytes(n, testBytesPerToken)) }
+	in := prompt.DeliveryInput{
+		TerminalState:   engine.StateIncomplete,
+		TerminalReason:  "block:" + strings.Repeat("0", 32),
+		CandidateHash:   strings.Repeat("0", 64),
+		ReviewerOutputs: []prompt.ReviewerOutput{{Participant: "reviewer", Output: stand(reviewerOut)}},
+	}
+	bare := estimate(prompt.Delivery(in))
+	for i := 0; i <= maxRounds; i++ {
+		in.OpenBlocks = append(in.OpenBlocks, prompt.OpenBlock{
+			BlockID: "reviewer-" + strconv.Itoa(i) + "-" + stand(reviewerOut), State: "open", Severity: "SEVERE", Evidence: "x", Remedy: "x",
+		})
+	}
+	return 2 * (estimate(prompt.Delivery(in)) - bare)
 }
 
 func worstCaseFor(t *testing.T, maxRounds int) recordView {
@@ -791,8 +813,8 @@ func TestBudgetWorstCaseMatchesRevisionBuilders(t *testing.T) {
 		if rec.Projected != base.Projected {
 			t.Fatalf("max_rounds=%d: projected=%d, want first-round %d", n, rec.Projected, base.Projected)
 		}
-		if rec.WorstCaseProjected != want {
-			t.Fatalf("max_rounds=%d: worst_case_projected=%d, want %d", n, rec.WorstCaseProjected, want)
+		if got := want + deliveryDeltaFromBuilders(t, n); rec.WorstCaseProjected != got {
+			t.Fatalf("max_rounds=%d: worst_case_projected=%d, want %d", n, rec.WorstCaseProjected, got)
 		}
 	}
 }
@@ -825,5 +847,31 @@ func TestBudgetWorstCaseCountsHistory(t *testing.T) {
 	// Three replays of the history: the author's, and the review and the repair.
 	if min := 3 * len(long) / 4; gotRound-freshRound < min {
 		t.Fatalf("revision round with history adds %d, without %d; want at least %d more", gotRound, freshRound, min)
+	}
+}
+
+// The submit reply carries the worst case beside the first-round figure, and
+// a replay of the same submission repeats both.
+func TestBudgetSubmitReplyReportsWorstCase(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, reviewScripts(approveStep()))
+	two := 2
+	req := wire.SubmitRequest{SubmissionID: "s", Input: testInput, MaxRounds: &two}
+	reply, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := budgetOf(t, h, reply.TurnID)
+	if reply.EstimatedTokens != int64(rec.Projected) || reply.WorstCaseEstimatedTokens != int64(rec.WorstCaseProjected) {
+		t.Fatalf("reply reports %d / %d, record holds %d / %d", reply.EstimatedTokens, reply.WorstCaseEstimatedTokens, rec.Projected, rec.WorstCaseProjected)
+	}
+	if reply.WorstCaseEstimatedTokens <= reply.EstimatedTokens {
+		t.Fatalf("worst case %d is not above the first round's %d", reply.WorstCaseEstimatedTokens, reply.EstimatedTokens)
+	}
+	again, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.WorstCaseEstimatedTokens != reply.WorstCaseEstimatedTokens || again.EstimatedTokens != reply.EstimatedTokens {
+		t.Fatalf("replay reports %d / %d, first submit %d / %d", again.EstimatedTokens, again.WorstCaseEstimatedTokens, reply.EstimatedTokens, reply.WorstCaseEstimatedTokens)
 	}
 }

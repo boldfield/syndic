@@ -562,12 +562,13 @@ func TestSubmitReplyJSON(t *testing.T) {
 	}
 
 	expectedKeys := map[string]bool{
-		"turn_id":          true,
-		"preset":           true,
-		"quick_profile":    true,
-		"estimated_tokens": true,
-		"conversation_id":  true,
-		"context_hash":     true,
+		"turn_id":                     true,
+		"preset":                      true,
+		"quick_profile":               true,
+		"estimated_tokens":            true,
+		"worst_case_estimated_tokens": true,
+		"conversation_id":             true,
+		"context_hash":                true,
 	}
 
 	// Check exact key set
@@ -1019,12 +1020,13 @@ func TestSubmitReplyWithConversation(t *testing.T) {
 	}
 
 	expectedKeys := map[string]bool{
-		"turn_id":          true,
-		"preset":           true,
-		"quick_profile":    true,
-		"estimated_tokens": true,
-		"conversation_id":  true,
-		"context_hash":     true,
+		"turn_id":                     true,
+		"preset":                      true,
+		"quick_profile":               true,
+		"estimated_tokens":            true,
+		"worst_case_estimated_tokens": true,
+		"conversation_id":             true,
+		"context_hash":                true,
 	}
 
 	if len(m) != len(expectedKeys) {

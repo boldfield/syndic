@@ -347,8 +347,11 @@ type SubmitReply struct {
 	Preset          string  `json:"preset"`
 	QuickProfile    *string `json:"quick_profile,omitempty"`
 	EstimatedTokens int64   `json:"estimated_tokens"`
-	ConversationID  string  `json:"conversation_id"`
-	ContextHash     string  `json:"context_hash"`
+	// WorstCaseEstimatedTokens is the projection across every configured
+	// revision round; admission uses only EstimatedTokens.
+	WorstCaseEstimatedTokens int64  `json:"worst_case_estimated_tokens"`
+	ConversationID           string `json:"conversation_id"`
+	ContextHash              string `json:"context_hash"`
 }
 
 type CancelRequest struct {
