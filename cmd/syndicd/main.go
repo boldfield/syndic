@@ -157,6 +157,8 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		ProbeMissing:   *probeMissing,
 		ProbeRawDir:    *probeRawDir,
 		ProbeExportDir: *probeExportDir,
+		JournalPath:    *journalPath,
+		SecretsDir:     *secretsDir,
 		OnRunOpened: func() error {
 			if err := srv.Listen(); err != nil {
 				return fmt.Errorf("server listen: %w", err)

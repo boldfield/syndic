@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -444,7 +445,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	}
 
 	if t.adapter == nil {
-		fail(probeReasonUnreachable, strPtr("adapter"), strPtr("adapter initialization failed"))
+		fail(probeReasonUnreachable, nil, nil)
 		return false
 	}
 	limit, _ := roster.PoolFor(t.pool)
@@ -469,7 +470,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 
 	incomplete := errors.Is(err, transport.ErrIncompleteProbe)
 	if err != nil && !incomplete {
-		step, status := probeFailureInfo(err)
+		step, status := probeFailureInfo(record.Raw)
 		fail(probeFailureReason(err, held), step, status)
 		return false
 	}
@@ -482,7 +483,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 		log.Printf("engine: probe evidence for %s/%s: %v", t.endpoint.Name, t.model, expErr)
 	}
 	if incomplete || record.ReportedModel == "" || record.MaxTokensField == "" || expErr != nil {
-		fail(probeReasonIncomplete, strPtr("response_validation"), strPtr("incomplete probe data"))
+		fail(probeReasonIncomplete, nil, nil)
 		return false
 	}
 
@@ -510,7 +511,7 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 	if err != nil {
 		// Nothing was committed, so the identity stays unprobed.
 		log.Printf("engine: record probe %s/%s: %v", t.endpoint.Name, t.model, err)
-		fail(probeReasonIncomplete, strPtr("journal"), strPtr(err.Error()))
+		fail(probeReasonIncomplete, nil, nil)
 		return false
 	}
 	res.wrote = true
@@ -597,26 +598,33 @@ func firstOr(s []string, def string) string {
 	return def
 }
 
-// probeFailureInfo extracts failing step and server status from a probe error.
-// It returns nil pointers when the information is not available.
-func probeFailureInfo(err error) (*string, *string) {
-	if err == nil {
+// probeStepOrder is the order the adapter runs its probe requests in.
+var probeStepOrder = []string{"models", "max_tokens", "max_completion_tokens", "system_role", "over_length", "calibration_baseline", "calibration"}
+
+// probeFailureInfo reads the step and HTTP status a failed probe recorded in
+// its raw evidence: the last step, in probe order, that got no response or an
+// error status. It returns nil pointers for whatever was not recorded.
+func probeFailureInfo(raw json.RawMessage) (*string, *string) {
+	var steps map[string]struct {
+		Status int `json:"status"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &steps) != nil {
 		return nil, nil
 	}
-	switch {
-	case errors.Is(err, transport.ErrUnreachable):
-		return strPtr("connection"), strPtr("endpoint unreachable")
-	case errors.Is(err, transport.ErrUnauthorized):
-		return strPtr("authentication"), strPtr("authorization failed (401/403)")
-	case errors.Is(err, transport.ErrModelUnavailable):
-		return strPtr("model_check"), strPtr("model not available")
-	case errors.Is(err, transport.ErrNotSent):
-		return strPtr("request_send"), strPtr(err.Error())
-	case errors.Is(err, transport.ErrUncertain):
-		return strPtr("request_processing"), strPtr("request outcome uncertain")
-	default:
-		return strPtr("unknown"), strPtr(err.Error())
+	var step string
+	var status int
+	for _, name := range probeStepOrder {
+		if st, ok := steps[name]; ok && (st.Status == 0 || st.Status >= 400) {
+			step, status = name, st.Status
+		}
 	}
+	if step == "" {
+		return nil, nil
+	}
+	if status == 0 {
+		return &step, nil
+	}
+	return &step, strPtr("HTTP " + strconv.Itoa(status))
 }
 
 // probeTimeoutOf is the per-request probe timeout an Options value asks for.

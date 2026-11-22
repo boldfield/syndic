@@ -122,13 +122,18 @@ func poolName(p config.Participant) string {
 	return p.Pool
 }
 
-func buildRetryCommandForParticipant(p config.Participant, rosterPath string) string {
-	cmd := "syndic probe --endpoint " + p.Endpoint + " --model " + p.Model
-	if rosterPath != "" {
-		cmd = cmd + " --roster " + shQuote(rosterPath)
+// retryCommand is the exact `syndic probe` invocation that would record the
+// participant's endpoint and model in the journal this daemon reads.
+func (e *Engine) retryCommand(p config.Participant) string {
+	cmd := "syndic probe --endpoint " + shQuote(p.Endpoint) + " --model " + shQuote(p.Model) + " --roster " + shQuote(e.rosterAbs)
+	if e.journalPath != "" {
+		cmd += " --journal " + shQuote(e.journalPath)
+	}
+	if e.secretsDir != "" {
+		cmd += " --secrets-dir " + shQuote(e.secretsDir)
 	}
 	if p.ContextTokens != nil {
-		cmd = cmd + " --context-tokens " + fmt.Sprint(*p.ContextTokens)
+		cmd += " --context-tokens " + fmt.Sprint(*p.ContextTokens)
 	}
 	return cmd
 }
@@ -218,7 +223,7 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 
 	// Build retry command for unprobed participants
 	if !mp.Usable {
-		cmd := buildRetryCommandForParticipant(p, e.rosterAbs)
+		cmd := e.retryCommand(p)
 		ws.RetryCommand = &cmd
 	}
 

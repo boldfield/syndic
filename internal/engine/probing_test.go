@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/transport/openai"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -957,101 +960,98 @@ func TestStartupOnRunOpenedRunsBeforeProbes(t *testing.T) {
 	}
 }
 
-// TestStatusSurfacesProbeFailureDetail verifies that status includes failing
-// step and server status for failed probes, and probed_at_start for successful ones.
+func statusParticipant(t *testing.T, eng *engine.Engine, id string) wire.Participant {
+	t.Helper()
+	st, err := eng.Status()
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	for _, p := range st.Participants {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("%s not in status", id)
+	return wire.Participant{}
+}
+
+// TestStatusSurfacesProbeFailureDetail drives the real openai adapter against
+// an httptest server: the failing step and HTTP status in status are the ones
+// the probe recorded, and the retry command names the daemon's own paths.
 func TestStatusSurfacesProbeFailureDetail(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		fail             error
-		wantFailingStep  *string
-		wantServerStat   *string
-		wantProbeAtStart bool
+		name       string
+		chatStatus int
+		wantStatus string
 	}{
-		{
-			name:             "successful probe marks probed_at_start",
-			fail:             nil,
-			wantFailingStep:  nil,
-			wantServerStat:   nil,
-			wantProbeAtStart: true,
-		},
-		{
-			name:             "unreachable probe records connection failure",
-			fail:             transport.ErrUnreachable,
-			wantFailingStep:  strPtr("connection"),
-			wantServerStat:   strPtr("endpoint unreachable"),
-			wantProbeAtStart: false,
-		},
-		{
-			name:             "unauthorized probe records authentication failure",
-			fail:             transport.ErrUnauthorized,
-			wantFailingStep:  strPtr("authentication"),
-			wantServerStat:   strPtr("authorization failed (401/403)"),
-			wantProbeAtStart: false,
-		},
-		{
-			name:             "model unavailable records model check failure",
-			fail:             transport.ErrModelUnavailable,
-			wantFailingStep:  strPtr("model_check"),
-			wantServerStat:   strPtr("model not available"),
-			wantProbeAtStart: false,
-		},
+		{"unauthorized", 401, "HTTP 401"},
+		{"forbidden", 403, "HTTP 403"},
+		{"model missing", 404, "HTTP 404"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/models") {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(tc.chatStatus)
+			}))
+			t.Cleanup(srv.Close)
 			env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
-			env.spies["author"].fail = tc.fail
-			eng := env.start(nil)
-
-			st, err := eng.Status()
-			if err != nil {
-				t.Fatalf("status: %v", err)
+			eng := env.start(func(o *engine.Options) {
+				o.JournalPath = "/var/lib/my journal/j.sqlite"
+				o.SecretsDir = "/etc/syn'dic"
+				o.NewAdapter = func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+					if p.ID == "author" {
+						ep.BaseURL = srv.URL
+						return openai.New(ep, nil), probeAdapterVersion, nil
+					}
+					return env.spies[p.ID], probeAdapterVersion, nil
+				}
+			})
+			author := statusParticipant(t, eng, "author")
+			if author.ProbeAtStart {
+				t.Error("failed probe marked probed at start")
 			}
-			var author *wire.Participant
-			for i := range st.Participants {
-				if st.Participants[i].ID == "author" {
-					author = &st.Participants[i]
-					break
-				}
+			if author.FailingStep == nil || *author.FailingStep != "max_tokens" {
+				t.Errorf("FailingStep = %v, want max_tokens", author.FailingStep)
 			}
-			if author == nil {
-				t.Fatal("author not in status")
+			if author.ServerStatus == nil || *author.ServerStatus != tc.wantStatus {
+				t.Errorf("ServerStatus = %v, want %s", author.ServerStatus, tc.wantStatus)
 			}
-
-			// Check ProbeAtStart
-			if author.ProbeAtStart != tc.wantProbeAtStart {
-				t.Fatalf("author.ProbeAtStart = %v, want %v", author.ProbeAtStart, tc.wantProbeAtStart)
+			want := "syndic probe --endpoint ep --model m-author --roster " + env.rosterPath +
+				" --journal '/var/lib/my journal/j.sqlite' --secrets-dir '/etc/syn'\\''dic'"
+			if author.RetryCommand == nil || *author.RetryCommand != want {
+				t.Errorf("RetryCommand = %v, want %q", author.RetryCommand, want)
 			}
-
-			// Check FailingStep and ServerStatus
-			if tc.wantFailingStep == nil {
-				if author.FailingStep != nil {
-					t.Fatalf("author.FailingStep = %v, want nil", author.FailingStep)
-				}
-			} else {
-				if author.FailingStep == nil || *author.FailingStep != *tc.wantFailingStep {
-					t.Fatalf("author.FailingStep = %v, want %v", author.FailingStep, tc.wantFailingStep)
-				}
-			}
-
-			if tc.wantServerStat == nil {
-				if author.ServerStatus != nil {
-					t.Fatalf("author.ServerStatus = %v, want nil", author.ServerStatus)
-				}
-			} else {
-				if author.ServerStatus == nil || *author.ServerStatus != *tc.wantServerStat {
-					t.Fatalf("author.ServerStatus = %v, want %v", author.ServerStatus, tc.wantServerStat)
-				}
-			}
-
-			// Verify retry command is present for failed probes
-			if tc.fail != nil {
-				if author.RetryCommand == nil {
-					t.Fatal("failed probe should have retry command")
-				}
-				if !strings.Contains(*author.RetryCommand, "syndic probe") {
-					t.Fatalf("retry command = %q, want 'syndic probe' in it", *author.RetryCommand)
-				}
+			reviewer := statusParticipant(t, eng, "reviewer")
+			if !reviewer.ProbeAtStart || reviewer.RetryCommand != nil || reviewer.FailingStep != nil {
+				t.Errorf("reviewer = %+v, want probed at start without retry detail", reviewer)
 			}
 		})
+	}
+}
+
+// TestStatusProbeAtStartDuringProbing blocks the second probe and reads
+// status: the participant probed first already reads probed at start.
+func TestStatusProbeAtStartDuringProbing(t *testing.T) {
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	eng := env.newEngine(nil)
+	var mid wire.Participant
+	var midReviewer wire.Participant
+	env.spies["reviewer"].onProbe = func(string) {
+		mid = statusParticipant(t, eng, "author")
+		midReviewer = statusParticipant(t, eng, "reviewer")
+	}
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = eng.Stop(context.Background()) })
+	if !mid.ProbeAtStart || mid.RetryCommand != nil {
+		t.Errorf("author mid-probe = %+v, want probed at start", mid)
+	}
+	if midReviewer.ProbeAtStart || midReviewer.RetryCommand == nil {
+		t.Errorf("reviewer mid-probe = %+v, want unprobed with retry command", midReviewer)
 	}
 }
 
@@ -1113,6 +1113,3 @@ func TestStatusConcurrentReadDuringProbing(t *testing.T) {
 		t.Fatalf("probed participants = %d, want 2", probed)
 	}
 }
-
-// strPtr is a helper to create a string pointer.
-func strPtr(s string) *string { return &s }
