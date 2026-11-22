@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -27,12 +28,17 @@ func init() {
 	cover(correctionsAndBudgetPara, "a reply containing both marker values in any surrounding text yields `unknown` eligibility when probed", "TestCorrections_UnknownEligibilityOnProbe")
 	cover(correctionsAndBudgetPara, "a 400 whose body names the context length yields `yes` eligibility when probed", "TestCorrections_YesEligibilityOnContextRejection")
 	cover(correctionsAndBudgetPara, "a 401, a 429 and a 400 whose body names content policy each yield `unknown` eligibility when probed", "TestCorrections_UnknownEligibilityOnOtherRejections")
+	cover(correctionsAndBudgetPara, "no probe outcome yields `no` eligibility", "TestCorrections_NoOutcomeYieldsNo")
+	cover(correctionsAndBudgetPara, "the over-length prompt's estimated size is at least 1.5 times the assumed context", "TestCorrections_OverLengthPromptSize")
 	cover(correctionsAndBudgetPara, "unknown eligibility is refused without `accept_unknown_truncation` and accepted with it", "TestCorrections_UnknownReviewerAcceptance")
 	cover(correctionsAndBudgetPara, "a roster whose preset names its author as a required reviewer is refused at load", "TestCorrections_AuthorAsReviewerRefusedAtLoad")
 
 	cover(correctionsAndBudgetPara, "a participant on a `metered` endpoint without `spending_control = \"external\"` is refused with `spending_ceiling`", "TestBudget_MeteredWithoutSpendingControlRefused")
 	cover(correctionsAndBudgetPara, "a participant on a `metered` endpoint with `spending_control = \"external\"` dispatches and the manifest records the setting", "TestBudget_MeteredWithSpendingControlAccepted")
-	cover(correctionsAndBudgetPara, "a turn whose revisions, tool attempts and referee decisions exceed `turn_max_estimated_tokens` ends `budget:turn`", "TestBudget_TurnExceedsBudget")
+	// Tool attempts and referee decisions are not in the engine yet, so only
+	// the revision round is registered.
+	cover(correctionsAndBudgetPara, "a turn whose revision rounds exceed `turn_max_estimated_tokens` ends `budget:turn` at the dispatch that does not fit, and that dispatch is not sent", "TestBudget_RevisionRoundExceedsTurnBudget")
+	cover(correctionsAndBudgetPara, "a metered endpoint with `spending_control = \"external\"` keeps `turn_max_estimated_tokens` as its bound and ends `budget:turn`", "TestBudget_MeteredExternalKeepsTurnBudget")
 }
 
 var probeHexMarker = regexp.MustCompile(`[0-9a-f]{32}`)
@@ -57,8 +63,12 @@ func probeCompletion(content string) string {
 // probeEndpoint runs the real openai adapter's probe against an httptest
 // endpoint that answers every step normally except the over-length one, which
 // over answers, and returns the record the probe produced.
-func probeEndpoint(t *testing.T, over probeOverLength, opts transport.ProbeOptions) transport.CapabilityRecord {
+//
+// It also returns the byte size of the over-length prompt the probe sent, or
+// zero when none was sent.
+func probeEndpoint(t *testing.T, over probeOverLength, opts transport.ProbeOptions) (transport.CapabilityRecord, int) {
 	t.Helper()
+	var sent atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"m1"}]}`))
@@ -78,8 +88,9 @@ func probeEndpoint(t *testing.T, over probeOverLength, opts transport.ProbeOptio
 				user = m.Content
 			}
 		}
-		if len(user) > 100000 {
-			status, body := over(probeHexMarker.FindAllString(user, -1))
+		if markers := probeHexMarker.FindAllString(user, -1); len(markers) >= 2 {
+			sent.Store(int64(len(user)))
+			status, body := over(markers)
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(body))
 			return
@@ -110,7 +121,7 @@ func probeEndpoint(t *testing.T, over probeOverLength, opts transport.ProbeOptio
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	return rec
+	return rec, int(sent.Load())
 }
 
 // wantProbeOutcome requires the probe's over-length outcome and eligibility.
@@ -131,7 +142,7 @@ func wantProbeOutcome(t *testing.T, rec transport.CapabilityRecord, overLength s
 func TestCorrections_UnknownEligibilityOnProbe(t *testing.T) {
 	t.Parallel()
 	t.Run("both_markers_in_surrounding_text", func(t *testing.T) {
-		rec := probeEndpoint(t, func(m []string) (int, string) {
+		rec, _ := probeEndpoint(t, func(m []string) (int, string) {
 			if len(m) < 2 {
 				t.Errorf("the over-length prompt carried %d markers, want 2", len(m))
 				return 500, ""
@@ -141,19 +152,19 @@ func TestCorrections_UnknownEligibilityOnProbe(t *testing.T) {
 		wantProbeOutcome(t, rec, "accepted_whole", transport.TriUnknown)
 	})
 	t.Run("one_marker", func(t *testing.T) {
-		rec := probeEndpoint(t, func(m []string) (int, string) {
+		rec, _ := probeEndpoint(t, func(m []string) (int, string) {
 			return 200, probeCompletion("only " + m[0])
 		}, transport.ProbeOptions{})
 		wantProbeOutcome(t, rec, "markers_missing", transport.TriUnknown)
 	})
 	t.Run("no_markers", func(t *testing.T) {
-		rec := probeEndpoint(t, func([]string) (int, string) {
+		rec, _ := probeEndpoint(t, func([]string) (int, string) {
 			return 200, probeCompletion("ok")
 		}, transport.ProbeOptions{})
 		wantProbeOutcome(t, rec, "markers_missing", transport.TriUnknown)
 	})
 	t.Run("not_run", func(t *testing.T) {
-		rec := probeEndpoint(t, func([]string) (int, string) {
+		rec, _ := probeEndpoint(t, func([]string) (int, string) {
 			t.Error("the over-length request was sent although that step is disabled")
 			return 500, ""
 		}, transport.ProbeOptions{DisableOverLength: true})
@@ -166,7 +177,7 @@ func TestCorrections_UnknownEligibilityOnProbe(t *testing.T) {
 // the context length: the only way to eligibility yes.
 func TestCorrections_YesEligibilityOnContextRejection(t *testing.T) {
 	t.Parallel()
-	rec := probeEndpoint(t, func([]string) (int, string) {
+	rec, _ := probeEndpoint(t, func([]string) (int, string) {
 		return http.StatusBadRequest, `{"error":{"message":"This model's maximum context length is 8192 tokens"}}`
 	}, transport.ProbeOptions{})
 	wantProbeOutcome(t, rec, "rejected:context", transport.TriYes)
@@ -186,7 +197,7 @@ func TestCorrections_UnknownEligibilityOnOtherRejections(t *testing.T) {
 		{"400_content_policy", http.StatusBadRequest, `{"error":{"message":"blocked by the content policy"}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := probeEndpoint(t, func([]string) (int, string) { return tc.status, tc.body }, transport.ProbeOptions{})
+			rec, _ := probeEndpoint(t, func([]string) (int, string) { return tc.status, tc.body }, transport.ProbeOptions{})
 			wantProbeOutcome(t, rec, "rejected:other", transport.TriUnknown)
 		})
 	}
@@ -198,7 +209,7 @@ func TestCorrections_UnknownEligibilityOnOtherRejections(t *testing.T) {
 // accept_unknown_truncation and nothing dispatched, dispatched with it.
 func TestCorrections_UnknownReviewerAcceptance(t *testing.T) {
 	t.Parallel()
-	rec := probeEndpoint(t, func(m []string) (int, string) {
+	rec, _ := probeEndpoint(t, func(m []string) (int, string) {
 		return 200, probeCompletion(strings.Join(m, " "))
 	}, transport.ProbeOptions{})
 	wantProbeOutcome(t, rec, "accepted_whole", transport.TriUnknown)
@@ -491,36 +502,142 @@ concurrency = 1
 	}
 }
 
-// TestBudget_TurnExceedsBudget runs a turn that is admitted within
-// turn_max_estimated_tokens: the author's reply is larger than the stand-in the
-// projection used, so the review dispatch that follows no longer fits. The turn
-// ends budget:turn and the reviewer is never sent that request.
-func TestBudget_TurnExceedsBudget(t *testing.T) {
-	t.Parallel()
-	limit := budgetsDefaultProjection(budgetsInput)
-	big := strings.Repeat("z", 90000)
-	roster := budgetsRoster(budgetsCfg{tpbm: "1.0", budgets: fmt.Sprintf("turn_max_estimated_tokens = %d", limit)})
-	s := newSuite(t, roster, map[string][]fake.Step{
-		"author":   budgetsScript(4, budgetsStep(big, "", nil)),
-		"reviewer": budgetsScript(4),
+// budgetsBlockingStep blocks every review and answers the author with text,
+// reporting heavy usage so that what the turn has charged exceeds what the
+// submit projected for it.
+func budgetsBlockingStep() fake.Step {
+	step := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		if req.Envelope.Phase != "review" {
+			return budgetsReplyText
+		}
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "evidence", "remedy", "reason")
 	})
+	step.Usage = &transport.Usage{Prompt: 10000, Completion: 100}
+	return step
+}
+
+// budgetsRevisionRefused runs a review turn on the roster whose reviewer
+// blocks the first candidate, with a limit that is exactly what the submit
+// projected for the first round, so that the revision round cannot fit. It
+// requires the turn to end budget:turn at the revision, with the author never
+// sent the revision.
+func budgetsRevisionRefused(t *testing.T, cfg budgetsCfg) {
+	t.Helper()
+	scripts := func() map[string][]fake.Step {
+		return map[string][]fake.Step{
+			"author":   {budgetsBlockingStep(), budgetsPlain(), budgetsPlain()},
+			"reviewer": {budgetsBlockingStep(), budgetsPlain(), budgetsPlain()},
+		}
+	}
+	cfg.extra += "\n[revision]\nmax_rounds = 2\n"
+
+	probe := cfg
+	probe.budgets = "turn_max_estimated_tokens = 1000000"
+	ps := newSuite(t, budgetsRoster(probe), scripts())
+	first := ps.budgetsSubmit(t, ps.Dial(t), "probe", budgetsInput, "", "").EstimatedTokens
+
+	cfg.budgets = fmt.Sprintf("turn_max_estimated_tokens = %d", first)
+	s := newSuite(t, budgetsRoster(cfg), scripts())
 	c := s.Dial(t)
 	reply := s.budgetsSubmit(t, c, "s1", budgetsInput, "", "")
-	if reply.EstimatedTokens != int64(limit) {
-		t.Fatalf("the projection is %d, want it exactly at the limit %d", reply.EstimatedTokens, limit)
+	if reply.EstimatedTokens != first {
+		t.Fatalf("the projection is %d, want %d", reply.EstimatedTokens, first)
 	}
 	turn := s.budgetsSettled(t, c, reply.TurnID)
 	wantTurn(t, turn, engine.StateIncomplete, "budget:turn")
-	if len(budgetsAttempts(turn, "reviewer", "review")) != 0 || len(s.budgetsCalls("reviewer", reply.TurnID, "")) != 0 {
-		t.Fatalf("the reviewer was dispatched past the turn budget: %+v", turn.Attempts)
+
+	// The first round ran: the reviewer was sent its review once.
+	if n := len(s.budgetsCalls("reviewer", reply.TurnID, "review")); n != 1 {
+		t.Fatalf("reviewer received %d review requests, want the first round's one", n)
+	}
+	// The revision did not fit, so the author was sent nothing after round one.
+	for _, call := range s.Adapters["author"].Calls() {
+		if env := call.Request.Envelope; env.TurnID == reply.TurnID && env.Phase != "author" && env.Phase != "terminal_delivery" {
+			t.Fatalf("the author was sent a %q request after the first round", env.Phase)
+		}
+	}
+	if n := len(s.budgetsCalls("author", reply.TurnID, "author")); n != 1 {
+		t.Fatalf("author received %d author requests, want 1: the revision was sent", n)
 	}
 	over := budgetsEventsOf(s, wire.EventKindBudget, func(wire.EvBudget) bool { return true })
-	if len(over) != 1 || over[0].Budget != "turn_max_estimated_tokens" || over[0].Limit != int64(limit) {
-		t.Fatalf("budget events = %+v, want one turn_max_estimated_tokens refusal at limit %d", over, limit)
+	if len(over) != 1 || over[0].Budget != "turn_max_estimated_tokens" || over[0].Limit != int64(first) {
+		t.Fatalf("budget events = %+v, want one turn_max_estimated_tokens refusal at limit %d", over, first)
 	}
 }
 
-func correctionsRosterOf(reviewerID string, reviewerKeys map[string]string, baseURL ...string) string {
+// TestBudget_RevisionRoundExceedsTurnBudget runs a turn that is admitted within
+// turn_max_estimated_tokens, whose first round charges more than was projected
+// and whose reviewer blocks: the revision round does not fit what is left, the
+// turn ends budget:turn and the revision is not sent.
+func TestBudget_RevisionRoundExceedsTurnBudget(t *testing.T) {
+	t.Parallel()
+	budgetsRevisionRefused(t, budgetsCfg{tpbm: "1.0"})
+}
+
+// TestBudget_MeteredExternalKeepsTurnBudget runs the same turn on a metered
+// endpoint with spending_control = "external", which is admitted as flat: the
+// turn budget is its only bound and still ends the turn budget:turn.
+func TestBudget_MeteredExternalKeepsTurnBudget(t *testing.T) {
+	t.Parallel()
+	budgetsRevisionRefused(t, budgetsCfg{tpbm: "1.0\nspending_control = \"external\"", billing: "metered"})
+}
+
+// TestCorrections_NoOutcomeYieldsNo drives the real probe through every kind
+// of over-length outcome, errored included, and requires that none yields no.
+func TestCorrections_NoOutcomeYieldsNo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		over probeOverLength
+		opts transport.ProbeOptions
+		want string
+	}{
+		{"accepted_whole", func(m []string) (int, string) { return 200, probeCompletion(strings.Join(m, " ")) }, transport.ProbeOptions{}, "accepted_whole"},
+		{"markers_missing", func([]string) (int, string) { return 200, probeCompletion("ok") }, transport.ProbeOptions{}, "markers_missing"},
+		{"rejected_context", func([]string) (int, string) {
+			return http.StatusBadRequest, `{"error":{"code":"context_length_exceeded","message":"too long"}}`
+		}, transport.ProbeOptions{}, "rejected:context"},
+		{"rejected_other", func([]string) (int, string) { return http.StatusUnauthorized, `{}` }, transport.ProbeOptions{}, "rejected:other"},
+		{"errored", func([]string) (int, string) { return 200, "this is not json" }, transport.ProbeOptions{}, "errored"},
+		{"not_run", func([]string) (int, string) { return 500, "" }, transport.ProbeOptions{DisableOverLength: true}, "not_run:skipped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec, _ := probeEndpoint(t, tc.over, tc.opts)
+			if rec.OverLength != tc.want {
+				t.Fatalf("OverLength = %q, want %q", rec.OverLength, tc.want)
+			}
+			if rec.EligibleRequiredReviewer == transport.TriNo {
+				t.Errorf("outcome %q yields eligibility no", rec.OverLength)
+			}
+			if tc.want != "rejected:context" && rec.EligibleRequiredReviewer != transport.TriUnknown {
+				t.Errorf("outcome %q yields %v, want unknown", rec.OverLength, rec.EligibleRequiredReviewer)
+			}
+		})
+	}
+}
+
+// TestCorrections_OverLengthPromptSize requires the over-length prompt the
+// probe really sends to be estimated at least 1.5 times the assumed context.
+func TestCorrections_OverLengthPromptSize(t *testing.T) {
+	t.Parallel()
+	for _, assumed := range []int{4096, 131072} {
+		rec, size := probeEndpoint(t, func([]string) (int, string) {
+			return http.StatusBadRequest, `{"error":{"message":"maximum context length exceeded"}}`
+		}, transport.ProbeOptions{AssumedContextLen: assumed})
+		if size == 0 {
+			t.Fatalf("assumed %d: no over-length prompt was sent", assumed)
+		}
+		if rec.Calibration.BytesPerToken <= 0 {
+			t.Fatalf("assumed %d: calibration %+v has no bytes per token", assumed, rec.Calibration)
+		}
+		estimated := float64(size) / rec.Calibration.BytesPerToken
+		if want := 1.5 * float64(assumed); estimated < want {
+			t.Errorf("assumed %d: the prompt of %d bytes is about %.0f tokens, want at least %.0f", assumed, size, estimated, want)
+		}
+	}
+}
+
+func correctionsRosterOf(reviewerID string, reviewerKeys map[string]string) string {
 	var b strings.Builder
 	b.WriteString(`default_preset = "review"
 
@@ -555,11 +672,7 @@ pool = "default"
 [[endpoints]]
 name = "local"
 base_url = "`)
-	if len(baseURL) > 0 {
-		b.WriteString(baseURL[0])
-	} else {
-		b.WriteString("http://localhost:11434/v1")
-	}
+	b.WriteString("http://localhost:11434/v1")
 	b.WriteString(`"
 declared_location = "local"
 declared_execution = "local"
