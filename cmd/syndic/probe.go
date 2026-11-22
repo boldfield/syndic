@@ -320,7 +320,11 @@ func printSummary(endpoint, model string, record transport.CapabilityRecord, raw
 		fmt.Printf("  Latency:          %d ms\n", *record.LatencyMillis)
 	}
 	if cal.Available {
-		fmt.Printf("  Calibration:      %.2f bytes/token\n", cal.BytesPerToken)
+		note := ""
+		if cal.BaselineBytes > 0 {
+			note = " (non-empty baseline)"
+		}
+		fmt.Printf("  Calibration:      %.2f bytes/token%s\n", cal.BytesPerToken, note)
 	} else {
 		fmt.Printf("  Calibration:      unavailable\n")
 	}

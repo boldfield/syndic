@@ -94,6 +94,7 @@ type CalibrationRecord struct {
 	BytesPerToken        float64
 	ObservedPromptTokens int
 	BaselinePromptTokens int
+	BaselineBytes        int
 }
 
 // MarshalJSON implements json.Marshaler.
@@ -106,6 +107,7 @@ func (c CalibrationRecord) MarshalJSON() ([]byte, error) {
 		"bytes_per_token":        c.BytesPerToken,
 		"observed_prompt_tokens": c.ObservedPromptTokens,
 		"baseline_prompt_tokens": c.BaselinePromptTokens,
+		"baseline_bytes":         c.BaselineBytes,
 	}
 	return json.Marshal(obj)
 }
@@ -131,6 +133,7 @@ func (c *CalibrationRecord) UnmarshalJSON(data []byte) error {
 			BytesPerToken        *float64 `json:"bytes_per_token"`
 			ObservedPromptTokens *int     `json:"observed_prompt_tokens"`
 			BaselinePromptTokens *int     `json:"baseline_prompt_tokens"`
+			BaselineBytes        int      `json:"baseline_bytes"`
 		}
 		var rec calRecord
 		if err := json.Unmarshal(data, &rec); err != nil {
@@ -149,6 +152,7 @@ func (c *CalibrationRecord) UnmarshalJSON(data []byte) error {
 		c.BytesPerToken = *rec.BytesPerToken
 		c.ObservedPromptTokens = *rec.ObservedPromptTokens
 		c.BaselinePromptTokens = *rec.BaselinePromptTokens
+		c.BaselineBytes = rec.BaselineBytes
 		return nil
 
 	default:
@@ -176,6 +180,7 @@ func NewProbeManifest(export Export, profile config.EndpointProfile, model, adap
 		BytesPerToken:        cal.BytesPerToken,
 		ObservedPromptTokens: cal.ObservedPromptTokens,
 		BaselinePromptTokens: cal.BaselinePromptTokens,
+		BaselineBytes:        cal.BaselineBytes,
 	}
 
 	return ProbeManifest{

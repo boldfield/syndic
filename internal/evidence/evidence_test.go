@@ -1577,3 +1577,24 @@ func TestOverLengthFinishReasonEmpty(t *testing.T) {
 		t.Errorf("OverLengthFinishReason should be null or omitted when empty, got %v", val)
 	}
 }
+
+func TestCalibrationRecordBaselineBytes(t *testing.T) {
+	var old CalibrationRecord
+	if err := json.Unmarshal([]byte(`{"bytes_per_token":0.5,"observed_prompt_tokens":100,"baseline_prompt_tokens":80}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if !old.Available || old.BaselineBytes != 0 {
+		t.Errorf("old record: %+v", old)
+	}
+	data, err := json.Marshal(CalibrationRecord{Available: true, BytesPerToken: 3.5, ObservedPromptTokens: 100, BaselinePromptTokens: 8, BaselineBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back CalibrationRecord
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.BaselineBytes != 1 {
+		t.Errorf("round trip BaselineBytes: got %d", back.BaselineBytes)
+	}
+}
