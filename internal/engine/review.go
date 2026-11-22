@@ -188,13 +188,7 @@ func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
 		return
 	}
 
-	// All reviewers completed - but turn might be already terminal
-	// (approval or early termination already called e.endIn)
-	if e.open != t {
-		return
-	}
-
-	// All reviewers completed and turn is still open - decide on revision
+	// All reviewers completed and turn is still open - decide on revision or approval
 	if e.shouldStartRevision(t) {
 		// Start revision round
 		if err := e.schedule(t, t.author, func() { e.startRevisionAuthor(t) }); err != nil {
@@ -202,14 +196,15 @@ func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
 		}
 	} else if t.hasBlock || t.hasRevReq {
 		// No more rounds allowed, end with blocks open
+		reason := reasonRoundsExhausted
 		if len(t.blockIDs) > 0 {
-			reason := reasonBlock + t.blockIDs[0]
-			e.finishLocked(t, StateIncomplete, reason)
-		} else {
-			e.finishLocked(t, StateIncomplete, reasonRoundsExhausted)
+			reason = reasonBlock + t.blockIDs[0]
 		}
+		e.finishLocked(t, StateIncomplete, reason)
+	} else if e.allApproved(t, "") {
+		// All reviewers approved and no blocks - end approved
+		e.finishLocked(t, StateApproved, reasonAllApproved)
 	}
-	// If no blocks/revisions and all approved, approval is already set
 }
 
 // startRepair begins the repair attempt for a malformed verdict and calls the
@@ -590,17 +585,16 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				}
 				t.hasBlock = true
 				t.blockIDs = append(t.blockIDs, blockID)
-				endState, endReason = StateIncomplete, reasonBlock+blockID
+				// Block recorded; decision deferred until all reviewers complete
 				break
 			}
 			approvedNow = true
-			if e.allApproved(t, d.participant) {
-				endState, endReason = StateApproved, reasonAllApproved
-			}
+			// Approval recorded; decision deferred until all reviewers complete
 		case verdict.RevisionRequest:
 			t.hasRevReq = true
-			endState, endReason = StateIncomplete, reasonRevision+d.participant
+			// Revision request recorded; decision deferred until all reviewers complete
 		case verdict.Rejected:
+			// Verdict explicitly rejected - this is a hard failure
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":rejected"
 		case verdict.Malformed:
 			attempt, err := tx.GetAttempt(d.attemptID)
@@ -608,21 +602,20 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				return err
 			}
 			if attempt.RepairOf != nil {
+				// Already repaired once; can't repair again
 				endState, endReason = StateIncomplete, reasonMalformed+d.participant
 			} else {
 				repair = true
 			}
 		}
 
-		// End immediately for failures, blocks, and approvals
-		// Defer revision decision for revision requests only
+		// End only on hard failures; defer revision/approval decisions
 		if endState != "" {
 			term, err = e.endIn(tx, emit, t, endState, endReason)
 			return err
 		}
 
-		// No terminal state yet - either revision_request or partial approval
-		// Decision will be made in runReviewer after all reviewers complete
+		// No terminal state - decision will be made in runReviewer after all reviewers complete
 		return nil
 	})
 	e.attemptDone(t, d.attemptID)
@@ -813,6 +806,7 @@ func (e *Engine) completeRevisionAuthor(t *openTurn, attemptID string, req trans
 		}
 
 		// Check for unchanged revision
+		// TODO: also compare change set lines per spec §4 Unchanged revision when change sets are added in milestone E
 		if res.Text == t.candidate {
 			unchanged = true
 			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonRevisionUnchanged)
@@ -829,8 +823,23 @@ func (e *Engine) completeRevisionAuthor(t *openTurn, attemptID string, req trans
 		if err != nil {
 			return err
 		}
-		if _, err := tx.FreezeCandidate(t.id, res.Text, hash); err != nil {
-			return err
+		// Use correct API based on round: FreezeCandidate for round 0, SetLatestCandidate for revisions
+		if t.currentRound == 0 {
+			if _, err := tx.FreezeCandidate(t.id, res.Text, hash); err != nil {
+				return err
+			}
+		} else {
+			// For revisions, need to fetch current candidate_id to pass as supersedes
+			turn, err := tx.GetTurn(t.id)
+			if err != nil {
+				return err
+			}
+			if turn.CandidateID == "" {
+				return fmt.Errorf("revision requires current candidate_id")
+			}
+			if _, err := tx.SetLatestCandidate(t.id, res.Text, hash, t.currentRound+1, turn.CandidateID); err != nil {
+				return err
+			}
 		}
 		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{TurnID: t.id, CandidateHash: hash}); err != nil {
 			return err
@@ -865,8 +874,13 @@ func (e *Engine) completeRevisionAuthor(t *openTurn, attemptID string, req trans
 	}
 	t.candidate = res.Text
 	t.candidateHash = hash
+	// Reset per-round state for new review round
 	t.hasBlock = false
 	t.hasRevReq = false
 	t.blockIDs = []string{}
+	t.approved = make(map[string]bool)
+	t.reviewerAttempts = make(map[string]int)
+	t.reviewerFeedbackByID = make(map[string]string)
+	t.reviewersBegun = 0
 	return true
 }

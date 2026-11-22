@@ -235,6 +235,27 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		doc                         *history.Document
 		rec                         budgetRecord
 	)
+	// Effective config has defaults applied by resolver
+	maxRoundsInEffect := 0
+	maxRoundsCeiling := 5
+	if eff.Preset.Revision != nil {
+		if eff.Preset.Revision.MaxRounds != nil {
+			maxRoundsInEffect = *eff.Preset.Revision.MaxRounds
+		}
+		if eff.Preset.Revision.MaxRoundsCeiling != nil {
+			maxRoundsCeiling = *eff.Preset.Revision.MaxRoundsCeiling
+		}
+	}
+	// Allow client override of max_rounds
+	if req.MaxRounds != nil {
+		clientRounds := *req.MaxRounds
+		if clientRounds < 0 || clientRounds > maxRoundsCeiling {
+			err := refusal(wire.ErrorCodeMaxRounds)
+			err.Detail = strPtr(fmt.Sprintf("ceiling:%d", maxRoundsCeiling))
+			return wire.SubmitReply{}, err
+		}
+		maxRoundsInEffect = clientRounds
+	}
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
 		convID, err = tx.AdoptConversation(req.ConversationID, req.Workspace)
@@ -294,6 +315,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			TurnDeadlineMS:    turn.Milliseconds(),
 			TurnDeadline:      turnDeadline,
 			BudgetJSON:        budgetJSON,
+			MaxRoundsInEffect: &maxRoundsInEffect,
+			MaxRoundsCeiling:  &maxRoundsCeiling,
 		})
 		if err != nil {
 			return err
@@ -320,11 +343,6 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, fmt.Errorf("engine: submit: %w", err)
 	}
 
-	maxRounds := 0
-	if eff.Preset.Revision != nil && eff.Preset.Revision.MaxRounds != nil {
-		maxRounds = *eff.Preset.Revision.MaxRounds
-	}
-
 	t := &openTurn{
 		id:                   turnID,
 		mode:                 eff.Preset.Mode,
@@ -339,7 +357,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		approved:             map[string]bool{},
 		stopAttempt:          map[string]func() bool{},
 		pending:              map[string]time.Time{},
-		maxRounds:            maxRounds,
+		maxRounds:            maxRoundsInEffect,
 		currentRound:         0,
 		blockIDs:             []string{},
 		hasBlock:             false,
