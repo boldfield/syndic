@@ -311,6 +311,7 @@ type TurnParams struct {
 	ConversationID    string
 	MaxRoundsInEffect *int
 	MaxRoundsCeiling  *int
+	ContextHash       string
 }
 
 // CreateEngineTurn creates a new engine turn with the given parameters.
@@ -345,10 +346,15 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 		budgetJSONStr = &s
 	}
 
+	var contextHashStr *string
+	if p.ContextHash != "" {
+		contextHashStr = &p.ContextHash
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, submitted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr, convID, p.MaxRoundsInEffect, p.MaxRoundsCeiling, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, submitted_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr, convID, p.MaxRoundsInEffect, p.MaxRoundsCeiling, contextHashStr, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		if isUniqueConstraintError(err, "submission_id") {
 			return "", ErrDuplicateSubmission
 		}

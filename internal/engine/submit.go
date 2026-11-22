@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport"
@@ -80,6 +81,35 @@ func findParticipant(participants []config.Participant, id string) *config.Parti
 		}
 	}
 	return nil
+}
+
+// renderHistory builds a history document from conversation turns and returns its hash.
+// contextFromTurn filters which turns to include (empty means all).
+func renderHistory(turns []journal.TurnInConversation, contextFromTurn *string) (string, error) {
+	doc := history.New()
+	for _, t := range turns {
+		if t.TerminalState == nil {
+			continue
+		}
+		turn := history.Turn{
+			ID:     t.ID,
+			State:  *t.TerminalState,
+			Input:  []byte{},
+			Answer: []byte{},
+			Label:  "reviewed",
+		}
+		if err := doc.AddTurn(turn); err != nil {
+			return "", fmt.Errorf("add turn to history: %w", err)
+		}
+	}
+
+	if contextFromTurn != nil {
+		if err := doc.SetContextFromTurn(*contextFromTurn); err != nil {
+			return "", fmt.Errorf("set context from turn: %w", err)
+		}
+	}
+
+	return doc.Hash(), nil
 }
 
 // Submit admits a turn, or refuses it with a *wire.Error. A refused
@@ -207,7 +237,55 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
-	rec, err := e.projectBudget(eff, req.Input)
+	var historyBytes []byte
+	if req.ConversationID != nil {
+		convID := *req.ConversationID
+		conv, err := e.store.GetConversation(convID)
+		if err != nil {
+			if errors.Is(err, journal.ErrNoSuchContent) {
+				bad := refusal(wire.ErrorCodeBadRequest)
+				bad.Detail = strPtr("unknown_conversation")
+				return wire.SubmitReply{}, bad
+			}
+			return wire.SubmitReply{}, fmt.Errorf("get conversation: %w", err)
+		}
+
+		if conv.Workspace != nil && *conv.Workspace != req.Workspace {
+			return wire.SubmitReply{}, refusal("workspace_mismatch")
+		}
+
+		turns, err := e.store.GetConversationTurns(convID)
+		if err != nil {
+			return wire.SubmitReply{}, fmt.Errorf("get conversation turns: %w", err)
+		}
+
+		historyDoc := history.New()
+		for _, t := range turns {
+			if t.TerminalState == nil {
+				continue
+			}
+			turn := history.Turn{
+				ID:     t.ID,
+				State:  *t.TerminalState,
+				Input:  []byte{},
+				Answer: []byte{},
+				Label:  "reviewed",
+			}
+			if err := historyDoc.AddTurn(turn); err != nil {
+				return wire.SubmitReply{}, fmt.Errorf("add turn to history: %w", err)
+			}
+		}
+
+		if req.ContextFromTurn != nil {
+			if err := historyDoc.SetContextFromTurn(*req.ContextFromTurn); err != nil {
+				return wire.SubmitReply{}, fmt.Errorf("set context from turn: %w", err)
+			}
+		}
+
+		historyBytes = historyDoc.Bytes()
+	}
+
+	rec, err := e.projectBudget(eff, req.Input, historyBytes)
 	if err != nil {
 		return wire.SubmitReply{}, err
 	}
@@ -246,6 +324,40 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			convID = *req.ConversationID
 		}
 
+		contextHash := ""
+		if convID != "" {
+			conv, err := tx.GetConversation(convID)
+			if err != nil {
+				if errors.Is(err, journal.ErrNoSuchContent) {
+					bad := refusal(wire.ErrorCodeBadRequest)
+					bad.Detail = strPtr("unknown_conversation")
+					return bad
+				}
+				return fmt.Errorf("get conversation: %w", err)
+			}
+
+			if conv.Workspace != nil && *conv.Workspace != req.Workspace {
+				conflict := refusal("workspace_mismatch")
+				return conflict
+			}
+
+			if conv.Workspace == nil {
+				if err := tx.SetConversationWorkspace(convID, req.Workspace); err != nil {
+					return fmt.Errorf("set conversation workspace: %w", err)
+				}
+			}
+
+			turns, err := tx.GetConversationTurns(convID)
+			if err != nil {
+				return fmt.Errorf("get conversation turns: %w", err)
+			}
+
+			contextHash, err = renderHistory(turns, req.ContextFromTurn)
+			if err != nil {
+				return fmt.Errorf("render history: %w", err)
+			}
+		}
+
 		turnID, err = tx.CreateEngineTurn(journal.TurnParams{
 			RunID:             e.runID,
 			Mode:              eff.Preset.Mode,
@@ -260,6 +372,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			ConversationID:    convID,
 			MaxRoundsInEffect: maxRoundsInEffect,
 			MaxRoundsCeiling:  maxRoundsCeiling,
+			ContextHash:       contextHash,
 		})
 		if err != nil {
 			return err

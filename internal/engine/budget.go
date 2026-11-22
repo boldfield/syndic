@@ -178,8 +178,8 @@ func budgetError(kind string) *wire.Error {
 }
 
 // projectBudget runs the submit-time budget checks and returns the record to
-// store on the turn.
-func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord, error) {
+// store on the turn. historyBytes is optional and included in admission checks.
+func (e *Engine) projectBudget(eff config.Effective, input string, historyBytes []byte) (budgetRecord, error) {
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
@@ -223,7 +223,25 @@ func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.Author(input), authorOut); err != nil {
+	authorMsgs := prompt.Author(input)
+
+	if len(historyBytes) > 0 {
+		if author.usable() < len(historyBytes) {
+			err := budgetError(budgetContext)
+			err.Participant = strPtr(author.id)
+			err.Admission = i64Ptr(satAdd(len(historyBytes), authorOut))
+			err.Limit = i64Ptr(author.usable())
+			return budgetRecord{}, err
+		}
+		authorMsgs = append([]transport.Message{
+			{
+				Role:    "user",
+				Content: string(historyBytes),
+			},
+		}, authorMsgs...)
+	}
+
+	if err := fits(author, authorMsgs, authorOut); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -249,6 +267,23 @@ func (e *Engine) projectBudget(eff config.Effective, input string) (budgetRecord
 			if err != nil {
 				return budgetRecord{}, err
 			}
+
+			if len(historyBytes) > 0 {
+				if rv.usable() < len(historyBytes) {
+					err := budgetError(budgetContext)
+					err.Participant = strPtr(rv.id)
+					err.Admission = i64Ptr(satAdd(len(historyBytes), out))
+					err.Limit = i64Ptr(rv.usable())
+					return budgetRecord{}, err
+				}
+				msgs = append([]transport.Message{
+					{
+						Role:    "user",
+						Content: string(historyBytes),
+					},
+				}, msgs...)
+			}
+
 			if err := fits(rv, msgs, out); err != nil {
 				return budgetRecord{}, err
 			}
