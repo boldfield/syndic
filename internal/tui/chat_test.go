@@ -198,6 +198,11 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 
 	const progress = "turn in progress: reviewers_dispatched, round 1/2, 30s, writer idle, rev running"
 	lines := chatView(a)
+	ti.EstimatedTokens = 24260
+	a.state.Turns["t2"] = ti
+	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.Contains(last, "[reviewers_dispatched] [round 1/2] [30s]") || !strings.Contains(last, "author:writer idle") {
+		t.Errorf("status line = %q, want the turn state, round, elapsed time, author state and the key hint", last)
+	}
 	lineOf(t, lines, "you: running question")
 	lineOf(t, lines, progress)
 

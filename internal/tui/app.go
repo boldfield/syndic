@@ -1028,15 +1028,14 @@ func (a *App) tabBar() string {
 const keyHint = "tab: switch  /help"
 
 // statusLine is the strip with the key hint at its right edge, w cells wide.
+// The strip compacts itself to leave room for the hint.
 func (a *App) statusLine(w int) string {
-	full := ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
-	// The hint takes the right edge only when the strip keeps all it shows
-	// without it; participant state is worth more than the hint.
-	gap := w - ansi.StringWidth(full) - ansi.StringWidth(keyHint)
-	if gap < 1 {
-		return full
+	hw := ansi.StringWidth(keyHint)
+	if w < hw+20 {
+		return ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
 	}
-	return full + strings.Repeat(" ", gap) + keyHint
+	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true), w-hw-1, "")
+	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-hw) + keyHint
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.

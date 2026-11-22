@@ -14,6 +14,12 @@ import (
 // At 80 columns with five reviewers the strip is at most 80 cells wide and ends with …
 // when needed, dropping segments from the right in whole segments. Uses terminal display width.
 func renderStrip(s State, width int, now time.Time) string {
+	return renderStripFor(s, width, now, false)
+}
+
+// renderStripFor is renderStrip; compact also drops the preset when the line
+// is too wide, so the open turn's state keeps its room beside the key hint.
+func renderStripFor(s State, width int, now time.Time, compact bool) string {
 	switch s.ConnState {
 	case ConnStateConnecting:
 		return "engine: connecting"
@@ -76,7 +82,8 @@ func renderStrip(s State, width int, now time.Time) string {
 		}
 	}
 
-	// [est. tokens / limit]
+	// [est. tokens / limit]; shed before participant state when the line is tight
+	estIdx := len(segments)
 	switch {
 	case ti.LimitTokens > 0:
 		segments = append(segments, fmt.Sprintf("[est. %d / %d]", ti.EstimatedTokens, ti.LimitTokens))
@@ -108,6 +115,25 @@ func renderStrip(s State, width int, now time.Time) string {
 	displayWidth := runewidth.StringWidth(line)
 	if displayWidth <= width {
 		return line
+	}
+
+	// Participant state is worth more than the identity note and the token
+	// estimate: drop those first, keeping the rest in order.
+	kept := segments[:len(segments)-1]
+	if estIdx < len(kept) && strings.HasPrefix(kept[estIdx], "[est.") {
+		kept = append(append([]string{}, kept[:estIdx]...), kept[estIdx+1:]...)
+	}
+	if line = strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
+		return line
+	}
+	segments = kept
+
+	// Next the preset goes: the running turn's state matters more.
+	if compact && len(segments) > 0 && segments[0] == fmt.Sprintf("[%s]", ti.Preset) {
+		segments = segments[1:]
+		if line = strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
+			return line
+		}
 	}
 
 	// Drop segments from the right, adding … at the end.
