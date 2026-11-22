@@ -53,7 +53,7 @@ func firstLine(text string, maxCells int) string {
 // convColumns is the single column list behind every conversation query; the
 // FROM clause must alias conversations as c. last_submitted_at comes from the
 // durable turns.submitted_at of the latest turn (the same turn the ordering key
-// picks); preview is the first line of the first turn's first input.
+// picks); preview is the first line of the first turn's input: its first user message.
 const convColumns = `
 	c.id, c.created_at, c.workspace,
 	(SELECT t2.submitted_at FROM turns t2 WHERE t2.conversation_id = c.id ORDER BY t2.rowid DESC LIMIT 1),
@@ -63,7 +63,7 @@ const convColumns = `
 		WHERE m.turn_id = (
 			SELECT t3.id FROM turns t3 WHERE t3.conversation_id = c.id
 			ORDER BY t3.rowid ASC LIMIT 1
-		) AND m.phase = 'input' ORDER BY m.sequence LIMIT 1)`
+		) AND m.phase = 'author' AND m.sender = 'user' ORDER BY m.sequence LIMIT 1)`
 
 // scanConvRow scans a conversation row from the query result using a Scan function.
 // Expects: id, created_at, workspace, last_submitted_at, turn_count, running, preview

@@ -55,7 +55,7 @@ func (f *convFixture) createTurn(t *testing.T, run, convID string) string {
 // addMessage adds an input message to a turn.
 func (f *convFixture) addMessage(t *testing.T, turnID, content string) {
 	t.Helper()
-	_, _, _, err := f.store.AppendMessage(turnID, "input", "user", nil, []byte(content), nil)
+	_, _, _, err := f.store.AppendMessage(turnID, "author", "user", nil, []byte(content), nil)
 	if err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
