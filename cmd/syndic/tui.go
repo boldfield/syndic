@@ -11,6 +11,7 @@ import (
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/lockfile"
 	"github.com/boldfield/syndic/internal/tui"
+	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -127,6 +128,7 @@ func validateConversationPrefix(ctx context.Context, socket, prefix, workspace s
 
 	// Search for conversations matching the prefix
 	var matches []string
+	var matchedConv *wire.ConversationSummary
 	cursor := ""
 	for {
 		reply, err := cl.Conversations(ctx, nil, cursor, 200)
@@ -134,20 +136,20 @@ func validateConversationPrefix(ctx context.Context, socket, prefix, workspace s
 			return "", fmt.Errorf("failed to list conversations: %v", err)
 		}
 
-		for _, conv := range reply.Items {
+		for i, conv := range reply.Items {
 			if len(conv.ID) >= len(prefix) && conv.ID[:len(prefix)] == prefix {
 				matches = append(matches, conv.ID)
-				// Also check if the workspace matches (for workspace validation)
-				if len(matches) == 1 && conv.Workspace != nil && *conv.Workspace != workspace {
-					return "", fmt.Errorf("workspace mismatch: conversation is in workspace %s but current directory is %s", *conv.Workspace, workspace)
+				matchedConv = &reply.Items[i]
+				// Stop early if we already have multiple matches
+				if len(matches) > 1 {
+					break
 				}
-				// Null-workspace conversations can be accessed from any directory
 			}
 		}
 
-		// Check if we have already found multiple matches
+		// Stop pagination if we found multiple matches
 		if len(matches) > 1 {
-			return "", fmt.Errorf("ambiguous conversation prefix: %s", prefix)
+			break
 		}
 
 		// Check if there are more conversations
@@ -159,6 +161,15 @@ func validateConversationPrefix(ctx context.Context, socket, prefix, workspace s
 
 	if len(matches) == 0 {
 		return "", fmt.Errorf("unknown conversation prefix: %s", prefix)
+	}
+
+	if len(matches) > 1 {
+		return "", fmt.Errorf("ambiguous conversation prefix: %s", prefix)
+	}
+
+	// Check workspace match for the single matched conversation
+	if matchedConv != nil && matchedConv.Workspace != nil && *matchedConv.Workspace != workspace {
+		return "", fmt.Errorf("workspace mismatch: conversation is in workspace %s but current directory is %s", *matchedConv.Workspace, workspace)
 	}
 
 	return matches[0], nil
