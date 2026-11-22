@@ -238,9 +238,10 @@ func (s *Store) OpenBlock(verdictID, blockID, candidateHash, severity, evidence,
 }
 
 // WithdrawBlock withdraws a block against a new candidate hash.
-func (s *Store) WithdrawBlock(blockID, againstCandidateHash string) error {
+// Rejects unless the caller is the reviewer who opened the block.
+func (s *Store) WithdrawBlock(blockID, reviewer, againstCandidateHash string) error {
 	return s.Tx(func(tx *Tx) error {
-		return tx.WithdrawBlock(blockID, againstCandidateHash)
+		return tx.WithdrawBlock(blockID, reviewer, againstCandidateHash)
 	})
 }
 
