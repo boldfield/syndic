@@ -417,6 +417,11 @@ func (e *Engine) probeOne(ctx context.Context, roster *config.Roster, t *probeTa
 		e.emitProbe(wire.EventKindProbeStarted, wire.EvProbeStarted{Participant: label})
 	}
 
+	// Mark participants as probed at start
+	for _, id := range t.participants {
+		e.probed[id] = true
+	}
+
 	fail := func(reason string) {
 		for _, label := range t.labels() {
 			e.emitProbe(wire.EventKindProbeFinished, wire.EvProbeFinished{

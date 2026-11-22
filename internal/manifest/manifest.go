@@ -25,6 +25,7 @@ type Input struct {
 	EngineVersion  string
 	StartedAt      time.Time
 	AdapterVersion func(p config.Participant) string
+	ProbeAtStart   map[string]bool // participants targeted for startup probing
 }
 
 // Participant describes the manifest state of a roster participant.
@@ -43,6 +44,10 @@ type Participant struct {
 	// CalibratedBytesPerToken is the probe's calibration before the safety
 	// factor; nil unless BytesPerTokenSource is "probe".
 	CalibratedBytesPerToken *float64
+	FailingStep             *string
+	ServerStatus            *string
+	RetryCommand            *string
+	ProbeAtStart            bool
 }
 
 // Built is the output of Build.
@@ -160,7 +165,22 @@ func buildParticipant(in Input, rosterParticipant config.Participant) (Participa
 		p.BytesPerTokenSource = "roster"
 	}
 
+	// Set ProbeAtStart flag and RetryCommand for participants targeted at startup probing
+	if in.ProbeAtStart != nil && in.ProbeAtStart[rosterParticipant.ID] {
+		p.ProbeAtStart = true
+		p.RetryCommand = buildRetryCommand(endpoint.Name, rosterParticipant.Model, rosterParticipant.ContextTokens)
+	}
+
 	return p, &probeManifest, nil
+}
+
+// buildRetryCommand constructs the exact syndic probe command that would retry probing.
+func buildRetryCommand(endpoint, model string, contextTokens *int) *string {
+	cmd := fmt.Sprintf("syndic probe --endpoint %s --model %s", endpoint, model)
+	if contextTokens != nil {
+		cmd = fmt.Sprintf("%s --context-tokens %d", cmd, *contextTokens)
+	}
+	return &cmd
 }
 
 // findEndpoint finds an endpoint profile by name.

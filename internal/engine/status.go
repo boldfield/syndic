@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -120,6 +121,14 @@ func poolName(p config.Participant) string {
 	return p.Pool
 }
 
+func buildRetryCommandForParticipant(p config.Participant) string {
+	cmd := "syndic probe --endpoint " + p.Endpoint + " --model " + p.Model
+	if p.ContextTokens != nil {
+		cmd = cmd + " --context-tokens " + fmt.Sprint(*p.ContextTokens)
+	}
+	return cmd
+}
+
 func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	mp := e.built.Participants[p.ID]
 	ep := e.endpoint(p.Endpoint)
@@ -180,6 +189,16 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		ws.OutputBound = &v
 	}
 	ws.BytesPerToken = mp.BytesPerToken
+	ws.FailingStep = mp.FailingStep
+	ws.ServerStatus = mp.ServerStatus
+	ws.ProbeAtStart = e.probed[p.ID]
+
+	// Build retry command for unprobed participants
+	if !mp.Usable {
+		cmd := buildRetryCommandForParticipant(p)
+		ws.RetryCommand = &cmd
+	}
+
 	if e.exceeded[p.ID] {
 		ws.Estimate = estimateExceeded
 	}

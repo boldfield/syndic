@@ -191,6 +191,7 @@ type Engine struct {
 	pstate        map[string]string // cancelling or unknown last reported, per participant
 	failed        map[string]string // failure state of the last dispatch, per participant
 	deliveries    map[string]*openTurn
+	probed        map[string]bool // participants that were targeted for startup probing
 	stop          *stopRun
 	stopping      bool
 	stoppingCh    chan struct{}
@@ -239,6 +240,7 @@ func New(o Options) (*Engine, error) {
 		pstate:          make(map[string]string),
 		failed:          make(map[string]string),
 		deliveries:      make(map[string]*openTurn),
+		probed:          make(map[string]bool),
 		stoppingCh:      make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)

@@ -794,3 +794,48 @@ func TestStartAbandonsUnfinishedProbingRun(t *testing.T) {
 		t.Fatalf("attempts = %d, err %v; restart must not replay requests", attempts, err)
 	}
 }
+
+// TestStatusSurfacesRetryCommand verifies that RetryCommand is correctly built
+// for participants without usable records.
+func TestStatusSurfacesRetryCommand(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, nil, enginetest.SkipProbe("author"))
+
+	// Get status and verify RetryCommand is populated for unprobed participant
+	status, err := h.Engine.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if len(status.Participants) == 0 {
+		t.Fatal("no participants in status")
+	}
+
+	// Should have at least the author participant
+	var authorParticipant *wire.Participant
+	for i := range status.Participants {
+		if status.Participants[i].ID == "author" {
+			authorParticipant = &status.Participants[i]
+			break
+		}
+	}
+	if authorParticipant == nil {
+		t.Fatal("author participant not found in status")
+	}
+
+	// Author was skipped from seeding, so should be unprobed and have a retry command
+	if authorParticipant.State != "unprobed" {
+		t.Errorf("State = %q, want unprobed", authorParticipant.State)
+	}
+
+	// Should have a retry command built from the participant info
+	if authorParticipant.RetryCommand == nil {
+		t.Fatal("RetryCommand should not be nil for unprobed participant")
+	}
+
+	// Verify retry command format
+	cmd := *authorParticipant.RetryCommand
+	expectedCmd := "syndic probe --endpoint local --model llama2"
+	if cmd != expectedCmd {
+		t.Errorf("RetryCommand = %q, want %q", cmd, expectedCmd)
+	}
+}

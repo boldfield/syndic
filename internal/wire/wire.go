@@ -276,6 +276,10 @@ type Participant struct {
 	ContextSource            string   `json:"context_source"`
 	EligibleRequiredReviewer string   `json:"eligible_required_reviewer"`
 	Estimate                 string   `json:"estimate"`
+	FailingStep              *string  `json:"failing_step,omitempty"`
+	ServerStatus             *string  `json:"server_status,omitempty"`
+	RetryCommand             *string  `json:"retry_command,omitempty"`
+	ProbeAtStart             bool     `json:"probe_at_start,omitempty"`
 }
 
 type Pool struct {
