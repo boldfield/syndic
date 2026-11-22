@@ -103,19 +103,15 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 		if p, ok := s.Participants[selectedID]; ok {
 			detail = participantDetail(s, p, now)
 		}
-		// Check if selected is a probe subject
-		subjKey := selectedID
-		if subj, ok := s.ProbeSubjects[subjKey]; ok {
-			detail = probeSubjectDetail(s, subj, now)
-		}
 	}
-	pools = poolLines(s, now)
-	refLines := probeSubjectLines(s, now)
+	// Probe subjects are listed in full below the pools, since they are not
+	// participants and so cannot be selected; the same cut applies to both.
+	pools = append(poolLines(s, now), probeSubjectLines(s, now)...)
 
 	// Fit the height: the table scrolls around the selection first, and the
 	// pools are cut last, leaving a marker that PgDn reaches the rest.
 	if height > 0 {
-		avail := func() int { return height - len(head) - 1 - len(detail) - len(pools) - len(refLines) }
+		avail := func() int { return height - len(head) - 1 - len(detail) - len(pools) }
 		if len(ids) > 0 {
 			rows := table[1:]
 			keep := max(avail(), 1)
@@ -125,17 +121,12 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 			}
 			table = append([]string{table[0]}, rows...)
 		}
-		if over := len(head) + len(table) + len(detail) + len(pools) + len(refLines) - height; over > 0 && (len(pools) > 0 || len(refLines) > 0) {
-			cut := min(over+1, len(pools)+len(refLines))
-			if cut <= len(pools) {
-				pools = append(pools[:len(pools)-cut], fmt.Sprintf("… %d more lines (PgDn)", cut))
-			} else {
-				pools = nil
-				refLines = append(refLines[:len(refLines)-(cut-len(pools))], fmt.Sprintf("… %d more lines (PgDn)", cut-len(pools)))
-			}
+		if over := len(head) + len(table) + len(detail) + len(pools) - height; over > 0 && len(pools) > 0 {
+			cut := min(over+1, len(pools))
+			pools = append(pools[:len(pools)-cut], fmt.Sprintf("… %d more lines (PgDn)", cut))
 		}
 	}
-	lines := append(append(append(append(head, table...), detail...), pools...), refLines...)
+	lines := append(append(append(head, table...), detail...), pools...)
 	out := make([]string, len(lines))
 	for i, l := range lines {
 		out[i] = clipCells(l, width)
@@ -402,66 +393,45 @@ func clipCells(s string, width int) string {
 	return runewidth.Truncate(s, width, "…")
 }
 
-// probeSubjectDetail lists information about a probe subject like a referee.
-func probeSubjectDetail(s State, subj ProbeSubjectInfo, now time.Time) []string {
-	var lines []string
-	lines = append(lines, "detail: "+plain(subj.Kind+":"+subj.Endpoint+":"+subj.Model))
-	state := subj.State
-	if subj.Detail != "" {
-		state += " (" + subj.Detail + ")"
-	}
-	lines = append(lines, "  state: "+plain(state))
-	lines = append(lines, "  kind: "+plain(subj.Kind))
-	lines = append(lines, "  endpoint: "+plain(subj.Endpoint)+"  model: "+plain(subj.Model))
-	if subj.ReportedModel != "" {
-		lines = append(lines, "  reported model: "+plain(subj.ReportedModel))
-	}
-	if subj.ProbeObservedAt != nil {
-		probeTime := fmt.Sprintf("  probe observed_at: %s (%s ago)", subj.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*subj.ProbeObservedAt)))
-		if subj.ProbeAtStart {
-			probeTime += ", probed at start"
-		}
-		lines = append(lines, probeTime)
-	} else {
-		lines = append(lines, "  probe observed_at: none")
-		if subj.FailingStep != "" {
-			lines = append(lines, "  probe failed at: "+plain(subj.FailingStep))
-		}
-		if subj.ServerStatus != "" {
-			lines = append(lines, "  server status: "+plain(subj.ServerStatus))
-		}
-	}
-	if subj.RetryCommand != "" {
-		lines = append(lines, "  retry: "+plain(subj.RetryCommand))
-	}
-	lines = append(lines, "  context bound: "+bound(subj.ContextBound, "")+"  output bound: "+bound(subj.OutputBound, ""))
-	bpt := "-"
-	if subj.BytesPerToken != nil {
-		bpt = fmt.Sprintf("%.2f (%s)", *subj.BytesPerToken, orDash(plain(subj.BytesPerTokenSource)))
-	}
-	lines = append(lines, "  bytes per token: "+bpt)
-	return lines
-}
-
-// probeSubjectLines lists each probe subject (referees, etc.) if any exist.
+// probeSubjectLines lists each probe subject (a referee identity) with its
+// probe state. A subject is no participant, so no roles are shown for it.
 func probeSubjectLines(s State, now time.Time) []string {
-	var lines []string
 	if len(s.ProbeSubjects) == 0 {
-		return lines
+		return nil
 	}
-	var keys []string
+	keys := make([]string, 0, len(s.ProbeSubjects))
 	for k := range s.ProbeSubjects {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	lines = append(lines, "probe subjects:")
+	lines := []string{"probe subjects:"}
 	for _, k := range keys {
 		subj := s.ProbeSubjects[k]
 		state := subj.State
 		if subj.Detail != "" {
 			state += ":" + subj.Detail
 		}
-		lines = append(lines, fmt.Sprintf("  %s/%s/%s: %s", plain(subj.Kind), plain(subj.Endpoint), plain(subj.Model), state))
+		lines = append(lines, fmt.Sprintf("  %s %s/%s: %s", plain(subj.Kind), plain(subj.Endpoint), plain(subj.Model), plain(state)))
+		if subj.ProbeObservedAt != nil {
+			at := fmt.Sprintf("    probe observed_at: %s (%s ago)", subj.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*subj.ProbeObservedAt)))
+			if subj.ProbeAtStart {
+				at += ", probed at start"
+			}
+			lines = append(lines, at)
+		} else if subj.ProbeAtStart {
+			lines = append(lines, "    probed at start")
+		} else if subj.State != "probed" {
+			lines = append(lines, "    probe observed_at: none")
+		}
+		if subj.FailingStep != "" {
+			lines = append(lines, "    probe failed at: "+plain(subj.FailingStep))
+		}
+		if subj.ServerStatus != "" {
+			lines = append(lines, "    server status: "+plain(subj.ServerStatus))
+		}
+		if subj.RetryCommand != "" {
+			lines = append(lines, "    retry: "+plain(subj.RetryCommand))
+		}
 	}
 	return lines
 }

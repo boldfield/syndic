@@ -1172,3 +1172,89 @@ func TestStatusConcurrentReadDuringProbing(t *testing.T) {
 		t.Fatalf("probed participants = %d, want 2", probed)
 	}
 }
+
+// refereeFailingAdapter probes the referee's model through bad and every other
+// model through the embedded adapter.
+type refereeFailingAdapter struct {
+	transport.Adapter
+	bad transport.Adapter
+}
+
+func (a refereeFailingAdapter) Probe(ctx context.Context, endpoint, model string, opts transport.ProbeOptions) (transport.CapabilityRecord, error) {
+	if model == "m-referee" {
+		return a.bad.Probe(ctx, endpoint, model, opts)
+	}
+	return a.Adapter.Probe(ctx, endpoint, model, opts)
+}
+
+// TestStatusReportsRefereeProbeSubjectAndFlags drives a failing referee probe
+// whose server echoes the credential back. The status must name the referee
+// without any role, carry its failure and retry command, set the preset and
+// accepted-truncation flags, and never hold the secret.
+func TestStatusReportsRefereeProbeSubjectAndFlags(t *testing.T) {
+	const secret = "sk-test-credential-do-not-leak"
+	t.Setenv("SYNDIC_TEST_REFEREE_TOKEN", secret)
+	restore := engine.SetRefereeIdentities(func(*config.Roster) []engine.RefereeIdentity {
+		return []engine.RefereeIdentity{{Endpoint: "ep", Model: "m-referee"}}
+	})
+	defer restore()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad credential " + r.Header.Get("Authorization")))
+	}))
+	t.Cleanup(srv.Close)
+
+	env := newProbeEnv(t, probeRoster("flat"), goodCapability(), "")
+	eng := env.start(func(o *engine.Options) {
+		o.NewAdapter = func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
+			// The referee shares the first participant's adapter on its
+			// endpoint, so that adapter fails only the referee's model.
+			bad := ep
+			bad.BaseURL = srv.URL
+			bad.Auth = &config.SecretRef{Source: "env", Name: "SYNDIC_TEST_REFEREE_TOKEN"}
+			return refereeFailingAdapter{Adapter: env.spies[p.ID], bad: openai.New(bad, config.NewEnvFileResolver(t.TempDir()))}, probeAdapterVersion, nil
+		}
+	})
+	st, err := eng.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.ProbeSubjects) != 1 {
+		t.Fatalf("probe subjects = %+v, want the referee", st.ProbeSubjects)
+	}
+	ref := st.ProbeSubjects[0]
+	if ref.Kind != "referee" || ref.Endpoint != "ep" || ref.Model != "m-referee" || ref.State != "unprobed" {
+		t.Errorf("referee subject = %+v", ref)
+	}
+	if ref.Detail == nil || !strings.Contains(*ref.Detail, "probe_failed") {
+		t.Errorf("referee detail = %v, want a probe_failed reason", ref.Detail)
+	}
+	if ref.FailingStep == nil || ref.ServerStatus == nil || *ref.ServerStatus != "HTTP 401" {
+		t.Errorf("referee failure = step %v status %v detail %v", ref.FailingStep, ref.ServerStatus, *ref.Detail)
+	}
+	if ref.RetryCommand == nil || !strings.HasPrefix(*ref.RetryCommand, "syndic probe --endpoint ep --model m-referee --roster ") {
+		t.Errorf("referee retry = %v", ref.RetryCommand)
+	}
+	for _, p := range st.Participants {
+		if p.ID == "referee:ep:m-referee" {
+			t.Errorf("referee listed as a participant: %+v", p)
+		}
+	}
+	if r := statusParticipant(t, eng, "reviewer"); !r.AcceptUnknownTruncation || !r.InDefaultPreset {
+		t.Errorf("reviewer = accept %v preset %v, want both", r.AcceptUnknownTruncation, r.InDefaultPreset)
+	}
+	if a := statusParticipant(t, eng, "author"); a.AcceptUnknownTruncation || !a.InDefaultPreset {
+		t.Errorf("author = accept %v preset %v, want preset only", a.AcceptUnknownTruncation, a.InDefaultPreset)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("status holds the credential: %s", raw)
+	}
+}

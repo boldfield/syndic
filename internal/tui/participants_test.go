@@ -584,7 +584,7 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 	}
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
-	// With the unprobed banner, we need height 16 instead of 15 to get the same overflow in renderParticipants.
+	// This fixture has unprobed default-preset participants, so the unprobed banner takes a head line: 16 rows give the same overflow 15 did.
 	send(r, resizeMsg(80, 16)) // height adjusted for the new unprobed banner line
 	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
@@ -882,171 +882,113 @@ func TestUnprobedBannerWithoutCurrentTurn(t *testing.T) {
 	}
 }
 
-// testEndToEndStatusReply sets up a full engine-backed test through status to
-// rendered output. It creates a turn with the given fixture, gets the status,
-// and returns a State with the status merged.
-func testEndToEndStatusReply(t *testing.T, roster string, scripts map[string][]fake.Step) State {
-	t.Helper()
-	h := enginetest.New(t, roster, scripts, enginetest.ClockStart(farFutureTime()), enginetest.NoStart())
+// TestParticipantsStatusToView drives the engine's real status through MergeStatus
+// into the rendered tab with no open turn. r2 has no record and is in the
+// default preset; nofp is unprobed but outside it. The endpoint carries a
+// credential reference whose value must reach neither status nor view.
+func TestParticipantsStatusToView(t *testing.T) {
+	const secret = "sk-test-credential-do-not-leak"
+	t.Setenv("SYNDIC_TEST_PAID_TOKEN", secret)
+	roster := strings.Replace(partRoster(), "declared_billing = \"flat\"", "declared_billing = \"flat\"\nauth = { source = \"env\", name = \"SYNDIC_TEST_PAID_TOKEN\" }", 1)
+	bound := 4096
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author": {reporting(enginetest.Reply(answerText), "llama3.2:8b")},
+	}, enginetest.ClockStart(farFutureTime()), enginetest.NoStart(), enginetest.SkipProbe("author"), enginetest.SkipProbe("r1"), enginetest.SkipProbe("r2"),
+		enginetest.SkipProbe("nofp"), enginetest.SkipProbe("mism"), enginetest.SkipProbe("norec"))
+	seedRecord(t, h, "local", "llama2", "llama3.2:8b", seedFull, &bound)
+	seedRecord(t, h, "local", "llama3", "llama3.1:70b", seedNoBounds, nil)
 	if err := h.Engine.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Engine.Stop(context.Background()) })
-
 	status, err := h.Engine.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	s := NewState()
-	s.Run.DefaultPreset = status.DefaultPreset
-	return MergeStatus(s, &status)
-}
-
-// TestEndToEndAcceptUnknownTruncationAndProbeStatus drives a real StatusReply
-// through MergeStatus into rendered output for AcceptUnknownTruncation and
-// probed-at-start markers, with no current turn.
-func TestEndToEndAcceptUnknownTruncationAndProbeStatus(t *testing.T) {
-	roster := `
-default_preset = "review"
-
-[deadlines]
-attempt     = "300s"
-turn        = "900s"
-delivery    = "60s"
-provisional = false
-
-[[participants]]
-id = "author"
-model = "llama2"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author"]
-pool = "default"
-
-[[participants]]
-id = "r1"
-model = "llama3"
-route = "api"
-endpoint = "local"
-eligible_roles = ["reviewer"]
-pool = "default"
-accept_unknown_truncation = true
-
-[[participants]]
-id = "r2"
-model = "qwen"
-route = "api"
-endpoint = "local"
-eligible_roles = ["reviewer"]
-pool = "default"
-accept_unknown_truncation = false
-
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:11434/v1"
-declared_location = "local"
-declared_execution = "local"
-declared_billing = "none"
-network_dependency = "none"
-dialect = "chat_completions_v1"
-models = ["llama2", "llama3", "qwen"]
-tokens_per_byte_max = 1.0
-
-[presets.review]
-mode = "review"
-author = "author"
-required_reviewers = ["r1", "r2"]
-
-[policy]
-local_only = true
-allowed_destinations = []
-
-[pools.default]
-concurrency = 1
-`
-	s := testEndToEndStatusReply(t, roster, map[string][]fake.Step{
-		"author": {enginetest.Reply(answerText)},
-		"r1":     {{Kind: fake.StepKindHang}},
-		"r2":     {{Kind: fake.StepKindHang}},
-	})
-
-	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
-
-	// r1 has accept_unknown_truncation=true with unknown eligibility, should show (accepted)
-	r1 := s.Participants["r1"]
-	if r1.EligibleRequiredReviewer != string(transport.TriUnknown) {
-		t.Logf("r1 eligibility: %s (expected unknown for a new probe)", r1.EligibleRequiredReviewer)
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if r1.AcceptUnknownTruncation {
-		detail := participantDetail(s, r1, now)
-		detailStr := strings.Join(detail, "\n")
-		if !strings.Contains(detailStr, "truncation: unknown (accepted)") {
-			t.Errorf("r1 detail should show 'truncation: unknown (accepted)' when accept_unknown_truncation=true:\n%s", detailStr)
+	var decoded wire.StatusReply
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	s := MergeStatus(NewState(), &decoded)
+	if s.CurrentTurn != "" {
+		t.Fatalf("a turn is open: %q", s.CurrentTurn)
+	}
+	now := h.Clock.Now()
+
+	list := renderParticipants(s, 120, 60, "r2", now)
+	wantParts(t, "r2 view", list,
+		"participants: 1 unprobed",
+		"detail: r2",
+		"retry: syndic probe --endpoint paid --model qwen --roster ")
+	if strings.Contains(list, "participants: 2 unprobed") || strings.Contains(list, "participants: 4 unprobed") {
+		t.Errorf("banner counts participants outside the default preset:\n%s", list)
+	}
+	r1 := renderParticipants(s, 120, 60, "r1", now)
+	wantParts(t, "r1 view", r1, "truncation: unknown (accepted)")
+	if strings.Contains(renderParticipants(s, 120, 60, "author", now), "(accepted)") {
+		t.Error("author shows an accepted truncation it never chose")
+	}
+	for name, out := range map[string]string{"status": string(raw), "r1 view": r1, "r2 view": list} {
+		if strings.Contains(out, secret) {
+			t.Errorf("%s holds the credential", name)
 		}
-	}
-
-	// r2 has accept_unknown_truncation=false, should not show (accepted)
-	r2 := s.Participants["r2"]
-	detail2 := participantDetail(s, r2, now)
-	detailStr2 := strings.Join(detail2, "\n")
-	if strings.Contains(detailStr2, "truncation: unknown (accepted)") {
-		t.Errorf("r2 detail should not show '(accepted)' when accept_unknown_truncation=false:\n%s", detailStr2)
-	}
-
-	// Both r1 and r2 are in the default preset (required_reviewers), so they should have InDefaultPreset=true
-	if !r1.InDefaultPreset {
-		t.Errorf("r1 should have InDefaultPreset=true as a required reviewer")
-	}
-	if !r2.InDefaultPreset {
-		t.Errorf("r2 should have InDefaultPreset=true as a required reviewer")
 	}
 }
 
-// TestSecretNotDisabledInRendering asserts that credentials embedded in fields
-// (like in retry commands or server status) are properly sanitized.
-func TestSecretNotDisabledInRendering(t *testing.T) {
-	secretToken := "secret-api-key-12345-not-to-leak"
-
+// TestProbeSubjectRendering feeds a referee probe subject through the wire
+// encoding and MergeStatus. It is shown without roles, with its failure and
+// retry command, and it goes away when the status no longer lists it.
+func TestProbeSubjectRendering(t *testing.T) {
+	str := func(v string) *string { return &v }
+	reply := wire.StatusReply{
+		Participants: []wire.Participant{{ID: "a", State: "idle", EligibleRoles: []string{"author"}}},
+		Pools:        []wire.Pool{{Name: "default", Concurrency: 1}},
+		ProbeSubjects: []wire.ProbeSubject{{
+			Kind: "referee", Identity: "referee:ep:judge", Endpoint: "ep", Model: "judge", State: "unprobed",
+			Detail: str("probe_failed:unauthorized"), FailingStep: str("max_tokens"), ServerStatus: str("HTTP 401"),
+			RetryCommand: str("syndic probe --endpoint ep --model judge --roster /r.toml"),
+		}},
+	}
+	raw, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded wire.StatusReply
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	s := MergeStatus(NewState(), &decoded)
 	now := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
-	s := NewState()
-	s.Run.DefaultPreset = "review"
-
-	// Create a participant with a secret embedded in the retry command
-	s.Participants["author"] = ParticipantInfo{
-		ID:              "author",
-		State:           "unprobed",
-		ReportedModel:   "llama2",
-		EligibleRoles:   []string{"author"},
-		FailingStep:     "identity_check",
-		ServerStatus:    "unauthorized",
-		RetryCommand:    "syndic probe author --endpoint local --secret " + secretToken,
-		InDefaultPreset: true,
-	}
-
-	s.Participants["reviewer"] = ParticipantInfo{
-		ID:              "reviewer",
-		State:           "unprobed",
-		ReportedModel:   "llama3",
-		EligibleRoles:   []string{"reviewer"},
-		ServerStatus:    "API error: " + secretToken,
-		InDefaultPreset: true,
-	}
-
-	s.Turns["t1"] = TurnInfo{ID: "t1", Author: "author", Reviewers: []string{"reviewer"}}
-	s.CurrentTurn = "t1"
-
-	// Render the participants view to ensure it handles embedded credentials without crashing
-	_ = renderParticipants(s, 80, 40, "author", now)
-
-	// Control characters in secrets should be sanitized but the token text may still appear.
-	// Verify that all string fields go through plain() sanitization.
-	for _, p := range s.Participants {
-		detail := participantDetail(s, p, now)
-		for _, line := range detail {
-			if strings.ContainsRune(line, '\x1b') {
-				t.Fatalf("escape sequence found in participant detail for %s: %s", p.ID, line)
-			}
+	out := renderParticipants(s, 100, 40, "a", now)
+	wantParts(t, "view", out, "probe subjects:", "referee ep/judge: unprobed:probe_failed:unauthorized",
+		"probe failed at: max_tokens", "server status: HTTP 401", "retry: syndic probe --endpoint ep --model judge --roster /r.toml")
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "judge") && strings.Contains(l, "roles") {
+			t.Errorf("referee line implies a role: %q", l)
 		}
+	}
+	if strings.Contains(strings.Join(participantIDs(s), ","), "judge") {
+		t.Error("referee listed as a participant")
+	}
+
+	// Every height renders without panicking; once the table and detail fit,
+	// the cut pools and subjects fit too and leave their marker.
+	for h := 1; h <= 40; h++ {
+		got := renderParticipants(s, 100, h, "a", now)
+		if lines := strings.Count(got, "\n") + 1; lines > h && h >= 11 {
+			t.Errorf("height %d rendered %d lines", h, lines)
+		}
+	}
+	if got := renderParticipants(s, 100, 8, "a", now); !strings.Contains(got, "more lines (PgDn)") {
+		t.Errorf("short view lacks the more-lines marker:\n%s", got)
+	}
+
+	reply.ProbeSubjects = nil
+	s = MergeStatus(s, &reply)
+	if out := renderParticipants(s, 100, 40, "a", now); strings.Contains(out, "judge") {
+		t.Errorf("stale subject remained:\n%s", out)
 	}
 }

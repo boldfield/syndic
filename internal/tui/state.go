@@ -660,7 +660,7 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 	s.Participants = participants
 
 	// Populate probe subjects from status
-	subjects := copyMap(s.ProbeSubjects)
+	subjects := make(map[string]ProbeSubjectInfo, len(status.ProbeSubjects))
 	for _, subj := range status.ProbeSubjects {
 		var obsAt *time.Time
 		if subj.ProbeObservedAt != nil {
