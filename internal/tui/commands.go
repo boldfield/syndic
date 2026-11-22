@@ -709,6 +709,7 @@ func cmdRounds(a *App, args []string) tea.Cmd {
 	}
 	a.rounds = n
 	a.roundsIsSet = true
+	a.state.RoundLimit = &n
 	a.refusal = fmt.Sprintf("rounds set to %d for this process", n)
 	return nil
 }
