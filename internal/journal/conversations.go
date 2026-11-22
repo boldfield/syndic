@@ -27,6 +27,7 @@ type TurnInConversation struct {
 	ID            string
 	TerminalState *string
 	SubmittedAt   *time.Time
+	Epoch         int64
 }
 
 // ErrAmbiguousConversationID is returned when a prefix matches multiple conversations.
@@ -281,7 +282,7 @@ func (s *Store) GetConversationTurns(conversationID string) ([]TurnInConversatio
 func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation, error) {
 	rows, err := tx.tx.Query(`
 		SELECT t.id, t.terminal_state,
-			t.submitted_at
+			t.submitted_at, t.epoch
 		FROM turns t
 		WHERE t.conversation_id = ?
 		ORDER BY t.rowid ASC
@@ -297,7 +298,7 @@ func (tx *Tx) GetConversationTurns(conversationID string) ([]TurnInConversation,
 		var terminalState sql.NullString
 		var submittedAtStr sql.NullString
 
-		if err := rows.Scan(&t.ID, &terminalState, &submittedAtStr); err != nil {
+		if err := rows.Scan(&t.ID, &terminalState, &submittedAtStr, &t.Epoch); err != nil {
 			return nil, fmt.Errorf("scan turn: %w", err)
 		}
 

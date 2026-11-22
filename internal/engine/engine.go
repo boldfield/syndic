@@ -695,6 +695,13 @@ func (e *Engine) Conversation(idPrefix string) (string, []wire.ConversationTurnS
 		state := ""
 		if t.TerminalState != nil {
 			state = *t.TerminalState
+		} else {
+			attemptPhase, err := e.store.GetLatestAttemptPhase(t.ID)
+			if err == nil && attemptPhase != "" {
+				state = attemptPhase
+			} else {
+				state = "in_progress"
+			}
 		}
 		summaries[i] = wire.ConversationTurnSummary{
 			ID:    t.ID,

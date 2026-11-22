@@ -797,28 +797,53 @@ func (c *connection) handleRequest(frame wire.Frame) {
 			cursor = *req.Cursor
 		}
 		summaries, nextCursor, err := c.server.engine.Conversations(req.Workspace, cursor, limit)
+		if err != nil {
+			c.respond(frame.ID, "conversations", nil, err)
+			return
+		}
+
 		reply := &wire.ConversationsReply{Items: summaries}
 		if nextCursor != "" {
 			reply.NextCursor = &nextCursor
 		}
-		c.respond(frame.ID, "conversations", reply, err)
+
+		_, fits := checkFrameSize(frame.ID, "conversations", reply)
+		if !fits {
+			if len(summaries) == 0 {
+				c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
+				return
+			}
+			for len(summaries) > 1 {
+				summaries = summaries[:len(summaries)-1]
+				reply := &wire.ConversationsReply{Items: summaries, NextCursor: &cursor}
+				_, fits := checkFrameSize(frame.ID, "conversations", reply)
+				if fits {
+					c.sendReply(frame.ID, reply)
+					return
+				}
+			}
+			c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
+			return
+		}
+
+		c.sendReply(frame.ID, reply)
 	case wire.RequestConversation:
 		var req wire.ConversationRequest
 		if !c.decode(frame, &req, "id") {
 			return
 		}
 		convID, turns, err := c.server.engine.Conversation(req.ID)
-		reply := &wire.ConversationReply{ID: convID, Turns: turns}
-		if err == nil && len(turns) > 0 {
-			// Check if reply would exceed frame size limit
-			if encoded, encErr := json.Marshal(reply); encErr == nil {
-				if len(encoded) > wire.MaxFrameBytes {
-					c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
-					return
-				}
-			}
+		if err != nil {
+			c.respond(frame.ID, "conversation", nil, err)
+			return
 		}
-		c.respond(frame.ID, "conversation", reply, err)
+		reply := &wire.ConversationReply{ID: convID, Turns: turns}
+		_, fits := checkFrameSize(frame.ID, "conversation", reply)
+		if !fits {
+			c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeFrame})
+			return
+		}
+		c.sendReply(frame.ID, reply)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}
@@ -851,6 +876,22 @@ func (c *connection) decode(frame wire.Frame, req any, required ...string) bool 
 func (c *connection) badRequest(id string, cause error) {
 	detail := cause.Error()
 	c.sendError(id, &wire.Error{Code: wire.ErrorCodeBadRequest, Detail: &detail})
+}
+
+// checkFrameSize checks if a reply body would fit in a frame when fully encoded.
+// Returns the encoded frame size and true if it fits, or the size and false if it exceeds MaxFrameBytes.
+func checkFrameSize(id, op string, body any) (int, bool) {
+	bodyJSON, _ := json.Marshal(body)
+	frame := wire.Frame{
+		V:    wire.ProtocolVersion,
+		ID:   id,
+		Type: "reply",
+		Kind: op,
+		Body: bodyJSON,
+	}
+	frameJSON, _ := json.Marshal(frame)
+	encodedLen := len(frameJSON) + 1
+	return encodedLen, encodedLen <= wire.MaxFrameBytes
 }
 
 // respond sends body as the reply to id, or the error err maps to.
