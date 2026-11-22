@@ -403,3 +403,46 @@ func TestChatTrimPointComesFromTheNewestTurnRecord(t *testing.T) {
 		t.Errorf("held trim from t3: %d turns marked, want 2", n)
 	}
 }
+
+// A turn record fetched at startup can land between replayed events. The
+// record and the events each count every revision from the turn's start, so
+// whatever the order the round must not be counted twice.
+func TestChatRoundSurvivesRecordBetweenReplayedEvents(t *testing.T) {
+	two := 2
+	submitted := chatFrame(t, 1, wire.EventKindTurnSubmitted, wire.EvTurnSubmitted{TurnID: "t1", SubmissionID: "s1", Preset: "review", ConversationID: "c"})
+	revision := chatFrame(t, 2, wire.EventKindTurnState, wire.EvTurnState{TurnID: "t1", State: "revision_dispatched"})
+	open := &wire.TurnReply{State: "revision_dispatched", Mode: "review", Preset: "review", Round: 1, MaxRounds: &two}
+	final := &wire.TurnReply{State: "approved", Mode: "review", Preset: "review", Round: 1, MaxRounds: &two}
+
+	s := apply(chatApp(t).state, submitted)
+	s = MergeTurn(s, "t1", open, chatNow)
+	s = apply(s, revision)
+	if got := s.Turns["t1"].Round; got != 1 {
+		t.Fatalf("round after record/replay race = %d, want 1", got)
+	}
+	// The same frame arriving again after a reconnect is not a new revision.
+	s = apply(s, revision)
+	if got := s.Turns["t1"].Round; got != 1 {
+		t.Fatalf("round after a resent revision frame = %d, want 1", got)
+	}
+	s = MergeTurn(s, "t1", final, chatNow)
+	if got := s.Turns["t1"].Round; got != 1 {
+		t.Fatalf("round after the terminal record = %d, want 1", got)
+	}
+	if strip := renderStrip(s, 200, chatNow); strings.Contains(strip, "[round 2/") {
+		t.Errorf("strip = %q, want no doubled round", strip)
+	}
+
+	// Events first, then the record: still one revision.
+	s = apply(chatApp(t).state, submitted)
+	s = apply(s, revision)
+	s = MergeTurn(s, "t1", final, chatNow)
+	if got := s.Turns["t1"].Round; got != 1 {
+		t.Errorf("round with events before the record = %d, want 1", got)
+	}
+	// A further revision after the record has been merged is still counted.
+	s = apply(s, chatFrame(t, 3, wire.EventKindTurnState, wire.EvTurnState{TurnID: "t1", State: "revision_dispatched"}))
+	if got := s.Turns["t1"].Round; got != 2 {
+		t.Errorf("round after a second revision = %d, want 2", got)
+	}
+}

@@ -69,10 +69,17 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
-	Round           int    // revisions started so far: one per revision_dispatched
+	Round           int    // revisions started so far: the larger of eventRounds and recordRound
 	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
 	InputRef        string // content ref of what the user typed, once the record says
 	ContextFrom     string // first earlier turn the turn's history included, once the record says
+
+	// The two round sources each count from the turn's start, so Round takes
+	// the larger rather than adding them: a record fetched between replayed
+	// events must not count a revision twice.
+	eventRounds     int   // revision_dispatched events applied
+	lastRevisionSeq int64 // seq of the last revision_dispatched applied; a resent frame is not counted again
+	recordRound     int   // the latest turn record's round count
 }
 
 // AttemptInfo holds information about one attempt.
@@ -277,8 +284,10 @@ func apply(s State, f wire.Frame) State {
 			turns := copyMap(s.Turns)
 			if ti, ok := turns[body.TurnID]; ok {
 				ti.State = body.State
-				if body.State == "revision_dispatched" {
-					ti.Round++
+				if body.State == "revision_dispatched" && f.Seq > ti.lastRevisionSeq {
+					ti.eventRounds++
+					ti.lastRevisionSeq = f.Seq
+					ti.Round = max(ti.eventRounds, ti.recordRound)
 				}
 				if body.Reason != nil {
 					ti.TerminalReason = body.Reason
@@ -681,7 +690,8 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	// open one only fills a missing estimate.
 	// The turn record is where a reopened or reattached turn gets its round
 	// count, limit and input; events only cover what this process watched.
-	ti.Round = max(ti.Round, turn.Round)
+	ti.recordRound = max(ti.recordRound, turn.Round)
+	ti.Round = max(ti.eventRounds, ti.recordRound)
 	switch {
 	case turn.Mode == "solo":
 		ti.MaxRounds = 0
