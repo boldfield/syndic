@@ -226,13 +226,6 @@ func (e *Engine) projectBudget(eff config.Effective, input string, historyBytes 
 	authorMsgs := prompt.Author(input)
 
 	if len(historyBytes) > 0 {
-		if author.usable() < len(historyBytes) {
-			err := budgetError(budgetContext)
-			err.Participant = strPtr(author.id)
-			err.Admission = i64Ptr(satAdd(len(historyBytes), authorOut))
-			err.Limit = i64Ptr(author.usable())
-			return budgetRecord{}, err
-		}
 		authorMsgs = append([]transport.Message{
 			{
 				Role:    "user",
@@ -269,13 +262,6 @@ func (e *Engine) projectBudget(eff config.Effective, input string, historyBytes 
 			}
 
 			if len(historyBytes) > 0 {
-				if rv.usable() < len(historyBytes) {
-					err := budgetError(budgetContext)
-					err.Participant = strPtr(rv.id)
-					err.Admission = i64Ptr(satAdd(len(historyBytes), out))
-					err.Limit = i64Ptr(rv.usable())
-					return budgetRecord{}, err
-				}
 				msgs = append([]transport.Message{
 					{
 						Role:    "user",

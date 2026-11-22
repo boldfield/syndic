@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"bytes"
 	"database/sql"
 	"testing"
 
@@ -146,7 +147,225 @@ func TestBusyIsGlobalAcrossConversations(t *testing.T) {
 	h.WaitTurnState(reply1.TurnID, engine.StateSoloComplete)
 }
 
-// TODO: TestContextFromTurnFiltersHistory - implement after debugging budget issue with ContextFromTurn
+func TestFrozenHistoryContainsRealData(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, soloScript)
+	workspace := "/workspace/test"
+
+	req1 := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "first question with specific text",
+		Preset:       &[]string{"solo"}[0],
+		Workspace:    workspace,
+	}
+
+	reply1, err := h.Engine.Submit(req1)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+
+	h.WaitTurnState(reply1.TurnID, engine.StateSoloComplete)
+
+	req2 := wire.SubmitRequest{
+		SubmissionID:   "s2",
+		Input:          "second question",
+		Preset:         &[]string{"solo"}[0],
+		Workspace:      workspace,
+		ConversationID: &reply1.ConversationID,
+	}
+
+	reply2, err := h.Engine.Submit(req2)
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+
+	// The second turn's history should contain the first turn's real input
+	if reply2.ContextHash == "" {
+		t.Fatal("second turn should have context_hash")
+	}
+
+	// Verify the history document was stored with real data
+	var historyBytes []byte
+	if err := h.DB.Conn().QueryRow(
+		`SELECT history_bytes FROM turns WHERE id = ?`, reply2.TurnID,
+	).Scan(&historyBytes); err != nil {
+		t.Fatalf("query history_bytes: %v", err)
+	}
+
+	if len(historyBytes) == 0 {
+		t.Fatal("history_bytes should not be empty")
+	}
+
+	// Parse the history document and verify it contains the real input
+	historyDoc, err := history.Parse(historyBytes)
+	if err != nil {
+		t.Fatalf("parse history document: %v", err)
+	}
+
+	turns := historyDoc.Included()
+	if len(turns) == 0 {
+		t.Fatal("history should include at least one turn")
+	}
+
+	if !bytes.Contains(turns[0].Input, []byte("first question with specific text")) {
+		t.Fatalf("history input should contain the actual input text, got: %s", turns[0].Input)
+	}
+}
+
+func TestContextFromTurnFiltersHistory(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, soloScript)
+	workspace := "/workspace/test"
+
+	// Create first turn
+	req1 := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "first input",
+		Preset:       &[]string{"solo"}[0],
+		Workspace:    workspace,
+	}
+	reply1, err := h.Engine.Submit(req1)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	h.WaitTurnState(reply1.TurnID, engine.StateSoloComplete)
+
+	// Create second turn
+	req2 := wire.SubmitRequest{
+		SubmissionID:   "s2",
+		Input:          "second input",
+		Preset:         &[]string{"solo"}[0],
+		Workspace:      workspace,
+		ConversationID: &reply1.ConversationID,
+	}
+	reply2, err := h.Engine.Submit(req2)
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	h.WaitTurnState(reply2.TurnID, engine.StateSoloComplete)
+	turn2ID := reply2.TurnID
+
+	// Create third turn with context_from_turn set to skip the first turn
+	req3 := wire.SubmitRequest{
+		SubmissionID:    "s3",
+		Input:           "third input",
+		Preset:          &[]string{"solo"}[0],
+		Workspace:       workspace,
+		ConversationID:  &reply1.ConversationID,
+		ContextFromTurn: &turn2ID,
+	}
+	reply3, err := h.Engine.Submit(req3)
+	if err != nil {
+		t.Fatalf("third submit: %v", err)
+	}
+
+	// Verify history_bytes includes only turns starting from turn2
+	var historyBytes []byte
+	if err := h.DB.Conn().QueryRow(
+		`SELECT history_bytes FROM turns WHERE id = ?`, reply3.TurnID,
+	).Scan(&historyBytes); err != nil {
+		t.Fatalf("query history_bytes: %v", err)
+	}
+
+	historyDoc, err := history.Parse(historyBytes)
+	if err != nil {
+		t.Fatalf("parse history document: %v", err)
+	}
+
+	turns := historyDoc.Included()
+	if len(turns) != 1 {
+		t.Fatalf("history with context_from_turn should have 1 turn, got %d", len(turns))
+	}
+
+	if turns[0].ID != turn2ID {
+		t.Fatalf("history should include turn2, got %s", turns[0].ID)
+	}
+
+	// But the hash should still be non-empty
+	if reply3.ContextHash == "" {
+		t.Fatal("context_hash should be set even with context_from_turn")
+	}
+}
+
+func TestTaintPersistsAcrossConversations(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, soloScript)
+	workspace := "/workspace/test"
+
+	// Create first turn
+	req1 := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "first input",
+		Preset:       &[]string{"solo"}[0],
+		Workspace:    workspace,
+	}
+	reply1, err := h.Engine.Submit(req1)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+
+	// Wait for first turn to complete before marking it as tainted
+	h.WaitTurnState(reply1.TurnID, engine.StateSoloComplete)
+
+	// Mark the first turn as file_tainted
+	if _, err := h.DB.Conn().Exec(`UPDATE turns SET file_tainted = 1 WHERE id = ?`, reply1.TurnID); err != nil {
+		t.Fatalf("mark first turn as tainted: %v", err)
+	}
+
+	// Create second turn in the same conversation
+	convID := reply1.ConversationID
+	req2 := wire.SubmitRequest{
+		SubmissionID:   "s2",
+		Input:          "second input",
+		Preset:         &[]string{"solo"}[0],
+		Workspace:      workspace,
+		ConversationID: &convID,
+	}
+	reply2, err := h.Engine.Submit(req2)
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+
+	// Verify second turn is also marked as tainted
+	var fileTainted bool
+	if err := h.DB.Conn().QueryRow(
+		`SELECT file_tainted FROM turns WHERE id = ?`, reply2.TurnID,
+	).Scan(&fileTainted); err != nil {
+		t.Fatalf("query file_tainted: %v", err)
+	}
+
+	if !fileTainted {
+		t.Fatal("second turn should be marked as tainted due to conversation history")
+	}
+
+	// Even with context_from_turn set to skip the tainted turn, the new turn should still be tainted
+	h.WaitTurnState(reply2.TurnID, engine.StateSoloComplete)
+
+	req3 := wire.SubmitRequest{
+		SubmissionID:    "s3",
+		Input:           "third input",
+		Preset:          &[]string{"solo"}[0],
+		Workspace:       workspace,
+		ConversationID:  &convID,
+		ContextFromTurn: &reply1.TurnID,
+	}
+	reply3, err := h.Engine.Submit(req3)
+	if err != nil {
+		t.Fatalf("third submit: %v", err)
+	}
+
+	// Verify third turn is also marked as tainted, even though context_from_turn skips the tainted turn
+	fileTainted = false
+	if err := h.DB.Conn().QueryRow(
+		`SELECT file_tainted FROM turns WHERE id = ?`, reply3.TurnID,
+	).Scan(&fileTainted); err != nil {
+		t.Fatalf("query file_tainted for third turn: %v", err)
+	}
+
+	if !fileTainted {
+		t.Fatal("third turn should be tainted even with context_from_turn, because taint survives trimming")
+	}
+}
+
+// Add import for bytes package at the top of the file if needed
+var _ = ""
 
 func TestMaxRoundsValidation(t *testing.T) {
 	h := enginetest.New(t, enginetest.RosterTOML, soloScript)

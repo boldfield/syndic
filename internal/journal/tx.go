@@ -848,3 +848,63 @@ func (tx *Tx) SetTurnFileTainted(turnID string, tainted bool) error {
 	}
 	return nil
 }
+
+// GetTurnInput loads the user's input text for a turn from the author message.
+func (tx *Tx) GetTurnInput(turnID string) ([]byte, error) {
+	var inputContent []byte
+	if err := tx.tx.QueryRow(`
+		SELECT content FROM messages WHERE turn_id = ? AND phase = 'author' AND sender = 'user' LIMIT 1
+	`, turnID).Scan(&inputContent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get turn input: %w", err)
+	}
+	return inputContent, nil
+}
+
+// GetTurnAnswer loads the approved answer text for a turn from its candidate,
+// or from the author's raw output for solo turns.
+func (tx *Tx) GetTurnAnswer(turnID string) ([]byte, error) {
+	turn, err := tx.GetTurn(turnID)
+	if err != nil {
+		return nil, fmt.Errorf("get turn: %w", err)
+	}
+	if turn.CandidateID != "" {
+		var answerContent []byte
+		if err := tx.tx.QueryRow(`
+			SELECT content FROM candidates WHERE id = ?
+		`, turn.CandidateID).Scan(&answerContent); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("get turn answer: %w", err)
+		}
+		return answerContent, nil
+	}
+
+	// For solo turns, the answer is the author's output
+	var rawOutput sql.NullString
+	if err := tx.tx.QueryRow(`
+		SELECT raw_output FROM attempts WHERE turn_id = ? AND phase = 'author' AND state = 'completed' AND status = 'complete' LIMIT 1
+	`, turnID).Scan(&rawOutput); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get turn answer from attempt: %w", err)
+	}
+	if rawOutput.Valid {
+		return []byte(rawOutput.String), nil
+	}
+	return nil, nil
+}
+
+// SetTurnHistoryBytes stores the frozen history document bytes for a turn.
+func (tx *Tx) SetTurnHistoryBytes(turnID string, historyBytes []byte) error {
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET history_bytes = ? WHERE id = ?
+	`, historyBytes, turnID); err != nil {
+		return fmt.Errorf("update turn history_bytes: %w", err)
+	}
+	return nil
+}

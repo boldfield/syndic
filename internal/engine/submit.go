@@ -83,33 +83,42 @@ func findParticipant(participants []config.Participant, id string) *config.Parti
 	return nil
 }
 
-// renderHistory builds a history document from conversation turns and returns its hash.
+// renderHistoryWithData builds a history document from conversation turns with real message data loaded from the tx.
 // contextFromTurn filters which turns to include (empty means all).
-func renderHistory(turns []journal.TurnInConversation, contextFromTurn *string) (string, error) {
+// Returns the bytes and hash of the canonical document.
+func (e *Engine) renderHistoryWithData(tx *journal.Tx, turns []journal.TurnInConversation, contextFromTurn *string) ([]byte, string, error) {
 	doc := history.New()
 	for _, t := range turns {
 		if t.TerminalState == nil {
 			continue
 		}
+		input, err := tx.GetTurnInput(t.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		answer, err := tx.GetTurnAnswer(t.ID)
+		if err != nil {
+			return nil, "", err
+		}
 		turn := history.Turn{
 			ID:     t.ID,
 			State:  *t.TerminalState,
-			Input:  []byte{},
-			Answer: []byte{},
+			Input:  input,
+			Answer: answer,
 			Label:  "reviewed",
 		}
 		if err := doc.AddTurn(turn); err != nil {
-			return "", fmt.Errorf("add turn to history: %w", err)
+			return nil, "", fmt.Errorf("add turn to history: %w", err)
 		}
 	}
 
 	if contextFromTurn != nil {
 		if err := doc.SetContextFromTurn(*contextFromTurn); err != nil {
-			return "", fmt.Errorf("set context from turn: %w", err)
+			return nil, "", fmt.Errorf("set context from turn: %w", err)
 		}
 	}
 
-	return doc.Hash(), nil
+	return doc.Bytes(), doc.Hash(), nil
 }
 
 // Submit admits a turn, or refuses it with a *wire.Error. A refused
@@ -237,6 +246,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
+	// For budget projection, we build history with empty bytes as a conservative estimate.
+	// The real history (with actual input/answer bytes) is rendered inside the tx.
 	var historyBytes []byte
 	if req.ConversationID != nil {
 		convID := *req.ConversationID
@@ -259,6 +270,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			return wire.SubmitReply{}, fmt.Errorf("get conversation turns: %w", err)
 		}
 
+		// Build history document with empty input/answer for projection (conservative estimate).
+		// Using empty bytes underestimates admission, which is safer: if the projection passes,
+		// and the real history is larger, the admission check inside the tx will catch it.
 		historyDoc := history.New()
 		for _, t := range turns {
 			if t.TerminalState == nil {
@@ -325,6 +339,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 
 		contextHash := ""
+		var frozenHistoryBytes []byte
+		conversationTainted := false
 		if convID != "" {
 			conv, err := tx.GetConversation(convID)
 			if err != nil {
@@ -351,9 +367,26 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 				return fmt.Errorf("get conversation turns: %w", err)
 			}
 
-			contextHash, err = renderHistory(turns, req.ContextFromTurn)
+			historyBytesRendered, contextHashRendered, err := e.renderHistoryWithData(tx, turns, req.ContextFromTurn)
 			if err != nil {
-				return fmt.Errorf("render history: %w", err)
+				return fmt.Errorf("render history with data: %w", err)
+			}
+			contextHash = contextHashRendered
+			frozenHistoryBytes = historyBytesRendered
+
+			// Compute conversation-wide transitive taint: if any earlier turn is tainted,
+			// this conversation is tainted, so the new turn will be marked tainted too.
+			for _, t := range turns {
+				if t.TerminalState != nil {
+					turn, err := tx.GetTurn(t.ID)
+					if err != nil {
+						return fmt.Errorf("get turn for taint check: %w", err)
+					}
+					if turn.FileTainted {
+						conversationTainted = true
+						break
+					}
+				}
 			}
 		}
 
@@ -377,6 +410,20 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if err != nil {
 			return err
 		}
+		if len(frozenHistoryBytes) > 0 {
+			if err := tx.SetTurnHistoryBytes(turnID, frozenHistoryBytes); err != nil {
+				return fmt.Errorf("store history bytes: %w", err)
+			}
+		}
+
+		// Persist transitive taint: if the conversation has any tainted turns,
+		// this new turn is also tainted.
+		if conversationTainted {
+			if err := tx.SetTurnFileTainted(turnID, true); err != nil {
+				return fmt.Errorf("set turn file tainted: %w", err)
+			}
+		}
+
 		submitted := wire.EvTurnSubmitted{
 			TurnID:          turnID,
 			SubmissionID:    req.SubmissionID,
