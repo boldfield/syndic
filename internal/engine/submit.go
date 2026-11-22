@@ -23,6 +23,7 @@ type openTurn struct {
 	author          string
 	input           string
 	history         *history.Document // frozen at submit; no turns when none
+	contextHash     string            // hash of the frozen history; empty when none
 	eff             config.Effective
 	attemptDeadline time.Duration
 	turnDeadline    time.Time
@@ -315,6 +316,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		author:          eff.Preset.Author,
 		input:           req.Input,
 		history:         doc,
+		contextHash:     contextHash,
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,

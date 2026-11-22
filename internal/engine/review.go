@@ -85,6 +85,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			ManifestHash:    e.manifestHash,
 			TurnID:          t.id,
 			AuthorAttemptID: attemptID,
+			ContextHash:     t.contextHash,
 			Content:         []byte(res.Text),
 		})
 		if err != nil {

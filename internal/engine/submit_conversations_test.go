@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport/fake"
@@ -427,4 +428,57 @@ func tainted(t *testing.T, h *enginetest.Harness, turnID string) bool {
 		t.Fatal(err)
 	}
 	return row.FileTainted
+}
+
+func TestCandidateIdentityBindsFrozenContextHash(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("answer one"), enginetest.Reply("answer two")},
+		"reviewer": {approveStep(), approveStep()},
+	})
+	first, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c1", Input: "question one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, first.TurnID, engine.StateApproved, "all_approved")
+	conv := first.ConversationID
+	second, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "c2", Input: "question two", ConversationID: &conv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, second.TurnID, engine.StateApproved, "all_approved")
+	if len(second.ContextHash) != 64 {
+		t.Fatalf("context hash = %q", second.ContextHash)
+	}
+
+	manifest := ""
+	if mh := h.Engine.Hello().ManifestHash; mh != nil {
+		manifest = *mh
+	}
+	hashFor := func(turnID, text, ctx string) string {
+		hash, err := candidate.Hash(candidate.Identity{
+			ManifestHash:    manifest,
+			TurnID:          turnID,
+			AuthorAttemptID: attemptsOf(h, turnID, "author")[0],
+			ContextHash:     ctx,
+			Content:         []byte(text),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hash
+	}
+	calls := h.Adapters["reviewer"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("reviewer calls = %d", len(calls))
+	}
+	if got, want := calls[0].Request.Envelope.CandidateHash, hashFor(first.TurnID, "answer one", ""); got != want {
+		t.Fatalf("first candidate hash = %s, want %s", got, want)
+	}
+	got := calls[1].Request.Envelope.CandidateHash
+	if want := hashFor(second.TurnID, "answer two", second.ContextHash); got != want {
+		t.Fatalf("second candidate hash = %s, want %s", got, want)
+	}
+	if got == hashFor(second.TurnID, "answer two", "") {
+		t.Fatal("candidate hash ignores the frozen context")
+	}
 }
