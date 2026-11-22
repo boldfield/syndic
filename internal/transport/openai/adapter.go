@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/transport"
@@ -1139,11 +1140,63 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
-// classifyRejectionError classifies an HTTP error response and returns both the classification and the rule.
-// Context-length errors are status 400/413 with specific error messages indicating token limit exceeded.
-// Returns (classification, rule).
-const overLengthClassificationRule = "status 400 or 413 with body containing context_length_exceeded, maximum context length, or token limit exceeded (case-insensitive) → rejected:context; status 401/403/404/429 or 5xx → rejected:other; other 400/413 → rejected:other; 2xx → accepted_whole or markers_missing"
+// contextLengthPhrases are the lower-case phrases that mark a 400 or 413 body as an explicit
+// context-length or token-limit refusal. overLengthClassificationRule is built from it.
+var contextLengthPhrases = []string{
+	"context_length_exceeded",
+	"maximum context length",
+	"token limit exceeded",
+	"prompt is too long",
+	"input is too long",
+	"context window",
+	"context length",
+	"too many tokens",
+	"exceeds the maximum number of tokens",
+	"maximum input tokens",
+}
 
+var overLengthClassificationRule = "status 400 or 413 with error code or type context_length_exceeded, or body containing one of: " +
+	strings.Join(contextLengthPhrases, ", ") +
+	" (case-insensitive) → rejected:context; status 401/403/404/429 or 5xx → rejected:other; other 400/413 → rejected:other; 2xx → accepted_whole or markers_missing"
+
+const overLengthDetailMax = 200
+
+// errorBodyFields holds the JSON fields of an error body that classification and the detail read.
+type errorBodyFields struct {
+	Code    any `json:"code"`
+	Type    any `json:"type"`
+	Message any `json:"message"`
+	Error   *struct {
+		Code    any `json:"code"`
+		Type    any `json:"type"`
+		Message any `json:"message"`
+	} `json:"error"`
+}
+
+func parseErrorBody(body []byte) errorBodyFields {
+	var f errorBodyFields
+	// A body that is not a JSON object (or whose error field is a string) leaves f partly or wholly empty.
+	if err := json.Unmarshal(body, &f); err != nil {
+		var loose struct {
+			Code    any `json:"code"`
+			Type    any `json:"type"`
+			Message any `json:"message"`
+		}
+		if json.Unmarshal(body, &loose) == nil {
+			f.Code, f.Type, f.Message = loose.Code, loose.Type, loose.Message
+		}
+	}
+	return f
+}
+
+func isContextLengthCode(v any) bool {
+	s, ok := v.(string)
+	return ok && strings.EqualFold(strings.TrimSpace(s), "context_length_exceeded")
+}
+
+// classifyRejectionError classifies an HTTP error response and returns both the classification and the rule.
+// Context-length errors are status 400/413 with an explicit context-length error code or phrase.
+// Returns (classification, rule).
 func classifyRejectionError(statusCode int, body []byte) (string, string) {
 	if statusCode == 401 || statusCode == 403 {
 		return "rejected:other", "authentication error"
@@ -1152,12 +1205,16 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 		return "rejected:other", "not found or rate limited"
 	}
 	if statusCode == 400 || statusCode == 413 {
-		bodyStr := strings.ToLower(string(body))
-		// Check for explicit context-length or token-limit signals
-		if strings.Contains(bodyStr, "context_length_exceeded") ||
-			strings.Contains(bodyStr, "maximum context length") ||
-			strings.Contains(bodyStr, "token limit exceeded") {
+		f := parseErrorBody(body)
+		if isContextLengthCode(f.Code) || isContextLengthCode(f.Type) ||
+			(f.Error != nil && (isContextLengthCode(f.Error.Code) || isContextLengthCode(f.Error.Type))) {
 			return "rejected:context", "explicit context-length or token-limit signal"
+		}
+		bodyStr := strings.ToLower(string(body))
+		for _, phrase := range contextLengthPhrases {
+			if strings.Contains(bodyStr, phrase) {
+				return "rejected:context", "explicit context-length or token-limit signal"
+			}
 		}
 		return "rejected:other", "400 or 413 without explicit context-length signal"
 	}
@@ -1165,6 +1222,39 @@ func classifyRejectionError(statusCode int, body []byte) (string, string) {
 		return "rejected:other", "server error"
 	}
 	return "rejected:other", "unknown error"
+}
+
+// rejectionDetail extracts the server's message from an error body: error.message, then message,
+// then the body. The result is not truncated: the caller scrubs it first, then cuts it.
+func rejectionDetail(body []byte) string {
+	f := parseErrorBody(body)
+	msg := ""
+	if f.Error != nil {
+		if m, ok := f.Error.Message.(string); ok {
+			msg = m
+		}
+	}
+	if msg == "" {
+		if m, ok := f.Message.(string); ok {
+			msg = m
+		}
+	}
+	if msg == "" {
+		msg = string(body)
+	}
+	return strings.TrimSpace(msg)
+}
+
+func truncateUTF8(s string, max int) string {
+	s = strings.ToValidUTF8(s, "")
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions) error {
@@ -1283,6 +1373,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	if httpResp.StatusCode != 0 && (httpResp.StatusCode < 200 || httpResp.StatusCode >= 300) {
 		outcome, _ := classifyRejectionError(httpResp.StatusCode, body)
 		record.OverLength = outcome
+		// Scrub the full message first, then cut, so a secret split by the cut is not left behind.
+		scrubbed, _ := transport.Scrub(rejectionDetail(body), *secrets)
+		record.OverLengthDetail = truncateUTF8(scrubbed, overLengthDetailMax)
 		return nil
 	}
 

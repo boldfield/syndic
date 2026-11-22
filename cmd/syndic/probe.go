@@ -315,6 +315,9 @@ func printSummary(endpoint, model string, record transport.CapabilityRecord, raw
 	fmt.Printf("  Usage available:  %s\n", record.UsageAvailable)
 	fmt.Printf("  System role:      %s\n", record.SystemRoleHonored)
 	fmt.Printf("  Over-length:      %s\n", record.OverLength)
+	if record.OverLengthDetail != "" {
+		fmt.Printf("    Reason:         %s\n", record.OverLengthDetail)
+	}
 	fmt.Printf("  Eligible reviewer: %s\n", record.EligibleRequiredReviewer)
 	if record.LatencyMillis != nil {
 		fmt.Printf("  Latency:          %d ms\n", *record.LatencyMillis)
