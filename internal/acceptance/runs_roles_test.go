@@ -879,6 +879,9 @@ func nRolesTOML(n, turnMax int, selfPreset bool) string {
 	models := []string{`"m-author"`}
 	var b strings.Builder
 	b.WriteString("default_preset = \"review\"\n\n[deadlines]\nattempt = \"300s\"\nturn = \"900s\"\ndelivery = \"60s\"\nprovisional = false\n\n")
+	// These tests pin what a block or revision request does to a turn with no
+	// revision loop, so the roster turns the loop off.
+	b.WriteString("[revision]\nmax_rounds = 0\n\n")
 	if turnMax > 0 {
 		fmt.Fprintf(&b, "[budgets]\nturn_max_estimated_tokens = %d\n\n", turnMax)
 	}

@@ -34,6 +34,7 @@ const (
 	StateAuthorDispatched    = "author_dispatched"
 	StateCandidateFrozen     = "candidate_frozen"
 	StateReviewersDispatched = "reviewers_dispatched"
+	StateRevisionDispatched  = "revision_dispatched"
 	StateApproved            = "approved"
 	StateSoloComplete        = "solo_complete"
 	StateIncomplete          = "incomplete"
@@ -68,6 +69,9 @@ const (
 	reasonAuthorFailed = "author_failed:"
 	reasonAllApproved  = "all_approved"
 	reasonCancelled    = "cancelled"
+
+	reasonRoundsExhausted   = "rounds_exhausted"
+	reasonRevisionUnchanged = "revision_unchanged"
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
@@ -737,9 +741,19 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		log.Printf("engine: turn %s: no delivery, reviewer texts unreadable: %v", row.ID, err)
 		return nil
 	}
+	// Only the current candidate's reviews are delivered, as in the live path.
+	// Storing a candidate bumps the epoch, so those are the reviews of the
+	// highest epoch, whether or not a later author attempt failed or changed
+	// nothing.
+	reviewEpoch := -1
+	for _, a := range attempts {
+		if a.Phase == phaseReview && a.Epoch > reviewEpoch {
+			reviewEpoch = a.Epoch
+		}
+	}
 	// Every accepted reply carries text, gate-failed ones included, as in the live path.
 	for _, a := range attempts {
-		if text, ok := texts[a.ID]; ok && a.Phase == phaseReview && !a.Quarantined {
+		if text, ok := texts[a.ID]; ok && a.Phase == phaseReview && !a.Quarantined && a.Epoch == reviewEpoch {
 			t.outputs[a.ID] = text
 		}
 	}

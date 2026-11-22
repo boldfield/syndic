@@ -52,12 +52,17 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
 
-	var hash string
+	var hash, candidateID string
+	var round int
+	var lines []string
 	var quarantined, ended, exceeded bool
 	var term *terminal
 	var held *hold
+	var endReason string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, quarantined, ended, exceeded, term, held = "", false, false, false, nil, nil
+		hash, candidateID, round, lines = "", "", 0, nil
+		quarantined, ended, exceeded, term, held = false, false, false, nil, nil
+		endReason = ""
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -78,20 +83,43 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if gate != nil {
 			ended = true
-			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonAuthorFailed+authorFailedStatus(res, gate))
+			endReason = reasonAuthorFailed + authorFailedStatus(res, gate)
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
+		}
+		lines = authorChangeLines(res)
+		if t.revising && sameRevision(t.candidate, t.changeLines, res.Text, lines) {
+			// The author produced nothing new; the human decides with the
+			// blocks still open.
+			ended = true
+			endReason = reasonRevisionUnchanged
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
+			return err
+		}
+		if t.revising {
+			round = t.round + 1
 		}
 		hash, err = candidate.Hash(candidate.Identity{
 			ManifestHash:    e.manifestHash,
 			TurnID:          t.id,
 			AuthorAttemptID: attemptID,
 			ContextHash:     t.contextHash,
+			Round:           round,
 			Content:         []byte(res.Text),
 		})
 		if err != nil {
 			return err
 		}
-		if _, err := tx.FreezeCandidate(t.id, res.Text, hash); err != nil {
+		if t.revising {
+			var turn *journal.TurnRow
+			if turn, err = tx.GetTurn(t.id); err != nil {
+				return err
+			}
+			candidateID, err = tx.SetLatestCandidate(t.id, res.Text, hash, round, turn.CandidateID)
+		} else {
+			candidateID, err = tx.FreezeCandidate(t.id, res.Text, hash)
+		}
+		if err != nil {
 			return err
 		}
 		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{TurnID: t.id, CandidateHash: hash}); err != nil {
@@ -119,10 +147,20 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	if ended {
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
+		// A revision's author failed or changed nothing: the candidate and its
+		// reviews exist, so the terminal state is delivered (none before one).
+		e.deliverTerminal(t, StateIncomplete, endReason)
 		return false
 	}
 	t.candidate = res.Text
 	t.candidateHash = hash
+	t.candidateID = candidateID
+	t.changeLines = lines
+	if t.revising {
+		t.revising = false
+		t.round = round
+		t.resetRound()
+	}
 	return true
 }
 
@@ -232,14 +270,11 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err != nil {
 			return err
 		}
-		msgs, err := prompt.Reviewer(prompt.ReviewInput{
-			Request:       t.input,
-			Candidate:     t.candidate,
-			CandidateHash: t.candidateHash,
-			AttemptID:     attemptID,
-			Delimiter:     delimiter,
-			History:       t.history,
-		})
+		blocks, err := tx.ReviewerOpenBlocks(t.id, id)
+		if err != nil {
+			return err
+		}
+		msgs, err := t.reviewerMessages(attemptID, delimiter, blocks)
 		if err != nil {
 			return err
 		}
@@ -326,14 +361,7 @@ func (e *Engine) newDelimiter(t *openTurn) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		_, err = prompt.Reviewer(prompt.ReviewInput{
-			Request:       t.input,
-			Candidate:     t.candidate,
-			CandidateHash: t.candidateHash,
-			AttemptID:     "pending",
-			Delimiter:     delimiter,
-			History:       t.history,
-		})
+		_, err = t.reviewerMessages("pending", delimiter, nil)
 		if errors.Is(err, prompt.ErrDelimiterCollision) {
 			continue
 		}
@@ -377,15 +405,11 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
-	originalReviewInput := prompt.ReviewInput{
-		Request:       t.input,
-		Candidate:     t.candidate,
-		CandidateHash: t.candidateHash,
-		AttemptID:     originalDispatch.attemptID,
-		Delimiter:     delimiter,
-		History:       t.history,
+	blocks, err := tx.ReviewerOpenBlocks(t.id, originalDispatch.participant)
+	if err != nil {
+		return nil, err
 	}
-	msgs, err := prompt.Repair(originalReviewInput, originalOutput, repairAttemptID)
+	msgs, err := t.repairMessages(originalDispatch.attemptID, delimiter, blocks, originalOutput, repairAttemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -459,13 +483,16 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
 
-	var quarantined, approvedNow, exceeded bool
-	var endState, endReason string
+	var quarantined, approvedNow, exceeded, revise bool
+	var endState, endReason, kind string
 	var repair bool
 	var term *terminal
 	var held *hold
+	// Everything the closure decides is held in locals and applied to the open
+	// turn once the transaction has committed, so a retried or rolled-back
+	// transaction leaves the turn's memory as it found it.
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		quarantined, approvedNow, endState, endReason = false, false, "", ""
+		quarantined, approvedNow, revise, endState, endReason, kind = false, false, false, "", "", ""
 		repair, exceeded, term, held = false, false, nil, nil
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
@@ -539,8 +566,19 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 
 		switch parsed.Classification {
-		case verdict.Valid:
-			if v.Decision == "block" {
+		case verdict.Valid, verdict.RevisionRequest:
+			// A withdrawal is the reviewer's, recorded against this candidate,
+			// and is looked up before a block of this verdict is opened.
+			if err := withdrawBlocks(tx, t, d.participant, v.BlockStates); err != nil {
+				return err
+			}
+			switch {
+			case parsed.Classification == verdict.RevisionRequest:
+				kind = resultRevision
+				if !t.loopEnabled() {
+					endState, endReason = StateIncomplete, reasonRevision+d.participant
+				}
+			case v.Decision == "block":
 				blockID, err := tx.OpenBlockFor(verdictID, v.BlockID, t.candidateHash, v.Severity, v.Evidence, v.Remedy)
 				if err != nil {
 					return err
@@ -548,15 +586,27 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				if err := emit(t.id, wire.EventKindBlockOpened, wire.EvBlockOpened{BlockID: blockID, Severity: v.Severity}); err != nil {
 					return err
 				}
-				endState, endReason = StateIncomplete, reasonBlock+blockID
-				break
+				kind = resultBlock
+				if !t.loopEnabled() {
+					endState, endReason = StateIncomplete, reasonBlock+blockID
+				}
+			default:
+				kind = resultApprove
+				approvedNow = true
+				if e.allApproved(t, d.participant) {
+					endState, endReason = StateApproved, reasonAllApproved
+				}
 			}
-			approvedNow = true
-			if e.allApproved(t, d.participant) {
-				endState, endReason = StateApproved, reasonAllApproved
+			// A loop waits for every required reviewer's accepted result on
+			// the candidate before it decides, so the author is sent all the
+			// feedback at once.
+			if endState == "" && t.loopEnabled() && e.resultsComplete(t, d.participant) {
+				if t.roundsRemain() {
+					revise = true
+				} else {
+					endState, endReason = StateIncomplete, reasonRoundsExhausted
+				}
 			}
-		case verdict.RevisionRequest:
-			endState, endReason = StateIncomplete, reasonRevision+d.participant
 		case verdict.Rejected:
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":rejected"
 		case verdict.Malformed:
@@ -602,10 +652,57 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	if approvedNow {
 		t.approved[d.participant] = true
 	}
+	if kind != "" {
+		if t.results == nil {
+			t.results = map[string]reviewResult{}
+		}
+		t.results[d.participant] = reviewResult{kind: kind, attemptID: d.attemptID, text: res.Text}
+	}
 	if endState != "" {
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
 		e.deliverTerminal(t, endState, endReason)
+		return nil
+	}
+	if revise {
+		e.startRevision(t)
+	}
+	return nil
+}
+
+// resultsComplete reports whether every required reviewer has an accepted
+// result on the current candidate, counting the one just recorded.
+func (e *Engine) resultsComplete(t *openTurn, just string) bool {
+	for _, id := range t.required {
+		if _, ok := t.results[id]; id != just && !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// withdrawBlocks records, against the current candidate, each of the
+// reviewer's open blocks its verdict marks withdrawn. A block it maintains
+// stays open.
+func withdrawBlocks(tx *journal.Tx, t *openTurn, participant string, states []verdict.BlockState) error {
+	if len(states) == 0 {
+		return nil
+	}
+	open, err := tx.ReviewerOpenBlocks(t.id, participant)
+	if err != nil {
+		return err
+	}
+	for _, st := range states {
+		if st.State != "withdrawn" {
+			continue
+		}
+		for _, b := range open {
+			if b.ReviewerBlockID == st.BlockID {
+				if err := tx.WithdrawBlock(b.ID, participant, t.candidateHash); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 	"os"
 	"testing"
@@ -73,4 +74,13 @@ func SetRefereeIdentities(f func(*config.Roster) []RefereeIdentity) (restore fun
 // before conversations.
 func LegacySubmissionHash(req wire.SubmitRequest) (string, error) {
 	return legacySubmissionHash(req)
+}
+
+// SetAuthorChangeLines replaces how an author result's change-set lines are
+// read, so a test can give a revision a patch. It returns a function that
+// restores the reader.
+func SetAuthorChangeLines(f func(transport.CompleteResult) []string) (restore func()) {
+	old := authorChangeLines
+	authorChangeLines = f
+	return func() { authorChangeLines = old }
 }
