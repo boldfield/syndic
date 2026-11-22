@@ -17,6 +17,14 @@ func init() {
 	cover(designDocsPara, "a pull request modifying both open-questions.md and a protected doc fails the design immutability check", "TestDesignDocs_MixedChangeFails")
 	cover(designDocsPara, "files similar to open-questions.md are caught as protected documents", "TestDesignDocs_SimilarFilesFail")
 	cover(designDocsPara, "the design immutability check fails when git diff fails due to unrelated histories", "TestDesignDocs_DiffFailsUnrelatedHistories")
+	cover(designDocsPara, "adding one new file under docs/design/ and nothing else passes", "TestDesignDocs_AddingSingleRatificationPasses")
+	cover(designDocsPara, "adding two new files under docs/design/ and nothing else passes", "TestDesignDocs_AddingMultipleRatificationPasses")
+	cover(designDocsPara, "adding a new file under docs/design/ together with a change to open-questions.md passes", "TestDesignDocs_AddingRatificationWithOpenQuestionsPasses")
+	cover(designDocsPara, "adding a new file under docs/design/ together with any file outside docs/design/ fails", "TestDesignDocs_AddingRatificationWithExternalChangesFails")
+	cover(designDocsPara, "modifying an existing design document fails", "TestDesignDocs_ModifyingDesignDocFails")
+	cover(designDocsPara, "deleting an existing design document fails", "TestDesignDocs_DeletingDesignDocFails")
+	cover(designDocsPara, "renaming an existing design document fails", "TestDesignDocs_RenamingDesignDocFails")
+	cover(designDocsPara, "adding a new file under docs/design/ in a subdirectory passes when nothing else changes", "TestDesignDocs_AddingSubdirectoryRatificationPasses")
 }
 
 func TestDesignDocs_ProtectedDocsFail(t *testing.T) {
@@ -347,6 +355,377 @@ func TestDesignDocs_DiffFailsUnrelatedHistories(t *testing.T) {
 
 	if err := cmd.Run(); err == nil {
 		t.Fatal("Expected script to fail with unrelated histories but it succeeded")
+	}
+}
+
+func TestDesignDocs_AddingSingleRatificationPasses(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.WriteFile(filepath.Join(designDir, "v6-new.md"), []byte("# New Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "docs/design/v6-new.md")
+	runCmd(t, testRepo, "git", "commit", "-m", "Add new design")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Expected script to succeed for ratification but got error: %v", err)
+	}
+}
+
+func TestDesignDocs_AddingMultipleRatificationPasses(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.WriteFile(filepath.Join(designDir, "v6-new.md"), []byte("# New Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v6-another.md"), []byte("# Another Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write another design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "docs/design/v6-new.md")
+	runCmd(t, testRepo, "git", "add", "docs/design/v6-another.md")
+	runCmd(t, testRepo, "git", "commit", "-m", "Add multiple new designs")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Expected script to succeed for multiple ratification but got error: %v", err)
+	}
+}
+
+func TestDesignDocs_AddingRatificationWithOpenQuestionsPasses(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.WriteFile(filepath.Join(designDir, "v6-new.md"), []byte("# New Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+	oqFile := filepath.Join(designDir, "open-questions.md")
+	content, err := os.ReadFile(oqFile)
+	if err != nil {
+		t.Fatalf("Failed to read open questions: %v", err)
+	}
+	if err := os.WriteFile(oqFile, append(content, []byte("\n# New question\n")...), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Add design and update questions")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Expected script to succeed for ratification with open-questions change but got error: %v", err)
+	}
+}
+
+func TestDesignDocs_AddingRatificationWithExternalChangesFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testRepo, "README.md"), []byte("# Readme\n"), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.WriteFile(filepath.Join(designDir, "v6-new.md"), []byte("# New Design\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+	readmeFile := filepath.Join(testRepo, "README.md")
+	content, err := os.ReadFile(readmeFile)
+	if err != nil {
+		t.Fatalf("Failed to read README: %v", err)
+	}
+	if err := os.WriteFile(readmeFile, append(content, []byte("\nUpdated\n")...), 0644); err != nil {
+		t.Fatalf("Failed to write README: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Add design and update readme")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for ratification with external changes but it succeeded")
+	}
+}
+
+func TestDesignDocs_ModifyingDesignDocFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v6-existing.md"), []byte("# Existing\n"), 0644); err != nil {
+		t.Fatalf("Failed to write existing design: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.WriteFile(filepath.Join(designDir, "v6-existing.md"), []byte("# Existing\nModified\n"), 0644); err != nil {
+		t.Fatalf("Failed to modify design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "docs/design/v6-existing.md")
+	runCmd(t, testRepo, "git", "commit", "-m", "Modify design")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for modifying design doc but it succeeded")
+	}
+}
+
+func TestDesignDocs_DeletingDesignDocFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v6-existing.md"), []byte("# Existing\n"), 0644); err != nil {
+		t.Fatalf("Failed to write existing design: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.Remove(filepath.Join(designDir, "v6-existing.md")); err != nil {
+		t.Fatalf("Failed to delete design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "-A")
+	runCmd(t, testRepo, "git", "commit", "-m", "Delete design")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for deleting design doc but it succeeded")
+	}
+}
+
+func TestDesignDocs_RenamingDesignDocFails(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "v6-old.md"), []byte("# Old\n"), 0644); err != nil {
+		t.Fatalf("Failed to write old design: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	if err := os.Rename(filepath.Join(designDir, "v6-old.md"), filepath.Join(designDir, "v6-new.md")); err != nil {
+		t.Fatalf("Failed to rename design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "-A")
+	runCmd(t, testRepo, "git", "commit", "-m", "Rename design")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("Expected script to fail for renaming design doc but it succeeded")
+	}
+}
+
+func TestDesignDocs_AddingSubdirectoryRatificationPasses(t *testing.T) {
+	t.Parallel()
+	testRepo := t.TempDir()
+
+	bareRepo := filepath.Join(t.TempDir(), "origin.git")
+	if err := os.MkdirAll(bareRepo, 0755); err != nil {
+		t.Fatalf("Failed to create bare repo dir: %v", err)
+	}
+	runCmd(t, bareRepo, "git", "init", "--bare")
+
+	initGitRepo(t, testRepo)
+	runCmd(t, testRepo, "git", "remote", "add", "origin", bareRepo)
+
+	designDir := filepath.Join(testRepo, "docs/design")
+	if err := os.MkdirAll(designDir, 0755); err != nil {
+		t.Fatalf("Failed to create design dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(designDir, "open-questions.md"), []byte("# Questions\n"), 0644); err != nil {
+		t.Fatalf("Failed to write open questions: %v", err)
+	}
+
+	runCmd(t, testRepo, "git", "add", ".")
+	runCmd(t, testRepo, "git", "commit", "-m", "Initial commit")
+	runCmd(t, testRepo, "git", "push", "origin", "HEAD:main")
+
+	runCmd(t, testRepo, "git", "checkout", "-b", "feature")
+
+	subDir := filepath.Join(designDir, "v6")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create subdirectory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "new.md"), []byte("# New Design in subdir\n"), 0644); err != nil {
+		t.Fatalf("Failed to write new design: %v", err)
+	}
+	runCmd(t, testRepo, "git", "add", "docs/design/v6/new.md")
+	runCmd(t, testRepo, "git", "commit", "-m", "Add design in subdirectory")
+
+	scriptPath := filepath.Join(repoRoot(), "scripts/check-design-immutability.sh")
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = testRepo
+	cmd.Env = append(os.Environ(), "GITHUB_BASE_REF=main")
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Expected script to succeed for ratification in subdirectory but got error: %v", err)
 	}
 }
 
