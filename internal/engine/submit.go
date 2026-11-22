@@ -100,12 +100,18 @@ func (e *Engine) renderHistoryWithData(tx *journal.Tx, turns []journal.TurnInCon
 		if err != nil {
 			return nil, "", err
 		}
+		label := "reviewed"
+		if *t.TerminalState == StateSoloComplete {
+			label = "unreviewed (solo)"
+		} else if *t.TerminalState == StateOverridden {
+			label = "human override"
+		}
 		turn := history.Turn{
 			ID:     t.ID,
 			State:  *t.TerminalState,
 			Input:  input,
 			Answer: answer,
-			Label:  "reviewed",
+			Label:  label,
 		}
 		if err := doc.AddTurn(turn); err != nil {
 			return nil, "", fmt.Errorf("add turn to history: %w", err)

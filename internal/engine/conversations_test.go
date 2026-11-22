@@ -456,31 +456,32 @@ func TestHistoryDocumentFormat(t *testing.T) {
 
 	hash := reply2.ContextHash
 
-	doc := history.New()
-	turns, err := h.Store.GetConversationTurns(reply.ConversationID)
+	// Retrieve the stored history bytes for the second turn
+	var historyBytes []byte
+	if err := h.DB.Conn().QueryRow(
+		`SELECT history_bytes FROM turns WHERE id = ?`, reply2.TurnID,
+	).Scan(&historyBytes); err != nil {
+		t.Fatalf("query history_bytes: %v", err)
+	}
+
+	// Parse the history document and verify the hash matches
+	doc, err := history.Parse(historyBytes)
 	if err != nil {
-		t.Fatalf("get conversation turns: %v", err)
+		t.Fatalf("parse history document: %v", err)
 	}
 
-	for _, turn := range turns {
-		if turn.TerminalState == nil {
-			continue
-		}
-		histTurn := history.Turn{
-			ID:     turn.ID,
-			State:  *turn.TerminalState,
-			Input:  []byte{},
-			Answer: []byte{},
-			Label:  "reviewed",
-		}
-		if err := doc.AddTurn(histTurn); err != nil {
-			t.Fatalf("add turn: %v", err)
-		}
+	if doc.Hash() != hash {
+		t.Fatalf("stored hash %q != computed hash of document %q", hash, doc.Hash())
 	}
 
-	expectedHash := doc.Hash()
-	if hash != expectedHash {
-		t.Fatalf("stored hash %q != computed hash %q", hash, expectedHash)
+	// Verify the history includes the first turn with correct label
+	turns := doc.Included()
+	if len(turns) != 1 {
+		t.Fatalf("expected 1 turn in history, got %d", len(turns))
+	}
+
+	if turns[0].Label != "unreviewed (solo)" {
+		t.Fatalf("expected label 'unreviewed (solo)', got %q", turns[0].Label)
 	}
 }
 
