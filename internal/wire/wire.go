@@ -284,6 +284,27 @@ type Participant struct {
 	InDefaultPreset          bool     `json:"in_default_preset,omitempty"`
 }
 
+// ProbeSubject represents a probe target that is not a participant (e.g., a referee).
+// It carries probe status and failure information without implying role capabilities.
+type ProbeSubject struct {
+	Kind                string   `json:"kind"` // "referee"
+	Identity            string   `json:"identity"`
+	Endpoint            string   `json:"endpoint"`
+	Model               string   `json:"model"`
+	State               string   `json:"state"` // "probed", "unprobed", etc.
+	Detail              *string  `json:"detail,omitempty"`
+	ProbeObservedAt     *string  `json:"probe_observed_at,omitempty"`
+	ProbeAtStart        bool     `json:"probe_at_start,omitempty"`
+	FailingStep         *string  `json:"failing_step,omitempty"`
+	ServerStatus        *string  `json:"server_status,omitempty"`
+	RetryCommand        *string  `json:"retry_command,omitempty"`
+	ReportedModel       string   `json:"reported_model,omitempty"`
+	ContextBound        *int64   `json:"context_bound,omitempty"`
+	OutputBound         *int64   `json:"output_bound,omitempty"`
+	BytesPerToken       *float64 `json:"bytes_per_token,omitempty"`
+	BytesPerTokenSource string   `json:"bytes_per_token_source,omitempty"`
+}
+
 type Pool struct {
 	Name        string     `json:"name"`
 	Concurrency int        `json:"concurrency"`
@@ -324,6 +345,7 @@ type StatusReply struct {
 	Presets              []string       `json:"presets"`
 	DeadlinesProvisional bool           `json:"deadlines_provisional"`
 	Participants         []Participant  `json:"participants"`
+	ProbeSubjects        []ProbeSubject `json:"probe_subjects,omitempty"`
 	Pools                []Pool         `json:"pools"`
 	OrphanedHolds        []Hold         `json:"orphaned_holds"`
 	QuickProfiles        []QuickProfile `json:"quick_profiles"`

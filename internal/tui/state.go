@@ -55,6 +55,26 @@ type ParticipantInfo struct {
 	InDefaultPreset          bool
 }
 
+// ProbeSubjectInfo holds information about a probe target that isn't a participant.
+type ProbeSubjectInfo struct {
+	Kind                string
+	Identity            string
+	Endpoint            string
+	Model               string
+	State               string
+	Detail              string
+	ProbeObservedAt     *time.Time
+	ProbeAtStart        bool
+	FailingStep         string
+	ServerStatus        string
+	RetryCommand        string
+	ReportedModel       string
+	ContextBound        *int64
+	OutputBound         *int64
+	BytesPerToken       *float64
+	BytesPerTokenSource string
+}
+
 // TurnInfo holds information about the current turn.
 type TurnInfo struct {
 	ID              string
@@ -157,6 +177,7 @@ type State struct {
 	TurnState           map[string]string
 	Run                 RunInfo
 	Participants        map[string]ParticipantInfo
+	ProbeSubjects       map[string]ProbeSubjectInfo
 	Pools               map[string]wire.Pool
 	OrphanedHolds       []wire.Hold
 	QuickProfiles       map[string]wire.QuickProfile
@@ -226,6 +247,7 @@ func NewState() State {
 	return State{
 		TurnState:     make(map[string]string),
 		Participants:  make(map[string]ParticipantInfo),
+		ProbeSubjects: make(map[string]ProbeSubjectInfo),
 		Pools:         make(map[string]wire.Pool),
 		QuickProfiles: make(map[string]wire.QuickProfile),
 		Turns:         make(map[string]TurnInfo),
@@ -636,6 +658,52 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 		}
 	}
 	s.Participants = participants
+
+	// Populate probe subjects from status
+	subjects := copyMap(s.ProbeSubjects)
+	for _, subj := range status.ProbeSubjects {
+		var obsAt *time.Time
+		if subj.ProbeObservedAt != nil {
+			t, _ := time.Parse(time.RFC3339, *subj.ProbeObservedAt)
+			obsAt = &t
+		}
+		detail := ""
+		if subj.Detail != nil {
+			detail = *subj.Detail
+		}
+		failingStep := ""
+		if subj.FailingStep != nil {
+			failingStep = *subj.FailingStep
+		}
+		serverStatus := ""
+		if subj.ServerStatus != nil {
+			serverStatus = *subj.ServerStatus
+		}
+		retryCommand := ""
+		if subj.RetryCommand != nil {
+			retryCommand = *subj.RetryCommand
+		}
+		key := subj.Kind + ":" + subj.Endpoint + ":" + subj.Model
+		subjects[key] = ProbeSubjectInfo{
+			Kind:                subj.Kind,
+			Identity:            subj.Identity,
+			Endpoint:            subj.Endpoint,
+			Model:               subj.Model,
+			State:               subj.State,
+			Detail:              detail,
+			ProbeObservedAt:     obsAt,
+			ProbeAtStart:        subj.ProbeAtStart,
+			FailingStep:         failingStep,
+			ServerStatus:        serverStatus,
+			RetryCommand:        retryCommand,
+			ReportedModel:       subj.ReportedModel,
+			ContextBound:        subj.ContextBound,
+			OutputBound:         subj.OutputBound,
+			BytesPerToken:       subj.BytesPerToken,
+			BytesPerTokenSource: subj.BytesPerTokenSource,
+		}
+	}
+	s.ProbeSubjects = subjects
 
 	// The open turn's roles show their participant's state as of this reply.
 	if ti, ok := s.Turns[s.CurrentTurn]; ok {

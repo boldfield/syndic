@@ -1014,22 +1014,22 @@ func TestSecretNotDisabledInRendering(t *testing.T) {
 
 	// Create a participant with a secret embedded in the retry command
 	s.Participants["author"] = ParticipantInfo{
-		ID:            "author",
-		State:         "unprobed",
-		ReportedModel: "llama2",
-		EligibleRoles: []string{"author"},
-		FailingStep:   "identity_check",
-		ServerStatus:  "unauthorized",
-		RetryCommand:  "syndic probe author --endpoint local --secret " + secretToken,
+		ID:              "author",
+		State:           "unprobed",
+		ReportedModel:   "llama2",
+		EligibleRoles:   []string{"author"},
+		FailingStep:     "identity_check",
+		ServerStatus:    "unauthorized",
+		RetryCommand:    "syndic probe author --endpoint local --secret " + secretToken,
 		InDefaultPreset: true,
 	}
 
 	s.Participants["reviewer"] = ParticipantInfo{
-		ID:            "reviewer",
-		State:         "unprobed",
-		ReportedModel: "llama3",
-		EligibleRoles: []string{"reviewer"},
-		ServerStatus:  "API error: " + secretToken,
+		ID:              "reviewer",
+		State:           "unprobed",
+		ReportedModel:   "llama3",
+		EligibleRoles:   []string{"reviewer"},
+		ServerStatus:    "API error: " + secretToken,
 		InDefaultPreset: true,
 	}
 
