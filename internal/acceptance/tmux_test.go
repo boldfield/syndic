@@ -639,7 +639,10 @@ func TestTMUX_EndToEnd(t *testing.T) {
 	})
 	host.start("s3")
 	pane = host.waitPane("s3", "the second turn's approved result", tmuxPaneWait, func(p string) bool {
-		return strings.Contains(p, "approved by") && strings.Contains(p, "Stub answer to: second question")
+		// The second question continues the conversation the first opened, so
+		// the stub echoes the history with it; the chat header proves s3
+		// reattached to the conversation holding both turns.
+		return strings.Contains(p, "approved by") && strings.Contains(p, ", 2 turns") && strings.Contains(p, "second question")
 	}, daemon)
 	checkWidth(t, pane)
 	if got := turnStates(t, journalPath); len(got) != 2 || got[0] != "approved" || got[1] != "approved" {

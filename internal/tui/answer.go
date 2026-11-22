@@ -27,6 +27,9 @@ func answerTurn(s State) string {
 	}
 	best := ""
 	for id, ti := range s.Turns {
+		if !s.inScope(id) {
+			continue
+		}
 		if best == "" {
 			best = id
 			continue

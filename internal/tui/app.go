@@ -85,6 +85,13 @@ type App struct {
 	pSelected   int                       // index of the selected row of the participants tab, in id order
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
+
+	// Conversation startup options
+	conversationID string   // the open conversation; empty until the first submit creates one
+	convTurns      int      // turns the open conversation holds
+	openTurns      []string // turns the conversation held at start-up, oldest first
+	roundsIsSet    bool     // rounds was explicitly set via flag
+	rounds         int      // round limit for this process
 }
 
 // Option configures an App.
@@ -109,6 +116,31 @@ func WithWorkDir(dir string) Option {
 // WithTerminalCapabilities sets the terminal rendering capabilities.
 func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) { a.terminalCapabilities = caps }
+}
+
+// WithConversation starts the app on the conversation id, which holds the
+// turns with the given ids, oldest first. The caller has already resolved the
+// id and checked its workspace. An empty id starts an empty conversation that
+// the first submit creates. The chat shows only this conversation's turns.
+func WithConversation(id string, turnIDs []string) Option {
+	return func(a *App) {
+		a.conversationID = id
+		a.convTurns = len(turnIDs)
+		a.openTurns = turnIDs
+		scope := &TurnScope{ConversationID: id, Turns: map[string]bool{}, Submissions: map[string]bool{}}
+		for _, t := range turnIDs {
+			scope.Turns[t] = true
+		}
+		a.state.Scope = scope
+	}
+}
+
+// WithRounds sets the round limit for this process.
+func WithRounds(n int) Option {
+	return func(a *App) {
+		a.rounds = n
+		a.roundsIsSet = true
+	}
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -419,7 +451,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if a.tab == tabAnswer {
-		page := max(a.bodyHeight()-1, 1)
+		page := max(a.answerHeight()-1, 1)
 		switch msg.String() {
 		case "up":
 			a.scrollAnswer(-1)
@@ -493,17 +525,31 @@ func (a *App) enter() tea.Cmd {
 	if a.state.Status != nil {
 		profiles = a.state.Status.QuickProfiles
 	}
+	var conversationID *string
+	if a.conversationID != "" {
+		conversationID = &a.conversationID
+	}
+	var maxRounds *int
+	if a.roundsIsSet {
+		maxRounds = &a.rounds
+	}
 	return a.send(submission{
 		input:            line,
 		preset:           a.state.NextPreset,
 		quickProfile:     a.quickSelection.selected(profiles),
 		allowProvisional: a.allowProvisional,
+		workspace:        a.workDir,
+		conversationID:   conversationID,
+		maxRounds:        maxRounds,
 	})
 }
 
 // send submits under a new submission id.
 func (a *App) send(sub submission) tea.Cmd {
 	sub.id = uuid.NewString()
+	if a.state.Scope != nil {
+		a.state.Scope.Submissions[sub.id] = true
+	}
 	// The submission id ties a /mode preset to the turn it started, whatever order the reply and the event arrive in.
 	if sub.preset != "" {
 		a.state.ModeSubmissionID = sub.id
@@ -547,6 +593,17 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 		a.refusal = formatRefusal(msg.err)
 		return nil
 	}
+	// The reply names the conversation the turn joined; later submits continue it.
+	if msg.conversationID != "" {
+		a.conversationID = msg.conversationID
+		if a.state.Scope != nil {
+			a.state.Scope.ConversationID = msg.conversationID
+		}
+	}
+	if a.state.Scope != nil {
+		a.state.Scope.Turns[msg.turnID] = true
+	}
+	a.convTurns++
 	a.input.SetValue("")
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
@@ -573,9 +630,23 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
-	if len(msg.status.TurnsOpen) > 0 {
+	open := ""
+	for _, id := range msg.status.TurnsOpen {
+		if a.state.inScope(id) {
+			open = id
+			break
+		}
+	}
+	if open == "" && len(a.openTurns) > 0 {
+		// Nothing of the conversation is open: show its latest turn.
+		last := a.openTurns[len(a.openTurns)-1]
+		if _, ok := a.state.Turns[last]; !ok {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, last))
+		}
+	}
+	if open != "" {
 		oldTurn := a.state.CurrentTurn
-		a.state.CurrentTurn = msg.status.TurnsOpen[0]
+		a.state.CurrentTurn = open
 		if oldTurn != a.state.CurrentTurn {
 			a.answerScrollRow = 0
 		}
@@ -585,6 +656,22 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
+}
+
+// conversationHeader names the open conversation by id prefix and turn count.
+func (a *App) conversationHeader() string {
+	if a.conversationID == "" {
+		return "conversation: new (created at the first submit)"
+	}
+	return fmt.Sprintf("conversation %s, %d turns", shortID(a.conversationID), a.convTurns)
+}
+
+// shortID is the first eight characters of an id.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // updateQuickProfileState sets the quick profile banners from the project
@@ -828,7 +915,7 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
-	return a, nil
+	return a, a.syncTranscript()
 }
 
 // attemptDone reports whether the attempt has a final status.
@@ -879,6 +966,11 @@ func (a *App) isTerminalTooSmall() bool {
 	return a.width < 40 || a.height < 10
 }
 
+// answerHeight is the lines of the answer tab below its conversation header.
+func (a *App) answerHeight() int {
+	return max(a.bodyHeight()-1, 0)
+}
+
 // answerLineCount is the length of the unclipped answer tab.
 func (a *App) answerLineCount() int {
 	turnID := answerTurn(a.state)
@@ -887,7 +979,7 @@ func (a *App) answerLineCount() int {
 
 // scrollAnswer moves the answer tab by delta lines, staying within the text.
 func (a *App) scrollAnswer(delta int) {
-	maxStart := max(a.answerLineCount()-a.bodyHeight(), 0)
+	maxStart := max(a.answerLineCount()-a.answerHeight(), 0)
 	a.answerScrollRow = min(max(a.answerScrollRow+delta, 0), maxStart)
 }
 
@@ -941,8 +1033,13 @@ func (a *App) View() string {
 	lines := strings.Split(tabView, "\n")
 
 	if a.tab == tabAnswer && len(a.panel) == 0 {
-		start := min(a.answerScrollRow, max(len(lines)-bodyHeight, 0))
+		start := min(a.answerScrollRow, max(len(lines)-a.answerHeight(), 0))
 		lines = lines[start:]
+		for len(lines) < a.answerHeight() {
+			lines = append(lines, "")
+		}
+		// The first line of the chat names the open conversation.
+		lines = append([]string{a.conversationHeader()}, lines[:a.answerHeight()]...)
 	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
