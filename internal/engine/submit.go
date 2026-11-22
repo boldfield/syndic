@@ -51,6 +51,7 @@ type openTurn struct {
 	blockIDs             []string                     // open blocks from current round
 	hasBlock             bool                         // whether at least one block or revision_request exists
 	hasRevReq            bool                         // whether at least one revision_request exists
+	revisionRequestFrom  string                       // reviewer id that gave the revision_request
 	reviewerFeedbackByID map[string]string            // feedback from each reviewer, by attempt id
 	reviewerResultsByID  map[string]map[string]string // tool results cited in feedback, by reviewer id
 	reviewerAttempts     map[string]int               // number of attempts per reviewer (includes quarantined)
@@ -235,16 +236,14 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		doc                         *history.Document
 		rec                         budgetRecord
 	)
-	// Effective config has defaults applied by resolver
+	// Use resolved revision config (which has roster-level defaults applied)
 	maxRoundsInEffect := 0
 	maxRoundsCeiling := 5
-	if eff.Preset.Revision != nil {
-		if eff.Preset.Revision.MaxRounds != nil {
-			maxRoundsInEffect = *eff.Preset.Revision.MaxRounds
-		}
-		if eff.Preset.Revision.MaxRoundsCeiling != nil {
-			maxRoundsCeiling = *eff.Preset.Revision.MaxRoundsCeiling
-		}
+	if eff.Revision.MaxRounds != nil {
+		maxRoundsInEffect = *eff.Revision.MaxRounds
+	}
+	if eff.Revision.MaxRoundsCeiling != nil {
+		maxRoundsCeiling = *eff.Revision.MaxRoundsCeiling
 	}
 	// Allow client override of max_rounds
 	if req.MaxRounds != nil {

@@ -195,10 +195,12 @@ func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
 			e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		}
 	} else if t.hasBlock || t.hasRevReq {
-		// No more rounds allowed, end with blocks open
+		// No more rounds allowed, end with the terminal reason
 		reason := reasonRoundsExhausted
 		if len(t.blockIDs) > 0 {
 			reason = reasonBlock + t.blockIDs[0]
+		} else if t.hasRevReq && t.revisionRequestFrom != "" {
+			reason = reasonRevision + t.revisionRequestFrom
 		}
 		e.finishLocked(t, StateIncomplete, reason)
 	} else if e.allApproved(t, "") {
@@ -585,14 +587,24 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 				}
 				t.hasBlock = true
 				t.blockIDs = append(t.blockIDs, blockID)
-				// Block recorded; decision deferred until all reviewers complete
+				// If no revision rounds are allowed, end immediately with block reason
+				if t.currentRound >= t.maxRounds {
+					endState, endReason = StateIncomplete, reasonBlock+blockID
+					break
+				}
+				// Otherwise defer decision until all reviewers complete
 				break
 			}
 			approvedNow = true
 			// Approval recorded; decision deferred until all reviewers complete
 		case verdict.RevisionRequest:
 			t.hasRevReq = true
-			// Revision request recorded; decision deferred until all reviewers complete
+			t.revisionRequestFrom = d.participant
+			// If no revision rounds are allowed, end immediately with revision_request reason
+			if t.currentRound >= t.maxRounds {
+				endState, endReason = StateIncomplete, reasonRevision+d.participant
+			}
+			// Otherwise defer decision until all reviewers complete
 		case verdict.Rejected:
 			// Verdict explicitly rejected - this is a hard failure
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":rejected"
@@ -877,6 +889,7 @@ func (e *Engine) completeRevisionAuthor(t *openTurn, attemptID string, req trans
 	// Reset per-round state for new review round
 	t.hasBlock = false
 	t.hasRevReq = false
+	t.revisionRequestFrom = ""
 	t.blockIDs = []string{}
 	t.approved = make(map[string]bool)
 	t.reviewerAttempts = make(map[string]int)

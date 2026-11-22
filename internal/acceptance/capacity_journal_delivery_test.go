@@ -73,7 +73,7 @@ var capacityFarFuture = time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 // capacityTwoReviewers is a roster of an author and two reviewers whose pool
 // admits two requests at once, so both reviewers are in flight together.
 func capacityTwoReviewers() string {
-	return nRolesTOML(2, 0, false) + "\n[pools.default]\nconcurrency = 2\n"
+	return nRolesTOML(2, 0, false) + "\n[pools.default]\nconcurrency = 2\n[presets.review.revision]\nmax_rounds = 0\n"
 }
 
 // capacityBegun waits for the attempt of the participant in the phase to be

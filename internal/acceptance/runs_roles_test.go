@@ -931,6 +931,12 @@ func nRolesIDs(n int) []string {
 	return ids
 }
 
+// nRolesTOMLNoRevision generates a roster like nRolesTOML but with max_rounds=0
+// to disable the revision loop for tests written before revision was implemented.
+func nRolesTOMLNoRevision(n int, turnMax int, selfPreset bool) string {
+	return nRolesTOML(n, turnMax, selfPreset) + "\n[presets.review.revision]\nmax_rounds = 0\n"
+}
+
 func TestNAndRoles_TwoReviewersNeeded(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, nRolesTOML(2, 0, false), runsScripts(nRolesIDs(2)...))
@@ -981,7 +987,7 @@ func TestNAndRoles_ApproveAndBlockIncomplete(t *testing.T) {
 	scripts["r2"] = []fake.Step{verdict(func(hash, attempt string) string {
 		return fake.VerdictBlock(hash, attempt, "b1", "high", "the evidence", "the remedy", "the reason")
 	}), normal()}
-	s := newSuite(t, nRolesTOML(2, 0, false), scripts)
+	s := newSuite(t, nRolesTOMLNoRevision(2, 0, false), scripts)
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "s1")
 	s.WaitTerminal(turnID)
