@@ -543,7 +543,8 @@ type ConversationTurnSummary struct {
 }
 
 type ConversationReply struct {
-	ID string `json:"id"`
+	ID        string  `json:"id"`
+	Workspace *string `json:"workspace"`
 	// Turns is the complete turn list; paging for the turn list is not specified in the design.
 	// The frame cap (MaxFrameBytes) bounds the reply size; a turn list that does not fit
 	// is refused with error{code: "frame"} as specified in the v4 delta's Framing section.

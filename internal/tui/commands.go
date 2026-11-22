@@ -82,7 +82,17 @@ func cmdQuit(a *App, _ []string) tea.Cmd { return a.quit() }
 func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
-	a.panel = append([]string{"commands:"}, commandHelp...)
+	lines := []string{"commands:"}
+	lines = append(lines, commandHelp...)
+	lines = append(lines, "", "keys:")
+	lines = append(lines,
+		"Tab, Shift+Tab       switch tabs",
+		"PgUp, PgDn           scroll the active tab",
+		"Alt+Enter            insert a newline in the input",
+		"Ctrl+C               clear input, or detach if input is empty",
+		"Ctrl+D               detach if input is empty",
+	)
+	a.panel = lines
 	return nil
 }
 
@@ -426,6 +436,7 @@ func approvalNo(ap *approvalPrompt) func(*App) tea.Cmd {
 }
 
 func cmdNew(a *App, _ []string) tea.Cmd {
+	oldTurnID := a.state.CurrentTurn
 	a.conversationID = ""
 	a.convTurns = 0
 	a.openTurns = nil
@@ -433,6 +444,9 @@ func cmdNew(a *App, _ []string) tea.Cmd {
 	a.state.ContextFrom = ""
 	a.answerScrollRow, a.answerFollow = 0, true
 	a.refusal = "new conversation started (creates at first submit)"
+	if oldTurnID != "" {
+		a.say(fmt.Sprintf("running turn %s continues", oldTurnID[:min(8, len(oldTurnID))]))
+	}
 	return nil
 }
 
@@ -481,15 +495,42 @@ func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
 		if c.Running {
 			running = " (running)"
 		}
-		preview := c.Preview
-		if len(preview) > 40 {
-			preview = preview[:40]
+		preview := truncatePreview(c.Preview, 60)
+		activity := ""
+		if c.LastSubmittedAt != "" {
+			activity = fmt.Sprintf(", last activity %s", formatTime(c.LastSubmittedAt))
 		}
-		line := fmt.Sprintf("%s  %s turns, %s%s%s", prefix, fmt.Sprint(c.TurnCount), preview, running, mark)
+		line := fmt.Sprintf("%s  %d turns%s, %s%s%s", prefix, c.TurnCount, activity, preview, running, mark)
 		lines = append(lines, line)
 	}
 	a.panel = lines
 	return a, nil
+}
+
+func truncatePreview(s string, maxCells int) string {
+	if s == "" {
+		return "(empty)"
+	}
+	runes := []rune(s)
+	var width int
+	for i, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if w < 0 {
+			w = 1
+		}
+		if width+w > maxCells {
+			return string(runes[:i]) + "…"
+		}
+		width += w
+	}
+	return s
+}
+
+func formatTime(t string) string {
+	if len(t) > 10 {
+		return t[:10]
+	}
+	return t
 }
 
 func cmdSwitch(a *App, args []string) tea.Cmd {
@@ -526,6 +567,11 @@ func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
 		a.refusal = "switch: " + formatRefusal(msg.err)
 		return a, nil
 	}
+	if msg.conv.Workspace != nil && *msg.conv.Workspace != a.workDir && *msg.conv.Workspace != "" {
+		a.refusal = fmt.Sprintf("switch: conversation belongs to %q, not the current directory %q", *msg.conv.Workspace, a.workDir)
+		return a, nil
+	}
+	oldTurnID := a.state.CurrentTurn
 	a.conversationID = msg.conv.ID
 	a.convTurns = len(msg.conv.Turns)
 	turnIDs := make([]string, len(msg.conv.Turns))
@@ -542,6 +588,9 @@ func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
 	a.answerScrollRow, a.answerFollow = 0, true
 	prefix := a.conversationID[:min(8, len(a.conversationID))]
 	a.refusal = fmt.Sprintf("switched to conversation %s (%d turns)", prefix, a.convTurns)
+	if oldTurnID != "" && !a.state.inScope(oldTurnID) {
+		a.say(fmt.Sprintf("running turn %s continues in conversation %s", oldTurnID[:min(8, len(oldTurnID))], prefix))
+	}
 	return a, nil
 }
 
@@ -552,9 +601,11 @@ func cmdTrim(a *App, args []string) tea.Cmd {
 	}
 	turnID := args[0]
 	found := false
-	for _, id := range a.openTurns {
+	foundIdx := -1
+	for i, id := range a.openTurns {
 		if id == turnID {
 			found = true
+			foundIdx = i
 			break
 		}
 	}
@@ -562,18 +613,65 @@ func cmdTrim(a *App, args []string) tea.Cmd {
 		a.refusal = "turn not in context; nothing changed"
 		return nil
 	}
+	panel := []string{fmt.Sprintf("trimming context to turn %s and later:", turnID[:min(8, len(turnID))])}
+	panel = append(panel, "")
+	panel = append(panel, "dropped turns:")
+	for i := 0; i < foundIdx; i++ {
+		id := a.openTurns[i]
+		prefix := id[:min(8, len(id))]
+		if input, ok := a.inputs[id]; ok {
+			line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
+			panel = append(panel, line)
+		} else {
+			panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+		}
+	}
+	panel = append(panel, "")
+	panel = append(panel, "included turns:")
+	for i := foundIdx; i < len(a.openTurns); i++ {
+		id := a.openTurns[i]
+		prefix := id[:min(8, len(id))]
+		if input, ok := a.inputs[id]; ok {
+			line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
+			panel = append(panel, line)
+		} else {
+			panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+		}
+	}
+	a.panel = panel
 	a.state.ContextFrom = turnID
 	a.refusal = fmt.Sprintf("context trimmed to %s and later", turnID[:min(8, len(turnID))])
 	return nil
 }
 
+func truncateLine(s string, maxCells int) string {
+	runes := []rune(s)
+	var width int
+	for i, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if w < 0 {
+			w = 1
+		}
+		if width+w > maxCells {
+			return string(runes[:i]) + "…"
+		}
+		width += w
+	}
+	return s
+}
+
 func cmdRounds(a *App, args []string) tea.Cmd {
 	if len(args) == 0 {
 		ceiling := 5
-		if a.state.Status != nil && len(a.state.Status.Presets) > 0 {
-			ceiling = 5
+		source := "preset default"
+		value := a.rounds
+		if a.roundsIsSet {
+			source = "command-line flag"
+		} else if a.state.Status != nil {
+			value = a.state.Status.Revision.Default
+			ceiling = a.state.Status.Revision.Ceiling
 		}
-		a.refusal = fmt.Sprintf("rounds: %d, ceiling: %d", a.rounds, ceiling)
+		a.refusal = fmt.Sprintf("rounds: %d (from %s), ceiling: %d", value, source, ceiling)
 		return nil
 	}
 	if len(args) != 1 {
@@ -582,8 +680,16 @@ func cmdRounds(a *App, args []string) tea.Cmd {
 	}
 	var n int
 	_, err := fmt.Sscanf(args[0], "%d", &n)
-	if err != nil || n < 0 || n > 5 {
-		a.refusal = "rounds must be 0-5"
+	if err != nil || n < 0 {
+		a.refusal = "rounds must be non-negative"
+		return nil
+	}
+	ceiling := 5
+	if a.state.Status != nil {
+		ceiling = a.state.Status.Revision.Ceiling
+	}
+	if n > ceiling {
+		a.refusal = fmt.Sprintf("rounds must be at most %d (the preset ceiling)", ceiling)
 		return nil
 	}
 	a.rounds = n

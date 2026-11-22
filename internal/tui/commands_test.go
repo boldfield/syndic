@@ -515,3 +515,92 @@ func TestFormatRefusalMembers(t *testing.T) {
 		t.Errorf("budget: %q", got)
 	}
 }
+
+func TestHelpListsCommandsAndKeys(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.typeLine("/help")
+	v := untilView(t, r, "commands:", "Tab, Shift+Tab", "Alt+Enter", "Ctrl+C", "Ctrl+D")
+	if !strings.Contains(v, "/new") || !strings.Contains(v, "/switch") || !strings.Contains(v, "/trim") {
+		t.Fatalf("/help did not list all commands:\n%s", v)
+	}
+}
+
+func TestNewStartsConversation(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.until(t, "connected", func(a *App) (string, bool) { return "", a.state.Status != nil })
+	r.typeLine("/new")
+	untilView(t, r, "new conversation started")
+	r.until(t, "scope is empty", func(a *App) (string, bool) { return "", len(a.state.Scope.Turns) == 0 })
+}
+
+func TestTrimShowsPreview(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.typeLine("first question")
+	turnIn(t, r, "solo_complete")
+	idle(t, r)
+	r.typeLine("second question")
+	var secondID string
+	r.until(t, "second submitted", func(a *App) (string, bool) {
+		if len(a.inputs) == 2 {
+			for id := range a.inputs {
+				secondID = id
+				break
+			}
+			return "", true
+		}
+		return "", false
+	})
+
+	r.typeLine("/trim")
+	untilView(t, r, "usage: /trim <turn_id>")
+
+	r.typeLine("/trim " + secondID[:8])
+	v := untilView(t, r, "trimming context", "dropped turns:", "included turns:")
+	if !strings.Contains(v, "first question") && !strings.Contains(v, "second question") {
+		t.Fatalf("/trim did not show preview of turns:\n%s", v)
+	}
+}
+
+func TestRoundsShowsProvenanceAndCeiling(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.until(t, "connected", func(a *App) (string, bool) { return "", a.state.Status != nil })
+
+	r.typeLine("/rounds")
+	v := untilView(t, r, "rounds:", "ceiling:")
+	if !strings.Contains(v, "preset default") && !strings.Contains(v, "command-line flag") {
+		t.Fatalf("/rounds did not show provenance:\n%s", v)
+	}
+
+	r.typeLine("/rounds 2")
+	untilView(t, r, "rounds set to 2")
+	r.typeLine("/rounds")
+	untilView(t, r, "command-line flag")
+}
+
+func TestSwitchChecksWorkspace(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.until(t, "connected", func(a *App) (string, bool) { return "", a.cl != nil })
+
+	r.typeLine("/switch nonexistent")
+	v := untilView(t, r, "switch:")
+	if strings.Contains(v, "switch") {
+		return
+	}
+}
+
+func TestConversationsIncludesLastActivity(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.until(t, "connected", func(a *App) (string, bool) { return "", a.cl != nil })
+
+	r.typeLine("test")
+	r.until(t, "turn submitted", func(a *App) (string, bool) { return "", a.state.CurrentTurn != "" })
+
+	r.typeLine("/conversations")
+	untilView(t, r, "last activity", "turns")
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -474,8 +475,14 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, a.enter()
 	case "alt+enter":
 		current := a.input.Value()
-		cursor := a.input.Position()
-		a.input.SetValue(current[:cursor] + "\n" + current[cursor:])
+		cursorPos := a.input.Position()
+		runes := []rune(current)
+		if cursorPos > len(runes) {
+			cursorPos = len(runes)
+		}
+		runes = append(runes[:cursorPos], append([]rune{'\n'}, runes[cursorPos:]...)...)
+		a.input.SetValue(string(runes))
+		a.input.SetCursor(cursorPos + 1)
 		return a, nil
 	}
 
@@ -646,6 +653,9 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	}
 	a.inputs[msg.turnID] = msg.sub.input
 	a.convTurns++
+	if !slices.Contains(a.openTurns, msg.turnID) {
+		a.openTurns = append(a.openTurns, msg.turnID)
+	}
 	a.input.SetValue("")
 	a.state.NextPreset = "" // /mode applies to one submit
 	if isTerminalState(a.state.TurnState[msg.turnID]) {

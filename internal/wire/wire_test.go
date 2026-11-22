@@ -1120,8 +1120,10 @@ func TestConversationsReplyJSON(t *testing.T) {
 }
 
 func TestConversationReplyJSON(t *testing.T) {
+	workspace := "/home/user/project"
 	reply := ConversationReply{
-		ID: "conv-123",
+		ID:        "conv-123",
+		Workspace: &workspace,
 		Turns: []ConversationTurnSummary{
 			{ID: "turn-1", State: "approved"},
 			{ID: "turn-2", State: "incomplete"},
@@ -1139,8 +1141,9 @@ func TestConversationReplyJSON(t *testing.T) {
 	}
 
 	expectedKeys := map[string]bool{
-		"id":    true,
-		"turns": true,
+		"id":        true,
+		"workspace": true,
+		"turns":     true,
 	}
 
 	if len(m) != len(expectedKeys) {
