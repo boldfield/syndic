@@ -47,6 +47,10 @@ type ParticipantInfo struct {
 	Estimate                 string
 	DeclaredBilling          string
 	SpendingControl          string
+	FailingStep              string
+	ServerStatus             string
+	RetryCommand             string
+	ProbeAtStart             bool
 }
 
 // TurnInfo holds information about the current turn.
@@ -590,6 +594,18 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 			t, _ := time.Parse(time.RFC3339, *p.ProbeObservedAt)
 			obsAt = &t
 		}
+		failingStep := ""
+		if p.FailingStep != nil {
+			failingStep = *p.FailingStep
+		}
+		serverStatus := ""
+		if p.ServerStatus != nil {
+			serverStatus = *p.ServerStatus
+		}
+		retryCommand := ""
+		if p.RetryCommand != nil {
+			retryCommand = *p.RetryCommand
+		}
 		participants[p.ID] = ParticipantInfo{
 			ID:                       p.ID,
 			Model:                    p.Model,
@@ -609,6 +625,10 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 			Estimate:                 p.Estimate,
 			DeclaredBilling:          p.DeclaredBilling,
 			SpendingControl:          p.SpendingControl,
+			FailingStep:              failingStep,
+			ServerStatus:             serverStatus,
+			RetryCommand:             retryCommand,
+			ProbeAtStart:             p.ProbeAtStart,
 		}
 	}
 	s.Participants = participants

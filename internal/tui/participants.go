@@ -56,6 +56,17 @@ func currentAuthor(s State) (ParticipantInfo, bool) {
 	return p, true
 }
 
+// countUnprobed returns the number of participants in the default preset that are unprobed.
+func countUnprobed(s State) int {
+	count := 0
+	for _, p := range s.Participants {
+		if p.State == "unprobed" {
+			count++
+		}
+	}
+	return count
+}
+
 // markedSameFamily reports whether p is a reviewer of the current turn whose
 // reported model is in the author's family.
 func markedSameFamily(s State, p ParticipantInfo) bool {
@@ -74,6 +85,9 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 	var head, table, detail, pools []string
 	if author, ok := currentAuthor(s); ok {
 		head = []string{fmt.Sprintf("author: %s (%s)", plain(author.ID), plain(orDash(author.ReportedModel)))}
+	}
+	if unprobed := countUnprobed(s); unprobed > 0 {
+		head = append(head, fmt.Sprintf("participants: %d unprobed", unprobed))
 	}
 	ids := participantIDs(s)
 	selIdx := 0
@@ -236,9 +250,22 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 		lines = append(lines, "  same-family: reported model is in the author's family")
 	}
 	if p.ProbeObservedAt != nil {
-		lines = append(lines, fmt.Sprintf("  probe observed_at: %s (%s ago)", p.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*p.ProbeObservedAt))))
+		probeTime := fmt.Sprintf("  probe observed_at: %s (%s ago)", p.ProbeObservedAt.UTC().Format("2006-01-02 15:04:05Z"), formatAge(now.Sub(*p.ProbeObservedAt)))
+		if p.ProbeAtStart {
+			probeTime += ", probed at start"
+		}
+		lines = append(lines, probeTime)
 	} else {
 		lines = append(lines, "  probe observed_at: none")
+		if p.FailingStep != "" {
+			lines = append(lines, "  probe failed at: "+plain(p.FailingStep))
+		}
+		if p.ServerStatus != "" {
+			lines = append(lines, "  server status: "+plain(p.ServerStatus))
+		}
+	}
+	if p.RetryCommand != "" {
+		lines = append(lines, "  retry: "+plain(p.RetryCommand))
 	}
 	// The design takes the output bound from the probe record alone.
 	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource)+"  output bound: "+bound(p.OutputBound, "probe"))
