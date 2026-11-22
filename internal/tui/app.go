@@ -210,6 +210,8 @@ func (a *App) answerIn(turnID string) answerInput {
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
+		conversationID: a.conversationID,
+		turnCount:      len(a.state.Turns),
 	}
 }
 

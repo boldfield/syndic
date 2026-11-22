@@ -29,6 +29,12 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
+	// Validate rounds value: must be 0 or positive, or the -1 unset sentinel
+	if *roundsPtr < -1 {
+		fmt.Fprintf(os.Stderr, "error: --rounds must be a non-negative integer or omitted\n")
+		return 2
+	}
+
 	// Check if stdout is a TTY; refuse to run if not
 	if !tui.IsStdoutTTY() {
 		fmt.Fprintf(os.Stderr, "error: standard output is not a terminal\n")

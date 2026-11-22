@@ -17,6 +17,8 @@ type answerInput struct {
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
 	plainMode      bool   // true when colors should not be used
+	conversationID string // the open conversation ID for display
+	turnCount      int    // number of turns in the conversation
 }
 
 // answerTurn picks the turn the answer tab is about: the open turn, else the
@@ -102,6 +104,17 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		return ""
 	}
 	var lines []string
+
+	// Add conversation header as first line
+	if in.conversationID != "" {
+		prefix := in.conversationID
+		if len(prefix) > 12 {
+			prefix = prefix[:12]
+		}
+		header := fmt.Sprintf("conversation: %s (%d turns)", prefix, in.turnCount)
+		lines = append(lines, header)
+	}
+
 	candidate := func() {
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
 			lines = append(lines, body(in.content, refs[0]))
