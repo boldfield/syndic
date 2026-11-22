@@ -38,23 +38,23 @@ var commands = map[string]commandHandler{
 
 // commandHelp is one line per command, in the order /help lists them.
 var commandHelp = []string{
-	"/mode <preset>            use the preset for the next submit only",
-	"/quick <name>|off         select or deselect a quick profile for this process",
-	"/participants             show the participants tab",
-	"/cancel                   cancel the open turn",
-	"/why                      why the current or last turn ended, with the detail",
-	"/override <reason>        accept an incomplete turn's candidate, with a reason",
-	"/release <pool> [attempt] release held capacity, after a confirmation",
-	"/drafts on|off            show or hide the author's unreviewed draft",
-	"/new                      start a new conversation",
-	"/conversations            list conversations in the current directory",
-	"/switch <id>              switch to a conversation (by unique prefix)",
-	"/trim <turn>              set the first turn to include in context for later submits",
-	"/rounds [n]               show or set the round limit",
-	"/budget                   show token reservation and usage",
-	"/resume                   reconnect to the engine",
-	"/quit                     leave; an open turn keeps running",
-	"/help                     this list",
+	"/mode <preset>  use preset for next submit",
+	"/quick <name>   select/deselect quick profile",
+	"/help           show commands and keys",
+	"/participants   show participants tab",
+	"/cancel         cancel the open turn",
+	"/why            why turn ended",
+	"/override       accept incomplete turn",
+	"/release        release held capacity",
+	"/drafts on|off  show/hide author draft",
+	"/new            start conversation",
+	"/conversations  list conversations",
+	"/switch <id>    switch to conversation",
+	"/trim <turn>    trim context from turn",
+	"/rounds [n]     set round limit",
+	"/budget         show token usage",
+	"/resume         reconnect to engine",
+	"/quit           leave; turn stays open",
 }
 
 // isCommand reports whether the input line is a command rather than a prompt.
@@ -82,16 +82,17 @@ func cmdQuit(a *App, _ []string) tea.Cmd { return a.quit() }
 func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
-	lines := []string{"commands:"}
-	lines = append(lines, commandHelp...)
-	lines = append(lines, "", "keys:")
+	lines := []string{"keys:"}
 	lines = append(lines,
-		"Tab, Shift+Tab       switch tabs",
-		"PgUp, PgDn           scroll the active tab",
-		"Alt+Enter            insert a newline in the input",
-		"Ctrl+C               clear input, or detach if input is empty",
-		"Ctrl+D               detach if input is empty",
+		"Tab, Shift+Tab  switch tabs",
+		"PgUp, PgDn      scroll active tab",
+		"Alt+Enter       insert newline",
+		"Ctrl+C          clear input or detach",
+		"Ctrl+D          detach if input empty",
+		"",
+		"commands:",
 	)
+	lines = append(lines, commandHelp...)
 	a.panel = lines
 	return nil
 }
@@ -599,48 +600,62 @@ func cmdTrim(a *App, args []string) tea.Cmd {
 		a.refusal = "usage: /trim <turn_id>"
 		return nil
 	}
-	turnID := args[0]
-	found := false
+	turnPrefix := args[0]
+
+	// Find the turn by prefix in Scope.Order
+	var fullTurnID string
 	foundIdx := -1
-	for i, id := range a.openTurns {
-		if id == turnID {
-			found = true
-			foundIdx = i
-			break
+	if a.state.Scope != nil {
+		for i, id := range a.state.Scope.Order {
+			if id == turnPrefix || strings.HasPrefix(id, turnPrefix) {
+				fullTurnID = id
+				foundIdx = i
+				break
+			}
 		}
 	}
-	if !found {
+
+	if fullTurnID == "" {
 		a.refusal = "turn not in context; nothing changed"
 		return nil
 	}
-	panel := []string{fmt.Sprintf("trimming context to turn %s and later:", turnID[:min(8, len(turnID))])}
+
+	panel := []string{fmt.Sprintf("trimming context to turn %s and later:", fullTurnID[:min(8, len(fullTurnID))])}
 	panel = append(panel, "")
 	panel = append(panel, "dropped turns:")
-	for i := 0; i < foundIdx; i++ {
-		id := a.openTurns[i]
-		prefix := id[:min(8, len(id))]
-		if input, ok := a.inputs[id]; ok {
-			line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
-			panel = append(panel, line)
-		} else {
-			panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+
+	if a.state.Scope != nil {
+		for i := 0; i < foundIdx; i++ {
+			id := a.state.Scope.Order[i]
+			prefix := id[:min(8, len(id))]
+			if input, ok := a.inputs[id]; ok {
+				line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
+				panel = append(panel, line)
+			} else {
+				panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+			}
 		}
 	}
+
 	panel = append(panel, "")
 	panel = append(panel, "included turns:")
-	for i := foundIdx; i < len(a.openTurns); i++ {
-		id := a.openTurns[i]
-		prefix := id[:min(8, len(id))]
-		if input, ok := a.inputs[id]; ok {
-			line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
-			panel = append(panel, line)
-		} else {
-			panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+
+	if a.state.Scope != nil {
+		for i := foundIdx; i < len(a.state.Scope.Order); i++ {
+			id := a.state.Scope.Order[i]
+			prefix := id[:min(8, len(id))]
+			if input, ok := a.inputs[id]; ok {
+				line := fmt.Sprintf("  %s: %s", prefix, truncateLine(firstLine(input), 70))
+				panel = append(panel, line)
+			} else {
+				panel = append(panel, fmt.Sprintf("  %s: (no input recorded)", prefix))
+			}
 		}
 	}
+
 	a.panel = panel
-	a.state.ContextFrom = turnID
-	a.refusal = fmt.Sprintf("context trimmed to %s and later", turnID[:min(8, len(turnID))])
+	a.state.ContextFrom = fullTurnID
+	a.refusal = fmt.Sprintf("context trimmed to %s and later", fullTurnID[:min(8, len(fullTurnID))])
 	return nil
 }
 
@@ -666,7 +681,7 @@ func cmdRounds(a *App, args []string) tea.Cmd {
 		source := "preset default"
 		value := a.rounds
 		if a.roundsIsSet {
-			source = "command-line flag"
+			source = "/rounds"
 		} else if a.state.Status != nil {
 			value = a.state.Status.Revision.Default
 			ceiling = a.state.Status.Revision.Ceiling
@@ -733,15 +748,24 @@ func (a *App) onBudget(msg budgetMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	lines := []string{"budget for this turn:"}
+
+	// Always show reserved, charged, and limit
 	if msg.budget.Reserved != nil {
 		lines = append(lines, fmt.Sprintf("  reserved:  %d tokens", *msg.budget.Reserved))
+	} else {
+		lines = append(lines, "  reserved:  (not available)")
 	}
 	if msg.budget.Charged != nil {
 		lines = append(lines, fmt.Sprintf("  charged:   %d tokens", *msg.budget.Charged))
+	} else {
+		lines = append(lines, "  charged:   (not available)")
 	}
 	if msg.budget.Limit != nil {
 		lines = append(lines, fmt.Sprintf("  limit:     %d tokens", *msg.budget.Limit))
+	} else {
+		lines = append(lines, "  limit:     (not available)")
 	}
+
 	if msg.budget.Projected != nil {
 		lines = append(lines, fmt.Sprintf("  projected: %d tokens", *msg.budget.Projected))
 	}
