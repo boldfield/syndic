@@ -588,3 +588,34 @@ func TestFindQuickTomlSymlinkedWorkingDirectoryStopsAtHome(t *testing.T) {
 		t.Fatalf("found %q, %v, want %q", path, err, want)
 	}
 }
+
+func TestGetDevID(t *testing.T) {
+	tmpdir := t.TempDir()
+	file1 := filepath.Join(tmpdir, "file1")
+	file2 := filepath.Join(tmpdir, "file2")
+	if err := os.WriteFile(file1, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file2, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fi1, err := os.Stat(file1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi2, err := os.Stat(file2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dev1 := getDevID(fi1)
+	dev2 := getDevID(fi2)
+
+	if dev1 == 0 {
+		t.Error("getDevID returned 0 for file1")
+	}
+	if dev1 != dev2 {
+		t.Errorf("getDevID returned different values: %d vs %d for files in the same directory", dev1, dev2)
+	}
+}
