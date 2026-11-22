@@ -337,7 +337,7 @@ func (a *App) confirmEnter() tea.Cmd {
 // while another, or a /release confirmation, is open waits behind it.
 type question struct {
 	lines    []string
-	yes, no  func(*App) tea.Cmd // esc and ctrl+c answer no
+	yes, no  func(*App) tea.Cmd // esc answers no
 	approval *approvalPrompt    // set when the question is a quick profile approval
 	refused  *submission        // set when it asks whether to resend a submit refused as provisional
 }

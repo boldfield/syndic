@@ -411,16 +411,20 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if a.question != nil {
-		// A question owns the keyboard: only y/n, esc and ctrl+c, and the
-		// scroll keys for a panel taller than the tab.
+		// A question owns the keyboard: only y/n and esc answer it, ctrl+c
+		// and ctrl+d clear or detach as anywhere else, and the scroll keys
+		// move a panel taller than the tab.
 		if a.scrollPanel(msg.String()) {
 			return a, nil
 		}
 		switch msg.String() {
 		case "y", "Y":
 			return a, a.answer(true)
-		case "n", "N", "esc", "ctrl+c":
+		case "n", "N", "esc":
 			return a, a.answer(false)
+		case "ctrl+c", "ctrl+d":
+			cmd, _ := a.detachKey(msg.String())
+			return a, cmd
 		}
 		return a, nil
 	}

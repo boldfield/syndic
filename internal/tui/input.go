@@ -2,11 +2,14 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -49,14 +52,54 @@ func setInputPrompt(in *textarea.Model, prompt string, width int) {
 }
 
 // inputLines is how many screen lines the input's text takes at its width,
-// counting a line that wraps once per row.
+// counting each row a line wraps onto as the textarea draws it.
 func inputLines(in textarea.Model) int {
 	w := max(in.Width(), 1)
 	n := 0
 	for _, l := range strings.Split(in.Value(), "\n") {
-		n += ansi.StringWidth(l)/w + 1
+		n += wrappedRows([]rune(l), w)
 	}
 	return n
+}
+
+// wrappedRows is how many rows the textarea draws one line of text on at
+// width: it follows the textarea's own word wrap (bubbles textarea wrap),
+// which breaks before a word that does not fit and keeps a trailing space
+// on the last row, so a line that fills its width exactly takes one more.
+func wrappedRows(runes []rune, width int) int {
+	var (
+		rows   = 1
+		line   []rune // the row being filled
+		word   []rune
+		spaces int
+	)
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+		if spaces > 0 {
+			if uniseg.StringWidth(string(line))+uniseg.StringWidth(string(word))+spaces > width {
+				rows++
+				line = nil
+			}
+			line = append(append(line, word...), []rune(strings.Repeat(" ", spaces))...)
+			spaces, word = 0, nil
+		} else if uniseg.StringWidth(string(word))+runewidth.RuneWidth(word[len(word)-1]) > width {
+			// The word fills a row by itself: it moves to a row of its own.
+			if len(line) > 0 {
+				rows++
+				line = nil
+			}
+			line = append(line, word...)
+			word = nil
+		}
+	}
+	if uniseg.StringWidth(string(line))+uniseg.StringWidth(string(word))+spaces >= width {
+		rows++
+	}
+	return rows
 }
 
 // normalizePaste keeps a paste's line breaks as typed: CRLF and lone CR become

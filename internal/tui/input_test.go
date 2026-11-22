@@ -219,3 +219,92 @@ func TestNormalizePaste(t *testing.T) {
 		}
 	}
 }
+
+// While a yes/no question is open, ctrl+c and ctrl+d act as they do on the
+// input anywhere: ctrl+c clears a non-empty input, and on an empty input
+// both detach rather than answering.
+func TestCtrlKeysInAQuestion(t *testing.T) {
+	answered := false
+	open := func(a *App) {
+		a.ask(&question{
+			lines: []string{"drop turns?"},
+			yes:   func(*App) tea.Cmd { answered = true; return nil },
+			no:    func(*App) tea.Cmd { answered = true; return nil },
+		})
+	}
+
+	a := offlineApp(t)
+	typeRunes(a, "kept")
+	open(a)
+	if cmd := press(a, tea.KeyMsg{Type: tea.KeyCtrlD}); isQuit(cmd) || a.input.Value() != "kept" {
+		t.Fatalf("ctrl+d on a non-empty input: quit=%v input=%q", isQuit(cmd), a.input.Value())
+	}
+	if cmd := press(a, tea.KeyMsg{Type: tea.KeyCtrlC}); isQuit(cmd) || a.input.Value() != "" {
+		t.Fatalf("ctrl+c on a non-empty input: quit=%v input=%q", isQuit(cmd), a.input.Value())
+	}
+	if a.question == nil || answered {
+		t.Fatal("ctrl+c answered the question")
+	}
+	if got := inputRegion(t, a); got[0] != "(y/n)>" {
+		t.Errorf("input line = %q, want the question's prompt", got)
+	}
+	if cmd := press(a, tea.KeyMsg{Type: tea.KeyCtrlC}); !isQuit(cmd) || answered {
+		t.Fatalf("ctrl+c on an empty input: quit=%v answered=%v, want a detach", isQuit(cmd), answered)
+	}
+
+	a = offlineApp(t)
+	open(a)
+	if cmd := press(a, tea.KeyMsg{Type: tea.KeyCtrlD}); !isQuit(cmd) || answered {
+		t.Fatalf("ctrl+d on an empty input: quit=%v answered=%v, want a detach", isQuit(cmd), answered)
+	}
+
+	// esc still answers no.
+	a = offlineApp(t)
+	open(a)
+	if press(a, tea.KeyMsg{Type: tea.KeyEsc}); a.question != nil || !answered {
+		t.Fatalf("esc did not answer the question")
+	}
+}
+
+// A line the textarea word-wraps onto more rows than its width alone would
+// need still shows in full, down to the row the cursor is on.
+func TestWordWrappedInputShowsTheCursorRow(t *testing.T) {
+	a := offlineApp(t)
+	word := strings.Repeat("a", 40)
+	typeRunes(a, strings.Join([]string{word, word, word, "END"}, " "))
+	// 40+1+40 does not fit the 78 cells after the prompt, so each word takes
+	// a row: three rows, where 124 cells alone would need two.
+	if got := a.inputRows(); got != 3 {
+		t.Errorf("input rows = %d, want 3", got)
+	}
+	got := inputRegion(t, a)
+	if want := []string{"> " + word, "  " + word, "  " + word + " END"}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("input lines = %q, want %q", got, want)
+	}
+	if view := strings.Split(a.input.View(), "\n"); strings.TrimRight(view[2], " ") != "  "+word+" END" {
+		t.Errorf("textarea row 3 = %q, want the cursor row", view[2])
+	}
+}
+
+func TestWrappedRowsMatchesTheTextarea(t *testing.T) {
+	lines := []string{
+		"",
+		"short",
+		strings.Repeat("x", 78),
+		strings.Repeat("x", 77),
+		strings.Repeat("x", 200),
+		strings.Repeat("word ", 40),
+		strings.Repeat("日本語 ", 30),
+		"a " + strings.Repeat("b", 100) + " c",
+		strings.Repeat("lorem ipsum dolor sit amet, ", 6),
+	}
+	a := offlineApp(t)
+	for _, l := range lines {
+		a.input.SetValue(l)
+		// The cursor is on the line, so LineInfo counts the rows the
+		// textarea wraps it onto.
+		if got, want := inputLines(a.input), a.input.LineInfo().Height; got != want {
+			t.Errorf("inputLines(%q) = %d, textarea draws %d", l, got, want)
+		}
+	}
+}
