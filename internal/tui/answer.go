@@ -138,6 +138,8 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
 			candidate()
+		} else {
+			lines = append(lines, "no approved answer (incomplete)")
 		}
 
 	case "overridden":

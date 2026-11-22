@@ -215,9 +215,18 @@ func (a *App) answerIn(turnID string) answerInput {
 	}
 }
 
+// chatDraftsMap returns a map of which turns should show drafts.
+func (a *App) chatDraftsMap() map[string]bool {
+	draftsMap := make(map[string]bool)
+	for id := range a.state.Turns {
+		draftsMap[id] = a.draftsOn(id)
+	}
+	return draftsMap
+}
+
 // fetchChatContent starts the fetches the chat tab is waiting on.
 func (a *App) fetchChatContent() tea.Cmd {
-	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, chatRefs(a.state))...)
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, chatRefs(a.state, a.candidateIDByTurn, a.chatDraftsMap()))...)
 }
 
 // transcriptIn gathers what the transcript tab needs.
@@ -1038,12 +1047,16 @@ func (a *App) View() string {
 	var tabView string
 	switch a.tab {
 	case tabChat:
+		// For chat tab, use per-turn draft settings
+		draftsMap := a.chatDraftsMap()
 		tabView = renderChat(a.state, chatInput{
-			content:     a.content,
-			drafts:      a.drafts != nil && *a.drafts,
-			plainMode:   !a.terminalCapabilities.Color,
-			blockDetail: a.blockDetail,
-			width:       w,
+			content:         a.content,
+			draftsMap:       draftsMap,
+			plainMode:       !a.terminalCapabilities.Color,
+			blockDetail:     a.blockDetail,
+			candidateIDMap:  a.candidateIDByTurn,
+			overrideReasons: a.overrideReasons,
+			width:           w,
 		}, w)
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")

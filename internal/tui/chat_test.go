@@ -11,10 +11,12 @@ import (
 func TestRenderChat_EmptyConversation(t *testing.T) {
 	s := NewState()
 	in := chatInput{
-		content:     NewContentCache(),
-		drafts:      false,
-		plainMode:   false,
-		blockDetail: make(map[string]wire.OpenBlock),
+		content:         NewContentCache(),
+		draftsMap:       make(map[string]bool),
+		plainMode:       false,
+		blockDetail:     make(map[string]wire.OpenBlock),
+		candidateIDMap:  make(map[string]string),
+		overrideReasons: make(map[string]string),
 	}
 
 	result := renderChat(s, in, 80)
@@ -43,10 +45,12 @@ func TestRenderChat_SingleApprovedTurn(t *testing.T) {
 	}
 
 	in := chatInput{
-		content:     NewContentCache(),
-		drafts:      false,
-		plainMode:   false,
-		blockDetail: make(map[string]wire.OpenBlock),
+		content:         NewContentCache(),
+		draftsMap:       make(map[string]bool),
+		plainMode:       false,
+		blockDetail:     make(map[string]wire.OpenBlock),
+		candidateIDMap:  make(map[string]string),
+		overrideReasons: make(map[string]string),
 	}
 
 	result := renderChat(s, in, 80)
@@ -82,10 +86,12 @@ func TestRenderChat_IncompleteTurn(t *testing.T) {
 	}
 
 	in := chatInput{
-		content:     NewContentCache(),
-		drafts:      false,
-		plainMode:   false,
-		blockDetail: make(map[string]wire.OpenBlock),
+		content:         NewContentCache(),
+		draftsMap:       make(map[string]bool),
+		plainMode:       false,
+		blockDetail:     make(map[string]wire.OpenBlock),
+		candidateIDMap:  make(map[string]string),
+		overrideReasons: make(map[string]string),
 	}
 
 	result := renderChat(s, in, 80)
@@ -168,7 +174,9 @@ func TestChatRefs_CollectsRefsForTurns(t *testing.T) {
 		Turns:          map[string]bool{turnID: true},
 	}
 
-	refs := chatRefs(s)
+	candidateIDMap := make(map[string]string)
+	draftsMap := make(map[string]bool)
+	refs := chatRefs(s, candidateIDMap, draftsMap)
 	// chatRefs should work even if no refs are found (the content is loaded on demand)
 	if len(refs) > 0 {
 		if refs[0] != "attempt:attempt-001" {

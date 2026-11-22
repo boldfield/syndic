@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -10,15 +9,17 @@ import (
 
 // chatInput is everything the chat tab needs beyond the State.
 type chatInput struct {
-	content     *ContentCache
-	drafts      bool
-	plainMode   bool
-	blockDetail map[string]wire.OpenBlock
-	width       int
+	content         *ContentCache
+	draftsMap       map[string]bool
+	plainMode       bool
+	blockDetail     map[string]wire.OpenBlock
+	candidateIDMap  map[string]string
+	overrideReasons map[string]string
+	width           int
 }
 
 // chatRefs lists all content refs the chat tab needs across all turns.
-func chatRefs(s State) []string {
+func chatRefs(s State, candidateIDMap map[string]string, draftsMap map[string]bool) []string {
 	var refs []string
 	seen := map[string]bool{}
 
@@ -44,46 +45,39 @@ func chatRefs(s State) []string {
 		return turns[i].id < turns[j].id
 	})
 
-	// For each turn, collect refs for its answer/candidate.
+	// For each turn, collect refs using the same logic as answerRefs
 	for _, entry := range turns {
 		ti := entry.ti
+		turnID := entry.id
+
 		switch ti.State {
 		case "approved", "incomplete", "overridden", "cancelled":
-			if ti.CandidateHash != nil && len(s.Attempts) > 0 {
-				// Find the candidate ID for this turn.
-				for id, ai := range s.Attempts {
-					if ai.TurnID == entry.id && ai.Phase == "review" && ai.Status == "complete" {
-						ref := "attempt:" + id
-						if !seen[ref] {
-							refs = append(refs, ref)
-							seen[ref] = true
-						}
-						break
-					}
+			// Use candidate if available
+			if ti.CandidateHash != nil && candidateIDMap[turnID] != "" {
+				ref := "candidate:" + candidateIDMap[turnID]
+				if !seen[ref] {
+					refs = append(refs, ref)
+					seen[ref] = true
 				}
 			}
 		case "solo_complete":
-			// Find the author attempt for solo mode.
-			for id, ai := range s.Attempts {
-				if ai.TurnID == entry.id && ai.Phase == "author" && ai.Status == "complete" {
-					ref := "attempt:" + id
-					if !seen[ref] {
-						refs = append(refs, ref)
-						seen[ref] = true
-					}
-					break
+			// Find the author attempt for solo mode
+			if id := authorAttempt(s, turnID); id != "" {
+				ref := "attempt:" + id
+				if !seen[ref] {
+					refs = append(refs, ref)
+					seen[ref] = true
 				}
 			}
 		default:
-			// For turns in progress, check if drafts should be shown.
-			for id, ai := range s.Attempts {
-				if ai.TurnID == entry.id && ai.Phase == "author" && ai.Status == "complete" {
+			// For turns in progress, include author attempt if drafts enabled for this turn
+			if draftsMap[turnID] {
+				if id := authorAttempt(s, turnID); id != "" {
 					ref := "attempt:" + id
 					if !seen[ref] {
 						refs = append(refs, ref)
 						seen[ref] = true
 					}
-					break
 				}
 			}
 		}
@@ -121,161 +115,35 @@ func renderChat(s State, in chatInput, width int) string {
 		return ""
 	}
 
-	// Render each turn.
+	// Render each turn using renderAnswer for proper banner handling
 	for _, entry := range turns {
 		turnID := entry.id
-		turnLines := renderChatTurn(s, turnID, in, width)
-		lines = append(lines, turnLines...)
-		lines = append(lines, "") // Separator between turns.
+
+		// Build answerInput for this turn
+		ai := answerInput{
+			content:        in.content,
+			drafts:         in.draftsMap[turnID],
+			candidateID:    in.candidateIDMap[turnID],
+			openBlocks:     blockSliceFromMap(in.blockDetail),
+			overrideReason: in.overrideReasons[turnID],
+			plainMode:      in.plainMode,
+		}
+
+		// Render the turn using the existing renderAnswer logic
+		turnLines := renderAnswer(s, turnID, ai)
+		if turnLines != "" {
+			lines = append(lines, turnLines)
+		}
+
+		// Add separator between turns
+		lines = append(lines, "")
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// renderChatTurn returns the lines for one turn in the chat tab.
-func renderChatTurn(s State, turnID string, in chatInput, width int) []string {
-	ti, ok := s.Turns[turnID]
-	if !ok {
-		return nil
-	}
-
-	var lines []string
-
-	// Helper to get the candidate content for this turn.
-	getCandidate := func() string {
-		// Find the latest completed attempt for this turn to display.
-		// For approved/solo/terminal turns, find the review or author attempt.
-		// For in-progress turns, find the author attempt if drafts are enabled.
-		var bestAttempt string
-		var bestEpoch int64 = -1
-
-		switch ti.State {
-		case "approved", "incomplete", "overridden", "cancelled":
-			// For terminal states, use the latest attempt (review or author).
-			for id, ai := range s.Attempts {
-				if ai.TurnID != turnID || ai.Status != "complete" {
-					continue
-				}
-				if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
-					bestAttempt = id
-					bestEpoch = ai.Epoch
-				}
-			}
-		case "solo_complete":
-			// For solo, use the author attempt.
-			for id, ai := range s.Attempts {
-				if ai.TurnID != turnID || ai.Phase != "author" || ai.Status != "complete" {
-					continue
-				}
-				if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
-					bestAttempt = id
-					bestEpoch = ai.Epoch
-				}
-			}
-		default:
-			// For in-progress turns, use author attempt if drafts enabled.
-			if in.drafts {
-				for id, ai := range s.Attempts {
-					if ai.TurnID != turnID || ai.Phase != "author" || ai.Status != "complete" {
-						continue
-					}
-					if ai.Epoch > bestEpoch || (ai.Epoch == bestEpoch && id > bestAttempt) {
-						bestAttempt = id
-						bestEpoch = ai.Epoch
-					}
-				}
-			}
-		}
-
-		if bestAttempt != "" {
-			return body(in.content, "attempt:"+bestAttempt)
-		} else if ti.CandidateHash != nil {
-			return "loading…"
-		}
-		return ""
-	}
-
-	switch ti.State {
-	case "approved":
-		if content := getCandidate(); content != "" {
-			lines = append(lines, content)
-		}
-		if ti.CandidateHash != nil {
-			hash := *ti.CandidateHash
-			if len(hash) > 12 {
-				hash = hash[:12]
-			}
-			// Use ti.Round if set, otherwise fall back to counting revisions from epochs.
-			revisionCount := ti.Round
-			if revisionCount == 0 {
-				revisionCount = countRevisions(s, turnID)
-			}
-			if revisionCount > 0 {
-				lines = append(lines, fmt.Sprintf("approved by %s after %d revisions against %s", strings.Join(approvers(s, turnID), ", "), revisionCount, hash))
-			} else {
-				lines = append(lines, fmt.Sprintf("approved by %s against %s", strings.Join(approvers(s, turnID), ", "), hash))
-			}
-		}
-
-	case "solo_complete":
-		lines = append(lines, "UNREVIEWED (solo)")
-		if content := getCandidate(); content != "" {
-			lines = append(lines, content)
-		}
-
-	case "incomplete":
-		if ti.TerminalReason != nil {
-			lines = append(lines, *ti.TerminalReason)
-		}
-		lines = append(lines, blockLines(blockSlice(in.blockDetail))...)
-		if ti.CandidateHash != nil {
-			lines = append(lines, "INCOMPLETE, not approved")
-			if content := getCandidate(); content != "" {
-				lines = append(lines, content)
-			}
-		} else {
-			lines = append(lines, "no approved answer (incomplete)")
-		}
-
-	case "overridden":
-		if content := getCandidate(); content != "" {
-			lines = append(lines, content)
-		}
-		reason := ""
-		if ti.TerminalReason != nil && *ti.TerminalReason != "override" {
-			reason = *ti.TerminalReason
-		}
-		lines = append(lines, "HUMAN OVERRIDE: "+reason)
-
-	case "cancelled":
-		lines = append(lines, "CANCELLED, not approved")
-		if ti.CandidateHash != nil {
-			if content := getCandidate(); content != "" {
-				lines = append(lines, content)
-			}
-		}
-
-	default:
-		// Turn in progress - show draft banner if drafts enabled.
-		if s.CurrentTurn == turnID && in.drafts {
-			draftText := "UNREVIEWED DRAFT"
-			if in.plainMode {
-				draftText = "!! UNREVIEWED DRAFT !!"
-			} else {
-				draftText = draftBanner.Render(draftText)
-			}
-			lines = append(lines, draftText)
-			if content := getCandidate(); content != "" {
-				lines = append(lines, content)
-			}
-		}
-	}
-
-	return lines
-}
-
-// blockSlice converts a map to a slice of OpenBlocks.
-func blockSlice(blocks map[string]wire.OpenBlock) []wire.OpenBlock {
+// blockSliceFromMap converts a map to a slice of OpenBlocks.
+func blockSliceFromMap(blocks map[string]wire.OpenBlock) []wire.OpenBlock {
 	var slice []wire.OpenBlock
 	for _, b := range blocks {
 		slice = append(slice, b)
