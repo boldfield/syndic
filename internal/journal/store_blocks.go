@@ -2,6 +2,7 @@ package journal
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -38,7 +39,7 @@ func (tx *Tx) GetBlockState(blockID string) (*BlockState, error) {
 		SELECT id, state, candidate_hash, withdrawn_against_hash, severity, evidence, remedy, reviewer_block_id
 		FROM blocks WHERE id = ?
 	`, blockID).Scan(&state.ID, &state.State, &state.CandidateHash, &withdrawnAgainstHash, &state.Severity, &state.Evidence, &state.Remedy, &reviewerBlockID); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("block not found")
 		}
 		return nil, fmt.Errorf("query block state: %w", err)

@@ -53,11 +53,13 @@ func (f *blockFixture) openIDs(t *testing.T) []string {
 
 func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 	f := newBlockFixture(t)
-	if _, err := f.store.CreateCandidate(f.turnID, "c1", "H1"); err != nil {
+	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	if err != nil {
 		t.Fatal(err)
 	}
 	f.openBlock(t, "b1", "H1")
-	if _, err := f.store.CreateCandidate(f.turnID, "c2", "H2"); err != nil {
+	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if ids := f.openIDs(t); len(ids) != 1 || ids[0] != "b1" {
@@ -76,6 +78,7 @@ func TestBlockSurvivesRevisionAndWithdrawal(t *testing.T) {
 	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
 		t.Fatalf("WithdrawBlock H2: %v", err)
 	}
+	_ = cid2
 	if ids := f.openIDs(t); len(ids) != 0 {
 		t.Fatalf("expected no open blocks, got %v", ids)
 	}

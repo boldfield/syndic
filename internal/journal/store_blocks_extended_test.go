@@ -44,11 +44,12 @@ func TestGetBlocksByState(t *testing.T) {
 
 func TestAllBlocksForTurn(t *testing.T) {
 	f := newBlockFixture(t)
+	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	f.openBlock(t, "b1", "H1")
 
-	_, err := f.store.CreateCandidate(f.turnID, "c2", "H2")
+	_, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
-		t.Fatalf("CreateCandidate: %v", err)
+		t.Fatalf("SetLatestCandidate: %v", err)
 	}
 
 	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
@@ -69,11 +70,12 @@ func TestAllBlocksForTurn(t *testing.T) {
 
 func TestWithdrawnBlocksAgainstHash(t *testing.T) {
 	f := newBlockFixture(t)
+	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	f.openBlock(t, "b1", "H1")
 
-	_, err := f.store.CreateCandidate(f.turnID, "c2", "H2")
+	_, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
-		t.Fatalf("CreateCandidate: %v", err)
+		t.Fatalf("SetLatestCandidate: %v", err)
 	}
 
 	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {
@@ -126,6 +128,7 @@ func TestBlocksForCandidate(t *testing.T) {
 
 func TestBlockStatePersistence(t *testing.T) {
 	f := newBlockFixture(t)
+	cid1, _ := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	f.openBlock(t, "b1", "H1")
 
 	state1, err := f.store.GetBlockState("b1")
@@ -136,9 +139,9 @@ func TestBlockStatePersistence(t *testing.T) {
 		t.Fatalf("expected nil withdrawn_against_hash initially")
 	}
 
-	_, err = f.store.CreateCandidate(f.turnID, "c2", "H2")
+	_, err = f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
 	if err != nil {
-		t.Fatalf("CreateCandidate: %v", err)
+		t.Fatalf("SetLatestCandidate: %v", err)
 	}
 
 	if err := f.store.WithdrawBlock("b1", "reviewer", "H2"); err != nil {

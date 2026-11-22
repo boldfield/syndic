@@ -61,6 +61,9 @@ func (tx *Tx) GetRoundInfo(turnID string) (*RoundInfo, error) {
 
 	if maxRoundsCeiling.Valid {
 		info.MaxRoundsCeiling = int(maxRoundsCeiling.Int64)
+	} else {
+		// Default to configured value if not set on turn
+		info.MaxRoundsCeiling = 5
 	}
 
 	return info, nil
@@ -152,7 +155,7 @@ func (tx *Tx) CandidateForRound(turnID string, round int) (string, error) {
 	if err := tx.tx.QueryRow(`
 		SELECT id FROM candidates WHERE turn_id = ? AND round = ?
 	`, turnID, round).Scan(&candidateID); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
 		return "", fmt.Errorf("query candidate: %w", err)
@@ -198,6 +201,8 @@ func (tx *Tx) LatestCandidate(turnID string) (string, int, error) {
 
 // AdvanceRound atomically advances a turn to the next round and bumps epoch.
 // This rejects late previous-round results by advancing the epoch.
+// It creates the new candidate (round+1 superseding current), updates turns.candidate_id,
+// and bumps the epoch all in one transaction.
 func (s *Store) AdvanceRound(turnID string) error {
 	return s.Tx(func(tx *Tx) error {
 		return tx.AdvanceRound(turnID)
@@ -205,13 +210,16 @@ func (s *Store) AdvanceRound(turnID string) error {
 }
 
 // AdvanceRound atomically advances a turn to the next round and bumps epoch.
+// Creates a new candidate for round+1 that supersedes the current candidate,
+// updates turns.candidate_id to the new candidate, and increments the epoch.
 func (tx *Tx) AdvanceRound(turnID string) error {
-	var currentEpoch int
+	var maxRoundsInEffect sql.NullInt64
 	var currentCandidateID sql.NullString
+	var currentRound int
 
 	if err := tx.tx.QueryRow(`
-		SELECT epoch, candidate_id FROM turns WHERE id = ?
-	`, turnID).Scan(&currentEpoch, &currentCandidateID); err != nil {
+		SELECT max_rounds_in_effect, candidate_id FROM turns WHERE id = ?
+	`, turnID).Scan(&maxRoundsInEffect, &currentCandidateID); err != nil {
 		return fmt.Errorf("query turn: %w", err)
 	}
 
@@ -219,7 +227,6 @@ func (tx *Tx) AdvanceRound(turnID string) error {
 		return fmt.Errorf("cannot advance round: turn has no current candidate")
 	}
 
-	var currentRound int
 	if err := tx.tx.QueryRow(`
 		SELECT round FROM candidates WHERE id = ?
 	`, currentCandidateID.String).Scan(&currentRound); err != nil {
@@ -229,10 +236,28 @@ func (tx *Tx) AdvanceRound(turnID string) error {
 		return fmt.Errorf("query current candidate: %w", err)
 	}
 
+	nextRound := currentRound + 1
+	if maxRoundsInEffect.Valid && nextRound > int(maxRoundsInEffect.Int64) {
+		return fmt.Errorf("cannot advance: round %d exceeds max_rounds_in_effect %d", nextRound, maxRoundsInEffect.Int64)
+	}
+
+	newCandidateID, err := generateID()
+	if err != nil {
+		return fmt.Errorf("generate candidate id: %w", err)
+	}
+
+	emptyContent := ""
 	if _, err := tx.tx.Exec(`
-		UPDATE turns SET epoch = epoch + 1 WHERE id = ?
-	`, turnID); err != nil {
-		return fmt.Errorf("bump epoch: %w", err)
+		INSERT INTO candidates (id, turn_id, content, content_hash, round, supersedes)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, newCandidateID, turnID, emptyContent, "", nextRound, currentCandidateID.String); err != nil {
+		return fmt.Errorf("insert new candidate: %w", err)
+	}
+
+	if _, err := tx.tx.Exec(`
+		UPDATE turns SET candidate_id = ?, epoch = epoch + 1 WHERE id = ?
+	`, newCandidateID, turnID); err != nil {
+		return fmt.Errorf("update turn: %w", err)
 	}
 
 	return nil

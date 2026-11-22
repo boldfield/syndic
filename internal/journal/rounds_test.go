@@ -172,7 +172,7 @@ func TestBlocksPersistAcrossRounds(t *testing.T) {
 		t.Fatalf("BeginAttempt round 0: %v", err)
 	}
 
-	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	_, err = f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 0: %v", err)
 	}
@@ -198,11 +198,6 @@ func TestBlocksPersistAcrossRounds(t *testing.T) {
 		t.Fatalf("AdvanceRound: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
-	if err != nil {
-		t.Fatalf("SetLatestCandidate round 1: %v", err)
-	}
-
 	blocksRound0After, err := f.store.BlocksForRound(f.turnID, 0)
 	if err != nil {
 		t.Fatalf("BlocksForRound round 0 after advance: %v", err)
@@ -210,8 +205,6 @@ func TestBlocksPersistAcrossRounds(t *testing.T) {
 	if len(blocksRound0After) != 1 {
 		t.Fatalf("expected block to persist in round 0, got %d", len(blocksRound0After))
 	}
-
-	_ = cid2
 }
 
 func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
@@ -222,12 +215,12 @@ func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
 		t.Fatalf("BeginAttempt round 0: %v", err)
 	}
 
-	cid1, err := f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
+	_, err = f.store.SetLatestCandidate(f.turnID, "c1", "H1", 0, "")
 	if err != nil {
 		t.Fatalf("SetLatestCandidate round 0: %v", err)
 	}
 
-	vid1, err := f.store.RecordVerdict(attemptID1, "H1", "approve", "good", "valid")
+	_, err = f.store.RecordVerdict(attemptID1, "H1", "approve", "good", "valid")
 	if err != nil {
 		t.Fatalf("RecordVerdict round 0 approve: %v", err)
 	}
@@ -236,12 +229,7 @@ func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
 		t.Fatalf("AdvanceRound: %v", err)
 	}
 
-	cid2, err := f.store.SetLatestCandidate(f.turnID, "c2", "H2", 1, cid1)
-	if err != nil {
-		t.Fatalf("SetLatestCandidate round 1: %v", err)
-	}
-
-	attemptID2, err := f.store.BeginAttempt(f.turnID, "reviewer1", "review", 1, nil, "")
+	_, err = f.store.BeginAttempt(f.turnID, "reviewer1", "review", 1, nil, "")
 	if err != nil {
 		t.Fatalf("BeginAttempt round 1: %v", err)
 	}
@@ -267,10 +255,6 @@ func TestApprovalsDoNotTransferAcrossRounds(t *testing.T) {
 	if approveH2Count != 0 {
 		t.Fatalf("expected 0 approval verdicts for H2 (new round), got %d", approveH2Count)
 	}
-
-	_ = cid2
-	_ = attemptID2
-	_ = vid1
 }
 
 func TestWithdrawBlockValidatesReviewerOwnership(t *testing.T) {
