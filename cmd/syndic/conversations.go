@@ -55,19 +55,32 @@ func cmdConversations(fs *flag.FlagSet, args []string) int {
 		workspace = &wd
 	}
 
-	// List conversations
-	reply, err := cl.Conversations(ctx, workspace, "", 200)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to list conversations: %v\n", err)
-		return 2
-	}
-
-	for _, conv := range reply.Items {
-		fmt.Printf("%s  %s  %d turns", conv.ID, conv.CreatedAt, conv.TurnCount)
-		if conv.Preview != "" {
-			fmt.Printf("  %s", conv.Preview)
+	// List conversations with pagination
+	cursor := ""
+	for {
+		reply, err := cl.Conversations(ctx, workspace, cursor, 200)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: failed to list conversations: %v\n", err)
+			return 2
 		}
-		fmt.Println()
+
+		for _, conv := range reply.Items {
+			// Print conversation with workspace
+			fmt.Printf("%s  %s  %d turns", conv.ID, conv.LastSubmittedAt, conv.TurnCount)
+			if conv.Workspace != nil {
+				fmt.Printf("  %s", *conv.Workspace)
+			}
+			if conv.Preview != "" {
+				fmt.Printf("  %s", conv.Preview)
+			}
+			fmt.Println()
+		}
+
+		// Check if there are more conversations
+		if reply.NextCursor == nil || *reply.NextCursor == "" {
+			break
+		}
+		cursor = *reply.NextCursor
 	}
 
 	return 0

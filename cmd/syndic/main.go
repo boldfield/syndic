@@ -15,8 +15,17 @@ func main() {
 		subcommand = "tui"
 		args = []string{}
 	} else {
-		subcommand = os.Args[1]
-		args = os.Args[2:]
+		firstArg := os.Args[1]
+
+		// Check if it's a recognized subcommand
+		if isSubcommand(firstArg) {
+			subcommand = firstArg
+			args = os.Args[2:]
+		} else {
+			// If it's a flag or unrecognized, default to tui
+			subcommand = "tui"
+			args = os.Args[1:]
+		}
 	}
 
 	switch subcommand {
@@ -48,4 +57,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcommand)
 		os.Exit(2)
 	}
+}
+
+func isSubcommand(arg string) bool {
+	return arg == "probe" || arg == "conversations"
 }

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"time"
 
+	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/lockfile"
 	"github.com/boldfield/syndic/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,7 +17,7 @@ import (
 func cmdTUI(fs *flag.FlagSet, args []string) int {
 	newConversation := fs.Bool("new", false, "start with a new conversation")
 	conversationID := fs.String("conversation", "", "open a named conversation (accepts unique prefix)")
-	rounds := fs.Int("rounds", 0, "set the round limit for this process")
+	roundsPtr := fs.Int("rounds", -1, "set the round limit for this process (0 to disable revisions)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -47,6 +49,26 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 		return 2
 	}
 
+	// Get current working directory for validation
+	wd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to get working directory: %v\n", err)
+		return 2
+	}
+
+	// If --conversation is specified, validate the prefix before starting the TUI
+	resolvedConvID := ""
+	if *conversationID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conv, err := validateConversationPrefix(ctx, paths.Socket, *conversationID, wd)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
+		resolvedConvID = conv
+	}
+
 	// Detect terminal capabilities
 	caps := tui.DetectTerminalCapabilities()
 
@@ -59,11 +81,11 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	if *newConversation {
 		opts = append(opts, tui.WithNewConversation())
 	}
-	if *conversationID != "" {
-		opts = append(opts, tui.WithConversationID(*conversationID))
+	if resolvedConvID != "" {
+		opts = append(opts, tui.WithConversationID(resolvedConvID))
 	}
-	if *rounds > 0 {
-		opts = append(opts, tui.WithRounds(*rounds))
+	if *roundsPtr >= 0 {
+		opts = append(opts, tui.WithRounds(*roundsPtr))
 	}
 
 	app := tui.NewApp(ctx, paths.Socket, opts...)
@@ -85,4 +107,53 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	}
 
 	return 0
+}
+
+// validateConversationPrefix checks if the conversation prefix is valid and
+// if the conversation's workspace matches the current directory.
+// Returns the resolved conversation ID or an error.
+func validateConversationPrefix(ctx context.Context, socket, prefix, workspace string) (string, error) {
+	cl, err := client.Dial(ctx, socket, "syndic-tui", "0")
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to daemon: %v", err)
+	}
+	defer func() { _ = cl.Close() }()
+
+	// Search for conversations matching the prefix
+	var matches []string
+	cursor := ""
+	for {
+		reply, err := cl.Conversations(ctx, nil, cursor, 200)
+		if err != nil {
+			return "", fmt.Errorf("failed to list conversations: %v", err)
+		}
+
+		for _, conv := range reply.Items {
+			if len(conv.ID) >= len(prefix) && conv.ID[:len(prefix)] == prefix {
+				matches = append(matches, conv.ID)
+				// Also check if the workspace matches (for workspace validation)
+				if len(matches) == 1 && conv.Workspace != nil && *conv.Workspace != workspace {
+					return "", fmt.Errorf("workspace mismatch: conversation is in workspace %s but current directory is %s", *conv.Workspace, workspace)
+				}
+				// Null-workspace conversations can be accessed from any directory
+			}
+		}
+
+		// Check if we have already found multiple matches
+		if len(matches) > 1 {
+			return "", fmt.Errorf("ambiguous conversation prefix: %s", prefix)
+		}
+
+		// Check if there are more conversations
+		if reply.NextCursor == nil || *reply.NextCursor == "" {
+			break
+		}
+		cursor = *reply.NextCursor
+	}
+
+	if len(matches) == 0 {
+		return "", fmt.Errorf("unknown conversation prefix: %s", prefix)
+	}
+
+	return matches[0], nil
 }

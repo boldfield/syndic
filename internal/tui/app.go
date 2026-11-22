@@ -87,9 +87,12 @@ type App struct {
 	pScroll     int                       // first line shown while pScrolled
 
 	// Conversation startup options
-	newConversation bool   // start with a new conversation
-	conversationID  string // conversation ID prefix to open
-	rounds          int    // round limit for this process
+	newConversation   bool   // start with a new conversation
+	conversationID    string // conversation ID to open
+	loadDefaultConv   bool   // load the latest conversation for the workspace on first connection
+	defaultConvLoaded bool   // whether we've already attempted to load the default conversation
+	roundsIsSet       bool   // rounds was explicitly set via flag
+	rounds            int    // round limit for this process
 }
 
 // Option configures an App.
@@ -128,7 +131,10 @@ func WithConversationID(id string) Option {
 
 // WithRounds sets the round limit for this process.
 func WithRounds(n int) Option {
-	return func(a *App) { a.rounds = n }
+	return func(a *App) {
+		a.rounds = n
+		a.roundsIsSet = true
+	}
 }
 
 // NewApp returns an App that talks to the engine socket at socketPath.
@@ -153,6 +159,10 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
 		o(a)
+	}
+	// If no specific conversation was requested, load the default (latest) one
+	if !a.newConversation && a.conversationID == "" {
+		a.loadDefaultConv = true
 	}
 	var errs []error
 	if a.workDir == "" {
@@ -375,6 +385,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onContent(msg)
 	case transcriptMsg:
 		return a.onTranscript(msg)
+	case defaultConvMsg:
+		return a.onDefaultConvLoaded(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -518,7 +530,7 @@ func (a *App) enter() tea.Cmd {
 		conversationID = &a.conversationID
 	}
 	var maxRounds *int
-	if a.rounds > 0 {
+	if a.roundsIsSet {
 		maxRounds = &a.rounds
 	}
 	return a.send(submission{
@@ -614,8 +626,27 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 		// The limit and deadline of a turn that is already open come from its record.
 		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
 	}
+	// Load the default conversation if needed
+	if a.loadDefaultConv && !a.defaultConvLoaded {
+		a.defaultConvLoaded = true
+		cmds = append(cmds, defaultConvCmd(a.ctx, a.gen, a.cl, a.workDir))
+	}
 	cmds = append(cmds, a.ensureTick(), a.syncTranscript(), a.reloadTranscript())
 	return a, tea.Batch(cmds...)
+}
+
+// onDefaultConvLoaded handles the result of loading the default conversation.
+func (a *App) onDefaultConvLoaded(msg defaultConvMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		// If we can't load the default conversation, just start fresh
+		a.conversationID = ""
+	} else if msg.conversationID != "" {
+		a.conversationID = msg.conversationID
+	}
+	return a, nil
 }
 
 // updateQuickProfileState sets the quick profile banners from the project
