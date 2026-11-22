@@ -377,3 +377,80 @@ func TestRevisionProjectionMustFit(t *testing.T) {
 		t.Fatalf("open blocks = %+v, err %v", blocks, err)
 	}
 }
+
+// Overriding a turn that ended after a revision delivers only the reviews of
+// the latest candidate, as the live path does.
+func TestRevisionOverrideDeliversLatestRoundOnly(t *testing.T) {
+	t.Cleanup(engine.EnableDelivery())
+	scripts := map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText), enginetest.Reply(revisedText), ack()},
+		"reviewer": {blockStep("b1"), v2Verdict("1", "block", "b2", "b1 maintained"), ack()},
+	}
+	h := enginetest.New(t, revisionRoster("1"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateIncomplete, "rounds_exhausted")
+	waitDeliveries(t, h, turnID, 2)
+	if err := h.Engine.Override(turnID, "false alarm"); err != nil {
+		t.Fatal(err)
+	}
+	var seen int
+	waitFor(t, "override deliveries", func() bool {
+		seen = 0
+		for _, c := range h.Adapters["author"].Calls() {
+			if c.Request.Envelope.Phase == phaseDelivery && strings.Contains(userContent(c.Request), "overridden") {
+				seen++
+				if n := strings.Count(userContent(c.Request), "VERDICT v"); n != 1 {
+					t.Fatalf("override delivery carries %d reviewer outputs, want 1: %q", n, userContent(c.Request))
+				}
+			}
+		}
+		return seen == 1
+	})
+}
+
+// A round whose projection does not fit the budget is never started, however
+// large the revised answer and however a reviewer may need repair. Sweeping the
+// limit above the first round's projection, a revision that starts must not
+// then run out of budget, and some limits must refuse one after the author's
+// own request would still have fit.
+func TestRevisionProjectionMustFitSweep(t *testing.T) {
+	heavy := func(step fake.Step) fake.Step {
+		step.Usage = &transport.Usage{Prompt: 10000, Completion: 100}
+		return step
+	}
+	for name, revised := range map[string]string{"short": revisedText, "long": strings.Repeat("a long answer. ", 400)} {
+		t.Run(name, func(t *testing.T) {
+			scripts := func() map[string][]fake.Step {
+				return map[string][]fake.Step{
+					"author":   {heavy(enginetest.Reply(authorText)), enginetest.Reply(revised)},
+					"reviewer": {heavy(blockStep("b1")), v2Verdict("1", "approve", "", "b1 withdrawn")},
+				}
+			}
+			probe := enginetest.New(t, withBudgets(revisionRoster("2"), "turn_max_estimated_tokens = 1000000"), scripts())
+			first := budgetOf(t, probe, submitReview(t, probe, "s1")).Projected
+			var started, refused int
+			for limit := first; limit < first+40000; limit += 1000 {
+				h := enginetest.New(t, withBudgets(revisionRoster("2"), "turn_max_estimated_tokens = "+strconv.Itoa(limit)), scripts())
+				turnID := submitReview(t, h, "s1")
+				row := waitEnded(t, h, turnID)
+				if revisionDispatches(h, turnID) == 0 {
+					if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "budget:turn" {
+						t.Fatalf("limit %d: turn ended %q %q, want incomplete budget:turn", limit, row.TerminalState, row.TerminalReason)
+					}
+					if n := len(h.Adapters["author"].Calls()); n != 1 {
+						t.Fatalf("limit %d: refused round but author called %d times", limit, n)
+					}
+					refused++
+					continue
+				}
+				started++
+				if row.TerminalState != engine.StateApproved {
+					t.Fatalf("limit %d: revision started but turn ended %q %q", limit, row.TerminalState, row.TerminalReason)
+				}
+			}
+			if started == 0 || refused == 0 {
+				t.Fatalf("sweep saw %d started and %d refused rounds, want both", started, refused)
+			}
+		})
+	}
+}

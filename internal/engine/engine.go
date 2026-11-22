@@ -741,8 +741,16 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		log.Printf("engine: turn %s: no delivery, reviewer texts unreadable: %v", row.ID, err)
 		return nil
 	}
+	// Only the current candidate's reviews are delivered, as in the live path:
+	// reviews dispatched before the last author attempt judged a superseded one.
+	first := 0
+	for i, a := range attempts {
+		if a.Phase == phaseAuthor {
+			first = i + 1
+		}
+	}
 	// Every accepted reply carries text, gate-failed ones included, as in the live path.
-	for _, a := range attempts {
+	for _, a := range attempts[first:] {
 		if text, ok := texts[a.ID]; ok && a.Phase == phaseReview && !a.Quarantined {
 			t.outputs[a.ID] = text
 		}

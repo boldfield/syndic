@@ -159,8 +159,8 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 // roundProjection is what the revision round about to start may add to the
 // turn's charge, in the worst case it can know: the author's revision with its
 // output bound and each required reviewer's review of a candidate as long as
-// the current one. Repair is not counted; it is checked by reservation when it
-// is dispatched.
+// a candidate as long as the author's output bound allows, plus the one repair
+// each may be given.
 func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorMaxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, t.author)
 	if missing != "" {
@@ -170,6 +170,7 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 	next := *t
 	next.round = t.round + 1
 	next.candidateHash = standInHash
+	next.candidate = pb.standIn(authorMaxOut)
 	for _, id := range t.required {
 		blocks, err := tx.ReviewerOpenBlocks(t.id, id)
 		if err != nil {
@@ -185,6 +186,11 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 		}
 		maxOut := rb.maxOutput(*t.eff.Budgets.ReviewerMaxOutputTokens)
 		total = satAdd(total, satAdd(rb.estimate(msgs), maxOut))
+		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rb.estimate(repair), maxOut))
 	}
 	return total, nil
 }
