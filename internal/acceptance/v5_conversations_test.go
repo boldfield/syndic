@@ -222,6 +222,27 @@ func TestConversations_EightFieldDeduplication(t *testing.T) {
 		t.Fatalf("%d conversations after the conflicts, want 1", n)
 	}
 
+	// quick_profile changed alone: the baseline names no preset and no
+	// quick_profile, so every other member stays byte-for-byte identical.
+	qbase := convReq("s3", "q3", convWorkspaceA, nil)
+	qfirst, _ := convSubmit(t, s, c, qbase)
+	qvariant := qbase
+	qvariant.QuickProfile = &fast
+	_, err = c.Submit(s.ctx(), qvariant)
+	qe := wantRefusal(t, err, wire.ErrorCodeSubmissionConflict)
+	if qe.TurnID == nil || *qe.TurnID != qfirst.TurnID {
+		t.Fatalf("quick_profile alone: conflict = %+v, want it to name turn %s", qe, qfirst.TurnID)
+	}
+	if n := len(convTurns(t, s, c, qfirst.ConversationID)); n != 1 {
+		t.Fatalf("quick_profile alone: %d turns after the conflict, want 1", n)
+	}
+	if n := countTurnSubmitted(s); n != 2 {
+		t.Fatalf("quick_profile alone: %d turn_submitted events, want 2", n)
+	}
+	if n := len(convList(t, s, c, nil)); n != 2 {
+		t.Fatalf("%d conversations after the quick_profile conflict, want 2", n)
+	}
+
 	// With all eight members present and identical the stored reply is replayed.
 	zero := 0
 	full := soloReq("s2", "q2", convWorkspaceA, &conv)
