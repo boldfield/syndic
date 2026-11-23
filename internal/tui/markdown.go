@@ -169,10 +169,10 @@ func trimTrailingSpaces(toks []safeToken) []safeToken {
 }
 
 // fenceOf recognises a fence line: its marker, run length and info string.
-func fenceOf(line []safeToken) (marker string, n int, info string, ok bool) {
+func fenceOf(line []safeToken) (marker string, n int, info []safeToken, ok bool) {
 	i := countLeadingSpaces(line)
 	if i > 3 || i >= len(line) || (line[i].text != "`" && line[i].text != "~") {
-		return "", 0, "", false
+		return "", 0, nil, false
 	}
 	marker = line[i].text
 	j := i
@@ -180,7 +180,7 @@ func fenceOf(line []safeToken) (marker string, n int, info string, ok bool) {
 		j++
 	}
 	if j-i < 3 {
-		return "", 0, "", false
+		return "", 0, nil, false
 	}
 	rest := line[j:]
 	rest = rest[countLeadingSpaces(rest):]
@@ -188,15 +188,7 @@ func fenceOf(line []safeToken) (marker string, n int, info string, ok bool) {
 	for k < len(rest) && !isSpaceTok(rest[k]) {
 		k++
 	}
-	return marker, j - i, joinToks(rest[:k]), true
-}
-
-func joinToks(toks []safeToken) string {
-	var b strings.Builder
-	for _, t := range toks {
-		b.WriteString(t.text)
-	}
-	return b.String()
+	return marker, j - i, rest[:k], true
 }
 
 func allSpaces(toks []safeToken) bool { return countLeadingSpaces(toks) == len(toks) }
@@ -211,7 +203,7 @@ func renderMarkdownTokens(toks []safeToken) [][]styledTok {
 	for _, line := range splitLines(toks) {
 		if fence != "" {
 			// only a bare fence of the same kind, at least as long, closes
-			if m, n, info, ok := fenceOf(line); ok && m == fence && n >= fenceLen && info == "" && allSpaces(line[countLeadingSpaces(line)+n:]) {
+			if m, n, info, ok := fenceOf(line); ok && m == fence && n >= fenceLen && len(info) == 0 && allSpaces(line[countLeadingSpaces(line)+n:]) {
 				fence = ""
 				continue
 			}
@@ -220,8 +212,9 @@ func renderMarkdownTokens(toks []safeToken) [][]styledTok {
 		}
 		if m, n, info, ok := fenceOf(line); ok {
 			fence, fenceLen = m, n
-			if info != "" {
-				out = append(out, plainToks(stText("["+info+"]"), 0))
+			if len(info) > 0 {
+				label := append(plainToks(stText("["), 0), plainToks(info, 0)...)
+				out = append(out, append(label, plainToks(stText("]"), 0)...))
 			}
 			continue
 		}
@@ -280,48 +273,111 @@ func run(toks []safeToken, i int) int {
 	return n
 }
 
-// renderInline parses inline Markdown over safe tokens: code spans (any
-// backtick run length), links with balanced destinations, and emphasis.
+// Bounds that keep inline parsing linear in the length of a line: nesting is
+// limited and an unmatched opener never rescans what an earlier one covered.
+const (
+	maxInlineDepth = 8
+	maxLinkDest    = 1024
+)
+
 func renderInline(toks []safeToken, st mdStyle) []styledTok {
+	return renderInlineDepth(toks, st, 0)
+}
+
+func isEscapable(t safeToken) bool {
+	return len(t.text) == 1 && t.text[0] > ' ' && t.text[0] < 0x7f && !isWordTok(t)
+}
+
+// matchBrackets pairs '[' with ']' in one pass; escaped brackets and those in
+// code spans are not special to the caller, which skips them itself.
+func matchBrackets(toks []safeToken) map[int]int {
+	var m map[int]int
+	var stack []int
+	for i := 0; i < len(toks); i++ {
+		switch toks[i].text {
+		case "\\":
+			i++
+		case "[":
+			stack = append(stack, i)
+		case "]":
+			if len(stack) > 0 {
+				if m == nil {
+					m = map[int]int{}
+				}
+				m[stack[len(stack)-1]] = i
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	return m
+}
+
+// renderInlineDepth parses inline Markdown over safe tokens: code spans (any
+// backtick run length), links with balanced destinations, emphasis and
+// backslash escapes.
+func renderInlineDepth(toks []safeToken, st mdStyle, depth int) []styledTok {
 	var out []styledTok
+	var brackets map[int]int
+	bracketsDone := false
+	codeFailed := map[int]bool{}
+	emphFailed := map[string]bool{}
 	for i := 0; i < len(toks); {
 		t := toks[i]
 		switch t.text {
+		case "\\":
+			if i+1 < len(toks) && isEscapable(toks[i+1]) {
+				out = append(out, styledTok{toks[i+1], st})
+				i += 2
+				continue
+			}
 		case "`":
 			n := run(toks, i)
-			if j := findCodeClose(toks, i+n, n); j >= 0 {
-				code := toks[i+n : j]
-				if len(code) >= 2 && isSpaceTok(code[0]) && isSpaceTok(code[len(code)-1]) && !allSpaces(code) {
-					code = code[1 : len(code)-1]
+			if !codeFailed[n] {
+				if j := findCodeClose(toks, i+n, n); j >= 0 {
+					code := toks[i+n : j]
+					if len(code) >= 2 && isSpaceTok(code[0]) && isSpaceTok(code[len(code)-1]) && !allSpaces(code) {
+						code = code[1 : len(code)-1]
+					}
+					out = append(out, plainToks(code, st|styleCode)...)
+					i = j + n
+					continue
 				}
-				out = append(out, plainToks(code, st|styleCode)...)
-				i = j + n
-				continue
+				codeFailed[n] = true
 			}
 			out = append(out, plainToks(toks[i:i+n], st)...)
 			i += n
 			continue
 		case "[":
-			if textEnd, destEnd, ok := matchLink(toks, i); ok {
-				out = append(out, renderInline(toks[i+1:textEnd], st)...)
-				out = append(out, plainToks(stText(" ("), st)...)
-				out = append(out, plainToks(toks[textEnd+2:destEnd], st|styleUnderline)...)
-				out = append(out, plainToks(stText(")"), st)...)
-				i = destEnd + 1
-				continue
+			if depth < maxInlineDepth {
+				if !bracketsDone {
+					brackets, bracketsDone = matchBrackets(toks), true
+				}
+				if textEnd, destEnd, ok := matchLink(toks, i, brackets); ok {
+					out = append(out, renderInlineDepth(toks[i+1:textEnd], st, depth+1)...)
+					out = append(out, plainToks(stText(" ("), st)...)
+					out = append(out, plainToks(toks[textEnd+2:destEnd], st|styleUnderline)...)
+					out = append(out, plainToks(stText(")"), st)...)
+					i = destEnd + 1
+					continue
+				}
 			}
 		case "*", "_":
 			n := run(toks, i)
-			if n <= 2 && openerOK(toks, i, n) {
+			key := t.text + string(rune('0'+min(n, 9)))
+			if n <= 3 && depth < maxInlineDepth && !emphFailed[key] && openerOK(toks, i, n) {
 				if j := findEmphClose(toks, i+n, n); j >= 0 {
 					sty := styleItalic
-					if n == 2 {
+					switch n {
+					case 2:
 						sty = styleBold
+					case 3:
+						sty = styleBold | styleItalic
 					}
-					out = append(out, renderInline(toks[i+n:j], st|sty)...)
+					out = append(out, renderInlineDepth(toks[i+n:j], st|sty, depth+1)...)
 					i = j + n
 					continue
 				}
+				emphFailed[key] = true
 			}
 			out = append(out, plainToks(toks[i:i+n], st)...)
 			i += n
@@ -349,30 +405,20 @@ func findCodeClose(toks []safeToken, from, n int) int {
 }
 
 // matchLink matches [text](dest) at i, the destination allowing balanced
-// parentheses and no whitespace. It returns the index of ']' and of the
-// closing ')'.
-func matchLink(toks []safeToken, i int) (textEnd, destEnd int, ok bool) {
-	depth := 0
-	k := -1
-	for j := i; j < len(toks); j++ {
-		if toks[j].text == "[" {
-			depth++
-		} else if toks[j].text == "]" {
-			depth--
-			if depth == 0 {
-				k = j
-				break
-			}
-		}
-	}
-	if k < 0 || k == i+1 || k+2 >= len(toks) || toks[k+1].text != "(" {
+// parentheses and no whitespace, and bounded in length. It returns the index
+// of ']' and of the closing ')'.
+func matchLink(toks []safeToken, i int, brackets map[int]int) (textEnd, destEnd int, ok bool) {
+	k, found := brackets[i]
+	if !found || k == i+1 || k+2 >= len(toks) || toks[k+1].text != "(" {
 		return 0, 0, false
 	}
-	depth = 1
-	for j := k + 2; j < len(toks); j++ {
+	depth := 1
+	for j := k + 2; j < len(toks) && j < k+2+maxLinkDest; j++ {
 		switch toks[j].text {
 		case " ":
 			return 0, 0, false
+		case "\\":
+			j++
 		case "(":
 			depth++
 		case ")":
@@ -389,27 +435,37 @@ func matchLink(toks []safeToken, i int) (textEnd, destEnd int, ok bool) {
 }
 
 // openerOK reports whether the delimiter run at i of length n can open
-// emphasis: followed by non-space and not inside a word or another run.
+// emphasis: followed by non-space and, for '_', not inside a word.
 func openerOK(toks []safeToken, i, n int) bool {
 	if i+n >= len(toks) || isSpaceTok(toks[i+n]) {
 		return false
 	}
-	if i > 0 && (isWordTok(toks[i-1]) || toks[i-1].text == toks[i].text) {
+	if i > 0 && toks[i-1].text == toks[i].text {
+		return false
+	}
+	if i > 0 && toks[i].text == "_" && isWordTok(toks[i-1]) {
 		return false
 	}
 	return true
 }
 
-// findEmphClose finds the closing run of exactly n identical delimiters.
+// findEmphClose finds the closing run: exactly n identical delimiters, or
+// three closing a double. A closer is not preceded by space and, for '_', not
+// followed by a word character. Escaped delimiters are skipped.
 func findEmphClose(toks []safeToken, from, n int) int {
 	delim := toks[from-1].text
 	for j := from; j < len(toks); {
+		if toks[j].text == "\\" {
+			j += 2
+			continue
+		}
 		if toks[j].text != delim {
 			j++
 			continue
 		}
 		m := run(toks, j)
-		if m == n && j > from && !isSpaceTok(toks[j-1]) && (j+m >= len(toks) || !isWordTok(toks[j+m])) {
+		if (m == n || (n == 2 && m == 3)) && j > from && !isSpaceTok(toks[j-1]) &&
+			(delim != "_" || j+m >= len(toks) || !isWordTok(toks[j+m])) {
 			return j
 		}
 		j += m

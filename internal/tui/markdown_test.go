@@ -4,6 +4,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mattn/go-runewidth"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 )
@@ -45,7 +48,7 @@ var goldenCases = []goldenCase{
 		name:     "plain brackets and snake_case are untouched",
 		in:       "plain [x] snake_case 2*3*4",
 		raw:      "  plain [x] snake_case 2*3*4",
-		rendered: "  plain [x] snake_case 2*3*4",
+		rendered: "  plain [x] snake_case 2\x1b[3m3\x1b[0m4",
 	},
 	{
 		name:     "underscore runs inside identifiers are not emphasis",
@@ -138,6 +141,47 @@ func TestMarkdownEscapeStaysAtomicWhenWrapped(t *testing.T) {
 		out := RenderMarkdown("abc \x1b[31m", 8, raw)
 		if strings.Contains(out, "\\x1\n") || strings.Contains(out, "\\\n") {
 			t.Errorf("raw=%v: escape split across lines: %q", raw, out)
+		}
+	}
+}
+
+func TestMarkdownEscapesAndDelimiterRuns(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`\*literal*`, "  *literal*"},
+		{`a \[x](y) b`, "  a [x](y) b"},
+		{`*a\*b*`, "  \x1b[3ma*b\x1b[0m"},
+		{`foo*bar*`, "  foo\x1b[3mbar\x1b[0m"},
+		{`**baz***`, "  \x1b[1mbaz\x1b[0m*"},
+		{`***x***`, "  \x1b[1;3mx\x1b[0m"},
+		{`snake_case_name`, "  snake_case_name"},
+		{`path\to`, `  path\to`},
+	}
+	for _, c := range cases {
+		if got := RenderMarkdown(c.in, 40, false); got != c.want {
+			t.Errorf("%q:\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMarkdownFenceLabelKeepsSafeTokens(t *testing.T) {
+	out := RenderMarkdown("```ab\x1b\n```", 8, false)
+	if want := "  [ab\\x1b]"; !strings.HasPrefix(out, "  [ab") || strings.Contains(out, "\\x1\n") {
+		t.Errorf("label split or altered (want like %q): %q", want, out)
+	}
+	for _, line := range strings.Split(RenderMarkdown("```日本語\nx\n```", 8, false), "\n") {
+		if w := runewidth.StringWidth(sgrRe.ReplaceAllString(line, "")); w > 8 {
+			t.Errorf("line %q is %d cells wide, over 8", line, w)
+		}
+	}
+}
+
+func TestMarkdownPathologicalInputIsLinear(t *testing.T) {
+	for _, unit := range []string{"[", "*a ", "`a ", "[a](", "_a ", "see arr[i and x *y here. "} {
+		in := strings.Repeat(unit, 65536/len(unit))
+		start := time.Now()
+		RenderMarkdown(in, 80, false)
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("%q: rendering 64 KiB took %v", unit, d)
 		}
 	}
 }
