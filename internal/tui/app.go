@@ -371,7 +371,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
+// update handles one message, then sets the input viewport the layout now
+// gives it: View only reads the model.
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer func() { fitInput(&a.input, a.inputRows()) }()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -1254,7 +1257,6 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	fitInput(&a.input, hs.Input)
 	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {

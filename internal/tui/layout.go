@@ -47,8 +47,8 @@ func (h heights) total() int {
 // allocate gives each region a bounded viewport. The tab bar, refusal line and
 // status line are fixed; the optional regions take their bounded height; the
 // body gets what remains. When that is under minBodyLines the input viewport
-// shrinks to one line, then banners to one line, then the body takes what is
-// left. Below 80x24 the drawer and lists do not open.
+// shrinks to one line, then banners to one line (the identity warning is never dropped), then the
+// body takes what is left. Below 80x24 the drawer and lists do not open.
 func allocate(in layoutIn) heights {
 	h := heights{TabBar: tabBarHeight, Status: stripHeight, Refusal: 1}
 	enabled := in.Width >= regionMinWidth && in.Height >= regionMinHeight
@@ -81,9 +81,6 @@ func allocate(in layoutIn) heights {
 	}
 	if room() < minBodyLines {
 		h.Banners = min(h.Banners, 1)
-	}
-	if room() < minBodyLines {
-		h.Banners = 0
 	}
 	h.Body = max(room(), 0)
 	return h

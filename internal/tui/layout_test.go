@@ -90,6 +90,7 @@ func crowded(t *testing.T, w, h int) *App {
 	a.state.UnapprovedProfile = &profile
 	a.input.SetValue(strings.Join([]string{"i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8"}, "\n"))
 	a.updateInput(nil) // scroll to the cursor, as typing does
+	fitInput(&a.input, a.inputRows())
 	return a
 }
 
@@ -274,5 +275,51 @@ func TestTranscriptTabShowsAPercentage(t *testing.T) {
 	var pct int
 	if _, err := fmt.Sscanf(bar[strings.LastIndex(bar, " ")+1:], "%d%%", &pct); err != nil || pct <= 0 || pct >= 100 {
 		t.Errorf("part way: tab bar %q", bar)
+	}
+}
+
+// TestTypedInputGrowsAndShrinksWithItsTop types through Update and View as the
+// input grows past six lines, then as the layout shrinks it and gives it back.
+func TestTypedInputGrowsAndShrinksWithItsTop(t *testing.T) {
+	a := chatApp(t)
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	for i := 1; i <= 8; i++ {
+		if i > 1 {
+			a.Update(altEnter)
+			a.View()
+		}
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(fmt.Sprintf("l%d", i))})
+		lines := chatView(a)
+		if len(lines) != 24 {
+			t.Fatalf("line %d: frame has %d lines, want 24", i, len(lines))
+		}
+		in := strings.Join(lines[len(lines)-1-a.inputRows():len(lines)-1], "\n")
+		if !strings.Contains(in, fmt.Sprintf("l%d", i)) {
+			t.Fatalf("line %d: cursor line not in view:\n%s", i, in)
+		}
+		if i <= maxInputViewport && !strings.Contains(in, "> l1") {
+			t.Fatalf("line %d: the first line is scrolled out:\n%s", i, in)
+		}
+	}
+	// A short terminal gives the input one line, the cursor line staying in view.
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	lines := chatView(a)
+	if got := lines[len(lines)-2]; !strings.Contains(got, "l8") {
+		t.Errorf("one-line input = %q, want the cursor line l8", got)
+	}
+	// Back to a tall one: six lines, and the cursor line still shows.
+	a.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	lines = chatView(a)
+	in := strings.Join(lines[len(lines)-1-a.inputRows():len(lines)-1], "\n")
+	if a.inputRows() != maxInputViewport || !strings.Contains(in, "l8") || strings.Contains(in, "> ") && !strings.Contains(in, "l3") {
+		t.Errorf("after growing back:\n%s", in)
+	}
+}
+
+func TestIdentityBannerSurvivesTinyHeights(t *testing.T) {
+	for _, h := range []int{6, 8, 10} {
+		if got := allocate(layoutIn{Height: h, Width: 80, Banners: 3, InputLines: 6}); got.Banners != 1 {
+			t.Errorf("height %d: %+v, want one banner line kept", h, got)
+		}
 	}
 }

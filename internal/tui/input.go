@@ -52,14 +52,22 @@ func setInputPrompt(in *textarea.Model, prompt string, width int) {
 }
 
 // fitInput sets the input's viewport to rows lines. When that changes it, the
-// input is drawn once at the new height and scrolled to its cursor, so the
-// cursor line stays in view however few lines the layout gives it.
+// input is laid out again from its first line and scrolled to its cursor, so
+// the top of the text is not left scrolled out by the old height and the
+// cursor line stays in view however few lines the layout gives it. It runs in
+// Update, never View.
 func fitInput(in *textarea.Model, rows int) {
 	rows = max(rows, 1)
 	if in.Height() == rows {
 		return
 	}
+	row, li := in.Line(), in.LineInfo()
 	in.SetHeight(rows)
+	in.SetValue(in.Value())
+	for in.Line() > row {
+		in.CursorUp()
+	}
+	in.SetCursor(li.StartColumn + li.ColumnOffset)
 	_ = in.View()
 	*in, _ = in.Update(nil)
 }
@@ -127,7 +135,11 @@ func normalizePaste(runes []rune) string {
 func renderInput(in textarea.Model, refusal string, width, rows int) string {
 	clip := lipgloss.NewStyle().MaxWidth(max(width, 1))
 	lines := strings.Split(in.View(), "\n")
-	lines = lines[:min(max(rows, 1), len(lines))]
+	rows = max(rows, 1)
+	lines = lines[:min(rows, len(lines))]
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
 	for i, l := range lines {
 		lines[i] = clip.Render(l)
 	}
