@@ -18,24 +18,42 @@ Illustrations supplied by the operator on 2026-11-21, showing the v6 TUI present
 
 ## Disagreements with the ratified design
 
-One disagreement found between the frames and `docs/design/v6-delta-tui-presentation.md` sections 0–7:
+Three disagreements found between the frames and `docs/design/v6-delta-tui-presentation.md` sections 0–7:
 
-**File: `chat-outcomes-100x30.txt`, line 23**
+**File: `chat-idle-100x30.txt`, line 5**
 
-The ratified design section 1 specifies: "An outcome line begins in column 0 with a one-character mark and a space: `✓` approved, `!` incomplete or overridden, `×` cancelled, `·` solo."
+The ratified design section 1 specifies: "An outcome line begins in column 0 with a one-character mark and a space: `✓` approved, `!` incomplete or overridden, `×` cancelled, `·` solo." Section 2 (line 76) further specifies: "Every outcome line ends with `· <n> reviews`."
 
 Frame shows:
 ```
-22	› explain why detach never cancels a turn
-23	  UNREVIEWED DRAFT
+4	› what does the gate check before a reviewer result counts?
+5	  approved by codex, muse against 5d20e9b1 · not in context
 ```
 
-The solo outcome on line 23 is missing the solo mark `·`. According to the design, this line should read:
+Line 5 shows an approved outcome (marked as "approved by...") but lacks the required `✓` mark and the reviews count. According to the design, this line should read:
 ```
-23	· UNREVIEWED DRAFT
+5	✓ approved by codex, muse against 5d20e9b1 · <n> reviews
 ```
 
-This is inconsistent with line 5 of the same frame, which correctly shows `· UNREVIEWED (solo)` with the mark.
+**File: `chat-dumb-80x24.txt`, line 23**
+
+The ratified design section 1 specifies: "A multi-line text area with the prompt `┃ `." Section 6 says that in plain terminal mode (TERM=dumb) with no colour, "prompts are single-line questions as in v4" but does not override the input prompt character.
+
+Frame shows:
+```
+23	>
+```
+
+The input prompt uses `>` but the design specifies `┃ `. The design does not provide an exception for TERM=dumb, so this is a disagreement.
+
+**File: `style.md`, line 39**
+
+The style table specifies:
+```
+39	| `┃ ` | 0 | the input prompt (`> ` in a plain terminal) |
+```
+
+The table documents `┃` as the input prompt with `> ` as a fallback for plain terminals. However, the design section 1 specifies `┃` as the input prompt and does not override it for plain terminals (section 6 does not mention the input prompt). This is inconsistent with the design's lack of exception for TERM=dumb.
 
 ## Operator ruling: status line overflow
 
