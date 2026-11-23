@@ -375,15 +375,9 @@ func orDash(s string) string {
 	return s
 }
 
-// plain replaces control characters, so a name from an adapter cannot drive the terminal.
-func plain(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return '·'
-		}
-		return r
-	}, s)
-}
+// plain is safeLine: a name or detail from an adapter is shown as safe text
+// on one line, so it cannot drive the terminal or break a row.
+func plain(s string) string { return safeLine(s) }
 
 // clipCells cuts s to at most width cells, ending in an ellipsis when it cuts.
 func clipCells(s string, width int) string {

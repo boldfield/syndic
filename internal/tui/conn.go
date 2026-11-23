@@ -169,6 +169,10 @@ func tickCmd() tea.Cmd {
 // formatRefusal renders a refusal as its code and detail, then every member
 // the engine sent with it, on one line.
 func formatRefusal(err error) string {
+	return safeLine(formatRefusalRaw(err))
+}
+
+func formatRefusalRaw(err error) string {
 	var we *wire.Error
 	if !errors.As(err, &we) {
 		return err.Error()

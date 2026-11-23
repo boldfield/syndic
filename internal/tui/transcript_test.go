@@ -567,7 +567,7 @@ func TestWrapTextKeepsEveryRune(t *testing.T) {
 			t.Fatalf("width %d: text changed", w)
 		}
 	}
-	if got := wrapText("a\x1b[31mb", 80); got[0] != "a·[31mb" {
+	if got := wrapText("a\x1b[31mb", 80); got[0] != `a\x1b[31mb` {
 		t.Fatalf("control characters reach the terminal: %q", got)
 	}
 }

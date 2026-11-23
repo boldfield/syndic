@@ -217,12 +217,13 @@ func (a *App) answerIn(turnID string) answerInput {
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
 		now:            a.now(),
+		width:          a.width,
 	}
 }
 
 // chatIn gathers what the chat tab needs.
 func (a *App) chatIn() chatInput {
-	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content}
+	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content, width: a.width}
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
@@ -779,9 +780,9 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // conversationHeader names the open conversation by id prefix and turn count.
 func (a *App) conversationHeader() string {
 	if a.conversationID == "" {
-		return "conversation: new (created at the first submit) · workspace " + a.workDir
+		return "conversation: new (created at the first submit) · workspace " + safeLine(a.workDir)
 	}
-	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, a.workDir)
+	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, safeLine(a.workDir))
 }
 
 // shortID is the first eight characters of an id.
@@ -854,10 +855,10 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 		}
 	}
 	a.ask(&question{approval: ap, yes: approvalYes(ap), no: approvalNo(ap), lines: []string{
-		"Project file: " + qs.ProjectFilePath,
-		fmt.Sprintf("selects quick profile %q:", qs.ProjectProfile),
+		"Project file: " + safeLine(qs.ProjectFilePath),
+		"selects quick profile \"" + safeLine(qs.ProjectProfile) + "\":",
 		"",
-		"  preset:  " + def.Preset,
+		"  preset:  " + safeLine(def.Preset),
 		fmt.Sprintf("  drafts:  %v", def.Drafts),
 		"  budgets: " + budgets,
 		"",
@@ -1228,7 +1229,7 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	inputLines := renderInput(a.input, a.refusal, w, a.inputRows())
+	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, a.inputRows())
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")

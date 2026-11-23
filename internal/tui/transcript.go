@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/mattn/go-runewidth"
@@ -17,8 +16,6 @@ const (
 	minColumn = 40
 	// columnGap separates the two columns of a repair pair.
 	columnGap = " │ "
-	// tabStop is how many cells a tab in a body is shown as.
-	tabStop = 4
 	// headerSep separates the parts of a header.
 	headerSep = " · "
 )
@@ -76,7 +73,7 @@ func transcriptLines(s State, turnID string, in transcriptInput, width int) []st
 			lines = append(lines, blockRowLines(blocks[rid], width)...)
 		} else {
 			lines = append(lines, wrapHeader(headerParts(s, in, it), width)...)
-			lines = append(lines, wrapText(bodyText(s, in, it), width)...)
+			lines = append(lines, SafeTextWithPrefix(bodyText(s, in, it), width)...)
 			if isAttempt {
 				lines = append(lines, blockRowLines(blocks[id], width)...)
 			}
@@ -138,10 +135,12 @@ func headerParts(s State, in transcriptInput, it wire.TranscriptItem) []string {
 
 // wrapHeader lays the parts of a header out on lines of at most width cells,
 // breaking between parts; a part wider than a line is wrapped inside itself.
+// Parts come from records, so each is escaped as one line of safe text.
 func wrapHeader(parts []string, width int) []string {
 	var out []string
 	cur := ""
 	for _, p := range parts {
+		p = safeLine(p)
 		switch {
 		case cur == "":
 			cur = p
@@ -156,6 +155,7 @@ func wrapHeader(parts []string, width int) []string {
 }
 
 // bodyText is the complete body of an item, or a note saying why there is none.
+// The result is raw: SafeTextWithPrefix escapes it exactly once.
 func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	if it.ByteLen == 0 {
 		if id, ok := strings.CutPrefix(it.Ref, "attempt:"); ok {
@@ -204,7 +204,7 @@ func repairPair(s State, in transcriptInput, orig, repair wire.TranscriptItem, w
 	side := func(label string, it wire.TranscriptItem, w int) []string {
 		lines := []string{label}
 		lines = append(lines, wrapHeader(headerParts(s, in, it), w)...)
-		return append(lines, wrapText(bodyText(s, in, it), w)...)
+		return append(lines, SafeTextWithPrefix(bodyText(s, in, it), w)...)
 	}
 	if col < minColumn {
 		return append(side("original", orig, width), side("repair", repair, width)...)
@@ -262,52 +262,22 @@ func blocksByAttempt(s State, detail map[string]wire.OpenBlock) map[string][]blo
 func blockRowLines(rows []blockRow, width int) []string {
 	var out []string
 	for _, r := range rows {
-		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", r.id, r.severity, r.state), width)...)
+		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", safeLine(r.id), safeLine(r.severity), safeLine(r.state)), width)...)
 		if r.evidence != "" {
-			out = append(out, wrapText("    evidence: "+r.evidence, width)...)
+			out = append(out, SafeTextWithPrefix("evidence: "+r.evidence, width)...)
 		}
 		if r.remedy != "" {
-			out = append(out, wrapText("    remedy: "+r.remedy, width)...)
+			out = append(out, SafeTextWithPrefix("remedy: "+r.remedy, width)...)
 		}
 	}
 	return out
 }
 
 // wrapText splits text into lines of at most width cells. Every rune is kept;
-// a line longer than width continues on the next row. Control characters are
-// shown as a dot so a body cannot drive the terminal.
+// a line longer than width continues on the next row. The text is escaped
+// through safeTokens, so a header or body cannot drive the terminal.
 func wrapText(text string, width int) []string {
-	width = max(width, 1)
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.TrimSuffix(text, "\n")
-	var out []string
-	for _, para := range strings.Split(text, "\n") {
-		var cur strings.Builder
-		cells := 0
-		for _, r := range para {
-			switch {
-			case r == '\t':
-				for i := 0; i < tabStop; i++ {
-					if cells == width {
-						out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
-					}
-					cur.WriteByte(' ')
-					cells++
-				}
-				continue
-			case unicode.IsControl(r):
-				r = '·'
-			}
-			w := runewidth.RuneWidth(r)
-			if cells > 0 && cells+w > width {
-				out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
-			}
-			cur.WriteRune(r)
-			cells += w
-		}
-		out = append(out, cur.String())
-	}
-	return out
+	return wrapTokens(safeTokens([]byte(text)), max(width, 1))
 }
 
 // padCells pads s with spaces to width cells.

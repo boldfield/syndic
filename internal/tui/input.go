@@ -127,7 +127,10 @@ func renderPanel(lines []string, width int) string {
 	wrap := lipgloss.NewStyle().Width(max(width, 1))
 	out := make([]string, 0, len(lines))
 	for _, l := range lines {
-		for _, w := range strings.Split(wrap.Render(l), "\n") {
+		// Panels and prompts carry record and workspace values; every line is
+		// one safe line, so a line feed in a value cannot open an unindented row.
+		// Escaping is idempotent on its own output.
+		for _, w := range strings.Split(wrap.Render(safeLine(l)), "\n") {
 			out = append(out, strings.TrimRight(w, " "))
 		}
 	}
