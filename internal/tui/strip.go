@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -179,6 +180,7 @@ func renderBanners(s State) []string {
 		}
 	}
 	if len(unknownParticipants) > 0 {
+		sort.Strings(unknownParticipants)
 		names := strings.Join(unknownParticipants, ", ")
 		banners = append(banners, fmt.Sprintf("identity: unknown(name-matched) %s", names))
 	}
