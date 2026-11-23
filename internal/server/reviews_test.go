@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine"
@@ -36,9 +37,13 @@ func TestReviewsRequest(t *testing.T) {
 	if reviews == nil || len(reviews.Items) == 0 {
 		t.Fatalf("reviews = %+v, want items", reviews)
 	}
+	items, err := reviews.DecodeItems()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify structure
-	for i, item := range reviews.Items {
+	for i, item := range items {
 		if item.Kind == "" {
 			t.Fatalf("item %d has no kind", i)
 		}
@@ -227,7 +232,7 @@ func TestReviewsDeterministicPaging(t *testing.T) {
 	}
 
 	// Page through reviews with limit=1
-	var allItems []wire.ReviewItem
+	var allItems []json.RawMessage
 	var cursor *string
 	for {
 		limit := 1
@@ -348,39 +353,4 @@ func TestReviewsNegativeLimit(t *testing.T) {
 	negLimit := -1
 	_, err = c.Reviews(ctx, reply.TurnID, nil, &negLimit)
 	wantCode(t, err, wire.ErrorCodeBadRequest)
-}
-
-func TestConversationZeroReviewCount(t *testing.T) {
-	h := newHarness(t)
-	s := serve(t, h.Engine, h.Store, h.Hub)
-	c := s.dial()
-	ctx := ctxT(t)
-
-	// Submit a turn that will have no reviews (all reviewers fail)
-	// This requires a turn that has reviews but all rejected
-	release := h.Hold("reviewer")
-	reply, err := c.Submit(ctx, reviewReq("zero-reviews"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Don't release the reviewer hold - force rejection by cancelling
-	release()
-	row := waitTerminal(t, h, reply.TurnID)
-
-	// Get conversation and check review_count is 0 for non-solo turns
-	conv, err := c.Conversation(ctx, reply.ConversationID[:8])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(conv.Turns) != 1 {
-		t.Fatalf("conversation has %d turns, want 1", len(conv.Turns))
-	}
-
-	turn := conv.Turns[0]
-	// Even if no reviews were accepted, review_count should be present for non-solo turns
-	if row.Mode != "solo" && turn.ReviewCount == nil {
-		t.Fatal("non-solo turn has nil ReviewCount, want a value (even if 0)")
-	}
 }

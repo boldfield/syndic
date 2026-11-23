@@ -85,7 +85,11 @@ func (it ReviewItem) MarshalJSON() ([]byte, error) {
 	if it.Oversized {
 		return json.Marshal(reviewShortItem{it.Round, it.CandidateHash, it.Participant, it.AttemptID, it.Kind, true, it.Record})
 	}
-	return json.Marshal(it.ReviewRecord)
+	rec := it.ReviewRecord
+	if rec.Blocks == nil {
+		rec.Blocks = []ReviewBlock{}
+	}
+	return json.Marshal(rec)
 }
 
 // ReviewBlockState is a block a verdict names as maintained or withdrawn.

@@ -575,43 +575,6 @@ type ConversationReply struct {
 	Turns []ConversationTurnSummary `json:"turns"`
 }
 
-type ReviewsRequest struct {
-	TurnID string  `json:"turn_id"`
-	Cursor *string `json:"cursor,omitempty"`
-	Limit  *int    `json:"limit,omitempty"`
-}
-
-type ReviewBlock struct {
-	BlockID  string            `json:"block_id"`
-	State    string            `json:"state"`
-	Severity *string           `json:"severity,omitempty"`
-	Evidence *ContentReference `json:"evidence,omitempty"`
-	Remedy   *ContentReference `json:"remedy,omitempty"`
-}
-
-type ContentReference struct {
-	Ref     string `json:"ref"`
-	SHA256  string `json:"sha256"`
-	ByteLen int64  `json:"byte_len"`
-}
-
-type ReviewItem struct {
-	Round         int               `json:"round"`
-	CandidateHash string            `json:"candidate_hash"`
-	Participant   string            `json:"participant"`
-	AttemptID     string            `json:"attempt_id"`
-	Kind          string            `json:"kind"`
-	Blocks        []ReviewBlock     `json:"blocks"`
-	Commentary    *ContentReference `json:"commentary,omitempty"`
-	Oversized     bool              `json:"oversized,omitempty"`
-	Record        *ContentReference `json:"record,omitempty"`
-}
-
-type ReviewsReply struct {
-	Items      []ReviewItem `json:"items"`
-	NextCursor *string      `json:"next_cursor,omitempty"`
-}
-
 // Event body types
 
 type EvRunOpened struct {

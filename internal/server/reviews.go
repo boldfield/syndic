@@ -1,55 +1,25 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-// buildReviews answers a reviews request from the journal.
-// It retrieves paged accepted verdicts for a turn, handling oversized items.
-func buildReviews(engine Engine, store *journal.Store, id string, turnID string, cursor *string, limit *int) (*wire.ReviewsReply, error) {
-	// Verify the turn exists
-	_, err := store.GetTurn(turnID)
+// buildReviews answers a reviews request from the journal: the accepted
+// verdicts of a turn, in round then roster order, as many as encode in one frame.
+func buildReviews(store *journal.Store, id string, turnID string, cursor *string, limit *int) (*wire.ReviewsReply, error) {
+	turn, err := store.GetTurn(turnID)
+	if err != nil {
+		return nil, err
+	}
+	roster, err := turnRoster(store, turn)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get roster order from the turn's recorded roster, not current engine preset.
-	// GetTurnRoster reads review_records which may be empty for pre-v6 turns.
-	roster, err := store.GetTurnRoster(turnID)
-	if err != nil {
-		return nil, err
-	}
-	if len(roster) == 0 {
-		// For pre-v6 turns, derive roster from the turn's attempts (the participants
-		// who actually reviewed the turn) in dispatch order, not the current preset.
-		attempts, err := store.ListAttempts(turnID)
-		if err != nil {
-			return nil, err
-		}
-		// Collect unique participants in the order they appear in attempts
-		seen := make(map[string]bool)
-		for _, attempt := range attempts {
-			if !seen[attempt.Participant] {
-				roster = append(roster, attempt.Participant)
-				seen[attempt.Participant] = true
-			}
-		}
-		// If no attempts yet (shouldn't happen for a completed turn), fall back to engine status
-		if len(roster) == 0 {
-			status, err := engine.Status()
-			if err != nil {
-				return nil, err
-			}
-			for _, p := range status.Participants {
-				roster = append(roster, p.ID)
-			}
-		}
-	}
-
-	// Parse cursor and limit
 	cursorStr := ""
 	if cursor != nil {
 		cursorStr = *cursor
@@ -59,14 +29,12 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 		if *limit < 1 {
 			return nil, &wire.Error{Code: wire.ErrorCodeBadRequest}
 		}
-		if *limit < journal.ReviewMaxLimit {
-			pageLimit = *limit
-		}
+		pageLimit = min(*limit, journal.ReviewMaxLimit)
 	}
 
-	// Get a page of reviews. Pass a generous frameBytes to get as many items as fit
-	// within the item limit, then trim to what fits in the encoded reply.
-	items, nextCursor, err := store.ReviewsPage(turnID, roster, cursorStr, pageLimit, wire.MaxFrameBytes*2)
+	// The journal packs items against a budget that ignores the reply
+	// envelope; ask for more than one frame holds and trim to what encodes.
+	items, next, err := store.ReviewsPage(turnID, roster, cursorStr, pageLimit, 2*wire.MaxFrameBytes)
 	if err != nil {
 		if errors.Is(err, journal.ErrBadReviewCursor) {
 			return nil, &wire.Error{Code: wire.ErrorCodeBadRequest}
@@ -74,81 +42,79 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 		return nil, err
 	}
 
-	// Build wire-formatted items
-	wireItems := make([]wire.ReviewItem, len(items))
+	raw := make([]json.RawMessage, len(items))
+	cursors := make([]string, len(items))
 	for i, item := range items {
-		reviewItem := wire.ReviewItem{
-			Round:         item.Round,
-			CandidateHash: item.CandidateHash,
-			Participant:   item.Participant,
-			AttemptID:     item.AttemptID,
-			Kind:          item.Kind,
-			Oversized:     item.Oversized,
+		if raw[i], err = json.Marshal(item); err != nil {
+			return nil, err
 		}
+		cursors[i] = item.VerdictID
+	}
+	return fitReviewsPage(id, raw, cursors, next)
+}
 
-		if item.Oversized {
-			// Short form: include the record reference
-			if item.Record != nil {
-				reviewItem.Record = &wire.ContentReference{
-					Ref:     item.Record.Ref,
-					SHA256:  item.Record.SHA256,
-					ByteLen: item.Record.ByteLen,
-				}
-			}
-		} else {
-			// Full form: always include blocks (empty array for approve without blocks) and commentary
-			reviewItem.Blocks = make([]wire.ReviewBlock, len(item.Blocks))
-			for j, block := range item.Blocks {
-				reviewBlock := wire.ReviewBlock{
-					BlockID: block.BlockID,
-					State:   block.State,
-				}
-				if block.Severity != "" {
-					reviewBlock.Severity = &block.Severity
-				}
-				if block.Evidence != nil {
-					reviewBlock.Evidence = &wire.ContentReference{
-						Ref:     block.Evidence.Ref,
-						SHA256:  block.Evidence.SHA256,
-						ByteLen: block.Evidence.ByteLen,
-					}
-				}
-				if block.Remedy != nil {
-					reviewBlock.Remedy = &wire.ContentReference{
-						Ref:     block.Remedy.Ref,
-						SHA256:  block.Remedy.SHA256,
-						ByteLen: block.Remedy.ByteLen,
-					}
-				}
-				reviewItem.Blocks[j] = reviewBlock
-			}
-			if item.Commentary.Ref != "" {
-				reviewItem.Commentary = &wire.ContentReference{
-					Ref:     item.Commentary.Ref,
-					SHA256:  item.Commentary.SHA256,
-					ByteLen: item.Commentary.ByteLen,
-				}
-			}
+// turnRoster is the turn's required reviewers in preset order, as its run
+// manifest recorded them. A turn whose manifest names no preset (none was
+// recorded) falls back to the roster its review records carry, then to the
+// order its reviewers first ran.
+func turnRoster(store *journal.Store, turn *journal.TurnRow) ([]string, error) {
+	if run, err := store.GetRun(turn.RunID); err == nil {
+		if roster, ok := manifestReviewers(run.Manifest, turn.Preset, turn.QuickProfile); ok {
+			return roster, nil
 		}
-
-		wireItems[i] = reviewItem
 	}
-
-	// Build item cursors for fitReviewsPage
-	itemCursors := make([]string, len(items))
-	for i, item := range items {
-		itemCursors[i] = item.VerdictID
+	roster, err := store.GetTurnRoster(turn.ID)
+	if err != nil || len(roster) > 0 {
+		return roster, err
 	}
+	attempts, err := store.ListAttempts(turn.ID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	for _, a := range attempts {
+		if a.Phase == "review" && !seen[a.Participant] {
+			seen[a.Participant] = true
+			roster = append(roster, a.Participant)
+		}
+	}
+	return roster, nil
+}
 
-	// Trim to what fits in the encoded reply
-	return fitReviewsPage(id, wireItems, itemCursors, nextCursor)
+// manifestReviewers resolves the preset a turn ran under, as config.Roster
+// does (explicit preset, else its quick profile's, else the default), and
+// returns its required reviewers.
+func manifestReviewers(manifest json.RawMessage, preset, quick string) ([]string, bool) {
+	var m struct {
+		Roster struct {
+			DefaultPreset string `json:"default_preset"`
+			Presets       map[string]struct {
+				RequiredReviewers []string `json:"required_reviewers"`
+			} `json:"presets"`
+			Quick map[string]struct {
+				Preset string `json:"preset"`
+			} `json:"quick"`
+		} `json:"roster"`
+	}
+	if json.Unmarshal(manifest, &m) != nil {
+		return nil, false
+	}
+	name := preset
+	if name == "" {
+		name = m.Roster.Quick[quick].Preset
+	}
+	if name == "" {
+		name = m.Roster.DefaultPreset
+	}
+	p, ok := m.Roster.Presets[name]
+	return p.RequiredReviewers, ok
 }
 
 // fitReviewsPage keeps the longest prefix of items whose reply fits in
 // one frame. A page that is cut resumes after the last kept item, through
 // itemCursors[i]; one that is not keeps next. A first item that does not fit
 // alone is errReplyTooLarge.
-func fitReviewsPage(id string, items []wire.ReviewItem, itemCursors []string, next string) (*wire.ReviewsReply, error) {
+func fitReviewsPage(id string, items []json.RawMessage, itemCursors []string, next string) (*wire.ReviewsReply, error) {
 	reply := &wire.ReviewsReply{Items: items}
 	if next != "" {
 		reply.NextCursor = &next

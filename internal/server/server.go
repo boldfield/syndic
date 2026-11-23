@@ -808,7 +808,7 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		if !c.decode(frame, &req, "turn_id") {
 			return
 		}
-		reply, err := buildReviews(c.server.engine, c.server.store, frame.ID, req.TurnID, req.Cursor, req.Limit)
+		reply, err := buildReviews(c.server.store, frame.ID, req.TurnID, req.Cursor, req.Limit)
 		c.respond(frame.ID, "reviews", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
