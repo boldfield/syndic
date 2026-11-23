@@ -112,7 +112,7 @@ The operator accepted all six modules, and the transitive modules listed here, o
 
 Committed versions of the six direct v6 TUI modules (2026-11-23):
 
-- `github.com/charmbracelet/bubbles`: `v1.0.0` (no change from inventory)
+- `github.com/charmbracelet/bubbles`: `v1.0.0` (matches inventory)
 - `github.com/charmbracelet/glamour`: `v1.0.0` (matches inventory)
 - `github.com/charmbracelet/huh`: `v1.0.0` (matches inventory)
 - `github.com/charmbracelet/harmonica`: `v0.2.0` (matches inventory)

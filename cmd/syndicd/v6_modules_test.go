@@ -28,6 +28,11 @@ func TestSyndicdNotDependsOnTUIModules(t *testing.T) {
 		t.Fatal("could not find module root (go.mod)")
 	}
 
+	// Helper to check if a dependency line is a forbidden module or subpackage.
+	isForbidden := func(depLine string, mod string) bool {
+		return depLine == mod || strings.HasPrefix(depLine, mod+"/")
+	}
+
 	// Check if syndicd imports any of the forbidden modules
 	cmd := exec.Command("go", "list", "-deps", "github.com/boldfield/syndic/cmd/syndicd")
 	cmd.Dir = modRoot
@@ -42,9 +47,38 @@ func TestSyndicdNotDependsOnTUIModules(t *testing.T) {
 	deps := out.String()
 	for _, mod := range forbiddenModules {
 		for _, line := range strings.Split(deps, "\n") {
-			if line == mod {
-				t.Errorf("cmd/syndicd should not depend on %s", mod)
+			if isForbidden(line, mod) {
+				t.Errorf("cmd/syndicd should not depend on %s (found %s)", mod, line)
 			}
+		}
+	}
+
+	// Positive control: verify that the matcher detects subpackages in internal/tui and cmd/syndic.
+	for _, pkg := range []string{"github.com/boldfield/syndic/internal/tui", "github.com/boldfield/syndic/cmd/syndic"} {
+		cmd = exec.Command("go", "list", "-deps", pkg)
+		cmd.Dir = modRoot
+		out.Reset()
+		errOut.Reset()
+		cmd.Stdout = &out
+		cmd.Stderr = &errOut
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("go list -deps %s failed: %v\nstderr: %s", pkg, err, errOut.String())
+		}
+
+		found := false
+		for _, mod := range forbiddenModules {
+			for _, line := range strings.Split(out.String(), "\n") {
+				if isForbidden(line, mod) {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			t.Errorf("positive control: %s should depend on at least one TUI module", pkg)
 		}
 	}
 }
