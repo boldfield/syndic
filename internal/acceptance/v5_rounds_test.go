@@ -627,7 +627,9 @@ func TestRevision_ReviewerRequestsBlind(t *testing.T) {
 		reviews := revWantCalls(t, s, id, "review", 2)
 		for i, req := range reviews {
 			text := revText(req)
-			if m := limit.FindString(text); m != "" {
+			// "all three" in the fixed v2 system prompt counts the fields to
+			// copy (candidate, attempt, round), not rounds.
+			if m := limit.FindString(strings.ReplaceAll(text, "Copy all three into the verdict", "")); m != "" {
 				t.Errorf("%s's round %d request mentions %q: %q", id, i, m, text)
 			}
 			if strings.Contains(text, other[id]) {

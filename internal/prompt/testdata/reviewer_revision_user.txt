@@ -1,0 +1,33 @@
+===== 0123456789abcdef0123456789abcdef BEGIN REQUEST =====
+Summarise the attached memo.
+===== 0123456789abcdef0123456789abcdef END REQUEST =====
+
+===== 0123456789abcdef0123456789abcdef BEGIN HISTORY =====
+syndic-history/v1
+turn 6
+turn-1
+state 8
+approved
+input 12
+What is 2+2?
+answer 1
+4
+label 8
+reviewed
+===== 0123456789abcdef0123456789abcdef END HISTORY =====
+
+===== 0123456789abcdef0123456789abcdef BEGIN CANDIDATE =====
+The memo proposes a two-week delay to the launch.
+===== 0123456789abcdef0123456789abcdef END CANDIDATE =====
+
+Your Open Blocks from Earlier Rounds:
+
+===== 0123456789abcdef0123456789abcdef BEGIN BLOCK b1 =====
+Block ID: b1
+Severity: medium
+Evidence: "two-week delay"
+Remedy: Say what is delayed.
+===== 0123456789abcdef0123456789abcdef END BLOCK b1 =====
+
+Review the revised candidate against your open blocks. For each block, indicate in your VERDICT whether it is withdrawn or maintained.
+

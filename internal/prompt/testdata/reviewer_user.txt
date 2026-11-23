@@ -1,0 +1,7 @@
+===== 0123456789abcdef0123456789abcdef BEGIN REQUEST =====
+Summarise the attached memo.
+===== 0123456789abcdef0123456789abcdef END REQUEST =====
+
+===== 0123456789abcdef0123456789abcdef BEGIN CANDIDATE =====
+The memo proposes a two-week delay.
+===== 0123456789abcdef0123456789abcdef END CANDIDATE =====
