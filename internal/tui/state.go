@@ -206,6 +206,21 @@ type State struct {
 	// Scope limits which turns the chat shows to the open conversation's. It
 	// is nil when the app was not started on a conversation.
 	Scope *TurnScope
+	// TurnConversation is the conversation each turn belongs to, as far as
+	// turn_submitted events and submit replies say. It names the conversation
+	// of a running turn the chat no longer shows.
+	TurnConversation map[string]string
+}
+
+// withTurnConversation records that the turn belongs to the conversation,
+// without mutating m.
+func withTurnConversation(m map[string]string, turnID, conversationID string) map[string]string {
+	if turnID == "" || conversationID == "" || m[turnID] == conversationID {
+		return m
+	}
+	out := copyMap(m)
+	out[turnID] = conversationID
+	return out
 }
 
 // TurnScope is the set of turns that belong to the open conversation.
@@ -283,6 +298,7 @@ func apply(s State, f wire.Frame) State {
 		var body wire.EvTurnSubmitted
 		if json.Unmarshal(f.Body, &body) == nil {
 			s = setTurnState(s, body.TurnID, "submitted")
+			s.TurnConversation = withTurnConversation(s.TurnConversation, body.TurnID, body.ConversationID)
 			if sc := s.Scope; sc != nil && ((sc.ConversationID != "" && body.ConversationID == sc.ConversationID) || sc.Submissions[body.SubmissionID]) {
 				sc.add(body.TurnID)
 			}

@@ -17,21 +17,33 @@ import (
 type commandHandler func(a *App, args []string) tea.Cmd
 
 var commands = map[string]commandHandler{
-	"quit":         cmdQuit,
-	"resume":       cmdResume,
-	"mode":         cmdMode,
-	"quick":        cmdQuick,
-	"participants": cmdParticipants,
-	"cancel":       cmdCancel,
-	"why":          cmdWhy,
-	"override":     cmdOverride,
-	"release":      cmdRelease,
-	"drafts":       cmdDrafts,
-	"help":         cmdHelp,
+	"quit":          cmdQuit,
+	"resume":        cmdResume,
+	"mode":          cmdMode,
+	"quick":         cmdQuick,
+	"participants":  cmdParticipants,
+	"cancel":        cmdCancel,
+	"why":           cmdWhy,
+	"override":      cmdOverride,
+	"release":       cmdRelease,
+	"drafts":        cmdDrafts,
+	"help":          cmdHelp,
+	"new":           cmdNew,
+	"conversations": cmdConversations,
+	"switch":        cmdSwitch,
+	"trim":          cmdTrim,
+	"rounds":        cmdRounds,
+	"budget":        cmdBudget,
 }
 
 // commandHelp is one line per command, in the order /help lists them.
 var commandHelp = []string{
+	"/new                      start a new conversation; a running turn continues",
+	"/conversations            list this directory's conversations",
+	"/switch <id>              open the conversation with this id or unique prefix",
+	"/trim <turn>              leave the turns before this one out of later history",
+	"/rounds [n]               show, or set for this process, the revisions per turn",
+	"/budget                   tokens reserved, charged and the limit of the turn",
 	"/mode <preset>            use the preset for the next submit only",
 	"/quick <name>|off         select or deselect a quick profile for this process",
 	"/participants             show the participants tab",
@@ -43,6 +55,18 @@ var commandHelp = []string{
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
+}
+
+// keyHelp is one line per key, in the order /help lists them.
+var keyHelp = []string{
+	"Tab, Shift+Tab            switch tabs",
+	"PgUp, PgDn                scroll the active tab, or this panel",
+	"Enter                     submit the input, or run the command",
+	"Alt+Enter                 insert a newline; a multi-line paste is kept as typed",
+	"Ctrl+C                    clear the input; on an empty input, detach",
+	"Ctrl+D                    on an empty input, detach, exactly as /quit",
+	"Esc                       close this panel",
+	"Detaching never cancels a turn; only /cancel does.",
 }
 
 // isCommand reports whether the input line is a command rather than a prompt.
@@ -71,6 +95,7 @@ func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
 	a.panel = append([]string{"commands:"}, commandHelp...)
+	a.panel = append(append(a.panel, "", "keys:"), keyHelp...)
 	return nil
 }
 
@@ -264,7 +289,7 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 		"dispatch to this pool may overlap it.",
 		"Type a reason and press enter to release; an empty reason or esc cancels.",
 	}
-	a.input.Prompt = reasonPrompt
+	a.setPrompt(reasonPrompt)
 	a.refusal = ""
 	return nil
 }
@@ -274,8 +299,8 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 func (a *App) cancelConfirm(why string) {
 	a.confirm = nil
 	a.panel = nil
-	a.input.Prompt = defaultPrompt
-	a.input.SetValue("")
+	a.setPrompt(defaultPrompt)
+	a.clearInput()
 	a.refusal = why
 	a.nextQuestion()
 }
@@ -312,7 +337,7 @@ func (a *App) confirmEnter() tea.Cmd {
 // while another, or a /release confirmation, is open waits behind it.
 type question struct {
 	lines    []string
-	yes, no  func(*App) tea.Cmd // esc and ctrl+c answer no
+	yes, no  func(*App) tea.Cmd // esc answers no
 	approval *approvalPrompt    // set when the question is a quick profile approval
 	refused  *submission        // set when it asks whether to resend a submit refused as provisional
 }
@@ -324,8 +349,8 @@ func (a *App) ask(q *question) {
 		return
 	}
 	a.question = q
-	a.panel = q.lines
-	a.input.Prompt = yesNoPrompt
+	a.panel, a.panelRow = q.lines, 0
+	a.setPrompt(yesNoPrompt)
 	a.refusal = ""
 }
 
@@ -348,7 +373,7 @@ func (a *App) answer(yes bool) tea.Cmd {
 func (a *App) closeQuestion(why string) {
 	a.question = nil
 	a.panel = nil
-	a.input.Prompt = defaultPrompt
+	a.setPrompt(defaultPrompt)
 	a.refusal = why
 }
 
