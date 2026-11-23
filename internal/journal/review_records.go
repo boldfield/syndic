@@ -85,7 +85,11 @@ func (it ReviewItem) MarshalJSON() ([]byte, error) {
 	if it.Oversized {
 		return json.Marshal(reviewShortItem{it.Round, it.CandidateHash, it.Participant, it.AttemptID, it.Kind, true, it.Record})
 	}
-	return json.Marshal(it.ReviewRecord)
+	rec := it.ReviewRecord
+	if rec.Blocks == nil {
+		rec.Blocks = []ReviewBlock{}
+	}
+	return json.Marshal(rec)
 }
 
 // ReviewBlockState is a block a verdict names as maintained or withdrawn.
@@ -306,6 +310,42 @@ func (tx *Tx) ReviewCount(turnID string) (int, error) {
 		return 0, fmt.Errorf("count reviews: %w", err)
 	}
 	return n, nil
+}
+
+// GetTurnRoster returns the participants of the turn in roster order, inferred
+// from existing review records. If no review records exist, returns nil.
+func (s *Store) GetTurnRoster(turnID string) ([]string, error) {
+	var roster []string
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		roster, txErr = tx.GetTurnRoster(turnID)
+		return txErr
+	})
+	return roster, err
+}
+
+// GetTurnRoster is the transaction form of Store.GetTurnRoster.
+func (tx *Tx) GetTurnRoster(turnID string) ([]string, error) {
+	rows, err := tx.tx.Query(`
+		SELECT DISTINCT participant FROM review_records
+		WHERE turn_id = ?
+		ORDER BY roster_index, participant`, turnID)
+	if err != nil {
+		return nil, fmt.Errorf("query turn roster: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var roster []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan participant: %w", err)
+		}
+		roster = append(roster, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return roster, nil
 }
 
 // MaterializeReviewRecords writes, from the structured acceptance rows, the

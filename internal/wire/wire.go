@@ -562,8 +562,9 @@ type ConversationRequest struct {
 }
 
 type ConversationTurnSummary struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID          string `json:"id"`
+	State       string `json:"state"`
+	ReviewCount *int   `json:"review_count,omitempty"`
 }
 
 type ConversationReply struct {
@@ -746,6 +747,7 @@ const (
 	RequestUnsubscribe   = "unsubscribe"
 	RequestConversations = "conversations"
 	RequestConversation  = "conversation"
+	RequestReviews       = "reviews"
 )
 
 // String constants for error codes
