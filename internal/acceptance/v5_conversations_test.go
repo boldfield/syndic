@@ -37,7 +37,7 @@ func init() {
 // TestConversations_EightFieldDeduplication tests that the deduplication hash
 // covers exactly eight fields: input, preset, quick_profile, allow_provisional,
 // workspace, conversation_id, context_from_turn, max_rounds.
-// A retry with any field changed creates a new turn; identical retry replays.
+// A retry with any field changed creates submission_conflict; identical retry replays.
 func TestConversations_EightFieldDeduplication(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
@@ -46,104 +46,176 @@ func TestConversations_EightFieldDeduplication(t *testing.T) {
 	const workspace = "/tmp/workspace"
 	preset := "review"
 	maxRounds := 2
+	allowProv := false
+	quickProf := "fast"
 
 	// First submit - all eight fields specified
 	req1 := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "question one",
-		Preset:       &preset,
-		Workspace:    workspace,
-		MaxRounds:    &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
+		QuickProfile:     nil, // not set
+		ContextFromTurn:  nil, // first turn, no history
+		ConversationID:   nil, // new conversation
 	}
 	reply1 := s.SubmitRequest(t, c, req1)
 	s.WaitTerminal(reply1.TurnID)
 	convID := reply1.ConversationID
+	firstTurnID := reply1.TurnID
 
 	// Identical retry should replay the same turn
 	req1Retry := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "question one",
-		Preset:       &preset,
-		Workspace:    workspace,
-		MaxRounds:    &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
+		QuickProfile:     nil,
+		ContextFromTurn:  nil,
+		ConversationID:   nil,
 	}
 	reply1Retry := s.SubmitRequest(t, c, req1Retry)
-	if reply1Retry.TurnID != reply1.TurnID {
-		t.Fatalf("identical retry created new turn %q instead of replaying %q", reply1Retry.TurnID, reply1.TurnID)
+	if reply1Retry.TurnID != firstTurnID {
+		t.Fatalf("identical retry created new turn %q instead of replaying %q", reply1Retry.TurnID, firstTurnID)
 	}
 
-	// Change input - should create new turn
+	// Change input - should create submission_conflict
 	req2 := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "DIFFERENT question",
-		Preset:       &preset,
-		Workspace:    workspace,
-		MaxRounds:    &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "DIFFERENT question",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
 	}
-	reply2 := s.SubmitRequest(t, c, req2)
-	if reply2.TurnID == reply1.TurnID {
-		t.Fatal("changing input should create new turn, got same turn")
+	_, err := c.Submit(s.ctx(), req2)
+	if err == nil {
+		t.Fatal("changing input should cause submission_conflict")
 	}
 
-	// Change preset - should create new turn
+	// Change preset - should create submission_conflict
+	altPreset := "audit"
 	req3 := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "question one",
-		Preset:       &preset, // try same but verify changing it would cause new turn
-		Workspace:    workspace,
-		MaxRounds:    &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &altPreset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
 	}
-	reply3 := s.SubmitRequest(t, c, req3)
-	if reply3.TurnID == reply1.TurnID {
-		t.Fatal("submission with different preset field combination should create new turn")
+	_, err = c.Submit(s.ctx(), req3)
+	if err == nil {
+		t.Fatal("changing preset should cause submission_conflict")
 	}
 
-	// Change workspace - should create new turn
-	altWorkspace := "/tmp/other"
+	// Change quick_profile - should create submission_conflict
 	req4 := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "question one",
-		Preset:       &preset,
-		Workspace:    altWorkspace,
-		MaxRounds:    &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
+		QuickProfile:     &quickProf,
 	}
-	reply4 := s.SubmitRequest(t, c, req4)
-	if reply4.TurnID == reply1.TurnID {
-		t.Fatal("changing workspace should create new turn, got same turn")
+	_, err = c.Submit(s.ctx(), req4)
+	if err == nil {
+		t.Fatal("changing quick_profile should cause submission_conflict")
 	}
 
-	// Change max_rounds - should create new turn
-	altRounds := 1
+	// Change allow_provisional - should create submission_conflict
+	allowProvTrue := true
 	req5 := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "question one",
-		Preset:       &preset,
-		Workspace:    workspace,
-		MaxRounds:    &altRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProvTrue,
 	}
-	reply5 := s.SubmitRequest(t, c, req5)
-	if reply5.TurnID == reply1.TurnID {
-		t.Fatal("changing max_rounds should create new turn, got same turn")
+	_, err = c.Submit(s.ctx(), req5)
+	if err == nil {
+		t.Fatal("changing allow_provisional should cause submission_conflict")
 	}
 
-	// Change conversation_id - should create submission_conflict or new conversation
-	newConvID := "other-conv-id"
+	// Change workspace - should create submission_conflict
+	altWorkspace := "/tmp/other"
 	req6 := wire.SubmitRequest{
-		SubmissionID:   "s1",
-		Input:          "question one",
-		Preset:         &preset,
-		Workspace:      workspace,
-		ConversationID: &newConvID,
-		MaxRounds:      &maxRounds,
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        altWorkspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
 	}
-	reply6, err := c.Submit(s.ctx(), req6)
-	if err == nil && reply6.TurnID == reply1.TurnID {
-		t.Fatal("changing conversation_id should create new turn or error, got same turn")
+	_, err = c.Submit(s.ctx(), req6)
+	if err == nil {
+		t.Fatal("changing workspace should cause submission_conflict")
 	}
 
-	// Verify that the original reply has valid fields
+	// Change max_rounds - should create submission_conflict
+	altRounds := 1
+	req7 := wire.SubmitRequest{
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &altRounds,
+		AllowProvisional: &allowProv,
+	}
+	_, err = c.Submit(s.ctx(), req7)
+	if err == nil {
+		t.Fatal("changing max_rounds should cause submission_conflict")
+	}
+
+	// Change conversation_id - should create submission_conflict
+	req8 := wire.SubmitRequest{
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		ConversationID:   &convID, // Add conversation_id when it was nil before
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
+	}
+	_, err = c.Submit(s.ctx(), req8)
+	if err == nil {
+		t.Fatal("changing conversation_id should cause submission_conflict")
+	}
+
+	// Change context_from_turn - should create submission_conflict
+	req9 := wire.SubmitRequest{
+		SubmissionID:     "s1",
+		Input:            "question one",
+		Preset:           &preset,
+		Workspace:        workspace,
+		MaxRounds:        &maxRounds,
+		AllowProvisional: &allowProv,
+		ContextFromTurn:  &firstTurnID, // Add context_from_turn when it was nil before
+	}
+	_, err = c.Submit(s.ctx(), req9)
+	if err == nil {
+		t.Fatal("changing context_from_turn should cause submission_conflict")
+	}
+
+	// Verify that the original turn still exists and no new turns were created
 	if convID == "" {
 		t.Fatal("submit reply should have conversation_id")
+	}
+	conversations := s.Conversations(t, c, workspace)
+	found := false
+	for _, conv := range conversations {
+		if conv.ID == convID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("conversation %q should still exist", convID)
 	}
 }
 
@@ -418,9 +490,10 @@ func TestConversations_OrderingByLatestSubmit(t *testing.T) {
 func TestContext_AuthorRequestWithHistory(t *testing.T) {
 	t.Parallel()
 	answerText := "the answer is 42"
-	s := newSuite(t, enginetest.RosterTOML, reviewScripts(
-		enginetest.Reply(answerText),
-	))
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply(answerText), enginetest.Reply(answerText)},
+		"reviewer": {verdict(fake.VerdictApprove), verdict(fake.VerdictApprove)},
+	})
 	c := s.Dial(t)
 
 	workspace := "/workspace"
@@ -454,7 +527,7 @@ func TestContext_AuthorRequestWithHistory(t *testing.T) {
 	}
 
 	// Check that author was called with history
-	authorCalls := s.calls("author", "answer")
+	authorCalls := s.calls("author", "author")
 	if len(authorCalls) < 2 {
 		t.Fatalf("expected at least 2 author calls, got %d", len(authorCalls))
 	}
@@ -658,44 +731,56 @@ func TestContext_ReviewerHistoryFenced(t *testing.T) {
 }
 
 // TestContext_CanonicalDocumentRendering tests that context_hash is properly set
-// for the canonical history document.
+// for the canonical history document on second and later turns.
 func TestContext_CanonicalDocumentRendering(t *testing.T) {
 	t.Parallel()
-	s := newSuite(t, enginetest.RosterTOML, reviewScripts(
-		verdict(fake.VerdictApprove),
-	))
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("first answer"), enginetest.Reply("second answer"), enginetest.Reply("third answer")},
+		"reviewer": {verdict(fake.VerdictApprove), verdict(fake.VerdictApprove), verdict(fake.VerdictApprove)},
+	})
 	c := s.Dial(t)
 
 	workspace := "/workspace"
 	preset := "review"
 
-	req := wire.SubmitRequest{
+	// First turn - context_hash will be empty (no prior history)
+	req1 := wire.SubmitRequest{
 		SubmissionID: "s1",
-		Input:        "question",
+		Input:        "first question",
 		Preset:       &preset,
 		Workspace:    workspace,
 	}
-	reply := s.SubmitRequest(t, c, req)
-	s.WaitTerminal(reply.TurnID)
+	reply1 := s.SubmitRequest(t, c, req1)
+	s.WaitTerminal(reply1.TurnID)
+	convID := reply1.ConversationID
 
-	// context_hash should be set when implemented
-	if reply.ContextHash != "" {
-		// Should be valid SHA-256 hex
-		if len(reply.ContextHash) != 64 {
-			t.Fatalf("context_hash should be 64 hex chars, got %d", len(reply.ContextHash))
+	// Second turn - context_hash should be set (has history from first turn)
+	req2 := wire.SubmitRequest{
+		SubmissionID:   "s2",
+		Input:          "follow-up question",
+		Preset:         &preset,
+		Workspace:      workspace,
+		ConversationID: &convID,
+	}
+	reply2 := s.SubmitRequest(t, c, req2)
+	s.WaitTerminal(reply2.TurnID)
+
+	// Turn record should have state approved
+	turn := s.Turn(t, c, reply2.TurnID)
+	if turn.State != engine.StateApproved {
+		reason := "<nil>"
+		if turn.TerminalReason != nil {
+			reason = *turn.TerminalReason
 		}
-		if _, err := hex.DecodeString(reply.ContextHash); err != nil {
-			t.Fatalf("context_hash is not valid hex: %v", err)
-		}
+		t.Fatalf("turn should be approved, got %q; terminal_reason=%q", turn.State, reason)
 	}
 
-	// Turn record should also carry context_hash
-	turn := s.Turn(t, c, reply.TurnID)
-	if reply.ContextHash == "" && turn.State == engine.StateApproved {
-		// If turn is approved, context_hash should be set
-		if reply.ContextHash == "" {
-			t.Fatal("context_hash should be populated for approved turn")
-		}
+	// Second turn context_hash should be valid SHA-256 hex
+	if len(reply2.ContextHash) != 64 {
+		t.Fatalf("context_hash should be 64 hex chars, got %d: %q", len(reply2.ContextHash), reply2.ContextHash)
+	}
+	if _, err := hex.DecodeString(reply2.ContextHash); err != nil {
+		t.Fatalf("context_hash is not valid hex: %v", err)
 	}
 }
 
