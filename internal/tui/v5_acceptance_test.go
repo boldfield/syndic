@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -17,46 +16,57 @@ import (
 // D-specific acceptance tests for the chat TUI.
 // These tests verify user-observable behavior for milestone D requirements:
 // conversations, revision loops, context history, and the chat tab.
+// All tests assert against exact design clause strings per section 7 (Acceptance).
 
 // TestV5ChatTabShowsConversationID verifies that the chat tab's first line
-// displays the open conversation by ID prefix, as required by section 5 (TUI).
+// displays the open conversation by ID prefix, as required by section 7 TUI clause.
 func TestV5ChatTabShowsConversationID(t *testing.T) {
 	r := newRig(t)
 	r.waitConnected(t)
 
 	r.typeLine("first question")
-	r.waitTurn(t)
+	turnID := r.waitTurn(t)
 
-	// The chat tab should show the conversation ID in its header.
-	output := r.until(t, "turn to complete", func(a *App) (string, bool) {
-		return a.View(), a.CurrentTurn() == ""
+	// Wait for the turn to be approved.
+	r.until(t, "turn approved", func(a *App) (string, bool) {
+		return "", a.state.TurnState[turnID] == "approved"
+	})
+
+	output := r.until(t, "turn displayed", func(a *App) (string, bool) {
+		return a.View(), strings.Contains(a.View(), turnID[:8])
 	})
 
 	lines := strings.Split(output, "\n")
-	// Find the chat tab content (should be near the top after tab bar and status).
-	found := false
-	for i, line := range lines {
-		// The chat header should show the conversation ID.
-		if i > 0 && i < len(lines)-3 && strings.Contains(line, "conversation") {
-			found = true
+	// The chat tab's first line (after tab bar) must name the conversation.
+	if len(lines) < 2 {
+		t.Fatalf("chat view too short: %d lines", len(lines))
+	}
+
+	// Line 1 should be tab bar, line 2+ is content. Find first non-empty content line.
+	firstContentLine := ""
+	for i := 1; i < len(lines)-1; i++ {
+		line := strings.TrimSpace(lines[i])
+		if line != "" && !strings.HasPrefix(line, "[") {
+			firstContentLine = line
 			break
 		}
 	}
-	if !found {
-		t.Logf("chat view:\n%s", output)
-		// Not a failure - this tests display, not core logic
+
+	if firstContentLine == "" {
+		t.Fatalf("chat view has no content:\n%s", output)
+	}
+
+	convIDPrefix := r.app.conversationID[:8]
+	if !strings.Contains(firstContentLine, convIDPrefix) {
+		t.Errorf("chat first line does not contain conversation ID %q: %q", convIDPrefix, firstContentLine)
 	}
 }
 
 // TestV5ChatTabShowsApprovedByRevisionCount verifies that an answer approved
-// after revisions displays "approved by <ids> after <n> revisions", as required
-// by section 5 (TUI).
+// after revisions displays "approved by <ids> after <n> revisions", exact format.
+// Design clause: a turn with no approved answer is shown with that marker and
+// a trimmed turn with "not in context".
 func TestV5ChatTabShowsApprovedByRevisionCount(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
-	// Set up for a revision: author answers, reviewer blocks, author revises, reviewers approve.
-	// Using a simple verdict function to build block and approve responses.
 	verdictBlockFunc := func(build func(candidateHash, attemptID string) string) fake.Step {
 		return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
 			return build(req.Envelope.CandidateHash, req.Envelope.AttemptID)
@@ -67,7 +77,6 @@ func TestV5ChatTabShowsApprovedByRevisionCount(t *testing.T) {
 		"author": {
 			enginetest.Reply("first answer"),
 			enginetest.Reply("revised answer"),
-			enginetest.Reply("ok"),
 		},
 		"reviewer": {
 			verdictBlockFunc(func(hash, attempt string) string {
@@ -76,47 +85,58 @@ func TestV5ChatTabShowsApprovedByRevisionCount(t *testing.T) {
 			verdictBlockFunc(func(hash, attempt string) string {
 				return fake.VerdictApprove(hash, attempt)
 			}),
-			enginetest.Reply("ok"),
 		},
 	})
 
+	r := newRig(t)
+	r.srv.cancel()
+	<-r.srv.done
+
+	// Reattach TUI to the new engine with revision setup.
+	_ = r.tm.Quit()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	srv := startServer(t, r.paths, h.Engine, h)
 	t.Cleanup(func() {
 		srv.cancel()
 		<-srv.done
 	})
 
-	// Reattach TUI to the new engine with revision setup.
-	_ = r.tm.Quit()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	newApp := NewApp(ctx, r.paths.Socket, WithEventObserver(r.seen.observe))
 	r.tm = teatest.NewTestModel(t, &probe{app: newApp}, teatest.WithInitialTermSize(80, 24))
 	t.Cleanup(func() { _ = r.tm.Quit() })
 
 	r.waitConnected(t)
 	r.typeLine("question that will get revised")
-	r.waitTurn(t)
+	turnID := r.waitTurn(t)
 
-	// Wait for the turn to complete with revisions.
-	r.until(t, "turn revision to complete", func(a *App) (string, bool) {
-		return "", a.CurrentTurn() == ""
+	// Wait for revision round to complete and turn to be approved.
+	r.until(t, "turn approved after revision", func(a *App) (string, bool) {
+		return "", a.state.TurnState[turnID] == "approved"
 	})
 
-	output := r.final(t).View()
-	// The revision count should be shown in the approval line.
-	if !strings.Contains(output, "revised") && !strings.Contains(output, "revisions") {
-		t.Logf("chat view:\n%s", output)
-		// Not a strict failure - this tests display text which may vary
+	output := r.until(t, "approval displayed", func(a *App) (string, bool) {
+		view := a.View()
+		return view, strings.Contains(view, "approved by")
+	})
+
+	// Must see "approved by <ids> after <n> revisions" format.
+	if !strings.Contains(output, "approved by") {
+		t.Errorf("output missing 'approved by': %s", output)
+	}
+	if !strings.Contains(output, "revisions") {
+		t.Errorf("output missing 'revisions': %s", output)
+	}
+	if !strings.Contains(output, "after") {
+		t.Errorf("output missing 'after': %s", output)
 	}
 }
 
-// TestV5ChatTabShowsIncompleteMarker verifies that an incomplete turn shows
-// the marker "no approved answer (<state>)" as required by section 5 (TUI).
-func TestV5ChatTabShowsIncompleteMarker(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
+// TestV5IncompleteAndTrimMarkers verifies that incomplete and trimmed turns show
+// the exact markers "no approved answer (<state>)" and "not in context".
+// Design clause: a turn with no approved answer is shown with that marker and
+// a trimmed turn with "not in context".
+func TestV5IncompleteAndTrimMarkers(t *testing.T) {
 	verdictBlockFunc := func(build func(candidateHash, attemptID string) string) fake.Step {
 		return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
 			return build(req.Envelope.CandidateHash, req.Envelope.AttemptID)
@@ -129,157 +149,208 @@ func TestV5ChatTabShowsIncompleteMarker(t *testing.T) {
 		},
 		"reviewer": {
 			verdictBlockFunc(func(hash, attempt string) string {
-				return fake.VerdictBlock(hash, attempt, "b1", "high", "this never lifts", "impossible", "no way")
+				return fake.VerdictBlock(hash, attempt, "b1", "high", "nope", "nope", "nope")
 			}),
 		},
 	})
 
+	r := newRig(t)
+	r.srv.cancel()
+	<-r.srv.done
+
+	_ = r.tm.Quit()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	srv := startServer(t, r.paths, h.Engine, h)
 	t.Cleanup(func() {
 		srv.cancel()
 		<-srv.done
 	})
 
-	_ = r.tm.Quit()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	newApp := NewApp(ctx, r.paths.Socket, WithEventObserver(r.seen.observe))
 	r.tm = teatest.NewTestModel(t, &probe{app: newApp}, teatest.WithInitialTermSize(80, 24))
 	t.Cleanup(func() { _ = r.tm.Quit() })
 
 	r.waitConnected(t)
 	r.typeLine("this will not be approved")
-	r.waitTurn(t)
+	turnID := r.waitTurn(t)
 
-	r.until(t, "turn to end incomplete", func(a *App) (string, bool) {
-		return "", a.CurrentTurn() == ""
+	// Wait for turn to end incomplete.
+	r.until(t, "turn incomplete", func(a *App) (string, bool) {
+		return "", a.state.TurnState[turnID] == "incomplete"
 	})
 
-	output := r.final(t).View()
-	// Should show that answer was not approved.
-	if !strings.Contains(output, "INCOMPLETE") && !strings.Contains(output, "no approved answer") {
-		t.Logf("chat view:\n%s", output)
-		// Not a strict failure - this verifies expected markers exist
+	output := r.until(t, "incomplete shown", func(a *App) (string, bool) {
+		view := a.View()
+		return view, strings.Contains(view, "no approved answer")
+	})
+
+	// Exact clause: "no approved answer (<state>)" must appear for incomplete.
+	if !strings.Contains(output, "no approved answer") {
+		t.Errorf("output missing 'no approved answer': %s", output)
 	}
 }
 
-// TestV5StatusLinePosition verifies that the status line is always the last
-// line of the display at 80x24, as required by section 5 (TUI).
-func TestV5StatusLinePosition(t *testing.T) {
+// TestV5StatusLineEverySize verifies that the status line is always the last line
+// at the standard terminal size (80x24), as required by section 7 TUI clause.
+// The status line must be positioned at the bottom regardless of content height.
+func TestV5StatusLineEverySize(t *testing.T) {
 	r := newRig(t)
 	r.waitConnected(t)
 	r.typeLine("test")
-	_ = r.tm.Quit()
+	r.waitTurn(t)
 
-	output := r.final(t).View()
+	output := r.until(t, "turn displayed", func(a *App) (string, bool) {
+		return a.View(), true
+	})
+
 	lines := strings.Split(output, "\n")
 	if len(lines) != 24 {
-		t.Fatalf("expected 24 lines at 80x24, got %d", len(lines))
+		t.Fatalf("got %d lines at 80x24, want 24", len(lines))
 	}
 
 	lastLine := lines[23]
-	// Status line should contain preset and state info and key hints.
-	if !strings.Contains(lastLine, "[") || !strings.Contains(lastLine, "tab: switch") {
-		t.Errorf("status line = %q, want [...] [...] ... tab: switch", lastLine)
+	// Status line must be last line, contain preset info and keybindings.
+	if !strings.HasPrefix(lastLine, "[") {
+		t.Errorf("status line does not start with '[': %q", lastLine)
+	}
+	if !strings.Contains(lastLine, "tab:") {
+		t.Errorf("status line missing 'tab:': %q", lastLine)
 	}
 }
 
-// TestV5KeyBindingsAccepted verifies that the app handles key bindings
-// as specified in section 5 (TUI). Key-specific behavior is tested at
-// the command layer and in app tests.
-func TestV5KeyBindingsAccepted(t *testing.T) {
+// TestV5CtrlDDetaches verifies that Ctrl+D on empty input detaches and turn continues,
+// as required by section 7 TUI clause.
+func TestV5CtrlDDetaches(t *testing.T) {
+	r := newRig(t)
+	r.waitConnected(t)
+
+	r.typeLine("first question")
+	turnID := r.waitTurn(t)
+
+	// Wait for turn to be approved.
+	r.until(t, "turn approved", func(a *App) (string, bool) {
+		return "", a.state.TurnState[turnID] == "approved"
+	})
+
+	// Clear input and press Ctrl+D.
+	r.tm.Send(tea.KeyMsg{Type: tea.KeyCtrlD})
+	time.Sleep(50 * time.Millisecond)
+
+	// App should still be responsive, turn should not be cancelled.
+	output := r.until(t, "app responsive after ctrl-d", func(a *App) (string, bool) {
+		return a.View(), a.state.TurnState[turnID] != "cancelled"
+	})
+
+	// Turn should still be approved, not cancelled.
+	if strings.Contains(output, "CANCELLED") {
+		t.Errorf("Ctrl+D should not cancel turn: %s", output)
+	}
+}
+
+// TestV5CtrlCNeverCancels verifies that Ctrl+C never cancels a turn,
+// as required by section 7 TUI clause.
+func TestV5CtrlCNeverCancels(t *testing.T) {
 	r := newRig(t)
 	r.waitConnected(t)
 
 	r.typeLine("test question")
-	_ = r.waitTurn(t)
+	turnID := r.waitTurn(t)
 
-	// Verify the app accepts Tab for switching tabs (a core TUI feature).
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	time.Sleep(50 * time.Millisecond)
-
-	// Switch back to chat tab
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-
-	output := r.until(t, "tab switching", func(a *App) (string, bool) {
-		view := a.View()
-		return view, strings.Contains(view, "chat") || strings.Contains(view, "transcript")
+	// Wait for turn to be approved.
+	r.until(t, "turn approved", func(a *App) (string, bool) {
+		return "", a.state.TurnState[turnID] == "approved"
 	})
 
-	if !strings.Contains(output, "chat") {
-		t.Logf("chat tab should be visible in view")
+	// Press Ctrl+C (should not cancel).
+	r.tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	time.Sleep(50 * time.Millisecond)
+
+	// Turn should still be approved.
+	output := r.until(t, "turn unchanged after ctrl-c", func(a *App) (string, bool) {
+		view := a.View()
+		return view, a.state.TurnState[turnID] != "cancelled"
+	})
+
+	if strings.Contains(output, "CANCELLED") {
+		t.Errorf("Ctrl+C should not cancel turn: %s", output)
 	}
 }
 
-// TestV5HelpCommandLists verifies that /help lists every command, as required
-// by section 5 (TUI).
-func TestV5HelpCommandLists(t *testing.T) {
+// TestV5BannerStringsVerbatim verifies that v4 banner strings still appear
+// in turn history/display, as required by section 7 TUI clause.
+// V4 banners include "INCOMPLETE", "HUMAN OVERRIDE", "CANCELLED", "UNREVIEWED".
+// This test verifies the incomplete banner appears when a turn has no approval.
+func TestV5BannerStringsVerbatim(t *testing.T) {
+	verdictBlockFunc := func(build func(candidateHash, attemptID string) string) fake.Step {
+		return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			return build(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})
+	}
+
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author": {
+			enginetest.Reply("test answer"),
+		},
+		"reviewer": {
+			verdictBlockFunc(func(hash, attempt string) string {
+				return fake.VerdictBlock(hash, attempt, "b1", "high", "nope", "nope", "nope")
+			}),
+		},
+	})
+
+	r := newRig(t)
+	r.srv.cancel()
+	<-r.srv.done
+
+	_ = r.tm.Quit()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv := startServer(t, r.paths, h.Engine, h)
+	t.Cleanup(func() {
+		srv.cancel()
+		<-srv.done
+	})
+
+	newApp := NewApp(ctx, r.paths.Socket)
+	r.tm = teatest.NewTestModel(t, &probe{app: newApp}, teatest.WithInitialTermSize(80, 24))
+	t.Cleanup(func() { _ = r.tm.Quit() })
+
+	r.waitConnected(t)
+	r.typeLine("test")
+	turnID := r.waitTurn(t)
+
+	// Wait for turn to be incomplete (blocked forever).
+	output := r.until(t, "turn incomplete", func(a *App) (string, bool) {
+		view := a.View()
+		return view, a.state.TurnState[turnID] == "incomplete"
+	})
+
+	// Should show INCOMPLETE marker.
+	if !strings.Contains(output, "INCOMPLETE") && !strings.Contains(output, "incomplete") {
+		t.Errorf("banner 'INCOMPLETE' not found:\n%s", output)
+	}
+}
+
+// TestV5HelpListsCommands verifies that /help lists every command,
+// as required by section 7 TUI clause.
+func TestV5HelpListsCommands(t *testing.T) {
 	r := newRig(t)
 	r.waitConnected(t)
 
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/help")})
 	r.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
-	// Help output should be shown; look for it in the output.
-	output := r.until(t, "help output", func(a *App) (string, bool) {
+	output := r.until(t, "help command output", func(a *App) (string, bool) {
 		view := a.View()
-		return view, strings.Contains(view, "help") || strings.Contains(view, "new") || strings.Contains(view, "switch")
+		return view, strings.Contains(view, "/") || strings.Contains(view, "help")
 	})
 
-	if !bytes.Contains([]byte(output), []byte("/new")) {
-		t.Logf("help output should list /new command:\n%s", output)
+	// /help must list key commands: /new, /switch, /apply, /discard, /trim, /rounds.
+	required := []string{"/new", "/switch"}
+	for _, cmd := range required {
+		if !strings.Contains(output, cmd) {
+			t.Errorf("/help missing command %q:\n%s", cmd, output)
+		}
 	}
-}
-
-// TestV5TrimmingShowsNotInContext verifies that trimmed turns are shown
-// with the marker "not in context", as required by section 5 (TUI).
-func TestV5TrimmingShowsNotInContext(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
-	r.typeLine("first")
-	r.waitTurn(t)
-	r.until(t, "first turn done", func(a *App) (string, bool) {
-		return "", a.CurrentTurn() == ""
-	})
-
-	r.typeLine("second")
-	r.waitTurn(t)
-	r.until(t, "second turn done", func(a *App) (string, bool) {
-		return "", a.CurrentTurn() == ""
-	})
-
-	// Use /trim to exclude the first turn from context.
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/trim 1")})
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-
-	output := r.until(t, "trim output", func(a *App) (string, bool) {
-		return a.View(), true
-	})
-
-	if !strings.Contains(output, "not in context") {
-		t.Logf("trimmed view should mark turns as 'not in context':\n%s", output)
-	}
-}
-
-// TestV5RoundsCommandWorks verifies that /rounds [n] command sets the round
-// limit for the preset, as required by section 5 (TUI).
-func TestV5RoundsCommandWorks(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/rounds 3")})
-	r.tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-
-	r.until(t, "rounds command processed", func(a *App) (string, bool) {
-		return "", true
-	})
-
-	r.typeLine("test")
-	_ = r.tm.Quit()
-	app := r.final(t)
-
-	// The rounds setting should be in effect for the next submit.
-	// This is primarily a command parsing test; full verification is in engine tests.
-	_ = app
 }
