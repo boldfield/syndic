@@ -78,14 +78,10 @@ func participantMark(state, turnState string, isAuthor bool, plainMode bool) str
 	isDone := false
 
 	if isAuthor {
-		// Author is done when reviewers have been dispatched (turn state >= reviewers_dispatched)
-		isDone = turnState == "reviewers_dispatched" || turnState == "incomplete" ||
+		// Author is done when reviewers have been dispatched AND author is idle
+		isReviewStarted := turnState == "reviewers_dispatched" || turnState == "incomplete" ||
 			turnState == "overridden" || turnState == "cancelled" || turnState == "approved"
-	} else {
-		// Reviewer is done if they have completed their review (turned idle after running)
-		// but we can only infer this from the turn state: a reviewer in revision state is done
-		// if the turn is in a state past their round. For now, we check if they're not running.
-		isDone = state != "running" && state != "queued"
+		isDone = isReviewStarted && state == "idle"
 	}
 
 	// Map engine states to marks
@@ -95,8 +91,7 @@ func participantMark(state, turnState string, isAuthor bool, plainMode bool) str
 	case "queued":
 		return "○"
 	case "idle":
-		// Author is done when reviewers dispatched and idle; otherwise idle shows as queued
-		if isAuthor && isDone {
+		if isDone {
 			return "✓"
 		}
 		return "○"

@@ -86,7 +86,8 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		}
 	}
 
-	// [budget meter] - droppable
+	// [budget meter] - droppable, only add if meter is not empty
+	indices.budget = -1
 	if ti.LimitTokens > 0 {
 		meter := budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
 		if meter != "" {
@@ -182,7 +183,34 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		}
 	}
 
-	// 4. Try shortening turn state with ellipsis
+	// 4. Drop the preset if it's the first segment and compact mode
+	if compact && len(segments) > 0 && indices.preset == 0 {
+		preset := segments[0]
+		// Only drop if it's exactly the preset segment [preset_name], not quick profile or next
+		if strings.HasPrefix(preset, "[") && strings.HasSuffix(preset, "]") &&
+			!strings.Contains(preset, "quick") && !strings.Contains(preset, "next") {
+			segments = segments[1:]
+			// Adjust indices after removal
+			indices.turnStateIdx--
+			if indices.budget > 0 {
+				indices.budget--
+			}
+			if indices.tokens > 0 {
+				indices.tokens--
+			}
+			if indices.round > 0 {
+				indices.round--
+			}
+			if indices.reviews > 0 {
+				indices.reviews--
+			}
+			if line := strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
+				return line
+			}
+		}
+	}
+
+	// 5. Try shortening turn state with ellipsis
 	if indices.turnStateIdx >= 0 && indices.turnStateIdx < len(segments) {
 		state := segments[indices.turnStateIdx]
 		// Extract the state text from [state] format
@@ -197,19 +225,6 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 				if runewidth.StringWidth(line) <= width {
 					return line
 				}
-			}
-		}
-	}
-
-	// 5. Drop the preset if it's the first segment and compact mode
-	if compact && len(segments) > 0 && indices.preset == 0 {
-		preset := segments[0]
-		// Only drop if it's exactly the preset segment [preset_name], not quick profile or next
-		if strings.HasPrefix(preset, "[") && strings.HasSuffix(preset, "]") &&
-			!strings.Contains(preset, "quick") && !strings.Contains(preset, "next") {
-			segments = segments[1:]
-			if line := strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
-				return line
 			}
 		}
 	}
