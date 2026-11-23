@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -824,26 +826,23 @@ func TestFetchReviewContentCancellation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected context cancellation error")
 	}
-	select {
-	case <-fetchCtx.Done():
-		// Context is done, as expected
-	default:
-		t.Fatalf("expected fetch context to be cancelled")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded in chain, got %v", err)
 	}
 }
 
 func TestAllReviewsPagingCancellation(t *testing.T) {
-	callCount := 0
+	var callCount atomic.Int32
 	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
 		if frame.Type != wire.RequestReviews {
 			return true
 		}
 
-		callCount++
+		n := callCount.Add(1)
 		var items []json.RawMessage
 		var nextCursor *string
 
-		switch callCount {
+		switch n {
 		case 1:
 			// First page
 			item := wire.ReviewItem{
@@ -860,7 +859,7 @@ func TestAllReviewsPagingCancellation(t *testing.T) {
 			nextCursor = &cursor
 		case 2:
 			// Simulate slow second page response
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			item := wire.ReviewItem{
 				Round:         1,
 				CandidateHash: "hash123",
@@ -895,34 +894,17 @@ func TestAllReviewsPagingCancellation(t *testing.T) {
 	}
 	defer func() { _ = client.Close() }()
 
-	// Create a context that will be cancelled after the first page
-	pagingCtx, pagingCancel := context.WithCancel(context.Background())
+	pagingCtx, pagingCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer pagingCancel()
 
-	// Use a custom loop to allow cancellation between pages
-	var cursor *string
-	limit := 50
-
-	// First page should succeed
-	items, nextCursor, err := client.VerifiedReviewsPage(pagingCtx, "turn-1", cursor, &limit)
-	if err != nil {
-		t.Fatalf("first page failed: %v", err)
+	// Page 1 returns immediately; page 2 is slow, so the context expires
+	// while the second request is outstanding inside the paging loop.
+	_, err = client.AllReviewsPaged(pagingCtx, "turn-1", 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded in chain, got %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item on first page, got %d", len(items))
-	}
-	if nextCursor == nil {
-		t.Fatalf("expected next cursor on first page")
-	}
-	cursor = nextCursor
-
-	// Cancel context before fetching second page
-	pagingCancel()
-
-	// Second page should fail due to cancellation
-	_, _, err = client.VerifiedReviewsPage(pagingCtx, "turn-1", cursor, &limit)
-	if err == nil {
-		t.Fatalf("expected context cancellation error on second page")
+	if got := callCount.Load(); got < 2 {
+		t.Fatalf("expected cancellation during second page, server saw %d requests", got)
 	}
 }
 
