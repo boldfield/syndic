@@ -336,6 +336,7 @@ func TestParticipantsCommandSwitchesTab(t *testing.T) {
 func TestHelpListsEveryCommandOnItsOwnLine(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), approve())
 	r := startAnswerRig(t, h)
+	send(r, resizeMsg(80, 40))
 	r.typeLine("/help")
 	v := untilView(t, r, "commands:")
 	for _, c := range []string{"/mode", "/participants", "/cancel", "/why", "/override", "/release", "/drafts", "/resume", "/quit", "/help"} {

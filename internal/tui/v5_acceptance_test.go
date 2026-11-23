@@ -159,11 +159,11 @@ func TestV5NoApprovedAnswerAndNotInContextMarkers(t *testing.T) {
 	if n := count(notInContext); n != 2 {
 		t.Errorf("%d lines are exactly %q, want 2 (t1 and t2):\n%s", n, notInContext, strings.Join(lines, "\n"))
 	}
-	if i, j := lineOf(t, lines, "you: q3"), lineOf(t, lines, "you: q2"); i < j {
+	if i, j := lineOf(t, lines, "› q3"), lineOf(t, lines, "› q2"); i < j {
 		t.Fatalf("turn order broken: q3 at %d before q2 at %d", i, j)
 	}
 	// The marker closes the turn it names: none follows q3's block.
-	first := lineOf(t, lines, "you: q3")
+	first := lineOf(t, lines, "› q3")
 	for _, l := range lines[first:] {
 		if l == notInContext {
 			t.Errorf("a turn from the trim point on is marked %q", notInContext)
@@ -293,7 +293,7 @@ func TestV5CtrlCWithTextClearsAndSendsNothing(t *testing.T) {
 
 // TestV5ApprovedAfterRevisionShowsIdsCountAndHash: through a real engine, a
 // block then a revised candidate and an approval renders
-// "approved by <ids> after 1 revisions against <hash>" on the chat tab.
+// "approved by <ids> after 1 revision against <hash>" on the chat tab.
 func TestV5ApprovedAfterRevisionShowsIdsCountAndHash(t *testing.T) {
 	roster := strings.Replace(enginetest.RosterTOML, "max_rounds = 0", "max_rounds = 2\nmax_rounds_ceiling = 5", 1)
 	block := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
@@ -325,7 +325,7 @@ func TestV5ApprovedAfterRevisionShowsIdsCountAndHash(t *testing.T) {
 		if ti.State != "approved" || ti.CandidateHash == nil {
 			return "", false
 		}
-		want := "approved by reviewer after 1 revisions against " + (*ti.CandidateHash)[:12]
+		want := "approved by reviewer after 1 revision against " + (*ti.CandidateHash)[:12]
 		v := a.View()
 		return v, strings.Contains(v, want) && strings.Contains(v, "the answer is 42, and here is why")
 	})

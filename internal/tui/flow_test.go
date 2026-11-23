@@ -278,7 +278,7 @@ func openTurnState(reviewers ...string) State {
 func TestRenderStripFull(t *testing.T) {
 	s := openTurnState("r1", "r2")
 	now := s.Turns["t1"].SubmittedAt.Add(75 * time.Second)
-	want := "[review] [author_dispatched] [1m15s / 15m0s] [est. 1234 / 250000] author:author running reviewers: r1 queued r2 queued identity: unknown(name-matched)"
+	want := "[review] [author_dispatched] [1m15s / 15m0s] [est. 1234 / 250000] author:author running reviewers: r1 queued r2 queued"
 	if got := renderStrip(s, 200, now); got != want {
 		t.Fatalf("strip =\n%q\nwant\n%q", got, want)
 	}
@@ -394,7 +394,7 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 		return d.app.state.CurrentTurn == "" && d.app.state.Turns[turn].TerminalReason != nil
 	})
 
-	for _, want := range []string{"[submitted]", "[author_dispatched]", "[candidate_frozen]", "[reviewers_dispatched]", "identity: unknown(name-matched)"} {
+	for _, want := range []string{"[submitted]", "[author_dispatched]", "[candidate_frozen]", "[reviewers_dispatched]"} {
 		if !d.sawStrip(want) {
 			t.Errorf("no strip showed %q; strips:\n%s", want, strings.Join(d.seen, "\n"))
 		}

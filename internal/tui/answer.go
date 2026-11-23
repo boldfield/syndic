@@ -101,7 +101,55 @@ func bodyRaw(cc *ContentCache, ref string) string {
 // shownAnswer renders answer text with optional Markdown rendering.
 // It respects rawMode to disable Markdown, and plainMode to disable it in plain terminals.
 func shownAnswer(raw string, width int, in answerInput) string {
-	return renderAnswerMarkdown(raw, width, in.rawMode, in.plainMode)
+	out := renderAnswerMarkdown(raw, width, in.rawMode, in.plainMode)
+	if width <= 0 {
+		// Unwrapped text still gets the content indent, so no answer line
+		// starts in column 0.
+		out = contentPrefix + strings.ReplaceAll(out, "\n", "\n"+contentPrefix)
+	}
+	return out
+}
+
+// Outcome marks, one per kind of outcome line (v6 section 1, Chat lines).
+const (
+	markApproved   = "✓"
+	markIncomplete = "!"
+	markCancelled  = "×"
+	markSolo       = "·"
+)
+
+// outcomeStyles are the outcome colours as light and dark pairs, chosen from
+// the terminal background. Every outcome also has its mark and its words, so
+// no meaning rests on colour.
+var outcomeStyles = map[string]lipgloss.Style{
+	markApproved:   lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "42"}),
+	markIncomplete: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"}),
+	markCancelled:  lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"}),
+	markSolo:       lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}),
+}
+
+// outcomeLines returns an outcome as lines: the mark and a space in column 0
+// of the first line, then the text wrapped to width, every later line a
+// content line. The text is escaped here, in both modes, and the whole line
+// is coloured unless plain.
+func outcomeLines(mark, raw string, in answerInput) []string {
+	return styledOutcomeLines(mark, raw, in, outcomeStyles[mark])
+}
+
+func styledOutcomeLines(mark, raw string, in answerInput, style lipgloss.Style) []string {
+	var lines []string
+	if in.width > 0 {
+		lines = SafeTextWithPrefix(raw, in.width)
+	} else {
+		lines = []string{contentPrefix + safeLine(raw)}
+	}
+	lines[0] = mark + " " + strings.TrimPrefix(lines[0], contentPrefix)
+	if !in.plainMode {
+		for i, l := range lines {
+			lines[i] = style.Render(l)
+		}
+	}
+	return lines
 }
 
 // shownPlain renders non-answer text as plain safe text, without Markdown rendering.
@@ -137,14 +185,17 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			hash := *ti.CandidateHash
 			hash = hash[:min(12, len(hash))]
 			by := strings.Join(approvers(s, turnID), ", ")
-			if ti.Round > 0 {
+			switch {
+			case ti.Round == 1:
+				by += " after 1 revision"
+			case ti.Round > 1:
 				by += fmt.Sprintf(" after %d revisions", ti.Round)
 			}
-			lines = append(lines, safeLine(fmt.Sprintf("approved by %s against %s", by, hash)))
+			lines = append(lines, outcomeLines(markApproved, fmt.Sprintf("approved by %s against %s", by, hash), in)...)
 		}
 
 	case "solo_complete":
-		lines = append(lines, "UNREVIEWED (solo)")
+		lines = append(lines, outcomeLines(markSolo, "UNREVIEWED (solo)", in)...)
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
 			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else {
@@ -157,7 +208,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		}
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		if ti.CandidateHash != nil {
-			lines = append(lines, "INCOMPLETE, not approved")
+			lines = append(lines, outcomeLines(markIncomplete, "INCOMPLETE, not approved", in)...)
 		}
 		lines = append(lines, noApprovedAnswer(ti.State))
 		if ti.CandidateHash != nil {
@@ -169,15 +220,17 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, shownPlain("HUMAN OVERRIDE: "+reason, in.width))
+		lines = append(lines, outcomeLines(markIncomplete, "HUMAN OVERRIDE: "+reason, in)...)
 		candidate()
 
 	case "cancelled":
 		if ti.CandidateHash == nil {
-			lines = append(lines, "cancelled before candidate", noApprovedAnswer(ti.State))
+			lines = append(lines, outcomeLines(markCancelled, "cancelled before candidate", in)...)
+			lines = append(lines, noApprovedAnswer(ti.State))
 			break
 		}
-		lines = append(lines, "CANCELLED, not approved", noApprovedAnswer(ti.State))
+		lines = append(lines, outcomeLines(markCancelled, "CANCELLED, not approved", in)...)
+		lines = append(lines, noApprovedAnswer(ti.State))
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		candidate()
 
@@ -186,10 +239,9 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			draftText := "UNREVIEWED DRAFT"
 			if in.plainMode {
 				draftText = "!! UNREVIEWED DRAFT !!"
-			} else {
-				draftText = draftBanner.Render(draftText)
 			}
-			lines = append(lines, draftText, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
+			lines = append(lines, styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
+			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
 		lines = append(lines, progressLine(ti, in.now))
 	}
@@ -224,7 +276,7 @@ func progressLine(ti TurnInfo, now time.Time) string {
 	return safeLine(strings.Join(parts, ", "))
 }
 
-var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"})
 
 // blockLines lists open blocks with severity, evidence and remedy.
 // These are always rendered as plain safe text, never with Markdown.

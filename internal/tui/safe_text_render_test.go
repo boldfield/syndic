@@ -97,7 +97,7 @@ func TestAppViewHostileSourcesAreSafeAndIndented(t *testing.T) {
 				t.Fatalf("control %U on line %q", r, l)
 			}
 		}
-		if strings.Contains(l, "long long") && !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "you: ") && !strings.HasPrefix(l, "     ") {
+		if strings.Contains(l, "long long") && !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "› ") && !strings.HasPrefix(l, "     ") {
 			t.Errorf("content line not indented: %q", l)
 		}
 		if runewidth.StringWidth(l) > 40 {

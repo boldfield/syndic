@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,9 +107,6 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		segments = append(segments, strings.Join(reviewerParts, " "))
 	}
 
-	// identity: unknown(name-matched)
-	segments = append(segments, "identity: unknown(name-matched)")
-
 	// Presets, profile names, states and participant ids come from the engine
 	// and the workspace: escape each segment before it is measured.
 	for i, seg := range segments {
@@ -122,9 +120,9 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		return line
 	}
 
-	// Participant state is worth more than the identity note and the token
-	// estimate: drop those first, keeping the rest in order.
-	kept := segments[:len(segments)-1]
+	// Participant state is worth more than the token estimate: drop it
+	// first, keeping the rest in order.
+	kept := segments
 	if estIdx < len(kept) && strings.HasPrefix(kept[estIdx], "[est.") {
 		kept = append(append([]string{}, kept[:estIdx]...), kept[estIdx+1:]...)
 	}
@@ -174,6 +172,12 @@ func formatDuration(d time.Duration) string {
 func renderBanners(s State) []string {
 	var banners []string
 
+	// The identity warning sorts first, so the height cap never folds it
+	// into a count.
+	if b := identityBanner(s); b != "" {
+		banners = append(banners, b)
+	}
+
 	if s.Status != nil {
 		if s.Status.DeadlinesProvisional {
 			banners = append(banners, "deadlines: provisional")
@@ -200,6 +204,23 @@ func renderBanners(s State) []string {
 		banners[i] = safeLine(b)
 	}
 	return banners
+}
+
+// identityBanner names, in sorted order, each participant whose identity the
+// engine only matched by name, or "" when none applies. The ids are escaped
+// by renderBanners with the rest.
+func identityBanner(s State) string {
+	var ids []string
+	for id, p := range s.Participants {
+		if p.Identity == "" || p.Identity == "unknown" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	sort.Strings(ids)
+	return "identity: unknown(name-matched): " + strings.Join(ids, ", ")
 }
 
 // bannerHeightDivisor sets how much of the screen banners may take: at most
