@@ -780,9 +780,9 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // conversationHeader names the open conversation by id prefix and turn count.
 func (a *App) conversationHeader() string {
 	if a.conversationID == "" {
-		return "conversation: new (created at the first submit) · workspace " + ToSafeText([]byte(a.workDir))
+		return "conversation: new (created at the first submit) · workspace " + safeLine(a.workDir)
 	}
-	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, ToSafeText([]byte(a.workDir)))
+	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, safeLine(a.workDir))
 }
 
 // shortID is the first eight characters of an id.
@@ -855,10 +855,10 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 		}
 	}
 	a.ask(&question{approval: ap, yes: approvalYes(ap), no: approvalNo(ap), lines: []string{
-		"Project file: " + ToSafeText([]byte(qs.ProjectFilePath)),
-		"selects quick profile \"" + ToSafeText([]byte(qs.ProjectProfile)) + "\":",
+		"Project file: " + safeLine(qs.ProjectFilePath),
+		"selects quick profile \"" + safeLine(qs.ProjectProfile) + "\":",
 		"",
-		"  preset:  " + def.Preset,
+		"  preset:  " + safeLine(def.Preset),
 		fmt.Sprintf("  drafts:  %v", def.Drafts),
 		"  budgets: " + budgets,
 		"",

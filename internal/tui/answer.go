@@ -230,7 +230,7 @@ func blockLines(blocks []wire.OpenBlock, width int) []string {
 		if b.State != "open" {
 			continue
 		}
-		lines = append(lines, ToSafeText([]byte(fmt.Sprintf("[%s] %s", b.Severity, b.ID))))
+		lines = append(lines, safeLine(fmt.Sprintf("[%s] %s", b.Severity, b.ID)))
 		if b.Evidence != "" {
 			lines = append(lines, shownLabelled("evidence: ", b.Evidence, width))
 		}

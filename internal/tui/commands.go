@@ -509,7 +509,7 @@ func figure(n *int64) string {
 func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 	lines := whyLinesRaw(id, tr, notice)
 	for i, l := range lines {
-		lines[i] = ToSafeText([]byte(l))
+		lines[i] = safeLine(l)
 	}
 	return lines
 }

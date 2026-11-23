@@ -262,7 +262,7 @@ func blocksByAttempt(s State, detail map[string]wire.OpenBlock) map[string][]blo
 func blockRowLines(rows []blockRow, width int) []string {
 	var out []string
 	for _, r := range rows {
-		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", ToSafeText([]byte(r.id)), ToSafeText([]byte(r.severity)), ToSafeText([]byte(r.state))), width)...)
+		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", safeLine(r.id), safeLine(r.severity), safeLine(r.state)), width)...)
 		if r.evidence != "" {
 			out = append(out, SafeTextWithPrefix("evidence: "+r.evidence, width)...)
 		}

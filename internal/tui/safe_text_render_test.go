@@ -304,3 +304,55 @@ func TestPanelsAndPromptsEscapeEveryLine(t *testing.T) {
 	a.inputs["t0"] = recordHostile
 	assertSafeLines(t, "trim preview", a.trimPreview([]string{"t0", "t1"}, "t1"))
 }
+
+// assertNoInjectedRow fails when a line feed in a value opened a row of its
+// own: the injected text must only appear behind the visible \x0a escape.
+func assertNoInjectedRow(t *testing.T, label string, lines []string) {
+	t.Helper()
+	for _, l := range strings.Split(strings.Join(lines, "\n"), "\n") {
+		if i := strings.Index(l, "INJECTED"); i >= 0 && !strings.Contains(l, `\x0aINJECTED`) {
+			t.Errorf("%s: injected row at column %d: %q", label, i, l)
+		}
+	}
+}
+
+func TestOneLineFieldsEscapeLineFeeds(t *testing.T) {
+	inj := "/safe\nINJECTED"
+
+	a := chatApp(t)
+	a.width, a.height = 120, 40
+	a.workDir = inj
+	assertNoInjectedRow(t, "header", []string{a.conversationHeader()})
+	a.conversationID = "c1234567890"
+	assertNoInjectedRow(t, "header open", []string{a.conversationHeader()})
+
+	lines := conversationLines([]wire.ConversationSummary{{ID: "c1", Preview: inj}}, "", inj, 120)
+	assertNoInjectedRow(t, "conversations", lines)
+
+	prof := inj
+	assertNoInjectedRow(t, "banners", renderBanners(State{UnapprovedProfile: &prof, QuickInvalid: "quick: invalid " + inj}))
+
+	assertNoInjectedRow(t, "blocks", blockLines([]wire.OpenBlock{{ID: inj, Severity: inj, State: "open"}}, 80))
+	assertNoInjectedRow(t, "block rows", blockRowLines([]blockRow{{id: inj, severity: inj, state: inj}}, 80))
+
+	reason := "gate: " + inj
+	tr := &wire.TurnReply{State: "incomplete", TerminalReason: &reason, OpenBlocks: []wire.OpenBlock{{ID: inj, Severity: inj, State: "open", Evidence: inj}}}
+	assertNoInjectedRow(t, "why", strings.Split(renderPanel(whyLines("t1", tr, nil), 80), "\n"))
+	assertNoInjectedRow(t, "panel", strings.Split(renderPanel([]string{"detail: " + inj}, 80), "\n"))
+
+	detail := inj
+	assertNoInjectedRow(t, "refusal", []string{formatRefusal(&wire.Error{Code: "c", Detail: &detail, Pool: &detail})})
+
+	a.quickSelection = &QuickSelection{ProjectFilePath: inj, ProjectProfile: inj}
+	a.requestApproval(wire.QuickProfile{Name: inj, Preset: inj, DefinitionSHA256: "d"})
+	if len(a.panel) == 0 {
+		t.Fatal("approval prompt not shown")
+	}
+	assertNoInjectedRow(t, "approval", a.panel)
+
+	a.state.UnapprovedProfile = &prof
+	a.state.QuickInvalid = "quick: invalid " + inj
+	view := strings.Split(a.View(), "\n")
+	assertNoInjectedRow(t, "view", view)
+	assertSafeLines(t, "view", view)
+}

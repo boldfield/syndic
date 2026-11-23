@@ -210,7 +210,7 @@ func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
 // conversationLines lists the conversations latest activity first, one line
 // each: id prefix, last activity, turn count and preview, the open one marked.
 func conversationLines(items []wire.ConversationSummary, open, workspace string, width int) []string {
-	workspace = ToSafeText([]byte(workspace))
+	workspace = safeLine(workspace)
 	lines := []string{"conversations in " + workspace + ", latest activity first (* is open):"}
 	if open == "" {
 		lines = append(lines, "* new      (created at the next submit)")
@@ -227,7 +227,7 @@ func conversationLines(items []wire.ConversationSummary, open, workspace string,
 		if c.Running {
 			running = ", running"
 		}
-		line := fmt.Sprintf("%s %-8s  %s  %d turns%s  %s", mark, shortID(c.ID), activity(c.LastSubmittedAt), c.TurnCount, running, ToSafeText([]byte(c.Preview)))
+		line := fmt.Sprintf("%s %-8s  %s  %d turns%s  %s", mark, shortID(c.ID), activity(c.LastSubmittedAt), c.TurnCount, running, safeLine(c.Preview))
 		lines = append(lines, ansi.Truncate(line, max(width, 1), "…"))
 	}
 	return lines
