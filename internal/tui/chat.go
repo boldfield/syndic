@@ -24,6 +24,16 @@ const userMark = "› "
 const notInContext = "not in context"
 
 var dimmed = lipgloss.NewStyle().Faint(true)
+
+// markSelected shows a line as the drawer's selected input: styled when color
+// is available, otherwise prefixed so the selection is visible in plain terminals.
+func markSelected(l string, plain bool) string {
+	if plain {
+		return "> " + l
+	}
+	return selectedInput.Render(l)
+}
+
 var selectedInput = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "75"})
 
 // chatTurns lists the turns of the chat, oldest first.
@@ -130,7 +140,9 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 					if i == 0 {
 						l = userMark + strings.TrimPrefix(l, contentPrefix)
 					}
-					if isSelected && !ai.plainMode {
+					if isSelected && i == 0 {
+						l = markSelected(l, ai.plainMode)
+					} else if isSelected && !ai.plainMode {
 						l = selectedInput.Render(l)
 					}
 					turn = append(turn, l)
@@ -138,15 +150,15 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 			} else {
 				lines := strings.Split(ToSafeText([]byte(text)), "\n")
 				lines[0] = userMark + lines[0]
-				if isSelected && !ai.plainMode {
-					lines[0] = selectedInput.Render(lines[0])
+				if isSelected {
+					lines[0] = markSelected(lines[0], ai.plainMode)
 				}
 				turn = append(turn, strings.Join(lines, "\n"+contentPrefix))
 			}
 		} else {
 			l := userMark + "(input not loaded)"
-			if isSelected && !ai.plainMode {
-				l = selectedInput.Render(l)
+			if isSelected {
+				l = markSelected(l, ai.plainMode)
 			}
 			turn = append(turn, l)
 		}

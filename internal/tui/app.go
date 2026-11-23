@@ -96,6 +96,7 @@ type App struct {
 	pScroll     int                       // first line shown while pScrolled
 
 	reviewsDrawer  *ReviewsDrawer  // the reviews drawer state
+	reviewCounts   map[string]*int // review_count per turn, from conversation info; a key marks the count as read
 	reviewsLoading map[string]bool // turns whose reviews are being fetched
 
 	// Conversation startup options
@@ -167,6 +168,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		quarantined:       make(map[string]bool),
 		blockDetail:       make(map[string]wire.OpenBlock),
 		reviewsDrawer:     NewReviewsDrawer(),
+		reviewCounts:      map[string]*int{},
 		reviewsLoading:    make(map[string]bool),
 	}
 	a.state.ConnState = ConnStateConnecting
@@ -212,7 +214,6 @@ func (a *App) draftsOn(turnID string) bool {
 
 // answerIn gathers what the answer tab needs for the turn.
 func (a *App) answerIn(turnID string) answerInput {
-	ti := a.state.Turns[turnID]
 	return answerInput{
 		content:        a.content,
 		drafts:         a.draftsOn(turnID),
@@ -223,7 +224,7 @@ func (a *App) answerIn(turnID string) answerInput {
 		rawMode:        a.rawMode,
 		now:            a.now(),
 		width:          a.width,
-		reviewCount:    ti.ReviewCount,
+		reviewCount:    a.reviewCounts[turnID],
 	}
 }
 
@@ -492,6 +493,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.onSubmit(msg)
 	case statusMsg:
 		return a.onStatusRefresh(msg)
+	case reviewCountsMsg:
+		return a.onReviewCounts(msg)
 	case turnMsg:
 		return a.onTurn(msg)
 	case commandMsg:
@@ -1219,6 +1222,7 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		turns[msg.id] = ti
 		a.state.Turns = turns
 	}
+	refresh := a.refreshReviewCounts(msg.id)
 	for _, at := range msg.turn.Attempts {
 		if at.Quarantined {
 			a.quarantined[at.ID] = true
@@ -1236,7 +1240,7 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
-	return a, a.syncTranscript()
+	return a, tea.Batch(a.syncTranscript(), refresh)
 }
 
 // attemptDone reports whether the attempt has a final status.

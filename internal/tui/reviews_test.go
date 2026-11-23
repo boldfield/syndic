@@ -177,7 +177,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 		t.Error("open drawer should not render empty")
 	}
 
-	if !stringIncludes(output, "Reviews") || !stringIncludes(output, "Turn 1") {
+	if !strings.Contains(output, "Reviews") || !strings.Contains(output, "Turn 1") {
 		t.Errorf("drawer output missing expected content: %q", output)
 	}
 }
@@ -202,10 +202,10 @@ func TestReviewsDrawerSafeText(t *testing.T) {
 
 	output := d.render(80, NewContentCache())
 	// The block ID should have escaped control sequence, not raw ANSI
-	if stringIncludes(output, "\x1b") {
+	if strings.Contains(output, "\x1b") {
 		t.Error("drawer should not contain raw ANSI codes")
 	}
-	if !stringIncludes(output, "\\x1b") {
+	if !strings.Contains(output, "\\x1b") {
 		t.Error("drawer should escape control characters")
 	}
 }
@@ -235,10 +235,10 @@ func TestReviewsDrawerCommentaryRendering(t *testing.T) {
 	d.UpdateReviews("turn1", items)
 
 	output := d.render(80, cc)
-	if !stringIncludes(output, "commentary") {
+	if !strings.Contains(output, "commentary") {
 		t.Error("drawer should show commentary label")
 	}
-	if !stringIncludes(output, commentText) {
+	if !strings.Contains(output, commentText) {
 		t.Error("drawer should render commentary content")
 	}
 }
@@ -260,9 +260,9 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 	output := d.render(80, NewContentCache())
 
 	// Check that p3 appears before p1, which appears before p2
-	pos3 := stringIndexOf(output, "p3")
-	pos1 := stringIndexOf(output, "p1")
-	pos2 := stringIndexOf(output, "p2")
+	pos3 := strings.Index(output, "p3")
+	pos1 := strings.Index(output, "p1")
+	pos2 := strings.Index(output, "p2")
 
 	if pos3 < 0 || pos1 < 0 || pos2 < 0 {
 		t.Error("not all participants rendered")
@@ -279,7 +279,7 @@ func TestReviewsDrawerPaging(t *testing.T) {
 
 	// Create many items to test paging
 	var items []wire.ReviewItem
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 40; i++ {
 		items = append(items, wire.ReviewItem{
 			Round:       0,
 			Participant: fmt.Sprintf("p%d", i),
@@ -297,7 +297,10 @@ func TestReviewsDrawerPaging(t *testing.T) {
 
 	// Test scrolling - only scroll if content is larger than viewport
 	contentLines := d.ContentLines()
-	if contentLines > 10 {
+	if contentLines <= 10 {
+		t.Fatalf("fixture too small to page: %d lines", contentLines)
+	}
+	{
 		initialOffset := d.scrollOffset
 		drawerHeight := 7
 		d.ScrollDown(drawerHeight, contentLines)
@@ -400,19 +403,6 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 	}
 }
 
-func stringIncludes(s, substr string) bool {
-	return stringIndexOf(s, substr) >= 0
-}
-
-func stringIndexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestReviewCountRendering(t *testing.T) {
 	// Test that review-count is rendered in outcome lines
 	ai := answerInput{
@@ -425,7 +415,7 @@ func TestReviewCountRendering(t *testing.T) {
 	lines := styledOutcomeLines("·", "UNREVIEWED (solo)", ai, lipgloss.NewStyle())
 	found := false
 	for _, line := range lines {
-		if stringIncludes(line, "3 reviews") {
+		if strings.Contains(line, "3 reviews") {
 			found = true
 			break
 		}
@@ -444,7 +434,7 @@ func TestReviewCountNotShownWhenZero(t *testing.T) {
 
 	lines := styledOutcomeLines("·", "UNREVIEWED (solo)", ai, lipgloss.NewStyle())
 	for _, line := range lines {
-		if stringIncludes(line, "reviews") {
+		if strings.Contains(line, "reviews") {
 			t.Error("should not show reviews when count is nil")
 		}
 	}
@@ -479,8 +469,22 @@ func TestSelectedInputHighlighting(t *testing.T) {
 
 	// The selected turn's input should be highlighted (we can't easily check for styling,
 	// but we can verify the structure is correct)
-	if !stringIncludes(output, "first input") {
+	if !strings.Contains(output, "first input") {
 		t.Error("selected turn input should be in chat output")
+	}
+	// In a plain terminal the selection is a marker; unselected turns have none.
+	in.answer = func(id string) answerInput { return answerInput{width: 80, plainMode: true} }
+	for sel, other := range map[string]string{"t1": "t2", "t2": "t1"} {
+		in.selectedDrawerTurnID = sel
+		plain, _ := chatLines(s, in)
+		out := strings.Join(plain, "\n")
+		name := map[string]string{"t1": "first input", "t2": "second input"}
+		if !strings.Contains(out, "> "+userMark+name[sel]) {
+			t.Errorf("selected %s lacks the plain marker:\n%s", sel, out)
+		}
+		if strings.Contains(out, "> "+userMark+name[other]) {
+			t.Errorf("unselected %s carries the marker:\n%s", other, out)
+		}
 	}
 }
 
@@ -527,6 +531,12 @@ func TestReviewsDrawerEndToEnd(t *testing.T) {
 
 	send(r, tea.KeyMsg{Type: tea.KeyEsc})
 	r.until(t, "drawer closed", func(a *App) (string, bool) { return "", !a.reviewsDrawer.IsOpen() })
+	// The open block stays in the chat once the drawer is closed, and the
+	// reviewed turn's outcome line carries its review count.
+	closed := untilView(t, r, "b7")
+	if !strings.Contains(closed, "reviews") {
+		t.Fatalf("outcome line lacks the review count:\n%s", closed)
+	}
 	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	r.until(t, "typing works again", func(a *App) (string, bool) { return a.input.Value(), a.input.Value() == "x" })
 }
