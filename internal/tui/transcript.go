@@ -76,7 +76,8 @@ func transcriptLines(s State, turnID string, in transcriptInput, width int) []st
 			lines = append(lines, blockRowLines(blocks[rid], width)...)
 		} else {
 			lines = append(lines, wrapHeader(headerParts(s, in, it), width)...)
-			lines = append(lines, wrapText(bodyText(s, in, it), width)...)
+			// Use content-line wrapping for body content (already escaped by bodyText)
+			lines = append(lines, WrapSafeTextWithPrefix(bodyText(s, in, it), width)...)
 			if isAttempt {
 				lines = append(lines, blockRowLines(blocks[id], width)...)
 			}

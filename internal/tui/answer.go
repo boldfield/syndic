@@ -89,7 +89,9 @@ func body(cc *ContentCache, ref string) string {
 	item := cc.Get(ref)
 	switch {
 	case item.Err != nil:
-		return "error: " + firstLine(item.Err.Error())
+		// Escape error message text to prevent control characters
+		errMsg := ToSafeText([]byte(item.Err.Error()))
+		return "error: " + firstLine(errMsg)
 	case !item.Ready:
 		return "loading…"
 	}
@@ -140,7 +142,8 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 
 	case "incomplete":
 		if ti.TerminalReason != nil {
-			lines = append(lines, *ti.TerminalReason)
+			// Escape terminal reason which may contain untrusted content
+			lines = append(lines, ToSafeText([]byte(*ti.TerminalReason)))
 		}
 		lines = append(lines, blockLines(in.openBlocks)...)
 		if ti.CandidateHash != nil {
@@ -156,7 +159,9 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, "HUMAN OVERRIDE: "+reason)
+		// Escape override reason which may contain untrusted content
+		safeReason := ToSafeText([]byte(reason))
+		lines = append(lines, "HUMAN OVERRIDE: "+safeReason)
 		candidate()
 
 	case "cancelled":
@@ -222,10 +227,14 @@ func blockLines(blocks []wire.OpenBlock) []string {
 		}
 		lines = append(lines, fmt.Sprintf("[%s] %s", b.Severity, b.ID))
 		if b.Evidence != "" {
-			lines = append(lines, "  evidence: "+b.Evidence)
+			// Escape evidence which is untrusted content
+			safeEvidence := ToSafeText([]byte(b.Evidence))
+			lines = append(lines, "  evidence: "+safeEvidence)
 		}
 		if b.Remedy != "" {
-			lines = append(lines, "  remedy: "+b.Remedy)
+			// Escape remedy which is untrusted content
+			safeRemedy := ToSafeText([]byte(b.Remedy))
+			lines = append(lines, "  remedy: "+safeRemedy)
 		}
 	}
 	return lines

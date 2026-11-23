@@ -108,7 +108,9 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 			text, ok = body(in.content, s.Turns[id].InputRef), true
 		}
 		if ok {
-			turn = append(turn, "you: "+strings.ReplaceAll(text, "\n", "\n     "))
+			// Escape user input to prevent control characters
+			safeText := ToSafeText([]byte(text))
+			turn = append(turn, "you: "+strings.ReplaceAll(safeText, "\n", "\n     "))
 		} else {
 			turn = append(turn, "you: (input not loaded)")
 		}

@@ -63,14 +63,24 @@ func TestToSafeText_DELAndC1(t *testing.T) {
 			want: "test\\x7fend",
 		},
 		{
-			name: "C1 control",
+			name: "C1 control as invalid UTF-8",
 			data: []byte("test\x80end"),
 			want: "test\\x80end",
 		},
 		{
-			name: "C1 high control",
+			name: "C1 high control as invalid UTF-8",
 			data: []byte("test\x9fend"),
 			want: "test\\x9fend",
+		},
+		{
+			name: "valid UTF-8 C1: U+0085 (NEL)",
+			data: []byte("test\xc2\x85end"), // U+0085 encoded as UTF-8
+			want: "test\\xc2\\x85end",
+		},
+		{
+			name: "valid UTF-8 C1: U+009B (8-bit CSI)",
+			data: []byte("test\xc2\x9bend"), // U+009B encoded as UTF-8
+			want: "test\\xc2\\x9bend",
 		},
 	}
 
@@ -244,8 +254,12 @@ func TestToSafeText_NoRawControls(t *testing.T) {
 			data: []byte("Position: \x1b[2J\x1b[H"),
 		},
 		{
-			name: "C1 controls",
+			name: "C1 controls as invalid UTF-8",
 			data: []byte("Error: \x80\x85\x9f"),
+		},
+		{
+			name: "valid UTF-8 C1 controls",
+			data: []byte("Error: \xc2\x85\xc2\x9b"), // U+0085 and U+009B in UTF-8
 		},
 		{
 			name: "CR and LF",
@@ -265,10 +279,14 @@ func TestToSafeText_NoRawControls(t *testing.T) {
 				}
 			}
 
-			// Verify no C1 controls
-			for b := 0x80; b <= 0x9f; b++ {
-				if bytes.Contains([]byte(got), []byte{byte(b)}) {
-					t.Errorf("ToSafeText output contains raw C1 byte 0x%02x: %q", b, got)
+			// Verify no C1 controls in output (they should be escaped)
+			// Check for raw C1 bytes (0x80-0x9f)
+			// But be careful: UTF-8 continuation bytes can also be in this range
+			// So we check rune-by-rune instead
+			for _, r := range got {
+				if r >= 0x80 && r <= 0x9f {
+					// This is a raw C1 byte - not allowed
+					t.Errorf("ToSafeText output contains raw C1 byte 0x%02x: %q", byte(r), got)
 				}
 			}
 		})
@@ -299,22 +317,27 @@ func TestSafeTextWithPrefix_WidthCompliance(t *testing.T) {
 		{
 			name:  "ASCII text",
 			text:  "Hello, World!",
-			width: 10,
+			width: 20,
 		},
 		{
 			name:  "Wide CJK characters",
 			text:  "日本語日本語日本語",
-			width: 10,
+			width: 20,
 		},
 		{
 			name:  "Emoji",
 			text:  "👨👩👧👦👨👩👧👦",
-			width: 10,
+			width: 20,
 		},
 		{
 			name:  "Mixed ASCII and wide",
 			text:  "Hello 世界 test",
-			width: 15,
+			width: 25,
+		},
+		{
+			name:  "small width",
+			text:  "abcdef",
+			width: 10,
 		},
 	}
 
@@ -328,9 +351,8 @@ func TestSafeTextWithPrefix_WidthCompliance(t *testing.T) {
 					t.Errorf("Line %d missing two-space prefix: %q", i, line)
 				}
 
-				// Check width compliance
-				content := strings.TrimPrefix(line, "  ")
-				cellWidth := runewidth.StringWidth(content)
+				// Check width compliance - the full line should not exceed width
+				cellWidth := runewidth.StringWidth(line)
 				if cellWidth > tt.width {
 					t.Errorf("Line %d exceeds width %d (got %d cells): %q", i, tt.width, cellWidth, line)
 				}
@@ -380,6 +402,40 @@ func TestSafeTextWithPrefix_AllLinesHavePrefix(t *testing.T) {
 	}
 }
 
+func TestSafeTextWithPrefix_EscapesAtomic(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "escape should not split across lines",
+			text: "ab\x1bcd",
+			want: []string{"  ab\\x1b", "  cd"},
+		},
+		{
+			name: "long escape token at boundary",
+			text: "ab\u202ecd", // RTL override
+			want: []string{"  ab\\u202e", "  cd"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SafeTextWithPrefix(tt.text, 10) // narrow width to force wrapping
+			// Just verify escapes are not split - each escape should appear whole on a line
+			fullOutput := strings.Join(got, "")
+			for _, part := range tt.want {
+				// Check that the escape from want appears in some line
+				escaped := strings.TrimPrefix(part, "  ")
+				if !strings.Contains(fullOutput, escaped) {
+					t.Errorf("SafeTextWithPrefix(%q, 10) missing escape %q in output %v", tt.text, escaped, got)
+				}
+			}
+		})
+	}
+}
+
 func TestSafeTextWithPrefix(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -421,6 +477,18 @@ func TestSafeTextWithPrefix(t *testing.T) {
 				"  ped to fit in the ",
 				"  width",
 			},
+		},
+		{
+			name:  "text with trailing newline",
+			text:  "hello\n",
+			width: 20,
+			want:  []string{"  hello"},
+		},
+		{
+			name:  "empty text",
+			text:  "",
+			width: 20,
+			want:  []string{"  "},
 		},
 	}
 

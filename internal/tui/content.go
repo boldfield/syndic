@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 
 	"github.com/boldfield/syndic/internal/client"
 	tea "github.com/charmbracelet/bubbletea"
@@ -94,4 +95,39 @@ func fetchRefs(ctx context.Context, cl *client.Client, cc *ContentCache, refs []
 // terminal line, so no content can place a character in column 0 or 1.
 func WrapContentLines(text string, width int) []string {
 	return SafeTextWithPrefix(text, width)
+}
+
+// WrapSafeTextWithPrefix wraps already-escaped text to width and prefixes every terminal line.
+// Unlike SafeTextWithPrefix, this does NOT call ToSafeText - it assumes the input is already
+// safe (escaped). Use this when the text has already been escaped by ToSafeText.
+func WrapSafeTextWithPrefix(safeText string, width int) []string {
+	const prefix = "  "
+	const minWidth = 3 // minimum 3: prefix (2) + at least 1 for content
+
+	if width < minWidth {
+		width = minWidth
+	}
+
+	// Split into paragraphs on newlines, trim trailing empty line
+	paragraphs := strings.Split(safeText, "\n")
+	if len(paragraphs) > 0 && paragraphs[len(paragraphs)-1] == "" {
+		paragraphs = paragraphs[:len(paragraphs)-1]
+	}
+
+	var out []string
+	for _, para := range paragraphs {
+		// Wrap paragraph to width, accounting for the prefix
+		lines := wrapParagraph(para, width-len(prefix))
+		// Add prefix to each line
+		for _, line := range lines {
+			out = append(out, prefix+line)
+		}
+	}
+
+	// If input was entirely empty or only newlines, return at least one empty prefixed line
+	if len(out) == 0 {
+		out = []string{prefix}
+	}
+
+	return out
 }

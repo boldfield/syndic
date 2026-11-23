@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -359,5 +360,69 @@ func TestAnswerTurnOrdersBySubmitSeq(t *testing.T) {
 	}}
 	if got := answerTurn(s); got != "aaa" {
 		t.Fatalf("answerTurn = %q, want the later submission aaa", got)
+	}
+}
+
+// TestTranscriptContentLineRendering verifies that hostile content in the transcript
+// is properly escaped and prefixed with two spaces on every terminal line.
+func TestTranscriptContentLineRendering(t *testing.T) {
+	// Create a content cache with various hostile content
+	cc := NewContentCache()
+
+	// Add content with control characters, bidi, and other hostile bytes
+	hostileContent := "normal text\x1b[31mred\x1b[0m\x0dCR\u202eRTL\nline2"
+	cc.Store("attempt:a1", hostileContent, nil)
+
+	// Create a minimal state with the item
+	s := State{
+		Attempts: map[string]AttemptInfo{
+			"a1": {ID: "a1", TurnID: "t1", Phase: "author", Status: "complete"},
+		},
+	}
+
+	// Create transcript input
+	in := transcriptInput{
+		items: []wire.TranscriptItem{
+			{Ref: "attempt:a1", ByteLen: int64(len(hostileContent))},
+		},
+		content: cc,
+	}
+
+	// Render the transcript
+	width := 80
+	lines := transcriptLines(s, "t1", in, width)
+	output := strings.Join(lines, "\n")
+
+	// Verify no raw control bytes in output
+	dangerousBytes := []byte{0x1b, 0x07, 0x0d}
+	for _, b := range dangerousBytes {
+		if bytes.Contains([]byte(output), []byte{b}) {
+			t.Errorf("transcript output contains raw control byte 0x%02x", b)
+		}
+	}
+
+	// Verify content lines are prefixed (body lines should have two-space prefix)
+	// Find the body content lines (they should start with "  ")
+	bodyLines := []string{}
+	for _, line := range lines {
+		// Skip header and empty lines - body content should be prefixed
+		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && line != "  " {
+			bodyLines = append(bodyLines, line)
+		}
+	}
+
+	if len(bodyLines) == 0 {
+		t.Fatal("no content lines found in transcript output")
+	}
+
+	// Verify the content is there but escaped
+	if !strings.Contains(output, "\\x1b") {
+		t.Error("escape sequence not found in output")
+	}
+	if !strings.Contains(output, "\\x0d") {
+		t.Error("CR escape not found in output")
+	}
+	if !strings.Contains(output, "\\u202e") {
+		t.Error("RTL override escape not found in output")
 	}
 }
