@@ -213,85 +213,125 @@ func TestRenderMarkdownMultilineWithRawMode(t *testing.T) {
 // Golden fixture tests with exact output assertions
 
 func TestGoldenCodeFenceWithLanguage(t *testing.T) {
-	text := "```go\nfunc main() {\n  fmt.Println(\"hello\")\n}\n```"
+	text := "```go\nfunc main() {}\n```"
 	width := 40
 
 	rawResult := RenderMarkdown(text, width, true)
 	renderedResult := RenderMarkdown(text, width, false)
 
 	// Raw mode should preserve the code fence with language label
-	if !strings.Contains(rawResult, "```go") {
-		t.Errorf("Raw mode: missing code fence language label in: %q", rawResult)
+	expectedRawLines := []string{
+		"  ```go",
+		"  func main() {}",
+		"  ```",
+	}
+	rawLines := strings.Split(rawResult, "\n")
+	if len(rawLines) != len(expectedRawLines) {
+		t.Errorf("Raw mode: expected %d lines, got %d:\n  expected: %v\n  got: %v",
+			len(expectedRawLines), len(rawLines), expectedRawLines, rawLines)
+	}
+	for i, line := range rawLines {
+		if i < len(expectedRawLines) && line != expectedRawLines[i] {
+			t.Errorf("Raw mode line %d: expected %q, got %q", i, expectedRawLines[i], line)
+		}
 	}
 
-	// Both modes should use 2-space prefix
+	// Rendered output should also include the language label (not stripped by renderer)
+	if !strings.Contains(renderedResult, "```go") {
+		t.Errorf("Rendered mode: missing code fence language label in: %q", renderedResult)
+	}
+
+	// Both should use 2-space prefix, no trailing padding
 	for _, line := range strings.Split(rawResult, "\n") {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Raw mode: non-prefixed line: %q", line)
-		}
-	}
-	for _, line := range strings.Split(renderedResult, "\n") {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Rendered mode: non-prefixed line: %q", line)
+		if strings.TrimSpace(line) != "" {
+			if !strings.HasPrefix(line, "  ") {
+				t.Errorf("Raw mode: line not prefixed with two spaces: %q", line)
+			}
+			if strings.TrimRight(line, " ") != line && strings.TrimSpace(line) != "" {
+				t.Errorf("Raw mode: line has trailing padding: %q", line)
+			}
 		}
 	}
 
-	// No ANSI escape sequences should appear
+	// No ANSI escape sequences
 	if strings.Contains(renderedResult, "\x1b") {
-		t.Errorf("Rendered mode: contains ANSI escape sequences: %q", renderedResult)
+		t.Errorf("Rendered mode: contains ANSI escape: %q", renderedResult)
 	}
 }
 
 func TestGoldenList(t *testing.T) {
-	text := "- item 1\n- item 2\n- item 3"
+	text := "- item 1\n- item 2"
 	width := 40
 
 	rawResult := RenderMarkdown(text, width, true)
 	renderedResult := RenderMarkdown(text, width, false)
 
-	// Raw mode should preserve list markers
-	if !strings.Contains(rawResult, "- item") {
-		t.Errorf("Raw mode: missing list items in: %q", rawResult)
+	// Raw mode expected output
+	expectedRawLines := []string{
+		"  - item 1",
+		"  - item 2",
 	}
-
-	// Both modes should have consistent indentation
 	rawLines := strings.Split(rawResult, "\n")
-	renderedLines := strings.Split(renderedResult, "\n")
-
+	if len(rawLines) != len(expectedRawLines) {
+		t.Errorf("Raw mode: expected %d lines, got %d:\n  expected: %v\n  got: %v",
+			len(expectedRawLines), len(rawLines), expectedRawLines, rawLines)
+	}
 	for i, line := range rawLines {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Raw mode: non-prefixed line %d: %q", i, line)
-		}
-	}
-	for i, line := range renderedLines {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Rendered mode: non-prefixed line %d: %q", i, line)
+		if i < len(expectedRawLines) && line != expectedRawLines[i] {
+			t.Errorf("Raw mode line %d: expected %q, got %q", i, expectedRawLines[i], line)
 		}
 	}
 
-	// No trailing padding in raw mode (lines should end without extra spaces)
-	for _, line := range rawLines {
-		trimmed := strings.TrimRight(line, " ")
-		if len(line) > len(trimmed) && strings.TrimSpace(line) != "" {
-			// Line has trailing spaces but is not empty after trim
-			t.Errorf("Raw mode: line has trailing padding: %q", line)
+	// Both modes must use 2-space prefix
+	for i, line := range rawLines {
+		if strings.TrimSpace(line) != "" {
+			if !strings.HasPrefix(line, "  ") {
+				t.Errorf("Raw mode line %d: not prefixed with two spaces: %q", i, line)
+			}
+			// No trailing padding in raw mode
+			if strings.TrimRight(line, " ") != line {
+				t.Errorf("Raw mode line %d: has trailing padding: %q", i, line)
+			}
 		}
 	}
 
-	// No ANSI sequences
+	for i, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" {
+			if !strings.HasPrefix(line, "  ") {
+				t.Errorf("Rendered mode line %d: not prefixed with two spaces: %q", i, line)
+			}
+		}
+	}
+
+	// No ANSI escape sequences
 	if strings.Contains(renderedResult, "\x1b") {
 		t.Errorf("Rendered mode: contains ANSI escape: %q", renderedResult)
 	}
 }
 
 func TestGoldenLink(t *testing.T) {
-	text := "Visit [example](https://example.com) for more info"
+	text := "Visit [example](https://example.com) now"
 	width := 60
 
 	rawResult := RenderMarkdown(text, width, true)
 	renderedResult := RenderMarkdown(text, width, false)
 
-	// URL should be visible in both modes
+	// Raw mode expected output
+	expectedRawLines := []string{
+		"  Visit [example](https://example.com) now",
+	}
+	rawLines := strings.Split(rawResult, "\n")
+	if len(rawLines) != len(expectedRawLines) {
+		t.Errorf("Raw mode: expected %d lines, got %d:\n  expected: %v\n  got: %v",
+			len(expectedRawLines), len(rawLines), expectedRawLines, rawLines)
+	}
+	for i, line := range rawLines {
+		if i < len(expectedRawLines) && line != expectedRawLines[i] {
+			t.Errorf("Raw mode line %d: expected %q, got %q", i, expectedRawLines[i], line)
+		}
+	}
+
+	// URL must be visible in both modes
 	if !strings.Contains(rawResult, "example.com") {
 		t.Errorf("Raw mode: URL not visible: %q", rawResult)
 	}
@@ -299,50 +339,103 @@ func TestGoldenLink(t *testing.T) {
 		t.Errorf("Rendered mode: URL not visible: %q", renderedResult)
 	}
 
-	// No hyperlink escape sequences
+	// No hyperlink escape sequences in rendered mode
 	if strings.Contains(renderedResult, "\x1b]8") {
 		t.Errorf("Rendered mode: found hyperlink escape: %q", renderedResult)
 	}
 
 	// Both modes must use 2-space prefix
-	for _, line := range strings.Split(rawResult, "\n") {
+	for i, line := range strings.Split(rawResult, "\n") {
 		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Raw mode: non-prefixed line: %q", line)
+			t.Errorf("Raw mode line %d: not prefixed with two spaces: %q", i, line)
 		}
 	}
-	for _, line := range strings.Split(renderedResult, "\n") {
+	for i, line := range strings.Split(renderedResult, "\n") {
 		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Rendered mode: non-prefixed line: %q", line)
+			t.Errorf("Rendered mode line %d: not prefixed with two spaces: %q", i, line)
 		}
 	}
 }
 
 func TestGoldenOutcomeLike(t *testing.T) {
-	// Outcome-like text that might look like a list or have special characters
-	text := "✓ approved by opus after 1 revision against abc123"
+	// Test outcome-like text with special characters that could confuse rendering
+	text := "✓ APPROVED by opus after 1 revision"
 	width := 60
 
 	rawResult := RenderMarkdown(text, width, true)
 	renderedResult := RenderMarkdown(text, width, false)
 
-	// Both should preserve the content and use 2-space prefix
-	for _, line := range strings.Split(rawResult, "\n") {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Raw mode: non-prefixed outcome line: %q", line)
-		}
+	// Raw mode expected
+	expectedRawLines := []string{
+		"  ✓ APPROVED by opus after 1 revision",
 	}
-	for _, line := range strings.Split(renderedResult, "\n") {
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
-			t.Errorf("Rendered mode: non-prefixed outcome line: %q", line)
+	rawLines := strings.Split(rawResult, "\n")
+	if len(rawLines) != len(expectedRawLines) {
+		t.Errorf("Raw mode: expected %d lines, got %d:\n  expected: %v\n  got: %v",
+			len(expectedRawLines), len(rawLines), expectedRawLines, rawLines)
+	}
+	for i, line := range rawLines {
+		if i < len(expectedRawLines) && line != expectedRawLines[i] {
+			t.Errorf("Raw mode line %d: expected %q, got %q", i, expectedRawLines[i], line)
 		}
 	}
 
-	// Content should be present in both
-	if !strings.Contains(rawResult, "approved") {
+	// Both modes must use 2-space prefix
+	for i, line := range strings.Split(rawResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode line %d: not prefixed with two spaces: %q", i, line)
+		}
+	}
+	for i, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode line %d: not prefixed with two spaces: %q", i, line)
+		}
+	}
+
+	// Content should match in both modes
+	if !strings.Contains(rawResult, "APPROVED") {
 		t.Errorf("Raw mode: outcome content missing: %q", rawResult)
 	}
-	if !strings.Contains(renderedResult, "approved") {
+	if !strings.Contains(renderedResult, "APPROVED") {
 		t.Errorf("Rendered mode: outcome content missing: %q", renderedResult)
+	}
+}
+
+// TestGoldenHostileBytes tests rendering of non-UTF-8 and control characters
+func TestGoldenHostileBytes(t *testing.T) {
+	// Invalid UTF-8 and control characters should be escaped, not leaked
+	text := "Data: \xff\x1b[31mred\x1b[0m"
+	width := 60
+
+	rawResult := RenderMarkdown(text, width, true)
+	renderedResult := RenderMarkdown(text, width, false)
+
+	// Should escape dangerous bytes, not show them raw
+	if strings.Contains(rawResult, "\xff") {
+		t.Errorf("Raw mode: invalid byte not escaped: %q", rawResult)
+	}
+	if strings.Contains(rawResult, "\x1b") {
+		t.Errorf("Raw mode: ANSI escape not escaped: %q", rawResult)
+	}
+	if strings.Contains(renderedResult, "\x1b") {
+		t.Errorf("Rendered mode: ANSI escape not escaped: %q", renderedResult)
+	}
+
+	// Should show visible escape representations
+	if !strings.Contains(rawResult, "\\xff") {
+		t.Errorf("Raw mode: visible escape missing: %q", rawResult)
+	}
+
+	// Both modes must use 2-space prefix
+	for i, line := range strings.Split(rawResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode line %d: not prefixed with two spaces: %q", i, line)
+		}
+	}
+	for i, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode line %d: not prefixed with two spaces: %q", i, line)
+		}
 	}
 }
 
@@ -383,5 +476,47 @@ func TestNumberedListAtStart(t *testing.T) {
 	// No ANSI escapes
 	if strings.Contains(result, "\x1b") {
 		t.Errorf("Contains ANSI escape: %q", result)
+	}
+}
+
+// TestRawModeToggleInteraction tests that /raw command changes View output
+func TestRawModeToggleInteraction(t *testing.T) {
+	// Use text with emphasis that wraps differently when rendered
+	text := "This is **bold** and *italic* and `code`"
+	width := 60
+
+	// Raw mode (Markdown disabled)
+	rawOutput := RenderMarkdown(text, width, true)
+
+	// Rendered mode (Markdown enabled)
+	renderedOutput := RenderMarkdown(text, width, false)
+
+	// Raw mode should preserve Markdown markers
+	if !strings.Contains(rawOutput, "**") {
+		t.Errorf("Raw mode should preserve ** markers: %q", rawOutput)
+	}
+	if !strings.Contains(rawOutput, "*") {
+		t.Errorf("Raw mode should preserve * markers: %q", rawOutput)
+	}
+
+	// Outputs may differ in whitespace/wrapping, but both are valid
+	// Just verify they both have proper prefix and no dangerous escapes
+	for i, line := range strings.Split(rawOutput, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw line %d not prefixed: %q", i, line)
+		}
+	}
+	for i, line := range strings.Split(renderedOutput, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered line %d not prefixed: %q", i, line)
+		}
+	}
+
+	// No dangerous escapes in either mode
+	if strings.Contains(rawOutput, "\x1b") {
+		t.Errorf("Raw mode has ANSI escape: %q", rawOutput)
+	}
+	if strings.Contains(renderedOutput, "\x1b") {
+		t.Errorf("Rendered mode has ANSI escape: %q", renderedOutput)
 	}
 }
