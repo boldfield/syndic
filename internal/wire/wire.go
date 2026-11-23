@@ -601,7 +601,7 @@ type ReviewItem struct {
 	Participant   string            `json:"participant"`
 	AttemptID     string            `json:"attempt_id"`
 	Kind          string            `json:"kind"`
-	Blocks        []ReviewBlock     `json:"blocks,omitempty"`
+	Blocks        []ReviewBlock     `json:"blocks"`
 	Commentary    *ContentReference `json:"commentary,omitempty"`
 	Oversized     bool              `json:"oversized,omitempty"`
 	Record        *ContentReference `json:"record,omitempty"`

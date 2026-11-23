@@ -455,11 +455,15 @@ func getConversation(store *journal.Store, openState func(turnID string) (string
 
 		// Add review_count for non-solo turns
 		turnRow, err := store.GetTurn(t.ID)
-		if err == nil && turnRow.Mode != "solo" {
+		if err != nil {
+			return nil, err
+		}
+		if turnRow.Mode != "solo" {
 			count, err := store.ReviewCount(t.ID)
-			if err == nil {
-				summary.ReviewCount = &count
+			if err != nil {
+				return nil, err
 			}
+			summary.ReviewCount = &count
 		}
 
 		reply.Turns[i] = summary

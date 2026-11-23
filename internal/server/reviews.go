@@ -17,18 +17,35 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 	}
 
 	// Get roster order from the turn's recorded roster, not current engine preset.
-	// First try to infer from existing review records, then fall back to engine status.
+	// GetTurnRoster reads review_records which may be empty for pre-v6 turns.
 	roster, err := store.GetTurnRoster(turnID)
 	if err != nil {
 		return nil, err
 	}
 	if len(roster) == 0 {
-		status, err := engine.Status()
+		// For pre-v6 turns, derive roster from the turn's attempts (the participants
+		// who actually reviewed the turn) in dispatch order, not the current preset.
+		attempts, err := store.ListAttempts(turnID)
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range status.Participants {
-			roster = append(roster, p.ID)
+		// Collect unique participants in the order they appear in attempts
+		seen := make(map[string]bool)
+		for _, attempt := range attempts {
+			if !seen[attempt.Participant] {
+				roster = append(roster, attempt.Participant)
+				seen[attempt.Participant] = true
+			}
+		}
+		// If no attempts yet (shouldn't happen for a completed turn), fall back to engine status
+		if len(roster) == 0 {
+			status, err := engine.Status()
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range status.Participants {
+				roster = append(roster, p.ID)
+			}
 		}
 	}
 
@@ -79,33 +96,31 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 				}
 			}
 		} else {
-			// Full form: include blocks and commentary
-			if len(item.Blocks) > 0 {
-				reviewItem.Blocks = make([]wire.ReviewBlock, len(item.Blocks))
-				for j, block := range item.Blocks {
-					reviewBlock := wire.ReviewBlock{
-						BlockID: block.BlockID,
-						State:   block.State,
-					}
-					if block.Severity != "" {
-						reviewBlock.Severity = &block.Severity
-					}
-					if block.Evidence != nil {
-						reviewBlock.Evidence = &wire.ContentReference{
-							Ref:     block.Evidence.Ref,
-							SHA256:  block.Evidence.SHA256,
-							ByteLen: block.Evidence.ByteLen,
-						}
-					}
-					if block.Remedy != nil {
-						reviewBlock.Remedy = &wire.ContentReference{
-							Ref:     block.Remedy.Ref,
-							SHA256:  block.Remedy.SHA256,
-							ByteLen: block.Remedy.ByteLen,
-						}
-					}
-					reviewItem.Blocks[j] = reviewBlock
+			// Full form: always include blocks (empty array for approve without blocks) and commentary
+			reviewItem.Blocks = make([]wire.ReviewBlock, len(item.Blocks))
+			for j, block := range item.Blocks {
+				reviewBlock := wire.ReviewBlock{
+					BlockID: block.BlockID,
+					State:   block.State,
 				}
+				if block.Severity != "" {
+					reviewBlock.Severity = &block.Severity
+				}
+				if block.Evidence != nil {
+					reviewBlock.Evidence = &wire.ContentReference{
+						Ref:     block.Evidence.Ref,
+						SHA256:  block.Evidence.SHA256,
+						ByteLen: block.Evidence.ByteLen,
+					}
+				}
+				if block.Remedy != nil {
+					reviewBlock.Remedy = &wire.ContentReference{
+						Ref:     block.Remedy.Ref,
+						SHA256:  block.Remedy.SHA256,
+						ByteLen: block.Remedy.ByteLen,
+					}
+				}
+				reviewItem.Blocks[j] = reviewBlock
 			}
 			if item.Commentary.Ref != "" {
 				reviewItem.Commentary = &wire.ContentReference{
