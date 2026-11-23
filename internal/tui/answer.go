@@ -18,6 +18,7 @@ type answerInput struct {
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
 	plainMode      bool   // true when colors should not be used
+	rawMode        bool   // true when Markdown rendering is disabled
 	width          int    // terminal width; content is wrapped and indented to it when positive
 	now            time.Time
 }
@@ -97,12 +98,15 @@ func bodyRaw(cc *ContentCache, ref string) string {
 	return strings.TrimRight(item.Data, "\n")
 }
 
-// shown is the one way untrusted text enters the answer and chat tabs: escaped
-// once, and wrapped and indented as content lines when the width is known.
-func shown(raw string, width int) string {
-	if width <= 0 {
-		return ToSafeText([]byte(raw))
-	}
+// shownAnswer renders answer text with optional Markdown rendering.
+// It respects rawMode to disable Markdown, and plainMode to disable it in plain terminals.
+func shownAnswer(raw string, width int, in answerInput) string {
+	return renderAnswerMarkdown(raw, width, in.rawMode, in.plainMode)
+}
+
+// shownPlain renders non-answer text as plain safe text, without Markdown rendering.
+// This is used for TerminalReason, evidence, remedy, and override messages.
+func shownPlain(raw string, width int) string {
 	return strings.Join(SafeTextWithPrefix(raw, width), "\n")
 }
 
@@ -120,7 +124,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	var lines []string
 	candidate := func() {
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else if ti.CandidateHash != nil {
 			lines = append(lines, "loading…")
 		}
@@ -142,15 +146,14 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	case "solo_complete":
 		lines = append(lines, "UNREVIEWED (solo)")
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else {
 			lines = append(lines, "loading…")
 		}
 
 	case "incomplete":
 		if ti.TerminalReason != nil {
-			// Escape terminal reason which may contain untrusted content
-			lines = append(lines, shown(*ti.TerminalReason, in.width))
+			lines = append(lines, shownPlain(*ti.TerminalReason, in.width))
 		}
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		if ti.CandidateHash != nil {
@@ -166,7 +169,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, shown("HUMAN OVERRIDE: "+reason, in.width))
+		lines = append(lines, shownPlain("HUMAN OVERRIDE: "+reason, in.width))
 		candidate()
 
 	case "cancelled":
@@ -186,7 +189,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			} else {
 				draftText = draftBanner.Render(draftText)
 			}
-			lines = append(lines, draftText, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, draftText, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
 		lines = append(lines, progressLine(ti, in.now))
 	}
@@ -224,6 +227,7 @@ func progressLine(ti TurnInfo, now time.Time) string {
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 
 // blockLines lists open blocks with severity, evidence and remedy.
+// These are always rendered as plain safe text, never with Markdown.
 func blockLines(blocks []wire.OpenBlock, width int) []string {
 	var lines []string
 	for _, b := range blocks {
@@ -232,22 +236,21 @@ func blockLines(blocks []wire.OpenBlock, width int) []string {
 		}
 		lines = append(lines, safeLine(fmt.Sprintf("[%s] %s", b.Severity, b.ID)))
 		if b.Evidence != "" {
-			lines = append(lines, shownLabelled("evidence: ", b.Evidence, width))
+			lines = append(lines, shownLabelledPlain("evidence: ", b.Evidence, width))
 		}
 		if b.Remedy != "" {
-			lines = append(lines, shownLabelled("remedy: ", b.Remedy, width))
+			lines = append(lines, shownLabelledPlain("remedy: ", b.Remedy, width))
 		}
 	}
 	return lines
 }
 
-// shownLabelled is shown for a labelled value; without a width the label is
-// indented in the legacy way.
-func shownLabelled(label, raw string, width int) string {
+// shownLabelledPlain renders a labelled value as plain safe text without Markdown.
+func shownLabelledPlain(label, raw string, width int) string {
 	if width <= 0 {
 		return "  " + label + ToSafeText([]byte(raw))
 	}
-	return shown(label+raw, width)
+	return shownPlain(label+raw, width)
 }
 
 // approvers are the reviewers with a valid verdict on the turn.

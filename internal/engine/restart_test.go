@@ -378,6 +378,9 @@ func TestRestartSplitPoolHoldsBothPools(t *testing.T) {
 	turnID := submitReview(t, h, "s1")
 	waitCount(t, h, wire.EventKindAttemptBegun, 3)
 	attemptID := attemptsOf(h, turnID, "r1")[0]
+	// r2's attempt must have ended, or it too is held in both pools.
+	r2Attempt := attemptsOf(h, turnID, "r2")[0]
+	waitFor(t, "r2's attempt completed", func() bool { return getAttempt(t, h, r2Attempt).State == "completed" })
 
 	split := restartRoster([]rpart{
 		author(),

@@ -78,6 +78,7 @@ type App struct {
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
 	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
+	rawMode              bool                        // /raw on|off; true disables Markdown rendering
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -216,6 +217,7 @@ func (a *App) answerIn(turnID string) answerInput {
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
+		rawMode:        a.rawMode,
 		now:            a.now(),
 		width:          a.width,
 	}
