@@ -56,12 +56,19 @@ func (c *Client) VerifiedReviewsPage(ctx context.Context, turnID string, cursor 
 }
 
 // AllReviews pages through all accepted reviews for a turn, stopping when no next_cursor is returned.
-// It rejects pages with repeated cursors to prevent infinite loops and validates all paging constraints.
+// It rejects a cursor the server has already issued, so a looping server cannot hang the caller.
 func (c *Client) AllReviews(ctx context.Context, turnID string) ([]wire.ReviewItem, error) {
+	return c.AllReviewsPaged(ctx, turnID, 50)
+}
+
+// AllReviewsPaged is AllReviews with an explicit page size (1 to 50).
+func (c *Client) AllReviewsPaged(ctx context.Context, turnID string, limit int) ([]wire.ReviewItem, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("limit must be positive: %d", limit)
+	}
 	var allItems []wire.ReviewItem
 	var cursor *string
-	var lastCursor *string
-	limit := 50
+	seen := map[string]bool{}
 
 	for {
 		items, nextCursor, err := c.VerifiedReviewsPage(ctx, turnID, cursor, &limit)
@@ -72,11 +79,10 @@ func (c *Client) AllReviews(ctx context.Context, turnID string) ([]wire.ReviewIt
 		if nextCursor == nil {
 			break
 		}
-		// Detect repeated cursor to prevent infinite loop
-		if lastCursor != nil && nextCursor != nil && *lastCursor == *nextCursor {
+		if seen[*nextCursor] {
 			return nil, fmt.Errorf("server returned repeated cursor: %s", *nextCursor)
 		}
-		lastCursor = cursor
+		seen[*nextCursor] = true
 		cursor = nextCursor
 	}
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/journal"
@@ -28,8 +29,6 @@ func init() {
 	cover(protocol, "an author result with status `truncated` yields `author_failed:truncated` and nothing is dispatched to reviewers", "TestProtocol_AuthorTruncated")
 	cover(protocol, "a reviewer result with mismatched `ReportedModel` fails `CheckResult` and is never parsed", "TestProtocol_ReviewerModelMismatch")
 	cover(protocol, "solo with status `refused` is `incomplete`, not `solo_complete`", "TestProtocol_SoloRefused")
-	cover(protocol, "review_count from conversation matches the total returned by AllReviews", "TestProtocol_ReviewCountMatchesAllReviews")
-	cover(protocol, "a solo turn has zero reviews and an empty list from AllReviews", "TestProtocol_SoloTurnZeroReviews")
 }
 
 // verdict is a reviewer step whose reply is built from the request it
@@ -394,88 +393,107 @@ func TestProtocol_SoloRefused(t *testing.T) {
 	}
 }
 
-func TestProtocol_ReviewCountMatchesAllReviews(t *testing.T) {
+// reviewCountOf returns the review_count the conversation reports for the turn
+// (zero when absent) and fails when the turn is missing.
+func reviewCountOf(t *testing.T, s *suite, c *client.Client, convID, turnID string) int {
+	t.Helper()
+	conv, err := c.Conversation(s.ctx(), convID)
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	for _, turn := range conv.Turns {
+		if turn.ID == turnID {
+			if turn.ReviewCount == nil {
+				return 0
+			}
+			return *turn.ReviewCount
+		}
+	}
+	t.Fatalf("turn %s not found in conversation", turnID)
+	return 0
+}
+
+// wantNoReviews requires zero review_count and an empty, cursor-less list.
+func wantNoReviews(t *testing.T, s *suite, c *client.Client, convID, turnID string) {
+	t.Helper()
+	if n := reviewCountOf(t, s, c, convID, turnID); n != 0 {
+		t.Fatalf("review_count = %d, want 0", n)
+	}
+	items, next, err := c.VerifiedReviewsPage(s.ctx(), turnID, nil, nil)
+	if err != nil || len(items) != 0 || next != nil {
+		t.Fatalf("reviews = %d items, cursor %v, err %v; want empty, no cursor", len(items), next, err)
+	}
+	all, err := c.AllReviews(s.ctx(), turnID)
+	if err != nil || len(all) != 0 {
+		t.Fatalf("AllReviews = %d items, err %v; want empty", len(all), err)
+	}
+}
+
+func TestClientReviews_CountMatchesAllReviews(t *testing.T) {
 	t.Parallel()
-	// Test that review_count from conversation matches the total returned by AllReviews
-	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
+	// Round 1 blocks; round 2's first verdict is malformed and its repair is
+	// accepted, so two verdicts are accepted. A page size of one spans pages.
+	s := newSuite(t, revRoster(2, 5), map[string][]fake.Step{
+		"author":   revAuthor(revAnswer, revRevised),
+		"reviewer": revAcks(revBlock0("b1", "e"), revV2(1, "approve", "", "", "b1 maintained"), revV2(1, "approve", "", "", "b1 withdrawn")),
+	})
 	c := s.Dial(t)
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	turnID := reply.TurnID
-	convID := reply.ConversationID
-	s.WaitTerminal(turnID)
-
-	// Get the conversation to read review_count
-	conv, err := c.Conversation(s.ctx(), convID)
-	if err != nil {
-		t.Fatalf("Conversation: %v", err)
+	s.WaitTerminal(reply.TurnID)
+	rows := s.attemptRows(t, reply.TurnID, "reviewer", "review")
+	if len(rows) != 3 || rows[2].RepairOf == nil {
+		t.Fatalf("review attempts = %+v, want block, malformed, repair", rows)
 	}
 
-	// Find the turn in the conversation
-	var turn *wire.ConversationTurnSummary
-	for i := range conv.Turns {
-		if conv.Turns[i].ID == turnID {
-			turn = &conv.Turns[i]
-			break
+	count := reviewCountOf(t, s, c, reply.ConversationID, reply.TurnID)
+	if count != 2 {
+		t.Fatalf("review_count = %d, want 2 (block and accepted repair)", count)
+	}
+	for _, limit := range []int{1, 50} {
+		all, err := c.AllReviewsPaged(s.ctx(), reply.TurnID, limit)
+		if err != nil {
+			t.Fatalf("AllReviewsPaged(%d): %v", limit, err)
+		}
+		if len(all) != count {
+			t.Fatalf("limit %d: client total %d, want review_count %d", limit, len(all), count)
+		}
+		if all[0].Kind != "block" || all[1].Kind != "approve" {
+			t.Fatalf("limit %d: kinds %q, %q; want block then the repaired approve", limit, all[0].Kind, all[1].Kind)
 		}
 	}
-	if turn == nil {
-		t.Fatalf("turn %s not found in conversation", turnID)
-	}
-
-	// Get all reviews through the client
-	allReviews, err := c.AllReviews(s.ctx(), turnID)
-	if err != nil {
-		t.Fatalf("AllReviews: %v", err)
-	}
-
-	// Verify AllReviews matches review_count
-	if turn.ReviewCount == nil {
-		t.Fatalf("turn has no review_count")
-	}
-	if len(allReviews) != *turn.ReviewCount {
-		t.Errorf("AllReviews returned %d items, want %d per review_count", len(allReviews), *turn.ReviewCount)
+	items, next, err := c.VerifiedReviewsPage(s.ctx(), reply.TurnID, nil, revIntPtr(1))
+	if err != nil || len(items) != 1 || next == nil {
+		t.Fatalf("first page of one = %d items, cursor %v, err %v; want one item and a cursor", len(items), next, err)
 	}
 }
 
-func TestProtocol_SoloTurnZeroReviews(t *testing.T) {
+func TestClientReviews_SoloZero(t *testing.T) {
 	t.Parallel()
-	// Test that a solo turn has zero reviews and an empty list from AllReviews
-	scripts := map[string][]fake.Step{"author": {enginetest.Reply(authorOK)}}
-	s := newSuite(t, enginetest.RosterTOML, scripts)
+	s := newSuite(t, enginetest.RosterTOML, map[string][]fake.Step{"author": {enginetest.Reply(authorOK)}})
 	c := s.Dial(t)
 	preset := "solo"
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?", Preset: &preset})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
-	turnID := reply.TurnID
-	convID := reply.ConversationID
-	s.WaitTerminal(turnID)
+	s.WaitTerminal(reply.TurnID)
+	wantNoReviews(t, s, c, reply.ConversationID, reply.TurnID)
+}
 
-	// Get all reviews through the client
-	allReviews, err := c.AllReviews(s.ctx(), turnID)
+func TestClientReviews_AllFailedZero(t *testing.T) {
+	t.Parallel()
+	// The only reviewer's verdict is rejected, so no verdict is accepted.
+	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictWrongHash)))
+	c := s.Dial(t)
+	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "what is the answer?"})
 	if err != nil {
-		t.Fatalf("AllReviews: %v", err)
+		t.Fatalf("submit: %v", err)
 	}
-	if len(allReviews) != 0 {
-		t.Errorf("solo turn AllReviews returned %d items, want 0", len(allReviews))
-	}
-
-	// Check conversation turn summary
-	conv, err := c.Conversation(s.ctx(), convID)
-	if err != nil {
-		t.Fatalf("Conversation: %v", err)
-	}
-
-	for i := range conv.Turns {
-		if conv.Turns[i].ID == turnID {
-			if conv.Turns[i].ReviewCount != nil && *conv.Turns[i].ReviewCount != 0 {
-				t.Errorf("solo turn review_count = %d, want 0 or nil", *conv.Turns[i].ReviewCount)
-			}
-			break
-		}
-	}
+	s.WaitTerminal(reply.TurnID)
+	turn := s.Turn(t, c, reply.TurnID)
+	wantTurn(t, turn, engine.StateIncomplete, "reviewer_failed:reviewer:rejected")
+	wantNoReviews(t, s, c, reply.ConversationID, reply.TurnID)
 }

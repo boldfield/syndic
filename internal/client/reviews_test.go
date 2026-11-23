@@ -925,3 +925,49 @@ func TestAllReviewsPagingCancellation(t *testing.T) {
 		t.Fatalf("expected context cancellation error on second page")
 	}
 }
+
+// repeatingCursorServer answers every reviews request with one item and the
+// next cursor from cursors (cycling), counting the requests it receives.
+func repeatingCursorServer(t *testing.T, cursors []string, calls *int) *testServer {
+	t.Helper()
+	return startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestReviews {
+			return true
+		}
+		item, _ := json.Marshal(wire.ReviewItem{Round: 0, CandidateHash: "h", Participant: "r", AttemptID: "a", Kind: "approve", Blocks: []wire.ReviewBlock{}})
+		next := cursors[*calls%len(cursors)]
+		*calls++
+		replyBody, _ := wire.NewReply(frame.ID, wire.ReviewsReply{Items: []json.RawMessage{item}, NextCursor: &next})
+		_ = w.Write(replyBody)
+		return *calls < 20
+	}))
+}
+
+func TestAllReviewsRepeatedCursor(t *testing.T) {
+	for name, cursors := range map[string][]string{
+		"immediate": {"A"},
+		"cycle":     {"A", "B", "C"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			server := repeatingCursorServer(t, cursors, &calls)
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c, err := Dial(ctx, server.addr, "test-client", "1.0")
+			if err != nil {
+				t.Fatalf("Dial failed: %v", err)
+			}
+			defer func() { _ = c.Close() }()
+
+			if _, err := c.AllReviews(ctx, "turn-1"); err == nil {
+				t.Fatal("expected repeated cursor error")
+			}
+			// Immediate: A then A again is caught on the second reply.
+			// Cycle: A, B, C, A is caught on the fourth reply.
+			if want := len(cursors) + 1; name == "cycle" && calls != want || name == "immediate" && calls != 2 {
+				t.Fatalf("server saw %d requests, want the repeat caught at once", calls)
+			}
+		})
+	}
+}
