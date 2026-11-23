@@ -18,6 +18,7 @@ func TestSyndicdNotDependsOnTUIModules(t *testing.T) {
 		"github.com/charmbracelet/glamour",
 		"github.com/charmbracelet/huh",
 		"github.com/charmbracelet/harmonica",
+		"github.com/charmbracelet/lipgloss",
 		"github.com/lrstanley/bubblezone",
 	}
 
@@ -27,27 +28,23 @@ func TestSyndicdNotDependsOnTUIModules(t *testing.T) {
 		t.Fatal("could not find module root (go.mod)")
 	}
 
-	cmd := exec.Command("go", "list", "-m", "all")
+	// Check if syndicd imports any of the forbidden modules
+	cmd := exec.Command("go", "list", "-deps", "github.com/boldfield/syndic/cmd/syndicd")
 	cmd.Dir = modRoot
 	var out bytes.Buffer
+	var errOut bytes.Buffer
 	cmd.Stdout = &out
+	cmd.Stderr = &errOut
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("go list -m all failed: %v", err)
-	}
-
-	// Check if syndicd imports any of the forbidden modules
-	cmd = exec.Command("go", "list", "-deps", "github.com/boldfield/syndic/cmd/syndicd")
-	cmd.Dir = modRoot
-	out.Reset()
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("go list -deps failed: %v", err)
+		t.Fatalf("go list -deps failed: %v\nstderr: %s", err, errOut.String())
 	}
 
 	deps := out.String()
 	for _, mod := range forbiddenModules {
-		if strings.Contains(deps, mod) {
-			t.Errorf("cmd/syndicd should not depend on %s", mod)
+		for _, line := range strings.Split(deps, "\n") {
+			if line == mod {
+				t.Errorf("cmd/syndicd should not depend on %s", mod)
+			}
 		}
 	}
 }

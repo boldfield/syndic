@@ -10,5 +10,6 @@ import (
 	_ "github.com/charmbracelet/glamour"
 	_ "github.com/charmbracelet/harmonica"
 	_ "github.com/charmbracelet/huh"
+	_ "github.com/charmbracelet/lipgloss"
 	_ "github.com/lrstanley/bubblezone"
 )
