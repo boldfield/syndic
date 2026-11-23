@@ -84,9 +84,9 @@ func TestChatShowsEachTurnsInputThenOutcome(t *testing.T) {
 
 	lines := chatView(a)
 	order := []string{
-		"you: first question", "first answer", "approved by rev against abcdef123456",
-		"you: second question", "UNREVIEWED (solo)", "second answer",
-		"you: third question", "HUMAN OVERRIDE: good enough", "third answer",
+		"› first question", "first answer", "approved by rev against abcdef123456",
+		"› second question", "UNREVIEWED (solo)", "second answer",
+		"› third question", "HUMAN OVERRIDE: good enough", "third answer",
 	}
 	prev := -1
 	for _, want := range order {
@@ -177,7 +177,7 @@ func TestChatMissingAnswerAndTrimmedTurnsAreDistinct(t *testing.T) {
 	if marked != 1 {
 		t.Fatalf("%d lines say %q, want 1:\n%s", marked, notInContext, strings.Join(lines, "\n"))
 	}
-	if m, in, other := lineOf(t, lines, notInContext), lineOf(t, lines, "you: old question"), lineOf(t, lines, "you: cancelled question"); m < in || m > other {
+	if m, in, other := lineOf(t, lines, notInContext), lineOf(t, lines, "› old question"), lineOf(t, lines, "› cancelled question"); m < in || m > other {
 		t.Errorf("marker at line %d, want between the first turn (%d) and the second (%d)", m, in, other)
 	}
 }
@@ -203,7 +203,7 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.Contains(last, "[reviewers_dispatched] [round 1/2] [30s]") || !strings.Contains(last, "author:writer idle") {
 		t.Errorf("status line = %q, want the turn state, round, elapsed time, author state and the key hint", last)
 	}
-	lineOf(t, lines, "you: running question")
+	lineOf(t, lines, "› running question")
 	lineOf(t, lines, progress)
 
 	for _, key := range []tea.KeyType{tea.KeyTab, tea.KeyTab} {
@@ -260,20 +260,20 @@ func TestChatScrollsBackThroughOlderTurns(t *testing.T) {
 		approveBy(a, id, "rev")
 	}
 	v := a.View()
-	if !strings.Contains(v, "you: question t12") || strings.Contains(v, "you: question t01") {
+	if !strings.Contains(v, "› question t12") || strings.Contains(v, "› question t01") {
 		t.Fatalf("a new chat should follow its newest turn:\n%s", v)
 	}
 	for i := 0; i < 20; i++ {
 		a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 	}
 	v = a.View()
-	if !strings.Contains(v, "you: question t01") || strings.Contains(v, "you: question t12") {
+	if !strings.Contains(v, "› question t01") || strings.Contains(v, "› question t12") {
 		t.Fatalf("PgUp did not reach the oldest turn:\n%s", v)
 	}
 	for i := 0; i < 20; i++ {
 		a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	}
-	if v = a.View(); !strings.Contains(v, "you: question t12") {
+	if v = a.View(); !strings.Contains(v, "› question t12") {
 		t.Fatalf("PgDn did not return to the newest turn:\n%s", v)
 	}
 }
@@ -331,7 +331,7 @@ func TestChatRecordLoadedTurnShowsRevisionsAndInput(t *testing.T) {
 	if got := a.state.Turns["t1"]; got.Round != 2 || got.MaxRounds != 2 || got.InputRef != ref {
 		t.Fatalf("turn after merge = %+v, want round 2 of 2 and the input ref", got)
 	}
-	lineOf(t, chatView(a), "you: loading…")
+	lineOf(t, chatView(a), "› loading…")
 	refs := chatRefs(a.state, a.chatIn())
 	found := false
 	for _, r := range refs {
@@ -342,7 +342,7 @@ func TestChatRecordLoadedTurnShowsRevisionsAndInput(t *testing.T) {
 	}
 	a.content.Store(ref, "what was typed", nil)
 	lines := chatView(a)
-	lineOf(t, lines, "you: what was typed")
+	lineOf(t, lines, "› what was typed")
 	lineOf(t, lines, "approved by rev after 2 revisions against abcdef123456")
 }
 
@@ -387,7 +387,7 @@ func TestChatTrimPointComesFromTheNewestTurnRecord(t *testing.T) {
 	if n := marked(); n != 1 {
 		t.Errorf("trimmed from t2: %d turns marked, want 1", n)
 	}
-	if lineOf(t, chatView(a), notInContext) > lineOf(t, chatView(a), "you: two") {
+	if lineOf(t, chatView(a), notInContext) > lineOf(t, chatView(a), "› two") {
 		t.Error("the marker is not on the first turn")
 	}
 

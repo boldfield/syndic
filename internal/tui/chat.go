@@ -16,6 +16,9 @@ type chatInput struct {
 	width   int                             // terminal width; user text is wrapped and indented to it when positive
 }
 
+// userMark begins a user input in column 0.
+const userMark = "› "
+
 // notInContext marks a turn that /trim dropped from the history later turns see.
 const notInContext = "not in context"
 
@@ -110,20 +113,21 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 		}
 		if ok {
 			if in.width > 0 {
-				// The label takes the place of the first line's indent, so the
-				// v5 "you: " row stays; the text is wrapped to fit beside it.
-				for i, l := range SafeTextWithPrefix(text, in.width-3) {
-					lead := "     "
+				// The mark takes the place of the first line's indent; the
+				// continuation lines are plain content lines.
+				for i, l := range SafeTextWithPrefix(text, in.width) {
 					if i == 0 {
-						lead = "you: "
+						l = userMark + strings.TrimPrefix(l, contentPrefix)
 					}
-					turn = append(turn, lead+strings.TrimPrefix(l, contentPrefix))
+					turn = append(turn, l)
 				}
 			} else {
-				turn = append(turn, "you: "+strings.ReplaceAll(ToSafeText([]byte(text)), "\n", "\n     "))
+				lines := strings.Split(ToSafeText([]byte(text)), "\n")
+				lines[0] = userMark + lines[0]
+				turn = append(turn, strings.Join(lines, "\n"+contentPrefix))
 			}
 		} else {
-			turn = append(turn, "you: (input not loaded)")
+			turn = append(turn, userMark+"(input not loaded)")
 		}
 		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
 		if trimmed[id] {

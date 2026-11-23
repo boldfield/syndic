@@ -214,8 +214,8 @@ func TestFourBannersCollapseAt80x24(t *testing.T) {
 	lines := strings.Split(v, "\n")
 	// tab bar, tab area, banners, input, status line.
 	at := 1 + body
-	if lines[at] != "deadlines: provisional" || lines[at+1] != "+3 more" {
-		t.Errorf("banner region = %q, %q; want the first banner and +3 more", lines[at], lines[at+1])
+	if !strings.HasPrefix(lines[at], "identity: unknown(name-matched)") || lines[at+1] != "+4 more" {
+		t.Errorf("banner region = %q, %q; want the identity banner first and +4 more", lines[at], lines[at+1])
 	}
 	if body < 5 {
 		t.Errorf("tab area has %d lines, want at least 5", body)

@@ -585,12 +585,12 @@ func TestParticipantsOrphanedHold(t *testing.T) {
 
 	// On a short terminal the fitted view cuts the orphaned hold; PgDn reaches it.
 	// This fixture has unprobed default-preset participants, so the unprobed banner takes a head line: 16 rows give the same overflow 15 did.
-	send(r, resizeMsg(80, 16)) // height adjusted for the new unprobed banner line
+	send(r, resizeMsg(80, 17)) // height adjusted for the unprobed and identity banner lines
 	untilPartsView(t, r, "more lines (PgDn)")
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown}, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilPartsView(t, r, "/release rpool "+m[1])
-	if n := len(strings.Split(v, "\n")); n > 16 {
-		t.Errorf("view is %d lines at 16 rows", n)
+	if n := len(strings.Split(v, "\n")); n > 17 {
+		t.Errorf("view is %d lines at 17 rows", n)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp}, tea.KeyMsg{Type: tea.KeyPgUp})
 	untilPartsView(t, r, "more lines (PgDn)")

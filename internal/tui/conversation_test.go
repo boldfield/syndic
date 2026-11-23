@@ -177,7 +177,7 @@ func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
 
 	re := start(WithWorkDir("/ws/a"), WithConversation(a.app.conversationID, turns))
 	re.until("the earlier answer and input", func(v string) bool {
-		return strings.Contains(v, "ALPHA-ANSWER") && strings.Contains(v, "you: alpha question")
+		return strings.Contains(v, "ALPHA-ANSWER") && strings.Contains(v, "› alpha question")
 	})
 	v := re.app.View()
 	if strings.Contains(v, "BRAVO-ANSWER") {
@@ -225,7 +225,7 @@ func TestReopenedTrimmedConversationMarksTurnsNotInContext(t *testing.T) {
 	// Reopened untrimmed, every turn is in context.
 	plain := start(WithWorkDir("/ws/a"), WithConversation(conv, order))
 	plain.until("both turns approved", func(v string) bool {
-		return strings.Count(v, "approved by") == 2 && strings.Contains(v, "you: second question")
+		return strings.Count(v, "approved by") == 2 && strings.Contains(v, "› second question")
 	})
 	if v := plain.app.View(); strings.Contains(v, notInContext) {
 		t.Fatalf("an untrimmed conversation shows %q:\n%s", notInContext, v)
@@ -269,16 +269,16 @@ func TestReopenedTrimmedConversationMarksTurnsNotInContext(t *testing.T) {
 	re := start(WithWorkDir("/ws/a"), WithConversation(conv, append(order, reply.TurnID)))
 	re.until("the trimmed turn marked", func(v string) bool {
 		return strings.Count(v, "approved by") == 3 && strings.Contains(v, notInContext) &&
-			strings.Contains(v, "you: first question") && strings.Contains(v, "you: second question") && strings.Contains(v, "you: third question")
+			strings.Contains(v, "› first question") && strings.Contains(v, "› second question") && strings.Contains(v, "› third question")
 	})
 	lines := strings.Split(re.app.View(), "\n")
 	first, second, marker := -1, -1, -1
 	marked := 0
 	for i, l := range lines {
 		switch {
-		case strings.Contains(l, "you: first question"):
+		case strings.Contains(l, "› first question"):
 			first = i
-		case strings.Contains(l, "you: second question"):
+		case strings.Contains(l, "› second question"):
 			second = i
 		case strings.Contains(l, notInContext):
 			marker = i
