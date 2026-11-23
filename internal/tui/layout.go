@@ -1,192 +1,116 @@
 package tui
 
-// RegionState describes which optional regions are currently shown.
-type RegionState struct {
-	DrawerOpen bool
-	ListOpen   bool
-	HelpOpen   bool
+import "fmt"
+
+// Height limits of the v6 layout (section 1, Heights).
+const (
+	minBodyLines     = 5 // the active tab never gets fewer, where the screen allows
+	maxBannerLines   = 2
+	maxListLines     = 5
+	drawerLines      = 7
+	tallDrawerLines  = 9
+	tallDrawerAbove  = 30 // the drawer takes tallDrawerLines above this many rows
+	regionMinWidth   = 80 // the drawer and lists open from this size up
+	regionMinHeight  = 24
+	maxInputViewport = 6 // the input scrolls inside itself beyond this
+)
+
+// regionWant is what the rest of the TUI asks the layout for. The zero value
+// asks for nothing: the drawer, lists, attached line and help line are other
+// tasks' features, and each reserves its lines by setting its field here.
+type regionWant struct {
+	Drawer    bool // the reviews drawer is open
+	ListLines int  // lines a command or file list would take; 0 when closed
+	Attached  bool // the attached line has content
+	Help      bool // the short help line is wanted
 }
 
-// Bounds describes the allocation of terminal lines to each UI region for a
-// given terminal size, respecting v6 height priorities: tab bar, status line,
-// content, input, and optional drawer, lists, and banners. All fields are
-// non-negative.
-type Bounds struct {
-	Height    int // terminal height
-	Width     int // terminal width
-	TabBar    int // tab bar: always 1 line
-	Status    int // status line: always 1 line
-	Content   int // active tab content: minimum 5 lines when drawer/list open
-	Input     int // input viewport: 1 to 6 lines visible (may scroll beyond)
-	Banners   int // banners: at most 2 lines, shrinks to 1 when drawer forces
-	Attached  int // attached line: 1 line reserved (D-07)
-	List      int // command or file list: at most 5 lines (closed when drawer opens)
-	ShortHelp int // short help: 1 line (hidden when drawer is open)
-	Drawer    int // reviews drawer: 7 lines or 9 above 30 rows (mutually exclusive with List)
+// layoutIn is everything the allocator needs.
+type layoutIn struct {
+	Height, Width int
+	Banners       int // banners that apply, before folding
+	InputLines    int // screen lines the input's text takes
+	Want          regionWant
 }
 
-// calcBounds allocates terminal height to each region according to v6 priority
-// and minimum constraints, taking into account which regions are currently open.
-// Terminal must be at least 80x24 for drawer/lists; below that they are disabled.
-func calcBounds(height, width int, state RegionState) Bounds {
-	b := Bounds{Height: height, Width: width, TabBar: 1, Status: 1}
+// heights is the number of lines each region gets, top to bottom: tab bar,
+// body, banners, drawer or list, attached, help, refusal and input, status.
+type heights struct {
+	TabBar, Body, Banners, Drawer, List, Attached, Help, Refusal, Input, Status int
+}
 
-	// Minimum viable terminal: tab bar + status line + at least 1 line of content
-	if height < tabBarHeight+stripHeight+1 {
-		return b
-	}
+// total is the sum of every region; it equals the terminal height.
+func (h heights) total() int {
+	return h.TabBar + h.Body + h.Banners + h.Drawer + h.List + h.Attached + h.Help + h.Refusal + h.Input + h.Status
+}
 
-	// Below 80x24 the drawer and lists do not open (v6 section 1).
-	if width < 80 || height < 24 {
-		// Minimal layout: just content and input, no drawer or lists.
-		availableForContent := height - b.TabBar - b.Status
-		// Try to give 1 line of input and the rest to content.
-		b.Input = 1
-		b.Content = max(availableForContent-b.Input, 0)
-		return b
-	}
+// allocate gives each region a bounded viewport. The tab bar, refusal line and
+// status line are fixed; the optional regions take their bounded height; the
+// body gets what remains. When that is under minBodyLines the input viewport
+// shrinks to one line, then banners to one line, then the body takes what is
+// left. Below 80x24 the drawer and lists do not open.
+func allocate(in layoutIn) heights {
+	h := heights{TabBar: tabBarHeight, Status: stripHeight, Refusal: 1}
+	enabled := in.Width >= regionMinWidth && in.Height >= regionMinHeight
 
-	// At 80x24+, allocate from the fixed regions inward.
-	// The order is: TabBar, Status (fixed), Banners, Attached, Drawer|List, Help, Input, Content
-	remaining := height - b.TabBar - b.Status
-
-	// Banners: at most 2 lines, but may shrink to 1 to keep content >= 5
-	b.Banners = min(2, remaining)
-	remaining -= b.Banners
-
-	// Attached line: 1 line reserved for file attachments (D-07 reserved but not rendered)
-	b.Attached = 1
-	remaining -= b.Attached
-
-	// Drawer and List are mutually exclusive.
-	// Determine which one is shown (if any).
-	drawerHeight := 0
-	listHeight := 0
-	if state.DrawerOpen {
-		// Drawer: 7 lines, or 9 above 30 rows
-		drawerHeight = 7
-		if height >= 30 {
-			drawerHeight = 9
+	if enabled {
+		switch {
+		case in.Want.Drawer:
+			h.Drawer = drawerLines
+			if in.Height > tallDrawerAbove {
+				h.Drawer = tallDrawerLines
+			}
+		case in.Want.ListLines > 0:
+			// A list closes when the drawer opens, so it is the else arm.
+			h.List = min(in.Want.ListLines, maxListLines)
 		}
-	} else if state.ListOpen {
-		// List: at most 5 lines
-		listHeight = 5
-	}
-
-	// Short help: 1 line, hidden when drawer is open
-	helpHeight := 0
-	if state.HelpOpen && !state.DrawerOpen {
-		helpHeight = 1
-	}
-
-	// Now allocate Input and Content.
-	// Content must have at least 5 lines when drawer or list is open.
-	minContent := 5
-	if !state.DrawerOpen && !state.ListOpen {
-		minContent = 1
-	}
-
-	// Input: normally 1-6 lines visible, but shrinks when drawer/list force it
-	// to preserve content >= 5 lines.
-	// Start with maximum input (6 lines).
-	inputHeight := 6
-	remaining -= drawerHeight + listHeight + helpHeight
-
-	// Adjust input if drawer/list would cause content to drop below minimum
-	if remaining-inputHeight < minContent {
-		// Shrink input to 1 line to try to preserve content
-		inputHeight = 1
-		if remaining-inputHeight < minContent && b.Banners > 1 {
-			// Still not enough; shrink banners to 1 line
-			remaining += b.Banners - 1
-			b.Banners = 1
+		// The short help line is hidden while the drawer is open.
+		if in.Want.Help && h.Drawer == 0 {
+			h.Help = 1
 		}
 	}
+	if in.Want.Attached {
+		h.Attached = 1
+	}
+	h.Banners = min(in.Banners, maxBannerLines)
+	h.Input = min(max(in.InputLines, 1), maxInputViewport)
 
-	b.Input = min(inputHeight, max(remaining, 1))
-	remaining -= b.Input
-
-	// Drawer and List heights
-	b.Drawer = drawerHeight
-	b.List = listHeight
-	b.ShortHelp = helpHeight
-
-	// Content gets remaining lines, enforcing minimum when drawer/list are open
-	b.Content = max(remaining, minContent)
-
-	return b
+	room := func() int { return in.Height - h.total() }
+	if room() < minBodyLines {
+		h.Input = 1
+	}
+	if room() < minBodyLines {
+		h.Banners = min(h.Banners, 1)
+	}
+	if room() < minBodyLines {
+		h.Banners = 0
+	}
+	h.Body = max(room(), 0)
+	return h
 }
 
-// ScrollInfo holds scroll position information for a region: how many lines
-// are off-screen before the view, and what percentage of the total that represents.
-type ScrollInfo struct {
-	Above      int // lines above the view
-	Percentage int // 0-100, rounded down; 100 at the last line
+// foldBanners fits banners into lines. When more apply than fit, the last
+// shown line ends "+<n> more"; the first banner, which is the identity
+// warning when it applies, is always shown.
+func foldBanners(banners []string, lines int) []string {
+	if lines <= 0 || len(banners) == 0 {
+		return nil
+	}
+	if len(banners) <= lines {
+		return banners
+	}
+	more := fmt.Sprintf("+%d more", len(banners)-1)
+	if lines == 1 {
+		return []string{banners[0] + " " + more}
+	}
+	return append(append([]string{}, banners[:lines-1]...), more)
 }
 
-// calcScrollPosition computes scroll position given total lines, visible lines,
-// and the first visible line. It returns the count of lines above and a percentage.
-func calcScrollPosition(total, visible, firstLine int) ScrollInfo {
-	if total <= 0 {
-		return ScrollInfo{0, 0}
+// scrollPercent is the scroll position as a percentage: 0 at the first line
+// and 100 once the last line is in view, including when everything fits.
+func scrollPercent(total, visible, first int) int {
+	if total <= visible || first+visible >= total {
+		return 100
 	}
-	if visible <= 0 {
-		return ScrollInfo{0, 0}
-	}
-
-	firstLine = max(0, min(firstLine, max(total-visible, 0)))
-
-	percentage := 0
-	if total > visible {
-		percentage = (firstLine * 100) / (total - visible)
-		// Clamp at 100 when at the end
-		if firstLine+visible >= total {
-			percentage = 100
-		}
-	}
-
-	return ScrollInfo{firstLine, percentage}
-}
-
-// TurnLineMap maps turn indices to their starting line numbers in the rendered chat.
-// turnStarts[i] is the line index where turn i begins; len(turnStarts) is the number of turns.
-type TurnLineMap struct {
-	turnStarts []int // line index where each turn begins
-	totalLines int   // total number of lines
-}
-
-// countEarlierTurns returns the number of complete turns before the given line index.
-func (m *TurnLineMap) countEarlierTurns(lineIndex int) int {
-	// Find which turn contains this line
-	for i := len(m.turnStarts) - 1; i >= 0; i-- {
-		if lineIndex >= m.turnStarts[i] {
-			return i
-		}
-	}
-	return 0
-}
-
-// calcScrollPositionByTurns computes scroll position by turn count instead of line count.
-// It takes the total number of lines, visible lines, the first visible line, and the turn boundaries.
-func calcScrollPositionByTurns(total, visible, firstLine int, turns *TurnLineMap) ScrollInfo {
-	if total <= 0 || visible <= 0 {
-		return ScrollInfo{0, 0}
-	}
-
-	firstLine = max(0, min(firstLine, max(total-visible, 0)))
-
-	// Count how many complete turns are above the view
-	earlierTurns := turns.countEarlierTurns(firstLine)
-
-	// Calculate percentage based on total lines
-	percentage := 0
-	if total > visible {
-		percentage = (firstLine * 100) / (total - visible)
-		// Clamp at 100 when at the end
-		if firstLine+visible >= total {
-			percentage = 100
-		}
-	}
-
-	return ScrollInfo{earlierTurns, percentage}
+	return first * 100 / (total - visible)
 }

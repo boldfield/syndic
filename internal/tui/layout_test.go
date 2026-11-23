@@ -1,398 +1,278 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestCalcBounds80x24(t *testing.T) {
-	// At 80x24, the minimum viable full-featured size, layout should:
-	// - Reserve 1 line for tab bar, 1 for status = 2
-	// - Reserve at least 1 for input, 2 for banners = 3
-	// - Leave remaining for content (at least 5)
-	b := calcBounds(24, 80, RegionState{})
-	if b.TabBar != 1 {
-		t.Errorf("TabBar = %d, want 1", b.TabBar)
-	}
-	if b.Status != 1 {
-		t.Errorf("Status = %d, want 1", b.Status)
-	}
-	if b.Input < 1 || b.Input > 6 {
-		t.Errorf("Input = %d, want 1-6", b.Input)
-	}
-	if b.Banners != 2 {
-		t.Errorf("Banners = %d, want 2 at 80x24", b.Banners)
-	}
-	if b.Content < 5 {
-		t.Errorf("Content = %d, want at least 5", b.Content)
-	}
-
-	// In D-07, drawer and list are closed by default, so they should be 0.
-	if b.Drawer != 0 {
-		t.Errorf("Drawer = %d, want 0 (closed by default)", b.Drawer)
-	}
-	if b.List != 0 {
-		t.Errorf("List = %d, want 0 (closed by default)", b.List)
-	}
-}
-
-func TestCalcBoundsBelow80x24(t *testing.T) {
-	// Below 80x24, drawer and lists do not open.
-	testCases := []struct {
-		h, w int
-		name string
+func TestAllocateDrawerHeights(t *testing.T) {
+	for _, tc := range []struct {
+		w, h, want int
 	}{
-		{24, 79, "79x24"},
-		{23, 80, "80x23"},
-		{20, 60, "60x20"},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w, RegionState{})
-			if b.Drawer != 0 || b.List != 0 {
-				t.Errorf("At %dx%d: drawer=%d list=%d, want both 0", tc.w, tc.h, b.Drawer, b.List)
-			}
-		})
-	}
-}
-
-func TestCalcBoundsSmallTerminal(t *testing.T) {
-	// Very small terminal (less than tab+status+1 line of content)
-	b := calcBounds(2, 40, RegionState{})
-	if b.TabBar+b.Status+b.Content > b.Height {
-		t.Errorf("At 40x2: total allocated = %d + %d + %d = %d, exceeds height %d",
-			b.TabBar, b.Status, b.Content, b.TabBar+b.Status+b.Content, b.Height)
-	}
-}
-
-func TestCalcBoundsLargeTerminal(t *testing.T) {
-	// At 30+ rows, drawer should be 9 lines (not applicable in D-07 since drawer
-	// is always closed, but we reserve the space calculation).
-	b := calcBounds(40, 120, RegionState{})
-	if b.TabBar != 1 || b.Status != 1 {
-		t.Errorf("At 120x40: TabBar=%d Status=%d, want 1 each", b.TabBar, b.Status)
-	}
-	// Content should be substantial
-	if b.Content < 5 {
-		t.Errorf("At 120x40: Content = %d, want at least 5", b.Content)
-	}
-}
-
-func TestCalcScrollPosition(t *testing.T) {
-	testCases := []struct {
-		total, visible, firstLine int
-		wantAbove                 int
-		wantPercentage            int
-		name                      string
-	}{
-		// All content fits: no scroll needed
-		{10, 20, 0, 0, 0, "content fits in view"},
-		// At the beginning
-		{100, 10, 0, 0, 0, "at start of 100 lines"},
-		// At the end
-		{100, 10, 90, 90, 100, "at end of 100 lines"},
-		// Middle
-		{100, 10, 45, 45, 50, "middle of 100 lines"},
-		// Edge case: single line visible
-		{100, 1, 50, 50, 50, "single line at 50/100"},
-		// Edge case: empty content
-		{0, 10, 0, 0, 0, "zero total lines"},
-		// Percentage rounding
-		{100, 10, 1, 1, 1, "1/99 ≈ 1%"},
-		{100, 10, 10, 10, 11, "10/90 ≈ 11%"},
-		// Clamped firstLine
-		{100, 10, 150, 90, 100, "firstLine clamped to max"},
-		{100, 10, -5, 0, 0, "negative firstLine clamped to 0"},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := calcScrollPosition(tc.total, tc.visible, tc.firstLine)
-			if got.Above != tc.wantAbove {
-				t.Errorf("Above = %d, want %d", got.Above, tc.wantAbove)
-			}
-			if got.Percentage != tc.wantPercentage {
-				t.Errorf("Percentage = %d, want %d", got.Percentage, tc.wantPercentage)
-			}
-		})
-	}
-}
-
-func TestCalcBounds80x24CrowdedLayout(t *testing.T) {
-	// Acceptance test: 80x24 crowded layout retains five chat lines and identity warning.
-	// This checks the specific constraint from the task.
-	b := calcBounds(24, 80, RegionState{})
-
-	// At 80x24:
-	// - Tab bar: 1 line
-	// - Status: 1 line
-	// - Input: at minimum 1 line (spec says 1-6)
-	// - Banners: 2 lines (identity warning is always shown when it applies)
-	// - Content: at least 5 lines (the acceptance criterion)
-	// Total: 1 + 1 + 1 + 2 + 5 = 10 lines minimum
-
-	if b.Content < 5 {
-		t.Errorf("At 80x24: Content = %d, want at least 5 for identity warning + chat", b.Content)
-	}
-
-	// Verify no drawer/list are consuming space
-	if b.Drawer != 0 || b.List != 0 {
-		t.Errorf("At 80x24: drawer=%d list=%d, want both 0 (closed by default)", b.Drawer, b.List)
-	}
-
-	// Content + Input + Banners + TabBar + Status should equal height
-	total := b.TabBar + b.Status + b.Input + b.Banners + b.Content
-	if total > b.Height {
-		t.Errorf("At 80x24: total allocated = %d, exceeds height %d", total, b.Height)
-	}
-}
-
-func TestInputRowsConstraint(t *testing.T) {
-	// The input can be 1-6 lines, but the actual allocation happens in inputRows().
-	// This test verifies the bounds structure doesn't violate that.
-	for h := 10; h <= 50; h++ {
-		for w := 40; w <= 200; w += 20 {
-			b := calcBounds(h, w, RegionState{})
-			if b.Input > 6 {
-				t.Errorf("At %dx%d: Input = %d, exceeds max 6", w, h, b.Input)
-			}
+		{80, 24, 7}, {80, 30, 7}, {80, 31, 9}, {120, 50, 9},
+		{79, 24, 0}, {80, 23, 0}, {79, 40, 0}, {40, 10, 0},
+	} {
+		got := allocate(layoutIn{Height: tc.h, Width: tc.w, Banners: 2, InputLines: 3, Want: regionWant{Drawer: true}})
+		if got.Drawer != tc.want {
+			t.Errorf("%dx%d: drawer = %d lines, want %d", tc.w, tc.h, got.Drawer, tc.want)
+		}
+		if got.total() != tc.h {
+			t.Errorf("%dx%d: regions sum to %d lines, want %d", tc.w, tc.h, got.total(), tc.h)
+		}
+		if got.Body < minBodyLines {
+			t.Errorf("%dx%d: body = %d lines, want at least %d", tc.w, tc.h, got.Body, minBodyLines)
 		}
 	}
 }
 
-// TestBoundsAllocation verifies that bounds allocation satisfies the design constraints.
-func TestBoundsAllocation(t *testing.T) {
-	testCases := []struct {
-		h, w            int
-		name            string
-		minContent      int
-		expectDrawer    int
-		expectList      int
-		expectShortHelp int
-	}{
-		{24, 80, "80x24 crowded", 5, 0, 0, 0},
-		{31, 80, "80x31 large", 5, 0, 0, 0},
-		{24, 79, "79x24 too narrow", 0, 0, 0, 0},
-		{23, 80, "80x23 too short", 0, 0, 0, 0},
+func TestAllocateDrawerAndListAreExclusive(t *testing.T) {
+	both := allocate(layoutIn{Height: 40, Width: 100, Want: regionWant{Drawer: true, ListLines: 5, Help: true}})
+	if both.Drawer == 0 || both.List != 0 || both.Help != 0 {
+		t.Errorf("drawer open: %+v; want the list closed and help hidden", both)
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w, RegionState{})
-
-			// Check drawer and list allocation
-			if b.Drawer != tc.expectDrawer {
-				t.Errorf("Drawer = %d, want %d", b.Drawer, tc.expectDrawer)
-			}
-			if b.List != tc.expectList {
-				t.Errorf("List = %d, want %d", b.List, tc.expectList)
-			}
-			if b.ShortHelp != tc.expectShortHelp {
-				t.Errorf("ShortHelp = %d, want %d", b.ShortHelp, tc.expectShortHelp)
-			}
-
-			// Check content minimum when at 80x24+
-			if tc.w >= 80 && tc.h >= 24 && b.Content < tc.minContent {
-				t.Errorf("At %dx%d: Content = %d, want at least %d", tc.w, tc.h, b.Content, tc.minContent)
-			}
-
-			// Verify bounds don't exceed terminal size
-			total := b.TabBar + b.Status + b.Content + b.Input + b.Banners + b.Drawer + b.List + b.ShortHelp + b.Attached
-			if total > b.Height {
-				t.Errorf("At %dx%d: total allocated %d exceeds height %d", tc.w, tc.h, total, b.Height)
-			}
-		})
+	list := allocate(layoutIn{Height: 40, Width: 100, Want: regionWant{ListLines: 9, Help: true}})
+	if list.Drawer != 0 || list.List != maxListLines || list.Help != 1 {
+		t.Errorf("list open: %+v; want a 5-line list, no drawer, help shown", list)
+	}
+	small := allocate(layoutIn{Height: 23, Width: 100, Want: regionWant{ListLines: 3, Help: true}})
+	if small.List != 0 || small.Help != 0 {
+		t.Errorf("below 80x24: %+v; want no list", small)
 	}
 }
 
-// TestTurnLineMapCounting verifies correct turn boundary tracking.
-func TestTurnLineMapCounting(t *testing.T) {
-	testCases := []struct {
-		name       string
-		turnStarts []int
-		lineIndex  int
-		wantTurns  int
-	}{
-		{"line in first turn", []int{0, 5, 10}, 2, 0},
-		{"line at second turn", []int{0, 5, 10}, 5, 1},
-		{"line in second turn", []int{0, 5, 10}, 7, 1},
-		{"line at third turn", []int{0, 5, 10}, 10, 2},
-		{"line in third turn", []int{0, 5, 10}, 12, 2},
-		{"empty turns", []int{}, 0, 0},
-		{"single turn", []int{0}, 0, 0},
+func TestAllocateShrinkOrder(t *testing.T) {
+	// Roomy: everything at its wanted size.
+	h := allocate(layoutIn{Height: 24, Width: 80, Banners: 2, InputLines: 6})
+	if h.Input != 6 || h.Banners != 2 || h.Body < minBodyLines {
+		t.Errorf("roomy: %+v", h)
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := &TurnLineMap{
-				turnStarts: tc.turnStarts,
-				totalLines: 100,
-			}
-			got := m.countEarlierTurns(tc.lineIndex)
-			if got != tc.wantTurns {
-				t.Errorf("countEarlierTurns(%d) = %d, want %d", tc.lineIndex, got, tc.wantTurns)
-			}
-		})
+	// Seven lines of text still show six.
+	if h := allocate(layoutIn{Height: 24, Width: 80, InputLines: 30}); h.Input != maxInputViewport {
+		t.Errorf("input = %d lines, want %d", h.Input, maxInputViewport)
 	}
-}
-
-// TestScrollPositionByTurns verifies scroll position calculation using turns.
-func TestScrollPositionByTurns(t *testing.T) {
-	turns := &TurnLineMap{
-		turnStarts: []int{0, 10, 20, 30},
-		totalLines: 40,
+	// The drawer opens at 80x24 with a full input, two banners and an attached
+	// line: they just fit, leaving the chat its five lines.
+	h = allocate(layoutIn{Height: 24, Width: 80, Banners: 2, InputLines: 6, Want: regionWant{Drawer: true, Attached: true}})
+	if h.Drawer != drawerLines || h.Input != 6 || h.Banners != 2 || h.Attached != 1 || h.Body != minBodyLines {
+		t.Errorf("crowded drawer: %+v", h)
 	}
-
-	testCases := []struct {
-		name        string
-		total       int
-		visible     int
-		firstLine   int
-		wantAbove   int
-		wantPercent int
-	}{
-		{"at start", 40, 10, 0, 0, 0},
-		{"in middle", 40, 10, 15, 1, 50}, // 15 * 100 / (40 - 10) = 50
-		{"at end", 40, 10, 30, 3, 100},
+	// Short of room, the input viewport shrinks to one line first and the
+	// banners keep their two.
+	h = allocate(layoutIn{Height: 14, Width: 80, Banners: 2, InputLines: 6, Want: regionWant{Attached: true}})
+	if h.Input != 1 || h.Banners != 2 || h.Body < minBodyLines {
+		t.Errorf("input shrink: %+v", h)
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := calcScrollPositionByTurns(tc.total, tc.visible, tc.firstLine, turns)
-			if got.Above != tc.wantAbove {
-				t.Errorf("Above = %d, want %d", got.Above, tc.wantAbove)
-			}
-			if got.Percentage != tc.wantPercent {
-				t.Errorf("Percentage = %d, want %d", got.Percentage, tc.wantPercent)
-			}
-		})
+	// Tighter still: the banners go to one line once the input is at one.
+	h = allocate(layoutIn{Height: 11, Width: 80, Banners: 2, InputLines: 6, Want: regionWant{Attached: true}})
+	if h.Input != 1 || h.Banners != 1 || h.Body < minBodyLines {
+		t.Errorf("banner shrink: %+v", h)
+	}
+	// A shorter input shrinks only as far as it must.
+	h = allocate(layoutIn{Height: 14, Width: 80, Banners: 2, InputLines: 3, Want: regionWant{Attached: true}})
+	if h.Input != 3 || h.Banners != 2 || h.Body != minBodyLines {
+		t.Errorf("short input: %+v", h)
 	}
 }
 
-// TestBoundsDefinesAllRegions verifies bounds allocation covers all regions.
-func TestBoundsDefinesAllRegions(t *testing.T) {
-	// At 80x24, verify all regions are properly allocated
-	b := calcBounds(24, 80, RegionState{})
+// crowded puts an identity warning, more banners than fit and a long input into the app.
+func crowded(t *testing.T, w, h int) *App {
+	t.Helper()
+	a := chatApp(t)
+	a.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	a.state.Participants = map[string]ParticipantInfo{"alpha": {ID: "alpha", Identity: "unknown"}}
+	a.state.Status.DeadlinesProvisional = true
+	a.state.Status.RosterFileChanged = true
+	a.state.ConnState = ConnStateReconnecting
+	profile := "fast"
+	a.state.UnapprovedProfile = &profile
+	a.input.SetValue(strings.Join([]string{"i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8"}, "\n"))
+	a.updateInput(nil) // scroll to the cursor, as typing does
+	return a
+}
 
-	// Verify all regions are non-negative
-	regions := map[string]int{
-		"TabBar":    b.TabBar,
-		"Status":    b.Status,
-		"Content":   b.Content,
-		"Input":     b.Input,
-		"Banners":   b.Banners,
-		"Attached":  b.Attached,
-		"List":      b.List,
-		"ShortHelp": b.ShortHelp,
-		"Drawer":    b.Drawer,
+// assertCrowdedFrame checks a crowded frame of h lines: the identity warning
+// shows, the status line is last and the chat keeps its minimum.
+func assertCrowdedFrame(t *testing.T, a *App, h int) []string {
+	t.Helper()
+	lines := chatView(a)
+	if len(lines) != h {
+		t.Fatalf("frame has %d lines, want %d:\n%s", len(lines), h, strings.Join(lines, "\n"))
 	}
+	at := lineOf(t, lines, "identity: unknown(name-matched)")
+	if !strings.Contains(lines[len(lines)-1], "tab: switch") {
+		t.Errorf("status line is not last: %q", lines[len(lines)-1])
+	}
+	if body := at - 1; body < minBodyLines {
+		t.Errorf("the tab area has %d lines, want at least %d", body, minBodyLines)
+	}
+	if !strings.HasPrefix(lines[0], "[chat]") {
+		t.Errorf("tab bar = %q", lines[0])
+	}
+	return lines
+}
 
-	for name, height := range regions {
-		if height < 0 {
-			t.Errorf("%s = %d, want >= 0", name, height)
+func TestCrowdedChatAt80x24(t *testing.T) {
+	a := crowded(t, 80, 24)
+	lines := assertCrowdedFrame(t, a, 24)
+	// Two banner lines, the identity warning first and the rest folded.
+	at := lineOf(t, lines, "identity: unknown(name-matched)")
+	if lines[at+1] != "+4 more" {
+		t.Errorf("second banner line = %q, want +4 more", lines[at+1])
+	}
+	// The input shows six lines, scrolled to its cursor: the last line is in view.
+	in := strings.Join(lines[at+2:], "\n")
+	if !strings.Contains(in, "i8") || strings.Contains(in, "i1\n") {
+		t.Errorf("the input did not scroll to its last line:\n%s", in)
+	}
+	rows := 0
+	for _, l := range lines[at+3 : len(lines)-1] {
+		if strings.TrimSpace(l) != "" {
+			rows++
 		}
 	}
-
-	// Drawer and List must be mutually exclusive
-	if b.Drawer > 0 && b.List > 0 {
-		t.Errorf("Drawer and List cannot both be positive: Drawer=%d, List=%d", b.Drawer, b.List)
-	}
-
-	// Content should be at least 5 lines at 80x24
-	if b.Content < 5 {
-		t.Errorf("Content = %d, want at least 5 at 80x24", b.Content)
+	if rows != maxInputViewport {
+		t.Errorf("input shows %d lines, want %d", rows, maxInputViewport)
 	}
 }
 
-// TestAttachmentSeamReserved verifies that the attachment seam is reserved at 80x24+.
-func TestAttachmentSeamReserved(t *testing.T) {
-	testCases := []struct {
-		h, w           int
-		name           string
-		shouldReserved int
-	}{
-		{24, 80, "80x24", 1},
-		{31, 80, "80x31", 1},
-		{24, 79, "79x24 no seam", 0},
-		{23, 80, "80x23 no seam", 0},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w, RegionState{})
-			if b.Attached != tc.shouldReserved {
-				t.Errorf("At %dx%d: Attached = %d, want %d", tc.w, tc.h, b.Attached, tc.shouldReserved)
-			}
-		})
+func TestCrowdedChatWithDrawerAt80x24And80x31(t *testing.T) {
+	for _, tc := range []struct{ w, h, drawer int }{{80, 24, 7}, {80, 31, 9}} {
+		a := crowded(t, tc.w, tc.h)
+		a.want = regionWant{Drawer: true, Attached: true}
+		lines := assertCrowdedFrame(t, a, tc.h)
+		hs := a.layout()
+		if hs.Drawer != tc.drawer {
+			t.Errorf("%dx%d: %+v, want a %d-line drawer", tc.w, tc.h, hs, tc.drawer)
+		}
+		at := lineOf(t, lines, "identity: unknown(name-matched)")
+		// banners, drawer, attached line, refusal line, input, status line.
+		if got, want := len(lines)-1-at-2, hs.Drawer+hs.Attached+hs.Refusal+hs.Input; got != want {
+			t.Errorf("%dx%d: %d lines under the banners, want %d", tc.w, tc.h, got, want)
+		}
 	}
 }
 
-// TestBounds80x24CrowdedContent verifies content allocation at the crowded size.
-func TestBounds80x24CrowdedContent(t *testing.T) {
-	// At 80x24 crowded layout: must retain 5 chat lines minimum
-	b := calcBounds(24, 80, RegionState{})
-
-	// Verify the allocation satisfies crowded constraints:
-	// TabBar(1) + Content(≥5) + Attached(1) + Banners(2) + Input(1) + Status(1) = 24
-	minTotal := b.TabBar + 5 + b.Attached + b.Banners + b.Input + b.Status
-	if minTotal > b.Height {
-		t.Errorf("At 80x24: minimum allocation %d exceeds height %d", minTotal, b.Height)
-	}
-
-	// Content must be at least 5 lines
-	if b.Content < 5 {
-		t.Errorf("At 80x24: Content = %d, want >= 5", b.Content)
-	}
-
-	// Attachment seam must be 1 line
-	if b.Attached != 1 {
-		t.Errorf("At 80x24: Attached = %d, want 1", b.Attached)
-	}
-
-	// Banners at most 2 lines
-	if b.Banners != 2 {
-		t.Errorf("At 80x24: Banners = %d, want 2", b.Banners)
-	}
-
-	// Input 1-6 lines
-	if b.Input < 1 || b.Input > 6 {
-		t.Errorf("At 80x24: Input = %d, want 1-6", b.Input)
+func TestNoDrawerOrListBelow80x24(t *testing.T) {
+	for _, size := range [][2]int{{79, 24}, {80, 23}, {60, 30}} {
+		a := crowded(t, size[0], size[1])
+		a.want = regionWant{Drawer: true, ListLines: 5, Help: true}
+		hs := a.layout()
+		if hs.Drawer != 0 || hs.List != 0 || hs.Help != 0 {
+			t.Errorf("%v: %+v, want no drawer, list or help", size, hs)
+		}
+		lines := assertCrowdedFrame(t, a, size[1])
+		if lineOf(t, lines, "identity: unknown(name-matched)") < 1 {
+			t.Errorf("%v: identity warning missing", size)
+		}
 	}
 }
 
-// TestBounds80x31Large verifies allocation at larger size.
-func TestBounds80x31Large(t *testing.T) {
-	// At 80x31, drawer should be 9 lines when closed in D-07
-	b := calcBounds(31, 80, RegionState{})
-
-	// Content must still be at least 5 lines
-	if b.Content < 5 {
-		t.Errorf("At 80x31: Content = %d, want >= 5", b.Content)
+// TestSmallerSizeKeepsTheMinimum runs under -short too: the smallest size the
+// TUI draws, with every banner and a long input.
+func TestSmallerSizeKeepsTheMinimum(t *testing.T) {
+	a := crowded(t, 40, 10)
+	lines := chatView(a)
+	if len(lines) != 10 || !strings.Contains(lines[len(lines)-1], "tab: switch") && !strings.Contains(lines[len(lines)-1], "idle") && !strings.Contains(lines[len(lines)-1], "engine") {
+		t.Fatalf("40x10 frame (%d lines):\n%s", len(lines), strings.Join(lines, "\n"))
 	}
-
-	// Drawer should still be 0 in D-07 (closed)
-	if b.Drawer != 0 {
-		t.Errorf("At 80x31: Drawer = %d, want 0 (closed in D-07)", b.Drawer)
-	}
-
-	// Attachment seam must be 1 line
-	if b.Attached != 1 {
-		t.Errorf("At 80x31: Attached = %d, want 1", b.Attached)
+	if hs := a.layout(); hs.Body < minBodyLines || hs.Drawer != 0 || hs.Input != 1 {
+		t.Errorf("40x10: %+v", hs)
 	}
 }
 
-// TestBounds79x24NoDrawer verifies no drawer/list below 80x24.
-func TestBounds79x24NoDrawer(t *testing.T) {
-	// Below 80 columns, drawer and lists do not open
-	b := calcBounds(24, 79, RegionState{})
+func TestInputScrollsBeyondSixLines(t *testing.T) {
+	a := chatApp(t)
+	var rows []string
+	for i := 1; i <= 9; i++ {
+		rows = append(rows, fmt.Sprintf("row%d", i))
+	}
+	a.input.SetValue(strings.Join(rows, "\n"))
+	a.updateInput(nil)
+	lines := chatView(a)
+	if hs := a.layout(); hs.Input != maxInputViewport {
+		t.Fatalf("input viewport = %d, want %d", hs.Input, maxInputViewport)
+	}
+	view := strings.Join(lines, "\n")
+	if !strings.Contains(view, "row9") || strings.Contains(view, "row1\n") || strings.Contains(view, "row3") {
+		t.Errorf("the input did not scroll to the cursor line:\n%s", view)
+	}
+	if !strings.Contains(lines[len(lines)-1], "tab: switch") {
+		t.Errorf("status line is not last: %q", lines[len(lines)-1])
+	}
+}
 
-	if b.Drawer != 0 {
-		t.Errorf("At 79x24: Drawer = %d, want 0", b.Drawer)
+func TestChatHeaderCountsEarlierTurnsNotLines(t *testing.T) {
+	a := chatApp(t)
+	a.workDir, a.conversationID, a.convTurns = "/ws", "0123456789abcdef", 3
+	// Turns of different heights: the first answer is long.
+	long := strings.TrimSuffix(strings.Repeat("a long answer line\n", 30), "\n")
+	addTurn(a, "t1", 1, "approved", "first question", long)
+	addTurn(a, "t2", 2, "approved", "second question", "short")
+	addTurn(a, "t3", 3, "approved", "third question", strings.TrimSuffix(strings.Repeat("tail line\n", 40), "\n"))
+
+	earlier := func() string {
+		h := chatView(a)[1]
+		i := strings.Index(h, " earlier")
+		if i < 0 {
+			t.Fatalf("no scroll info in %q", h)
+		}
+		return strings.Fields(h[:i])[len(strings.Fields(h[:i]))-1]
 	}
-	if b.List != 0 {
-		t.Errorf("At 79x24: List = %d, want 0", b.List)
+	lines, _ := chatLines(a.state, a.chatIn())
+	a.scrollAnswer(-len(lines)) // to the top
+	if got := earlier(); got != "0" {
+		t.Errorf("at the top: %s earlier, want 0", got)
 	}
-	if b.Attached != 0 {
-		t.Errorf("At 79x24: Attached = %d, want 0 (no features below 80x24)", b.Attached)
+	if h := chatView(a)[1]; !strings.HasSuffix(h, "0%") {
+		t.Errorf("at the top: header %q, want 0%%", h)
+	}
+	_, _, starts := chatLinesWithStarts(a.state, a.chatIn())
+	// Scroll until the view starts inside the third turn: two turns lie above.
+	a.answerFollow, a.answerScrollRow = false, starts[2]+2
+	if got := earlier(); got != "2" {
+		t.Errorf("inside turn three: %s earlier, want 2", got)
+	}
+	// Inside the first turn, no turn lies wholly above, though many lines do.
+	a.answerScrollRow = 10
+	if got := earlier(); got != "0" {
+		t.Errorf("inside turn one: %s earlier, want 0", got)
+	}
+	// At the end the view reads 100%.
+	a.scrollAnswer(len(lines))
+	if h := chatView(a)[1]; !strings.HasSuffix(h, "100%") {
+		t.Errorf("at the end: header %q, want 100%%", h)
+	}
+}
+
+func TestChatHeaderKeepsTheWorkspaceWhenScrollInfoDoesNotFit(t *testing.T) {
+	a := chatApp(t)
+	a.workDir = "/ws/" + strings.Repeat("deep/", 12) + "end"
+	header := chatView(a)[1]
+	// Only the edge of the screen clips it, never scroll info.
+	if !strings.HasPrefix(a.conversationHeader(), header) || strings.Contains(header, "earlier") {
+		t.Errorf("header = %q, want the conversation header alone", header)
+	}
+}
+
+func TestTranscriptTabShowsAPercentage(t *testing.T) {
+	a := transcriptApp(80, 24)
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 60)})
+	a.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if bar := chatView(a)[0]; !strings.HasSuffix(bar, " 0%") {
+		t.Errorf("at the top: tab bar %q, want 0%%", bar)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if bar := chatView(a)[0]; !strings.HasSuffix(bar, " 100%") {
+		t.Errorf("at the end: tab bar %q, want 100%%", bar)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyHome})
+	a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	bar := chatView(a)[0]
+	var pct int
+	if _, err := fmt.Sscanf(bar[strings.LastIndex(bar, " ")+1:], "%d%%", &pct); err != nil || pct <= 0 || pct >= 100 {
+		t.Errorf("part way: tab bar %q", bar)
 	}
 }

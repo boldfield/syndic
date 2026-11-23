@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -57,16 +58,20 @@ func header(d *driver) string {
 	lines := strings.Split(d.app.View(), "\n")
 	for i, l := range lines {
 		if strings.HasPrefix(l, "[") && i+1 < len(lines) {
-			return lines[i+1]
+			return stripScrollInfo(lines[i+1])
 		}
 	}
 	return ""
 }
 
+var scrollInfoRE = regexp.MustCompile(`\s+\d+ earlier · \d+%$`)
+
+// stripScrollInfo drops the scroll position at the right of a chat header.
+func stripScrollInfo(line string) string { return scrollInfoRE.ReplaceAllString(line, "") }
+
 func TestChatHeaderNamesTheOpenConversation(t *testing.T) {
 	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}), WithWorkDir("/ws/x"))
-	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
-	if got, want := header(d), "conversation 01234567, 3 turns · workspace /ws/x 0 earlier · 0%"; got != want {
+	if got, want := header(d), "conversation 01234567, 3 turns · workspace /ws/x"; got != want {
 		t.Fatalf("first line of the chat = %q, want %q\n%s", got, want, d.app.View())
 	}
 }
@@ -184,8 +189,7 @@ func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
 	if strings.Contains(v, "BRAVO-ANSWER") {
 		t.Errorf("the other conversation's answer is shown:\n%s", v)
 	}
-	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
-	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns · workspace /ws/a 0 earlier · 0%"; got != want {
+	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns · workspace /ws/a"; got != want {
 		t.Errorf("header = %q, want %q", got, want)
 	}
 

@@ -32,10 +32,6 @@ const (
 	stripHeight  = 1
 )
 
-// inputHeight is the bottom region at its smallest: a refusal line and one
-// input line. A multi-line input takes more; see inputRows.
-const inputHeight = 2
-
 // App is the root Bubble Tea model. All of its state changes in Update; the
 // commands it starts only carry results back as messages.
 type App struct {
@@ -77,6 +73,7 @@ type App struct {
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
+	want                 regionWant                  // optional regions the layout reserves lines for; none in milestone D
 	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
 	rawMode              bool                        // /raw on|off; true disables Markdown rendering
 
@@ -787,32 +784,31 @@ func (a *App) conversationHeader() string {
 	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, safeLine(a.workDir))
 }
 
-// conversationHeaderWithScroll formats the conversation header with scroll position info.
-// It appends the count of earlier turns and scroll percentage to the right edge,
-// only if there is room without truncating the header.
-func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answerHeight int, startLine int, turnMap *TurnLineMap) string {
-	header := a.conversationHeader()
-
-	var scroll ScrollInfo
-	if turnMap != nil {
-		scroll = calcScrollPositionByTurns(totalLines, answerHeight, startLine, turnMap)
-	} else {
-		scroll = calcScrollPosition(totalLines, answerHeight, startLine)
+// withScrollInfo returns text with info flush against the right edge of a
+// line w cells wide, or text alone when both do not fit: scroll info never
+// costs the text a character.
+func withScrollInfo(text string, w int, info string) string {
+	gap := w - ansi.StringWidth(text) - ansi.StringWidth(info)
+	if gap < 1 && text != "" {
+		return text
 	}
+	return text + strings.Repeat(" ", max(gap, 0)) + info
+}
 
-	// Format scroll info: "N earlier · X%"
-	scrollStr := fmt.Sprintf("%d earlier · %d%%", scroll.Above, scroll.Percentage)
-
-	// Only append scroll info if the full header fits with scroll info, without truncating.
-	// Avoid truncating the workspace path.
-	fullResult := header + " " + scrollStr
-	if ansi.StringWidth(fullResult) <= headerWidth {
-		return fullResult
+// turnsAbove is how many turns lie wholly above line first, given the line
+// each turn starts at and the total number of lines.
+func turnsAbove(starts []int, total, first int) int {
+	n := 0
+	for i := range starts {
+		end := total
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		if end <= first {
+			n++
+		}
 	}
-
-	// If not enough room, return just the header without scroll info.
-	// Keep the workspace path intact rather than truncating for scroll text.
-	return ansi.Truncate(header, headerWidth, "")
+	return n
 }
 
 // shortID is the first eight characters of an id.
@@ -1103,37 +1099,23 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// regionState returns the current state of optional regions (drawer, list, help).
-func (a *App) regionState() RegionState {
-	// In D-07, all regions are closed. Future tasks will set these based on user action.
-	return RegionState{
-		DrawerOpen: false,
-		ListOpen:   false,
-		HelpOpen:   false,
-	}
+// layout allocates the screen's lines to its regions; see allocate.
+func (a *App) layout() heights {
+	return allocate(layoutIn{
+		Height:     a.height,
+		Width:      a.width,
+		Banners:    len(renderBanners(a.state)),
+		InputLines: inputLines(a.input),
+		Want:       a.want,
+	})
 }
 
-// getBounds computes height bounds for the current terminal and state.
-func (a *App) getBounds() Bounds {
-	return calcBounds(a.height, a.width, a.regionState())
-}
+// bodyHeight is the number of lines left for the active tab.
+func (a *App) bodyHeight() int { return a.layout().Body }
 
-// bodyHeight is the number of lines left for the active tab: what the tab
-// bar, the banners, the input and the status line leave. Uses bounds-based allocation.
-func (a *App) bodyHeight() int {
-	bounds := a.getBounds()
-	return bounds.Content
-}
-
-// inputRows is how many lines the input shows. Uses bounds-based allocation.
-// The actual input text may exceed this (up to 6 visible lines), and the input
-// will scroll internally. When input text is shorter, it shows fewer lines.
-func (a *App) inputRows() int {
-	bounds := a.getBounds()
-	// Count actual lines in the input text, but cap at bounds.Input
-	actual := inputLines(a.input)
-	return min(actual, bounds.Input)
-}
+// inputRows is how many lines the input viewport shows, 1 to maxInputViewport;
+// a longer text scrolls inside it.
+func (a *App) inputRows() int { return a.layout().Input }
 
 // panelLines is the panel as shown, wrapped to the width.
 func (a *App) panelLines() []string { return strings.Split(renderPanel(a.panel, a.width), "\n") }
@@ -1194,7 +1176,6 @@ func (a *App) statusLine(w int) string {
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.
-// Heights are allocated according to calcBounds, the v6 design's height allocator.
 func (a *App) View() string {
 	w := a.width
 
@@ -1207,39 +1188,23 @@ func (a *App) View() string {
 		return ansi.Truncate(msg, w, "")
 	}
 
-	// Get bounds for this terminal and state
-	bounds := a.getBounds()
-
-	// Render banners and cap to actual available height
-	banners := renderBanners(a.state)
-	banners = capBannersForHeight(banners, a.height, 5)
-
-	// Ensure we don't exceed the allocated banner lines
-	if len(banners) > bounds.Banners {
-		banners = banners[:bounds.Banners]
-	}
+	hs := a.layout()
+	banners := foldBanners(renderBanners(a.state), hs.Banners)
 
 	// Clip all banners to width
 	for i, banner := range banners {
 		banners[i] = ansi.Truncate(banner, w, "")
 	}
 
-	// Calculate actual input height: renderInput adds refusal line + input lines
-	actualInputLines := inputLines(a.input)
-	inputHeight := min(actualInputLines, maxInputRows)
-
-	// Calculate content height to exactly fill terminal height
-	// Output: tabBar + content + banners + (refusal + input) + status
-	// Total: 1 + content + len(banners) + (1 + inputHeight) + 1 = height
-	// So: content = height - 3 - len(banners) - inputHeight
-	contentHeight := max(a.height-3-len(banners)-inputHeight, 0)
+	bodyHeight := hs.Body
 
 	var tabView string
 	lastTurn := 0
+	var turnStarts []int
 	switch a.tab {
 	case tabChat:
 		var chat []string
-		chat, lastTurn = chatLines(a.state, a.chatIn())
+		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
 		tabView = strings.Join(chat, "\n")
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
@@ -1248,9 +1213,9 @@ func (a *App) View() string {
 			// A refresh can shorten the content under the offset, so the
 			// start is kept within the last full page as it is now.
 			full := strings.Split(a.participantsFull(w), "\n")
-			tabView = strings.Join(full[min(a.pScroll, max(len(full)-contentHeight, 0)):], "\n")
+			tabView = strings.Join(full[min(a.pScroll, max(len(full)-bodyHeight, 0)):], "\n")
 		} else {
-			tabView = renderParticipants(a.state, w, contentHeight, a.selectedParticipantID(), a.now())
+			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
 		}
 	}
 	lines := strings.Split(tabView, "\n")
@@ -1258,51 +1223,60 @@ func (a *App) View() string {
 		lines = a.panelLines()
 		start := min(a.panelRow, a.maxPanelRow())
 		lines = lines[start:]
-		if len(lines) > contentHeight && contentHeight > 0 {
+		if len(lines) > bodyHeight && bodyHeight > 0 {
 			// The panel goes on below: its last visible line says so.
-			lines = append(lines[:contentHeight-1], fmt.Sprintf("… %d more lines (PgDn)", len(lines)-contentHeight+1))
+			lines = append(lines[:bodyHeight-1], fmt.Sprintf("… %d more lines (PgDn)", len(lines)-bodyHeight+1))
 		}
 	}
 
 	if a.tab == tabChat && len(a.panel) == 0 {
-		answerHt := max(contentHeight-1, 0)
+		answerHeight := max(bodyHeight-1, 0)
 		start := a.chatStart(len(lines), lastTurn)
+		total := len(lines)
 		lines = lines[start:]
-		for len(lines) < answerHt {
+		for len(lines) < answerHeight {
 			lines = append(lines, "")
 		}
-		// Build turn line map to count earlier turns correctly
-		turnMap := buildTurnLineMap(a.state, a.chatIn())
-		// The first line of the chat names the open conversation with scroll position.
-		headerWithScroll := a.conversationHeaderWithScroll(w, len(lines)+start, answerHt, start, turnMap)
-		lines = append([]string{headerWithScroll}, lines[:answerHt]...)
+		// The first line of the chat names the open conversation, and at its
+		// right how many turns are above the view and where the view stands.
+		header := a.conversationHeader()
+		lines = append([]string{withScrollInfo(header, w, fmt.Sprintf("%d earlier · %d%%",
+			turnsAbove(turnStarts, total, start), scrollPercent(total, answerHeight, start)))}, lines[:answerHeight]...)
 	}
-	for len(lines) < contentHeight {
+	for len(lines) < bodyHeight {
 		lines = append(lines, "")
 	}
-	lines = lines[:contentHeight]
+	lines = lines[:bodyHeight]
 
 	// Clip all lines to width to handle wide characters and ANSI sequences
 	for i, line := range lines {
 		lines[i] = ansi.Truncate(line, w, "")
 	}
 
-	// Render input, capped to the allocated input height
-	inputStr := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, inputHeight)
-	inputLinesList := strings.Split(inputStr, "\n")
+	// Clip input lines to width
+	fitInput(&a.input, hs.Input)
+	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
+	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")
 	}
-	inputStr = strings.Join(inputLinesList, "\n")
+	inputLines = strings.Join(inputLinesList, "\n")
 
-	// Build output: tab bar, content, banners, input, status line.
-	// Note: bounds reserves 1 line for attachments (Attached seam) in D-07,
-	// but attachments are not yet implemented, so the line is not rendered.
-	// When attachments are implemented in D-08+, this will render the attachment line.
-	output := []string{ansi.Truncate(a.tabBar(), w, "")}
+	// Build output: tab bar, tab, banners, the drawer or list, the attached
+	// line, short help, input, status line. The optional regions' lines are
+	// reserved here and filled by the tasks that own them.
+	tabBar := a.tabBar()
+	if a.tab == tabTranscript {
+		// The transcript shows where its view stands at the tab bar's right.
+		tabBar = withScrollInfo(tabBar, w, fmt.Sprintf("%d%%", scrollPercent(len(a.tLines), bodyHeight, a.tRow)))
+	}
+	output := []string{ansi.Truncate(tabBar, w, "")}
 	output = append(output, lines...)
 	output = append(output, banners...)
-	output = append(output, inputStr)
+	for range hs.Drawer + hs.List + hs.Attached + hs.Help {
+		output = append(output, "")
+	}
+	output = append(output, inputLines)
 	output = append(output, a.statusLine(w))
 	return strings.Join(output, "\n")
 }

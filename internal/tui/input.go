@@ -19,8 +19,8 @@ const (
 )
 
 // maxInputRows is the most lines the input shows; a longer input scrolls
-// within them, so the active tab keeps its room. Per v6 spec, input is 1-6 lines.
-const maxInputRows = 6
+// within them, so the active tab keeps its room.
+const maxInputRows = maxInputViewport
 
 // newInput returns the input: plain, unstyled and multi-line. Enter is the
 // App's (submit); Alt+Enter inserts a newline.
@@ -49,6 +49,19 @@ func setInputPrompt(in *textarea.Model, prompt string, width int) {
 		return pad
 	})
 	in.SetWidth(max(width, 1))
+}
+
+// fitInput sets the input's viewport to rows lines. When that changes it, the
+// input is drawn once at the new height and scrolled to its cursor, so the
+// cursor line stays in view however few lines the layout gives it.
+func fitInput(in *textarea.Model, rows int) {
+	rows = max(rows, 1)
+	if in.Height() == rows {
+		return
+	}
+	in.SetHeight(rows)
+	_ = in.View()
+	*in, _ = in.Update(nil)
 }
 
 // inputLines is how many screen lines the input's text takes at its width,

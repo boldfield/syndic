@@ -287,8 +287,7 @@ func TestConversationsAndSwitch(t *testing.T) {
 
 	// The first conversation opens by prefix, with its turn and only that.
 	r.command("/switch "+first[:6], "switched to conversation "+shortID(first)+", 1 turns", "› first question")
-	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
-	if got, want := header(r.driver), "conversation "+shortID(first)+", 1 turns · workspace /ws/here 0 earlier · 0%"; got != want {
+	if got, want := header(r.driver), "conversation "+shortID(first)+", 1 turns · workspace /ws/here"; got != want {
 		t.Errorf("header after /switch = %q, want %q", got, want)
 	}
 	if v := r.app.View(); strings.Contains(v, "› second question") {

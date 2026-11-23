@@ -221,7 +221,7 @@ func TestFourBannersCollapseAt80x24(t *testing.T) {
 		t.Errorf("tab area has %d lines, want at least 5", body)
 	}
 	// tab bar, tab area, banners, input and status line fill the frame.
-	if want := tabBarHeight + body + 2 + inputHeight + stripHeight; len(lines) != want {
+	if want := tabBarHeight + body + 2 + 2 + stripHeight; len(lines) != want {
 		t.Errorf("frame has %d lines, want %d", len(lines), want)
 	}
 }
