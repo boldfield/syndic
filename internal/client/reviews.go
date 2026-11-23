@@ -23,10 +23,10 @@ func verifyRef(ref *wire.ContentReference, data []byte) error {
 	return nil
 }
 
-// VerifiedReviewsPage fetches a page of reviews for a turn with decoded items.
-// It verifies that the page fits within constraints and returns decoded items
-// ready for use. The caller may fetch full content references via FetchReviewContent
-// or oversized record references via FetchOversizedRecord.
+// VerifiedReviewsPage fetches a single page of reviews for a turn with decoded items.
+// It validates the page constraints and returns decoded items ready for use. The caller may fetch
+// full content references via FetchReviewContent or oversized record references via FetchOversizedRecord.
+// A limit exceeding 50, a cursor present with no items, or more items than the requested limit is rejected.
 func (c *Client) VerifiedReviewsPage(ctx context.Context, turnID string, cursor *string, limit *int) ([]wire.ReviewItem, *string, error) {
 	// Validate limit constraint: limit must be at most 50
 	if limit != nil && *limit > 50 {
@@ -47,14 +47,20 @@ func (c *Client) VerifiedReviewsPage(ctx context.Context, turnID string, cursor 
 		return nil, nil, fmt.Errorf("invalid paging state: cursor present but no items returned")
 	}
 
+	// Guard against more items than requested limit
+	if limit != nil && len(items) > *limit {
+		return nil, nil, fmt.Errorf("server returned %d items, exceeding requested limit of %d", len(items), *limit)
+	}
+
 	return items, reply.NextCursor, nil
 }
 
-// AllReviews pages through all accepted reviews for a turn, validating that the total
-// count matches the expected review_count. It stops when no next_cursor is returned.
+// AllReviews pages through all accepted reviews for a turn, stopping when no next_cursor is returned.
+// It rejects pages with repeated cursors to prevent infinite loops and validates all paging constraints.
 func (c *Client) AllReviews(ctx context.Context, turnID string) ([]wire.ReviewItem, error) {
 	var allItems []wire.ReviewItem
 	var cursor *string
+	var lastCursor *string
 	limit := 50
 
 	for {
@@ -66,6 +72,11 @@ func (c *Client) AllReviews(ctx context.Context, turnID string) ([]wire.ReviewIt
 		if nextCursor == nil {
 			break
 		}
+		// Detect repeated cursor to prevent infinite loop
+		if lastCursor != nil && nextCursor != nil && *lastCursor == *nextCursor {
+			return nil, fmt.Errorf("server returned repeated cursor: %s", *nextCursor)
+		}
+		lastCursor = cursor
 		cursor = nextCursor
 	}
 
@@ -91,7 +102,7 @@ func (c *Client) FetchOversizedRecord(ctx context.Context, item *wire.ReviewItem
 
 	// Verify the content matches the declared hash and length
 	if err := verifyRef(item.Record, recordBytes); err != nil {
-		return wire.ReviewItem{}, fmt.Errorf("oversized record %s", err)
+		return wire.ReviewItem{}, fmt.Errorf("oversized record: %w", err)
 	}
 
 	// Decode into a fresh value to avoid mutating caller's item
@@ -144,7 +155,7 @@ func (c *Client) FetchReviewContent(ctx context.Context, ref *wire.ContentRefere
 
 	// Verify the content matches the declared hash and length
 	if err := verifyRef(ref, content); err != nil {
-		return nil, fmt.Errorf("content %s", err)
+		return nil, fmt.Errorf("content: %w", err)
 	}
 
 	return content, nil

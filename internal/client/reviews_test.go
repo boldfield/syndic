@@ -541,6 +541,89 @@ func TestFetchOversizedRecordIdentityMismatch(t *testing.T) {
 	}
 }
 
+func TestFetchOversizedRecordCallerNotMutatedOnFailure(t *testing.T) {
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestContent {
+			return true
+		}
+
+		// Return a record with wrong participant (will fail identity check)
+		recordItem := wire.ReviewItem{
+			Round:         0,
+			CandidateHash: "hash123",
+			Participant:   "reviewer-different",
+			AttemptID:     "attempt-1",
+			Kind:          "approve",
+			Blocks:        []wire.ReviewBlock{},
+		}
+		recordBytes, _ := json.Marshal(recordItem)
+		recordHash := sha256.Sum256(recordBytes)
+		recordHashStr := hex.EncodeToString(recordHash[:])
+
+		reply := wire.ContentReply{
+			Ref:    "record:verdict-1",
+			Offset: 0,
+			Data:   wire.EncodePage(recordBytes),
+			Total:  int64(len(recordBytes)),
+			SHA256: recordHashStr,
+		}
+		replyBody, _ := wire.NewReply(frame.ID, reply)
+		_ = w.Write(replyBody)
+		return false
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	recordItem := wire.ReviewItem{
+		Round:         0,
+		CandidateHash: "hash123",
+		Participant:   "reviewer-different",
+		AttemptID:     "attempt-1",
+		Kind:          "approve",
+		Blocks:        []wire.ReviewBlock{},
+	}
+	recordBytes, _ := json.Marshal(recordItem)
+	recordHash := sha256.Sum256(recordBytes)
+
+	// Create an oversized item with specific values to check for mutation
+	originalItem := wire.ReviewItem{
+		Round:         0,
+		CandidateHash: "hash123",
+		Participant:   "reviewer-1",
+		AttemptID:     "attempt-1",
+		Kind:          "approve",
+		Oversized:     true,
+		Record: &wire.ContentReference{
+			Ref:     "record:verdict-1",
+			SHA256:  hex.EncodeToString(recordHash[:]),
+			ByteLen: int64(len(recordBytes)),
+		},
+	}
+	testItem := originalItem
+
+	// Attempt to fetch - should fail due to identity mismatch
+	_, err = client.FetchOversizedRecord(ctx, &testItem)
+	if err == nil {
+		t.Fatalf("expected error for identity mismatch")
+	}
+
+	// Verify caller's item was not mutated
+	if testItem.Oversized != originalItem.Oversized {
+		t.Fatalf("caller's Oversized field was mutated: before %v, after %v", originalItem.Oversized, testItem.Oversized)
+	}
+	if testItem.Record == nil {
+		t.Fatalf("caller's Record reference was cleared")
+	}
+}
+
 func TestFetchReviewContent(t *testing.T) {
 	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
 		if frame.Type != wire.RequestContent {
@@ -714,11 +797,11 @@ func TestFetchReviewContentCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Create a context that cancels quickly
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
+	// Use separate context for Dial; cancel only the fetch context
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
 
-	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	client, err := Dial(dialCtx, server.addr, "test-client", "1.0")
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
@@ -732,9 +815,113 @@ func TestFetchReviewContentCancellation(t *testing.T) {
 		ByteLen: int64(len(content)),
 	}
 
+	// Create a context that cancels quickly for the fetch
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer fetchCancel()
+
 	// Should fail due to context cancellation
-	_, err = client.FetchReviewContent(ctx, ref)
+	_, err = client.FetchReviewContent(fetchCtx, ref)
 	if err == nil {
 		t.Fatalf("expected context cancellation error")
+	}
+	select {
+	case <-fetchCtx.Done():
+		// Context is done, as expected
+	default:
+		t.Fatalf("expected fetch context to be cancelled")
+	}
+}
+
+func TestAllReviewsPagingCancellation(t *testing.T) {
+	callCount := 0
+	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
+		if frame.Type != wire.RequestReviews {
+			return true
+		}
+
+		callCount++
+		var items []json.RawMessage
+		var nextCursor *string
+
+		switch callCount {
+		case 1:
+			// First page
+			item := wire.ReviewItem{
+				Round:         0,
+				CandidateHash: "hash123",
+				Participant:   "reviewer-1",
+				AttemptID:     "attempt-1",
+				Kind:          "approve",
+				Blocks:        []wire.ReviewBlock{},
+			}
+			itemBytes, _ := json.Marshal(item)
+			items = []json.RawMessage{itemBytes}
+			cursor := "cursor-2"
+			nextCursor = &cursor
+		case 2:
+			// Simulate slow second page response
+			time.Sleep(100 * time.Millisecond)
+			item := wire.ReviewItem{
+				Round:         1,
+				CandidateHash: "hash123",
+				Participant:   "reviewer-2",
+				AttemptID:     "attempt-2",
+				Kind:          "block",
+				Blocks:        []wire.ReviewBlock{},
+			}
+			itemBytes, _ := json.Marshal(item)
+			items = []json.RawMessage{itemBytes}
+			nextCursor = nil
+		}
+
+		reply := wire.ReviewsReply{
+			Items:      items,
+			NextCursor: nextCursor,
+		}
+		replyBody, _ := wire.NewReply(frame.ID, reply)
+		_ = w.Write(replyBody)
+
+		return nextCursor != nil
+	}))
+	defer server.Close()
+
+	// Use separate context for Dial
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+
+	client, err := Dial(dialCtx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Create a context that will be cancelled after the first page
+	pagingCtx, pagingCancel := context.WithCancel(context.Background())
+	defer pagingCancel()
+
+	// Use a custom loop to allow cancellation between pages
+	var cursor *string
+	limit := 50
+
+	// First page should succeed
+	items, nextCursor, err := client.VerifiedReviewsPage(pagingCtx, "turn-1", cursor, &limit)
+	if err != nil {
+		t.Fatalf("first page failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item on first page, got %d", len(items))
+	}
+	if nextCursor == nil {
+		t.Fatalf("expected next cursor on first page")
+	}
+	cursor = nextCursor
+
+	// Cancel context before fetching second page
+	pagingCancel()
+
+	// Second page should fail due to cancellation
+	_, _, err = client.VerifiedReviewsPage(pagingCtx, "turn-1", cursor, &limit)
+	if err == nil {
+		t.Fatalf("expected context cancellation error on second page")
 	}
 }
