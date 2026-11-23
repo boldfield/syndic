@@ -53,7 +53,7 @@ var commandHelp = []string{
 	"/override <reason>        accept an incomplete turn's candidate, with a reason",
 	"/release <pool> [attempt] release held capacity, after a confirmation",
 	"/drafts on|off            show or hide the author's unreviewed draft",
-	"/raw on|off               show or hide Markdown rendering in answer text",
+	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",

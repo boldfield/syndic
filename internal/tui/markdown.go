@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // RenderMarkdown renders answer text at the given terminal width, with
@@ -12,87 +13,406 @@ func RenderMarkdown(text string, width int, raw bool) string {
 }
 
 // renderAnswerMarkdown renders answer text for the chat tab. Raw and plain
-// (no-colour) modes show unformatted safe text. Otherwise the text is first
-// converted to safe text, then Markdown is rendered from that safe text into
-// plain lines without any terminal escape, and the result goes through the
-// same wrap-and-indent boundary as raw mode, so both use the same final
-// content indentation. Escaped text is idempotent under that boundary.
+// (no-colour) modes show unformatted safe text through SafeTextWithPrefix.
+// Otherwise the bytes are escaped once into safe tokens, Markdown is parsed
+// over those tokens (a visible escape is one atomic token the parser never
+// looks inside) and only then does the TUI add its own SGR styling. The
+// result is wrapped and indented to the same final content indentation as
+// raw mode.
 func renderAnswerMarkdown(text string, width int, raw bool, noColor bool) string {
 	if width <= 0 {
 		return ToSafeText([]byte(text))
 	}
-	if !raw && !noColor {
-		text = renderMarkdownLines(ToSafeText([]byte(text)))
+	if raw || noColor {
+		return strings.Join(SafeTextWithPrefix(text, width), "\n")
 	}
-	return strings.Join(SafeTextWithPrefix(text, width), "\n")
+	lines := renderMarkdownTokens(safeTokens([]byte(text)))
+	return strings.Join(wrapStyled(lines, max(width, minContentWidth)-len(contentPrefix)), "\n")
 }
 
-var (
-	fenceRe      = regexp.MustCompile("^\\s*(```|~~~)\\s*(\\S*)")
-	headingRe    = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$`)
-	bulletRe     = regexp.MustCompile(`^(\s*)[-*+]\s+(.*)$`)
-	orderedRe    = regexp.MustCompile(`^(\s*)(\d+[.)])\s+(.*)$`)
-	inlineCodeRe = regexp.MustCompile("`([^`]+)`")
-	linkRe       = regexp.MustCompile(`\[([^\[\]]+)\]\(([^()\s]+)\)`)
-	boldRe       = regexp.MustCompile(`(\*\*|__)(\S|\S[^\n]*?\S)(\*\*|__)`)
-	italicStarRe = regexp.MustCompile(`(^|[^\w*])\*(\S|[^\s*][^*\n]*?[^\s*])\*([^\w*]|$)`)
-	italicUndRe  = regexp.MustCompile(`(^|[^\w_])_(\S|[^\s_][^_\n]*?[^\s_])_([^\w_]|$)`)
+// mdStyle is a set of TUI-owned display styles; untrusted text never
+// contributes an escape, only these do.
+type mdStyle uint8
+
+const (
+	styleBold mdStyle = 1 << iota
+	styleItalic
+	styleCode
+	styleUnderline
 )
 
-// renderMarkdownLines turns safe text into display lines: lists get bullets,
-// headings and emphasis lose their markers, links show their URL, inline
-// code loses its backticks and a fenced block shows its language label above
-// the code, indented. Nothing here emits an escape sequence.
-func renderMarkdownLines(safe string) string {
-	var out []string
-	inFence := false
-	for _, line := range strings.Split(safe, "\n") {
-		if m := fenceRe.FindStringSubmatch(line); m != nil {
-			if inFence {
-				inFence = false
-				continue
-			}
-			inFence = true
-			if m[2] != "" {
-				out = append(out, "["+m[2]+"]")
-			}
-			continue
-		}
-		if inFence {
-			out = append(out, "  "+line)
-			continue
-		}
-		if m := headingRe.FindStringSubmatch(line); m != nil {
-			out = append(out, renderInline(m[1]))
-		} else if m := bulletRe.FindStringSubmatch(line); m != nil {
-			out = append(out, m[1]+"• "+renderInline(m[2]))
-		} else if m := orderedRe.FindStringSubmatch(line); m != nil {
-			out = append(out, m[1]+m[2]+" "+renderInline(m[3]))
-		} else {
-			out = append(out, renderInline(line))
-		}
-	}
-	return strings.Join(out, "\n")
+// styledTok is a safe token with the style it is displayed in.
+type styledTok struct {
+	safeToken
+	st mdStyle
 }
 
-// renderInline renders inline Markdown of one line. Code spans are kept
-// verbatim, minus their backticks; everything between them is rendered.
-func renderInline(line string) string {
-	var b strings.Builder
-	last := 0
-	for _, loc := range inlineCodeRe.FindAllStringSubmatchIndex(line, -1) {
-		b.WriteString(renderSpans(line[last:loc[0]]))
-		b.WriteString(line[loc[2]:loc[3]])
-		last = loc[1]
+func (s mdStyle) sgr() string {
+	var codes []string
+	if s&styleBold != 0 {
+		codes = append(codes, "1")
 	}
-	b.WriteString(renderSpans(line[last:]))
+	if s&styleItalic != 0 {
+		codes = append(codes, "3")
+	}
+	if s&styleUnderline != 0 {
+		codes = append(codes, "4")
+	}
+	if s&styleCode != 0 {
+		codes = append(codes, "36")
+	}
+	return "\x1b[" + strings.Join(codes, ";") + "m"
+}
+
+const sgrReset = "\x1b[0m"
+
+// wrapStyled lays styled lines out on lines of at most width cells and
+// prefixes each one. Style is closed at the end of every line and reopened
+// on the next, so the prefix and following rows are never styled.
+func wrapStyled(lines [][]styledTok, width int) []string {
+	var out []string
+	var cur strings.Builder
+	col := 0
+	var applied mdStyle
+	flush := func() {
+		if applied != 0 {
+			cur.WriteString(sgrReset)
+			applied = 0
+		}
+		out = append(out, contentPrefix+cur.String())
+		cur.Reset()
+		col = 0
+	}
+	for _, line := range lines {
+		for _, t := range line {
+			if col > 0 && col+t.width > width {
+				flush()
+			}
+			if t.st != applied {
+				if applied != 0 {
+					cur.WriteString(sgrReset)
+				}
+				if t.st != 0 {
+					cur.WriteString(t.st.sgr())
+				}
+				applied = t.st
+			}
+			cur.WriteString(t.text)
+			col += t.width
+		}
+		flush()
+	}
+	return out
+}
+
+func isSpaceTok(t safeToken) bool { return t.text == " " }
+
+func isWordTok(t safeToken) bool {
+	r, size := utf8.DecodeRuneInString(t.text)
+	return size == len(t.text) && (r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r))
+}
+
+func plainToks(toks []safeToken, st mdStyle) []styledTok {
+	out := make([]styledTok, len(toks))
+	for i, t := range toks {
+		out[i] = styledTok{t, st}
+	}
+	return out
+}
+
+func stText(s string) []safeToken {
+	toks := make([]safeToken, 0, len(s))
+	for _, r := range s {
+		toks = append(toks, safeToken{text: string(r), width: 1})
+	}
+	return toks
+}
+
+// splitLines splits tokens at line feeds. A trailing line feed ends the last
+// line rather than opening another, as in raw mode.
+func splitLines(toks []safeToken) [][]safeToken {
+	var lines [][]safeToken
+	var cur []safeToken
+	pending := false
+	for _, t := range toks {
+		if t.nl {
+			lines = append(lines, cur)
+			cur = nil
+			pending = false
+			continue
+		}
+		cur = append(cur, t)
+		pending = true
+	}
+	if pending {
+		lines = append(lines, cur)
+	}
+	if len(lines) == 0 {
+		lines = [][]safeToken{nil}
+	}
+	return lines
+}
+
+func countLeadingSpaces(toks []safeToken) int {
+	n := 0
+	for n < len(toks) && isSpaceTok(toks[n]) {
+		n++
+	}
+	return n
+}
+
+func trimTrailingSpaces(toks []safeToken) []safeToken {
+	for len(toks) > 0 && isSpaceTok(toks[len(toks)-1]) {
+		toks = toks[:len(toks)-1]
+	}
+	return toks
+}
+
+// fenceOf recognises a fence line: its marker, run length and info string.
+func fenceOf(line []safeToken) (marker string, n int, info string, ok bool) {
+	i := countLeadingSpaces(line)
+	if i > 3 || i >= len(line) || (line[i].text != "`" && line[i].text != "~") {
+		return "", 0, "", false
+	}
+	marker = line[i].text
+	j := i
+	for j < len(line) && line[j].text == marker {
+		j++
+	}
+	if j-i < 3 {
+		return "", 0, "", false
+	}
+	rest := line[j:]
+	rest = rest[countLeadingSpaces(rest):]
+	k := 0
+	for k < len(rest) && !isSpaceTok(rest[k]) {
+		k++
+	}
+	return marker, j - i, joinToks(rest[:k]), true
+}
+
+func joinToks(toks []safeToken) string {
+	var b strings.Builder
+	for _, t := range toks {
+		b.WriteString(t.text)
+	}
 	return b.String()
 }
 
-func renderSpans(s string) string {
-	s = linkRe.ReplaceAllString(s, "$1 ($2)")
-	s = boldRe.ReplaceAllString(s, "$2")
-	s = italicStarRe.ReplaceAllString(s, "$1$2$3")
-	s = italicUndRe.ReplaceAllString(s, "$1$2$3")
-	return s
+func allSpaces(toks []safeToken) bool { return countLeadingSpaces(toks) == len(toks) }
+
+// renderMarkdownTokens turns safe tokens into styled display lines: lists get
+// bullets, headings are bold, links show their URL, emphasis and inline code
+// are styled and a fenced block shows its language label above the code.
+func renderMarkdownTokens(toks []safeToken) [][]styledTok {
+	var out [][]styledTok
+	fence := ""
+	fenceLen := 0
+	for _, line := range splitLines(toks) {
+		if fence != "" {
+			// only a bare fence of the same kind, at least as long, closes
+			if m, n, info, ok := fenceOf(line); ok && m == fence && n >= fenceLen && info == "" && allSpaces(line[countLeadingSpaces(line)+n:]) {
+				fence = ""
+				continue
+			}
+			out = append(out, append(plainToks(stText("  "), 0), plainToks(line, styleCode)...))
+			continue
+		}
+		if m, n, info, ok := fenceOf(line); ok {
+			fence, fenceLen = m, n
+			if info != "" {
+				out = append(out, plainToks(stText("["+info+"]"), 0))
+			}
+			continue
+		}
+		out = append(out, renderBlockLine(line))
+	}
+	return out
+}
+
+func renderBlockLine(line []safeToken) []styledTok {
+	ind := countLeadingSpaces(line)
+	rest := line[ind:]
+	// heading
+	if ind <= 3 {
+		h := 0
+		for h < len(rest) && h < 7 && rest[h].text == "#" {
+			h++
+		}
+		if h >= 1 && h <= 6 && (h == len(rest) || isSpaceTok(rest[h])) {
+			body := trimTrailingSpaces(rest[h:])
+			body = body[countLeadingSpaces(body):]
+			// optional closing #s
+			e := len(body)
+			for e > 0 && body[e-1].text == "#" {
+				e--
+			}
+			if e < len(body) && (e == 0 || isSpaceTok(body[e-1])) {
+				body = trimTrailingSpaces(body[:e])
+			}
+			return renderInline(body, styleBold)
+		}
+	}
+	// bullet
+	if len(rest) >= 2 && (rest[0].text == "-" || rest[0].text == "*" || rest[0].text == "+") && isSpaceTok(rest[1]) {
+		out := plainToks(line[:ind], 0)
+		out = append(out, plainToks(stText("• "), 0)...)
+		return append(out, renderInline(rest[1+countLeadingSpaces(rest[1:]):], 0)...)
+	}
+	// ordered list
+	d := 0
+	for d < len(rest) && len(rest[d].text) == 1 && rest[d].text[0] >= '0' && rest[d].text[0] <= '9' {
+		d++
+	}
+	if d > 0 && d+1 < len(rest) && (rest[d].text == "." || rest[d].text == ")") && isSpaceTok(rest[d+1]) {
+		out := plainToks(line[:ind+d+2], 0)
+		return append(out, renderInline(rest[d+1+countLeadingSpaces(rest[d+1:]):], 0)...)
+	}
+	return renderInline(line, 0)
+}
+
+// run counts consecutive tokens equal to text from i.
+func run(toks []safeToken, i int) int {
+	n := 0
+	for i+n < len(toks) && toks[i+n].text == toks[i].text {
+		n++
+	}
+	return n
+}
+
+// renderInline parses inline Markdown over safe tokens: code spans (any
+// backtick run length), links with balanced destinations, and emphasis.
+func renderInline(toks []safeToken, st mdStyle) []styledTok {
+	var out []styledTok
+	for i := 0; i < len(toks); {
+		t := toks[i]
+		switch t.text {
+		case "`":
+			n := run(toks, i)
+			if j := findCodeClose(toks, i+n, n); j >= 0 {
+				code := toks[i+n : j]
+				if len(code) >= 2 && isSpaceTok(code[0]) && isSpaceTok(code[len(code)-1]) && !allSpaces(code) {
+					code = code[1 : len(code)-1]
+				}
+				out = append(out, plainToks(code, st|styleCode)...)
+				i = j + n
+				continue
+			}
+			out = append(out, plainToks(toks[i:i+n], st)...)
+			i += n
+			continue
+		case "[":
+			if textEnd, destEnd, ok := matchLink(toks, i); ok {
+				out = append(out, renderInline(toks[i+1:textEnd], st)...)
+				out = append(out, plainToks(stText(" ("), st)...)
+				out = append(out, plainToks(toks[textEnd+2:destEnd], st|styleUnderline)...)
+				out = append(out, plainToks(stText(")"), st)...)
+				i = destEnd + 1
+				continue
+			}
+		case "*", "_":
+			n := run(toks, i)
+			if n <= 2 && openerOK(toks, i, n) {
+				if j := findEmphClose(toks, i+n, n); j >= 0 {
+					sty := styleItalic
+					if n == 2 {
+						sty = styleBold
+					}
+					out = append(out, renderInline(toks[i+n:j], st|sty)...)
+					i = j + n
+					continue
+				}
+			}
+			out = append(out, plainToks(toks[i:i+n], st)...)
+			i += n
+			continue
+		}
+		out = append(out, styledTok{t, st})
+		i++
+	}
+	return out
+}
+
+func findCodeClose(toks []safeToken, from, n int) int {
+	for j := from; j < len(toks); {
+		if toks[j].text != "`" {
+			j++
+			continue
+		}
+		m := run(toks, j)
+		if m == n {
+			return j
+		}
+		j += m
+	}
+	return -1
+}
+
+// matchLink matches [text](dest) at i, the destination allowing balanced
+// parentheses and no whitespace. It returns the index of ']' and of the
+// closing ')'.
+func matchLink(toks []safeToken, i int) (textEnd, destEnd int, ok bool) {
+	depth := 0
+	k := -1
+	for j := i; j < len(toks); j++ {
+		if toks[j].text == "[" {
+			depth++
+		} else if toks[j].text == "]" {
+			depth--
+			if depth == 0 {
+				k = j
+				break
+			}
+		}
+	}
+	if k < 0 || k == i+1 || k+2 >= len(toks) || toks[k+1].text != "(" {
+		return 0, 0, false
+	}
+	depth = 1
+	for j := k + 2; j < len(toks); j++ {
+		switch toks[j].text {
+		case " ":
+			return 0, 0, false
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				if j == k+2 {
+					return 0, 0, false
+				}
+				return k, j, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// openerOK reports whether the delimiter run at i of length n can open
+// emphasis: followed by non-space and not inside a word or another run.
+func openerOK(toks []safeToken, i, n int) bool {
+	if i+n >= len(toks) || isSpaceTok(toks[i+n]) {
+		return false
+	}
+	if i > 0 && (isWordTok(toks[i-1]) || toks[i-1].text == toks[i].text) {
+		return false
+	}
+	return true
+}
+
+// findEmphClose finds the closing run of exactly n identical delimiters.
+func findEmphClose(toks []safeToken, from, n int) int {
+	delim := toks[from-1].text
+	for j := from; j < len(toks); {
+		if toks[j].text != delim {
+			j++
+			continue
+		}
+		m := run(toks, j)
+		if m == n && j > from && !isSpaceTok(toks[j-1]) && (j+m >= len(toks) || !isWordTok(toks[j+m])) {
+			return j
+		}
+		j += m
+	}
+	return -1
 }

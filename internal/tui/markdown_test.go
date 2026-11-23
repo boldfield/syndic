@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,31 +21,55 @@ var goldenCases = []goldenCase{
 		name:     "link shows its URL, no hyperlink escape",
 		in:       "See [docs](https://e.io/x) ok",
 		raw:      "  See [docs](https://e.io/x) ok",
-		rendered: "  See docs (https://e.io/x) ok",
+		rendered: "  See docs (\x1b[4mhttps://e.io/x\x1b[0m) ok",
 	},
 	{
 		name:     "labeled code fence, list, emphasis and inline code",
 		in:       "Intro *em* and **b** `c`\n```go\nx := 1\n\ty := 2\n```\n- a\n  more\n- b\n1. first\n2. second",
 		raw:      "  Intro *em* and **b** `c`\n  ```go\n  x := 1\n      y := 2\n  ```\n  - a\n    more\n  - b\n  1. first\n  2. second",
-		rendered: "  Intro em and b c\n  [go]\n    x := 1\n        y := 2\n  • a\n    more\n  • b\n  1. first\n  2. second",
+		rendered: "  Intro \x1b[3mem\x1b[0m and \x1b[1mb\x1b[0m \x1b[36mc\x1b[0m\n  [go]\n    \x1b[36mx := 1\x1b[0m\n    \x1b[36m    y := 2\x1b[0m\n  • a\n    more\n  • b\n  1. first\n  2. second",
 	},
 	{
 		name:     "outcome-like Markdown keeps its words and checkbox",
 		in:       "**APPROVED**\n- [x] approved",
 		raw:      "  **APPROVED**\n  - [x] approved",
-		rendered: "  APPROVED\n  • [x] approved",
+		rendered: "  \x1b[1mAPPROVED\x1b[0m\n  • [x] approved",
 	},
 	{
 		name:     "hostile bytes are escaped before rendering",
 		in:       "bad \x1b[31m *red* \x1b[0m \xff `c`",
 		raw:      "  bad \\x1b[31m *red* \\x1b[0m \\xff `c`",
-		rendered: "  bad \\x1b[31m red \\x1b[0m \\xff c",
+		rendered: "  bad \\x1b[31m \x1b[3mred\x1b[0m \\x1b[0m \\xff \x1b[36mc\x1b[0m",
 	},
 	{
 		name:     "plain brackets and snake_case are untouched",
 		in:       "plain [x] snake_case 2*3*4",
 		raw:      "  plain [x] snake_case 2*3*4",
 		rendered: "  plain [x] snake_case 2*3*4",
+	},
+	{
+		name:     "underscore runs inside identifiers are not emphasis",
+		in:       "MAX__SIZE and foo__bar__baz a__b**c",
+		raw:      "  MAX__SIZE and foo__bar__baz a__b**c",
+		rendered: "  MAX__SIZE and foo__bar__baz a__b**c",
+	},
+	{
+		name:     "long code delimiter and balanced link destination",
+		in:       "``a ` b`` [p](https://e.io/a_(b))",
+		raw:      "  ``a ` b`` [p](https://e.io/a_(b))",
+		rendered: "  \x1b[36ma ` b\x1b[0m p (\x1b[4mhttps://e.io/a_(b)\x1b[0m)",
+	},
+	{
+		name:     "closing fence cannot carry an info string",
+		in:       "```\nfoo\n```bash\nbar\n```",
+		raw:      "  ```\n  foo\n  ```bash\n  bar\n  ```",
+		rendered: "    \x1b[36mfoo\x1b[0m\n    \x1b[36m```bash\x1b[0m\n    \x1b[36mbar\x1b[0m",
+	},
+	{
+		name:     "ordered and heading",
+		in:       "# Title #\n1. one",
+		raw:      "  # Title #\n  1. one",
+		rendered: "  \x1b[1mTitle\x1b[0m\n  1. one",
 	},
 }
 
@@ -61,10 +86,14 @@ func TestGoldenMarkdown(t *testing.T) {
 	}
 }
 
+// sgrRe matches the only escapes the renderer may emit: TUI-owned styling.
+var sgrRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
 func TestMarkdownNeverEmitsControls(t *testing.T) {
 	for _, c := range goldenCases {
 		for _, raw := range []bool{true, false} {
-			if out := RenderMarkdown(c.in, 40, raw); strings.ContainsAny(out, "\x1b\r\x00\x07") || strings.Contains(out, "\x9b") {
+			out := sgrRe.ReplaceAllString(RenderMarkdown(c.in, 40, raw), "")
+			if strings.ContainsAny(out, "\x1b\r\x00\x07") || strings.Contains(out, "\x9b") {
 				t.Errorf("%s raw=%v: control in %q", c.name, raw, out)
 			}
 		}
@@ -92,14 +121,23 @@ func TestRawCommandChangesView(t *testing.T) {
 	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
 	r.typeLine("question")
 	turnIn(t, r, "approved")
-	v := untilView(t, r, "this is bold text")
+	v := untilView(t, r, "this is "+"\x1b[1mbold\x1b[0m"+" text")
 	if strings.Contains(v, "**bold**") {
 		t.Fatalf("markdown shown while rendering:\n%s", v)
 	}
 	r.typeLine("/raw on")
 	untilView(t, r, "this is **bold** text", "raw on")
 	r.typeLine("/raw off")
-	untilView(t, r, "this is bold text", "raw off")
+	untilView(t, r, "this is \x1b[1mbold\x1b[0m text", "raw off")
 	r.typeLine("/raw maybe")
 	untilView(t, r, "usage: /raw on|off")
+}
+
+func TestMarkdownEscapeStaysAtomicWhenWrapped(t *testing.T) {
+	for _, raw := range []bool{true, false} {
+		out := RenderMarkdown("abc \x1b[31m", 8, raw)
+		if strings.Contains(out, "\\x1\n") || strings.Contains(out, "\\\n") {
+			t.Errorf("raw=%v: escape split across lines: %q", raw, out)
+		}
+	}
 }
