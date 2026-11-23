@@ -1,11 +1,9 @@
 package server_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine"
-	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -16,7 +14,7 @@ func TestReviewsRequest(t *testing.T) {
 	ctx := ctxT(t)
 
 	// Submit a review turn
-	release := h.Hold("author", "reviewer1", "reviewer2")
+	release := h.Hold("reviewer")
 	reply, err := c.Submit(ctx, reviewReq("reviews-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -72,8 +70,8 @@ func TestReviewsEmptyForSoloTurn(t *testing.T) {
 	// Release hold
 	release()
 	row := waitTerminal(t, h, reply.TurnID)
-	if row.TerminalState != engine.StateApproved {
-		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	if row.TerminalState != engine.StateSoloComplete {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateSoloComplete)
 	}
 
 	// Request reviews - should be empty
@@ -108,7 +106,7 @@ func TestReviewsWithLimit(t *testing.T) {
 	ctx := ctxT(t)
 
 	// Submit a review turn
-	release := h.Hold("author", "reviewer1", "reviewer2")
+	release := h.Hold("reviewer")
 	reply, err := c.Submit(ctx, reviewReq("reviews-limit"))
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +138,7 @@ func TestConversationIncludesReviewCount(t *testing.T) {
 	ctx := ctxT(t)
 
 	// Submit a review turn
-	release := h.Hold("author", "reviewer1", "reviewer2")
+	release := h.Hold("reviewer")
 	reply, err := c.Submit(ctx, reviewReq("review-count-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -188,8 +186,8 @@ func TestConversationSoloTurnNoReviewCount(t *testing.T) {
 	// Release hold
 	release()
 	row := waitTerminal(t, h, reply.TurnID)
-	if row.TerminalState != engine.StateApproved {
-		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	if row.TerminalState != engine.StateSoloComplete {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateSoloComplete)
 	}
 
 	// Get conversation and check review_count
