@@ -134,12 +134,15 @@ func TestStartupProbe_UnchangedRosterNoProbes(t *testing.T) {
 // records on flat endpoints are probed at start and become usable in that run.
 func TestStartupProbe_FlatEndpointProbed(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("flat-ep", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 
@@ -172,12 +175,15 @@ func TestStartupProbe_FlatEndpointProbed(t *testing.T) {
 // records on metered endpoints are not probed at start (without --probe-missing).
 func TestStartupProbe_MeteredNotProbed(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("metered-ep", "metered"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -201,12 +207,15 @@ func TestStartupProbe_MeteredNotProbed(t *testing.T) {
 // leaves the participant probe_failed:unreachable and the engine still starts.
 func TestStartupProbe_UnreachableFailure(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("unreachable", "none"),
 		map[string][]fake.Step{
 			"author":   {fake.Step{Kind: fake.StepKindError, Err: transport.ErrUnreachable}},
 			"reviewer": {fake.Step{Kind: fake.StepKindError, Err: transport.ErrUnreachable}},
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -229,12 +238,15 @@ func TestStartupProbe_UnreachableFailure(t *testing.T) {
 // a possible send leaves an uncertain-capacity hold.
 func TestStartupProbe_UncertainFailure(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("uncertain", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
 		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap),
 		enginetest.ProbeUncertainAt("author", "models"))
 
 	c := s.Dial(t)
@@ -266,7 +278,8 @@ func TestStartupProbe_IncompleteProbeNoModel(t *testing.T) {
 			"reviewer": repeat(4),
 		},
 		enginetest.WithProbing(),
-		enginetest.WithCapability("author", cap))
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", probeTestCapability()))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -296,7 +309,8 @@ func TestStartupProbe_IncompleteProbeNoMaxTokens(t *testing.T) {
 			"reviewer": repeat(4),
 		},
 		enginetest.WithProbing(),
-		enginetest.WithCapability("author", cap))
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", probeTestCapability()))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -317,12 +331,15 @@ func TestStartupProbe_IncompleteProbeNoMaxTokens(t *testing.T) {
 // hello returns state "started" and the manifest hash.
 func TestStartupProbe_HelloAfterStarted(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(2),
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 
@@ -343,12 +360,15 @@ func TestStartupProbe_HelloAfterStarted(t *testing.T) {
 // returns state "probing", null manifest_hash, and run_first_seq equal to run_opened seq.
 func TestStartupProbe_HelloDuringProbing(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   {fake.Step{Kind: fake.StepKindHang}},
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -381,12 +401,15 @@ func TestStartupProbe_HelloDuringProbing(t *testing.T) {
 // (run_first_seq - 1) replays run_opened, all probe events, and engine_started.
 func TestStartupProbe_SubscribeReplay(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -439,12 +462,15 @@ func TestStartupProbe_SubscribeReplay(t *testing.T) {
 // with error code "probing" during probing.
 func TestStartupProbe_SubmitRefusedDuringProbing(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   {fake.Step{Kind: fake.StepKindHang}},
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 
@@ -460,12 +486,15 @@ func TestStartupProbe_SubmitRefusedDuringProbing(t *testing.T) {
 // written after the last probe, not before.
 func TestStartupProbe_ManifestWrittenAfterProbes(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	c.Hello()
@@ -491,12 +520,15 @@ func TestStartupProbe_ManifestWrittenAfterProbes(t *testing.T) {
 // carries the manifest_hash and comes after all probes are complete.
 func TestStartupProbe_EngineStartedAfterManifest(t *testing.T) {
 	t.Parallel()
+	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(2),
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing())
+		enginetest.WithProbing(),
+		enginetest.WithCapability("author", cap),
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	c.Hello()
