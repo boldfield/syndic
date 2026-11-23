@@ -137,14 +137,28 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			hash := *ti.CandidateHash
 			hash = hash[:min(12, len(hash))]
 			by := strings.Join(approvers(s, turnID), ", ")
+			banner := "approved by " + by
 			if ti.Round > 0 {
-				by += fmt.Sprintf(" after %d revisions", ti.Round)
+				if ti.Round == 1 {
+					banner += " after 1 revision"
+				} else {
+					banner += fmt.Sprintf(" after %d revisions", ti.Round)
+				}
 			}
-			lines = append(lines, safeLine(fmt.Sprintf("approved by %s against %s", by, hash)))
+			banner += " against " + hash
+			reviews := -1
+			if ti.ReviewCount != nil {
+				reviews = *ti.ReviewCount
+			}
+			lines = append(lines, outcomeLine("✓", approvedMark, banner, reviews, in.plainMode))
 		}
 
 	case "solo_complete":
-		lines = append(lines, "UNREVIEWED (solo)")
+		reviews := -1
+		if ti.ReviewCount != nil {
+			reviews = *ti.ReviewCount
+		}
+		lines = append(lines, outcomeLine("·", soloMark, "UNREVIEWED (solo)", reviews, in.plainMode))
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
 			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else {
@@ -157,7 +171,11 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		}
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		if ti.CandidateHash != nil {
-			lines = append(lines, "INCOMPLETE, not approved")
+			reviews := -1
+			if ti.ReviewCount != nil {
+				reviews = *ti.ReviewCount
+			}
+			lines = append(lines, outcomeLine("!", incompleteMark, "INCOMPLETE, not approved", reviews, in.plainMode))
 		}
 		lines = append(lines, noApprovedAnswer(ti.State))
 		if ti.CandidateHash != nil {
@@ -169,7 +187,11 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, shownPlain("HUMAN OVERRIDE: "+reason, in.width))
+		reviews := -1
+		if ti.ReviewCount != nil {
+			reviews = *ti.ReviewCount
+		}
+		lines = append(lines, outcomeLine("!", incompleteMark, "HUMAN OVERRIDE: "+reason, reviews, in.plainMode))
 		candidate()
 
 	case "cancelled":
@@ -177,7 +199,12 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			lines = append(lines, "cancelled before candidate", noApprovedAnswer(ti.State))
 			break
 		}
-		lines = append(lines, "CANCELLED, not approved", noApprovedAnswer(ti.State))
+		reviews := -1
+		if ti.ReviewCount != nil {
+			reviews = *ti.ReviewCount
+		}
+		lines = append(lines, outcomeLine("×", cancelledMark, "CANCELLED, not approved", reviews, in.plainMode))
+		lines = append(lines, noApprovedAnswer(ti.State))
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		candidate()
 
@@ -225,6 +252,32 @@ func progressLine(ti TurnInfo, now time.Time) string {
 }
 
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+
+// outcomeMark styles for outcome lines (light/dark pairs)
+var (
+	approvedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green for approved
+	incompleteMark = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow for incomplete/override
+	cancelledMark  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red for cancelled
+	soloMark       = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray for solo
+)
+
+// outcomeLine formats a single outcome line with mark, banner, and optional reviews count.
+// mark is a single character (✓, !, ×, ·), and reviews is the review count (-1 means no count).
+// Returns the line with safe text, applying colour when appropriate.
+func outcomeLine(mark string, style lipgloss.Style, banner string, reviews int, plainMode bool) string {
+	reviewsSuffix := ""
+	if reviews >= 0 {
+		if reviews == 1 {
+			reviewsSuffix = " · 1 reviews"
+		} else {
+			reviewsSuffix = fmt.Sprintf(" · %d reviews", reviews)
+		}
+	}
+	if plainMode {
+		return safeLine(mark + " " + banner + reviewsSuffix)
+	}
+	return style.Render(mark) + " " + safeLine(banner+reviewsSuffix)
+}
 
 // blockLines lists open blocks with severity, evidence and remedy.
 // These are always rendered as plain safe text, never with Markdown.

@@ -325,7 +325,7 @@ func TestV5ApprovedAfterRevisionShowsIdsCountAndHash(t *testing.T) {
 		if ti.State != "approved" || ti.CandidateHash == nil {
 			return "", false
 		}
-		want := "approved by reviewer after 1 revisions against " + (*ti.CandidateHash)[:12]
+		want := "✓ approved by reviewer after 1 revision against " + (*ti.CandidateHash)[:12]
 		v := a.View()
 		return v, strings.Contains(v, want) && strings.Contains(v, "the answer is 42, and here is why")
 	})

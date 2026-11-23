@@ -127,7 +127,7 @@ func TestAnswerApproved(t *testing.T) {
 	if err != nil || reply.CandidateHash == nil {
 		t.Fatalf("turn reply %+v, %v", reply, err)
 	}
-	want := "approved by reviewer against " + (*reply.CandidateHash)[:12]
+	want := "✓ approved by reviewer against " + (*reply.CandidateHash)[:12]
 	v := untilView(t, r, answerText, want)
 	if strings.Index(v, answerText) > strings.Index(v, "approved by") {
 		t.Fatalf("approval line precedes the text:\n%s", v)

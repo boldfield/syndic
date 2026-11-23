@@ -84,9 +84,9 @@ func TestChatShowsEachTurnsInputThenOutcome(t *testing.T) {
 
 	lines := chatView(a)
 	order := []string{
-		"you: first question", "first answer", "approved by rev against abcdef123456",
-		"you: second question", "UNREVIEWED (solo)", "second answer",
-		"you: third question", "HUMAN OVERRIDE: good enough", "third answer",
+		"you: first question", "first answer", "✓ approved by rev against abcdef123456",
+		"you: second question", "· UNREVIEWED (solo)", "second answer",
+		"you: third question", "! HUMAN OVERRIDE: good enough", "third answer",
 	}
 	prev := -1
 	for _, want := range order {
@@ -108,12 +108,12 @@ func TestChatApprovedByRevisionShowsTheCount(t *testing.T) {
 	ti := a.state.Turns["t1"]
 	ti.Round = 2
 	a.state.Turns["t1"] = ti
-	lineOf(t, chatView(a), "approved by rev after 2 revisions against abcdef123456")
+	lineOf(t, chatView(a), "✓ approved by rev after 2 revisions against abcdef123456")
 
 	// No revision: the original wording.
 	addTurn(a, "t2", 2, "approved", "q2", "answer2")
 	approveBy(a, "t2", "rev")
-	lineOf(t, chatView(a), "approved by rev against abcdef123456t2"[:len("approved by rev against abcdef123456")])
+	lineOf(t, chatView(a), "✓ approved by rev against abcdef123456t2"[:len("✓ approved by rev against abcdef123456")])
 }
 
 func TestChatRoundCountComesFromRevisionEvents(t *testing.T) {
