@@ -85,11 +85,11 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 	args = append(args, turnID)
 
 	if cursor != nil {
-		query += ` AND (round, created_at) > (SELECT round, created_at FROM review_records WHERE id = ?)`
+		query += ` AND (round, created_at, id) > (SELECT round, created_at, id FROM review_records WHERE id = ?)`
 		args = append(args, *cursor)
 	}
 
-	query += ` ORDER BY round ASC, created_at ASC LIMIT ?`
+	query += ` ORDER BY round ASC, created_at ASC, id ASC LIMIT ?`
 	args = append(args, limit+1)
 
 	rows, err := tx.tx.Query(query, args...)
@@ -116,9 +116,7 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 			return nil, nil, fmt.Errorf("parse verdict json: %w", err)
 		}
 
-		if len(records) < limit {
-			records = append(records, r)
-		}
+		records = append(records, r)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -154,13 +152,15 @@ func computeSHA256Hash(data []byte) string {
 
 // StoreReviewRecordContent stores the content referenced by a review record
 // (commentary, evidence, remedy) and returns a ContentRef.
-func (tx *Tx) StoreReviewRecordContent(content []byte) (*ContentRef, error) {
+// Note: This function requires a turn context from the transaction; callers should
+// pass a valid turn_id when calling this from a turn's context.
+func (tx *Tx) StoreReviewRecordContent(turnID string, content []byte) (*ContentRef, error) {
 	contentHash := computeSHA256Hash(content)
 	byteLen := int64(len(content))
 
 	// Content is stored via AppendMessage in the messages table with a special sender.
 	// Use a synthetic message ID for the content reference.
-	msgID, _, _, err := tx.AppendMessage("", "review", "system", nil, content, nil)
+	msgID, _, _, err := tx.AppendMessage(turnID, "review", "system", nil, content, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store review content: %w", err)
 	}
@@ -233,8 +233,8 @@ func EstimateRecordSize(blocks []ReviewBlock, commentary *ContentRef) bool {
 
 // StoreOversizedRecord stores the full structured record as content when it exceeds 64 KiB.
 // Returns a ContentRef to the stored record.
-func (tx *Tx) StoreOversizedRecord(recordJSON []byte) (*ContentRef, error) {
-	return tx.StoreReviewRecordContent(recordJSON)
+func (tx *Tx) StoreOversizedRecord(turnID string, recordJSON []byte) (*ContentRef, error) {
+	return tx.StoreReviewRecordContent(turnID, recordJSON)
 }
 
 // GetReviewRecordsForStore is used by the Store wrapper to call GetReviewRecords within a transaction.
