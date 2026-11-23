@@ -458,7 +458,7 @@ func TestDeliveryNotSentWhenItDoesNotFitContext(t *testing.T) {
 			ack(),
 		},
 	}
-	h := enginetest.New(t, reviewRoster("author", "r1"), scripts, enginetest.WithContextBound("author", 5000))
+	h := enginetest.New(t, reviewRoster("author", "r1"), scripts, enginetest.WithContextBound("author", 6000))
 	turnID := submitReview(t, h, "s1")
 	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
 	got := waitDeliveries(t, h, turnID, 2)
