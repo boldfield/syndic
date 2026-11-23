@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/mattn/go-runewidth"
@@ -276,8 +277,8 @@ func blockRowLines(rows []blockRow, width int) []string {
 }
 
 // wrapText splits text into lines of at most width cells. Every rune is kept;
-// a line longer than width continues on the next row. Text must be pre-escaped;
-// no control characters are expected in input.
+// a line longer than width continues on the next row. Control characters are
+// shown as a dot so a body cannot drive the terminal.
 func wrapText(text string, width int) []string {
 	width = max(width, 1)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
@@ -287,8 +288,8 @@ func wrapText(text string, width int) []string {
 		var cur strings.Builder
 		cells := 0
 		for _, r := range para {
-			switch r {
-			case '\t':
+			switch {
+			case r == '\t':
 				for i := 0; i < tabStop; i++ {
 					if cells == width {
 						out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
@@ -297,6 +298,8 @@ func wrapText(text string, width int) []string {
 					cells++
 				}
 				continue
+			case unicode.IsControl(r):
+				r = '·'
 			}
 			w := runewidth.RuneWidth(r)
 			if cells > 0 && cells+w > width {
