@@ -16,14 +16,20 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 		return nil, err
 	}
 
-	// Get roster order from engine status
-	status, err := engine.Status()
+	// Get roster order from the turn's recorded roster, not current engine preset.
+	// First try to infer from existing review records, then fall back to engine status.
+	roster, err := store.GetTurnRoster(turnID)
 	if err != nil {
 		return nil, err
 	}
-	var roster []string
-	for _, p := range status.Participants {
-		roster = append(roster, p.ID)
+	if len(roster) == 0 {
+		status, err := engine.Status()
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range status.Participants {
+			roster = append(roster, p.ID)
+		}
 	}
 
 	// Parse cursor and limit
@@ -32,12 +38,18 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 		cursorStr = *cursor
 	}
 	pageLimit := journal.ReviewMaxLimit
-	if limit != nil && *limit > 0 && *limit < journal.ReviewMaxLimit {
-		pageLimit = *limit
+	if limit != nil {
+		if *limit < 1 {
+			return nil, &wire.Error{Code: wire.ErrorCodeBadRequest}
+		}
+		if *limit < journal.ReviewMaxLimit {
+			pageLimit = *limit
+		}
 	}
 
-	// Get the page of reviews, respecting the frame size limit
-	items, nextCursor, err := store.ReviewsPage(turnID, roster, cursorStr, pageLimit, wire.MaxFrameBytes)
+	// Get a page of reviews. Pass a generous frameBytes to get as many items as fit
+	// within the item limit, then trim to what fits in the encoded reply.
+	items, nextCursor, err := store.ReviewsPage(turnID, roster, cursorStr, pageLimit, wire.MaxFrameBytes*2)
 	if err != nil {
 		if errors.Is(err, journal.ErrBadReviewCursor) {
 			return nil, &wire.Error{Code: wire.ErrorCodeBadRequest}
@@ -45,11 +57,8 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 		return nil, err
 	}
 
-	// Build the reply
-	reply := &wire.ReviewsReply{
-		Items: make([]wire.ReviewItem, len(items)),
-	}
-
+	// Build wire-formatted items
+	wireItems := make([]wire.ReviewItem, len(items))
 	for i, item := range items {
 		reviewItem := wire.ReviewItem{
 			Round:         item.Round,
@@ -107,17 +116,45 @@ func buildReviews(engine Engine, store *journal.Store, id string, turnID string,
 			}
 		}
 
-		reply.Items[i] = reviewItem
+		wireItems[i] = reviewItem
 	}
 
-	if nextCursor != "" {
-		reply.NextCursor = &nextCursor
+	// Build item cursors for fitReviewsPage
+	itemCursors := make([]string, len(items))
+	for i, item := range items {
+		itemCursors[i] = item.VerdictID
 	}
 
-	// Verify the reply fits in one frame
-	if !replyFits(id, reply) {
+	// Trim to what fits in the encoded reply
+	return fitReviewsPage(id, wireItems, itemCursors, nextCursor)
+}
+
+// fitReviewsPage keeps the longest prefix of items whose reply fits in
+// one frame. A page that is cut resumes after the last kept item, through
+// itemCursors[i]; one that is not keeps next. A first item that does not fit
+// alone is errReplyTooLarge.
+func fitReviewsPage(id string, items []wire.ReviewItem, itemCursors []string, next string) (*wire.ReviewsReply, error) {
+	reply := &wire.ReviewsReply{Items: items}
+	if next != "" {
+		reply.NextCursor = &next
+	}
+	if replyFits(id, reply) {
+		return reply, nil
+	}
+	// Frame size grows with the item count, so the longest fitting prefix is found by bisection.
+	lo, hi := 0, len(items)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		cursor := itemCursors[mid-1]
+		if replyFits(id, &wire.ReviewsReply{Items: items[:mid], NextCursor: &cursor}) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 {
 		return nil, errReplyTooLarge
 	}
-
-	return reply, nil
+	cursor := itemCursors[lo-1]
+	return &wire.ReviewsReply{Items: items[:lo], NextCursor: &cursor}, nil
 }

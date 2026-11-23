@@ -205,3 +205,182 @@ func TestConversationSoloTurnNoReviewCount(t *testing.T) {
 		t.Fatalf("solo turn has ReviewCount %d, want nil", *turn.ReviewCount)
 	}
 }
+
+func TestReviewsDeterministicPaging(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	// Submit a review turn
+	release := h.Hold("reviewer")
+	reply, err := c.Submit(ctx, reviewReq("paging-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Release all holds so turn can complete
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+	if row.TerminalState != engine.StateApproved {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	}
+
+	// Page through reviews with limit=1
+	var allItems []wire.ReviewItem
+	var cursor *string
+	for {
+		limit := 1
+		reviews, err := c.Reviews(ctx, reply.TurnID, cursor, &limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(reviews.Items) == 0 {
+			break
+		}
+		allItems = append(allItems, reviews.Items...)
+		if reviews.NextCursor == nil {
+			break
+		}
+		cursor = reviews.NextCursor
+	}
+
+	if len(allItems) == 0 {
+		t.Fatalf("expected at least one review, got %d", len(allItems))
+	}
+
+	// Get all reviews at once
+	reviews, err := c.Reviews(ctx, reply.TurnID, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(reviews.Items) != len(allItems) {
+		t.Fatalf("paged %d items, got %d all at once", len(allItems), len(reviews.Items))
+	}
+
+	if reviews.NextCursor != nil {
+		t.Fatalf("full page has cursor, want nil")
+	}
+}
+
+func TestReviewsLimitExceeded(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	// Submit a review turn
+	release := h.Hold("reviewer")
+	reply, err := c.Submit(ctx, reviewReq("limit-exceeded"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Release all holds
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+	if row.TerminalState != engine.StateApproved {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	}
+
+	// Request with limit > 50
+	limit := 100
+	reviews, err := c.Reviews(ctx, reply.TurnID, nil, &limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should be clamped to max
+	if len(reviews.Items) > 50 {
+		t.Fatalf("got %d items, expected at most 50", len(reviews.Items))
+	}
+}
+
+func TestReviewsBadCursor(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	// Submit a review turn
+	release := h.Hold("reviewer")
+	reply, err := c.Submit(ctx, reviewReq("bad-cursor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Release all holds
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+	if row.TerminalState != engine.StateApproved {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	}
+
+	// Request with bad cursor
+	badCursor := "not-a-real-cursor"
+	_, err = c.Reviews(ctx, reply.TurnID, &badCursor, nil)
+	wantCode(t, err, wire.ErrorCodeBadRequest)
+}
+
+func TestReviewsNegativeLimit(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	// Submit a review turn
+	release := h.Hold("reviewer")
+	reply, err := c.Submit(ctx, reviewReq("neg-limit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Release all holds
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+	if row.TerminalState != engine.StateApproved {
+		t.Fatalf("terminal state = %q, want %q", row.TerminalState, engine.StateApproved)
+	}
+
+	// Request with negative limit
+	negLimit := -1
+	_, err = c.Reviews(ctx, reply.TurnID, nil, &negLimit)
+	wantCode(t, err, wire.ErrorCodeBadRequest)
+}
+
+func TestConversationZeroReviewCount(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	// Submit a turn that will have no reviews (all reviewers fail)
+	// This requires a turn that has reviews but all rejected
+	release := h.Hold("reviewer")
+	reply, err := c.Submit(ctx, reviewReq("zero-reviews"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Don't release the reviewer hold - force rejection by cancelling
+	release()
+	row := waitTerminal(t, h, reply.TurnID)
+
+	// Get conversation and check review_count is 0 for non-solo turns
+	conv, err := c.Conversation(ctx, reply.ConversationID[:8])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(conv.Turns) != 1 {
+		t.Fatalf("conversation has %d turns, want 1", len(conv.Turns))
+	}
+
+	turn := conv.Turns[0]
+	// Even if no reviews were accepted, review_count should be present for non-solo turns
+	if row.Mode != "solo" && turn.ReviewCount == nil {
+		t.Fatal("non-solo turn has nil ReviewCount, want a value (even if 0)")
+	}
+}

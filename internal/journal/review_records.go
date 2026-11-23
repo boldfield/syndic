@@ -308,6 +308,42 @@ func (tx *Tx) ReviewCount(turnID string) (int, error) {
 	return n, nil
 }
 
+// GetTurnRoster returns the participants of the turn in roster order, inferred
+// from existing review records. If no review records exist, returns nil.
+func (s *Store) GetTurnRoster(turnID string) ([]string, error) {
+	var roster []string
+	err := s.Tx(func(tx *Tx) error {
+		var txErr error
+		roster, txErr = tx.GetTurnRoster(turnID)
+		return txErr
+	})
+	return roster, err
+}
+
+// GetTurnRoster is the transaction form of Store.GetTurnRoster.
+func (tx *Tx) GetTurnRoster(turnID string) ([]string, error) {
+	rows, err := tx.tx.Query(`
+		SELECT DISTINCT participant FROM review_records
+		WHERE turn_id = ?
+		ORDER BY roster_index, participant`, turnID)
+	if err != nil {
+		return nil, fmt.Errorf("query turn roster: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var roster []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan participant: %w", err)
+		}
+		roster = append(roster, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return roster, nil
+}
+
 // MaterializeReviewRecords writes, from the structured acceptance rows, the
 // record of every accepted verdict of the turn that has none, and returns how
 // many it wrote. roster is the participants in roster order. No model output
