@@ -9,18 +9,19 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// renderStrip returns the status strip line. It is a single line showing:
+// renderStrip returns the status line. It is a single line showing:
 // [preset] [quick:<name>?] [turn state] [elapsed / turn_deadline]
-// [est. tokens / limit] author:<id> <state> reviewers: <id> <state> … identity: unknown(name-matched)
-// At 80 columns with five reviewers the strip is at most 80 cells wide and ends with …
-// when needed, dropping segments from the right in whole segments. Uses terminal display width.
+// [est. tokens / limit] [round n/m] ctrl+o: reviews tab: switch  /help
+// At narrow widths, segments are dropped in order: budget meter, reviews hint, round, then turn state is shortened.
+// Uses terminal display width. Participant states are on the progress line.
 func renderStrip(s State, width int, now time.Time) string {
-	return renderStripFor(s, width, now, false)
+	return renderStripFor(s, width, now, false, false)
 }
 
 // renderStripFor is renderStrip; compact also drops the preset when the line
 // is too wide, so the open turn's state keeps its room beside the key hint.
-func renderStripFor(s State, width int, now time.Time, compact bool) string {
+// includedReviewsHint controls whether to include "ctrl+o: reviews" (true for chat tab).
+func renderStripFor(s State, width int, now time.Time, compact bool, includeReviewsHint bool) string {
 	switch s.ConnState {
 	case ConnStateConnecting:
 		return "engine: connecting"
@@ -65,11 +66,6 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 	// [turn state]
 	segments = append(segments, fmt.Sprintf("[%s]", ti.State))
 
-	// [round n/m] while revising
-	if ti.Round > 0 && ti.MaxRounds > 0 {
-		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
-	}
-
 	// [elapsed / turn deadline]
 	if !ti.SubmittedAt.IsZero() {
 		elapsed := formatDuration(max(now.Sub(ti.SubmittedAt), 0))
@@ -83,8 +79,8 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		}
 	}
 
-	// [est. tokens / limit]; shed before participant state when the line is tight
-	estIdx := len(segments)
+	// [budget meter and tokens/limit]; track position for overflow shedding
+	budgetIdx := len(segments)
 	switch {
 	case ti.LimitTokens > 0:
 		segments = append(segments, fmt.Sprintf("[est. %d / %d]", ti.EstimatedTokens, ti.LimitTokens))
@@ -92,22 +88,19 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		segments = append(segments, fmt.Sprintf("[est. %d]", ti.EstimatedTokens))
 	}
 
-	// author:<id> <state>
-	if ti.Author != "" {
-		segments = append(segments, fmt.Sprintf("author:%s %s", ti.Author, ti.AuthorState))
+	// [ctrl+o: reviews] when reviews are present and hint is requested
+	reviewsIdx := len(segments)
+	if includeReviewsHint {
+		segments = append(segments, "ctrl+o: reviews")
 	}
 
-	// reviewers: <id> <state> … (in order from Reviewers list, not map iteration)
-	if len(ti.Reviewers) > 0 {
-		reviewerParts := []string{"reviewers:"}
-		for _, id := range ti.Reviewers {
-			state := ti.ReviewerStates[id]
-			reviewerParts = append(reviewerParts, fmt.Sprintf("%s %s", id, state))
-		}
-		segments = append(segments, strings.Join(reviewerParts, " "))
+	// [round n/m] during revision
+	roundIdx := len(segments)
+	if ti.Round > 0 && ti.MaxRounds > 0 {
+		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
 	}
 
-	// Presets, profile names, states and participant ids come from the engine
+	// Presets, profile names, and states come from the engine
 	// and the workspace: escape each segment before it is measured.
 	for i, seg := range segments {
 		segments[i] = safeLine(seg)
@@ -120,29 +113,50 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		return line
 	}
 
-	// Participant state is worth more than the token estimate: drop it
-	// first, keeping the rest in order.
-	kept := segments
-	if estIdx < len(kept) && strings.HasPrefix(kept[estIdx], "[est.") {
-		kept = append(append([]string{}, kept[:estIdx]...), kept[estIdx+1:]...)
+	// Overflow strategy per design: drop in order:
+	// 1. Budget meter (drop first to keep tokens/limit visible)
+	if budgetIdx >= 0 && budgetIdx < len(segments) {
+		kept := append(append([]string{}, segments[:budgetIdx]...), segments[budgetIdx+1:]...)
+		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
+			return line
+		}
+		segments = kept
+		reviewsIdx--
+		roundIdx--
 	}
-	if line = strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
-		return line
+
+	// 2. Reviews hint
+	if includeReviewsHint && reviewsIdx >= 0 && reviewsIdx < len(segments) {
+		kept := append(append([]string{}, segments[:reviewsIdx]...), segments[reviewsIdx+1:]...)
+		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
+			return line
+		}
+		segments = kept
+		roundIdx--
 	}
-	segments = kept
+
+	// 3. Round n/m
+	if roundIdx >= 0 && roundIdx < len(segments) {
+		kept := append(append([]string{}, segments[:roundIdx]...), segments[roundIdx+1:]...)
+		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
+			return line
+		}
+		segments = kept
+	}
 
 	// Next the preset goes: the running turn's state matters more.
-	if compact && len(segments) > 0 && segments[0] == safeLine(fmt.Sprintf("[%s]", ti.Preset)) {
+	if compact && len(segments) > 0 && strings.HasPrefix(segments[0], "[") {
 		segments = segments[1:]
 		if line = strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 	}
 
-	// Drop segments from the right, adding … at the end.
+	// 4. Drop segments from the right, adding … at the end.
+	// But never drop to fewer than 2 segments to keep turn state and key info visible.
 	ellipsis := "…"
 	ellipsisWidth := runewidth.StringWidth(ellipsis)
-	for len(segments) > 0 {
+	for len(segments) > 2 {
 		segments = segments[:len(segments)-1]
 		line = strings.Join(segments, " ")
 		lineWidth := runewidth.StringWidth(line)

@@ -243,7 +243,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			lines = append(lines, styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
 			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
-		lines = append(lines, progressLine(ti, in.now))
+		lines = append(lines, renderProgress(s, in.now, in.plainMode))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -252,28 +252,6 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 // turn that ended without one.
 func noApprovedAnswer(state string) string {
 	return "no approved answer (" + state + ")"
-}
-
-// progressLine is the one line a running turn shows: phase, round,
-// elapsed time and participant states, the last of which a narrow terminal
-// cuts first.
-func progressLine(ti TurnInfo, now time.Time) string {
-	parts := []string{"turn in progress: " + ti.State}
-	if ti.MaxRounds > 0 {
-		parts = append(parts, fmt.Sprintf("round %d/%d", ti.Round, ti.MaxRounds))
-	}
-	if !ti.SubmittedAt.IsZero() && !now.IsZero() {
-		parts = append(parts, formatDuration(max(now.Sub(ti.SubmittedAt), 0)))
-	}
-	if ti.Author != "" {
-		parts = append(parts, ti.Author+" "+ti.AuthorState)
-	}
-	if len(ti.Reviewers) > 0 {
-		for _, id := range ti.Reviewers {
-			parts = append(parts, id+" "+ti.ReviewerStates[id])
-		}
-	}
-	return safeLine(strings.Join(parts, ", "))
 }
 
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "124", Dark: "203"})

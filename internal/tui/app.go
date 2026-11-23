@@ -1147,13 +1147,14 @@ func (a *App) tabBar() string {
 const keyHint = "tab: switch  /help"
 
 // statusLine is the strip with the key hint at its right edge, w cells wide.
-// The strip compacts itself to leave room for the hint.
+// The strip includes ctrl+o: reviews when the chat tab is active.
 func (a *App) statusLine(w int) string {
 	hw := ansi.StringWidth(keyHint)
+	includeReviewsHint := a.tab == tabChat
 	if w < hw+20 {
-		return ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
+		return ansi.Truncate(renderStripFor(a.state, w, a.now(), false, includeReviewsHint), w, "")
 	}
-	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true), w-hw-1, "")
+	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true, includeReviewsHint), w-hw-1, "")
 	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-hw) + keyHint
 }
 

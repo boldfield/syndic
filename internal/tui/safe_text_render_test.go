@@ -229,7 +229,7 @@ func TestStatusLineEscapesRecordValues(t *testing.T) {
 	a := hostileRecordApp(t)
 	for _, w := range []int{40, 80, 400} {
 		for _, compact := range []bool{false, true} {
-			line := renderStripFor(a.state, w, chatNow, compact)
+			line := renderStripFor(a.state, w, chatNow, compact, false)
 			assertSafeRunes(t, "strip", line)
 			if strings.Contains(line, "\n") {
 				t.Errorf("w=%d: strip broke onto two lines: %q", w, line)

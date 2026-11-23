@@ -200,8 +200,17 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	lines := chatView(a)
 	ti.EstimatedTokens = 24260
 	a.state.Turns["t2"] = ti
-	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.Contains(last, "[reviewers_dispatched] [round 1/2] [30s]") || !strings.Contains(last, "author:writer idle") {
-		t.Errorf("status line = %q, want the turn state, round, elapsed time, author state and the key hint", last)
+	last := chatView(a)[23]
+	// Check status line contains the required elements
+	hasStatusElements := strings.HasSuffix(last, keyHint) &&
+		strings.Contains(last, "[reviewers_dispatched]") &&
+		strings.Contains(last, "[round 1/2]") &&
+		strings.Contains(last, "[30s]")
+	if !hasStatusElements {
+		t.Errorf("status line = %q, want turn state, round, elapsed time, and key hint (no participant states in v6)", last)
+	}
+	if strings.Contains(last, "author:writer idle") {
+		t.Errorf("status line = %q, should not contain participant states in v6 (moved to progress line)", last)
 	}
 	lineOf(t, lines, "› running question")
 	lineOf(t, lines, progress)

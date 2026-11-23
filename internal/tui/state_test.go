@@ -377,8 +377,9 @@ func TestApplyPureOnParticipantState(t *testing.T) {
 	}
 }
 
-// TestRenderStripWithReviewersInOrder verifies reviewers are shown in order,
-// not random map iteration.
+// TestRenderStripWithReviewersInOrder verifies the status line format in v6.
+// In v6, participant states are on the progress line, not the status line.
+// This test verifies the status line contains the turn state.
 func TestRenderStripWithReviewersInOrder(t *testing.T) {
 	s := NewState()
 	s.Status = &wire.StatusReply{DefaultPreset: "review"}
@@ -398,20 +399,20 @@ func TestRenderStripWithReviewersInOrder(t *testing.T) {
 	}
 
 	strip := renderStrip(s, 200, testTime)
-	if !contains(strip, "r1 queued") || !contains(strip, "r2 running") || !contains(strip, "r3 idle") {
-		t.Errorf("strip = %s", strip)
+	// In v6, participant states are on the progress line, not the status line.
+	// Verify the status line contains the turn state and preset.
+	if !strings.Contains(strip, "[review]") || !strings.Contains(strip, "[submitted]") {
+		t.Errorf("strip should contain preset and state: %s", strip)
 	}
-	// Verify order: r1 should come before r2 should come before r3
-	idx1 := indexOf(strip, "r1")
-	idx2 := indexOf(strip, "r2")
-	idx3 := indexOf(strip, "r3")
-	if idx1 < 0 || idx2 < 0 || idx3 < 0 || idx1 >= idx2 || idx2 >= idx3 {
-		t.Errorf("reviewers not in order: r1@%d, r2@%d, r3@%d", idx1, idx2, idx3)
+	// Participant states should not be on the status line in v6
+	if strings.Contains(strip, "r1 queued") || strings.Contains(strip, "r2 running") || strings.Contains(strip, "r3 idle") {
+		t.Errorf("participant states should not be on status line in v6: %s", strip)
 	}
 }
 
-// TestRenderStripTruncatesWithEllipsis verifies the strip truncates at terminal
-// display width with ellipsis.
+// TestRenderStripTruncatesWithEllipsis verifies the strip respects terminal
+// display width with ellipsis when needed. In v6, participant states are not on
+// the status line, so this test checks that the status line fits within width.
 func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 	s := NewState()
 	s.Status = &wire.StatusReply{DefaultPreset: "review"}
@@ -432,8 +433,9 @@ func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 	if displayWidth > 80 {
 		t.Errorf("strip display width = %d, want <= 80", displayWidth)
 	}
-	if !strings.HasSuffix(strip, "…") {
-		t.Errorf("strip should end with ellipsis: %s", strip)
+	// Participant states are on the progress line in v6, not the status line
+	if !strings.Contains(strip, "[submitted]") {
+		t.Errorf("strip should contain turn state: %s", strip)
 	}
 	if strings.Count(strip, "\n") > 0 {
 		t.Errorf("strip should be a single line, got: %s", strip)
@@ -489,14 +491,6 @@ func TestRenderBannersShowsRosterChanged(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
-}
-
-func indexOf(s, substr string) int {
-	return strings.Index(s, substr)
 }
 
 func TestMergeTurnStaleIncompleteReplyKeepsOverride(t *testing.T) {
