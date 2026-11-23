@@ -247,12 +247,15 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 			sortedParticipants = append(sortedParticipants, p)
 		}
 	}
-	// Add any participants not in roster
+	// Add any participants not in roster, sorted for determinism
+	var missing []string
 	for p := range itemsByParticipant {
 		if !slices.Contains(sortedParticipants, p) {
-			sortedParticipants = append(sortedParticipants, p)
+			missing = append(missing, p)
 		}
 	}
+	slices.Sort(missing)
+	sortedParticipants = append(sortedParticipants, missing...)
 
 	// Render each participant's verdict
 	for _, participant := range sortedParticipants {

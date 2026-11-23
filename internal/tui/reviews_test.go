@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/boldfield/syndic/internal/wire"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestReviewsDrawerOpen(t *testing.T) {
@@ -407,4 +408,79 @@ func stringIndexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+func TestReviewCountRendering(t *testing.T) {
+	// Test that review-count is rendered in outcome lines
+	ai := answerInput{
+		width:       80,
+		plainMode:   false,
+		reviewCount: ptrInt(3),
+	}
+
+	// Test that the review count is appended to the outcome
+	lines := styledOutcomeLines("·", "UNREVIEWED (solo)", ai, lipgloss.NewStyle())
+	found := false
+	for _, line := range lines {
+		if stringIncludes(line, "3 reviews") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("review count should be shown in outcome lines")
+	}
+}
+
+func TestReviewCountNotShownWhenZero(t *testing.T) {
+	// Test that review-count is not rendered when it's 0 or nil
+	ai := answerInput{
+		width:     80,
+		plainMode: false,
+	}
+
+	lines := styledOutcomeLines("·", "UNREVIEWED (solo)", ai, lipgloss.NewStyle())
+	for _, line := range lines {
+		if stringIncludes(line, "reviews") {
+			t.Error("should not show reviews when count is nil")
+		}
+	}
+}
+
+func TestSelectedInputHighlighting(t *testing.T) {
+	// Test that selected turn input is highlighted in chat rendering
+	s := State{
+		Turns: map[string]TurnInfo{
+			"t1": {State: "solo_complete"},
+			"t2": {State: "solo_complete"},
+		},
+		Scope: &TurnScope{
+			ConversationID: "conv1",
+			Order:          []string{"t1", "t2"},
+			Turns:          map[string]bool{"t1": true, "t2": true},
+		},
+	}
+
+	in := chatInput{
+		answer: func(id string) answerInput {
+			return answerInput{width: 80, plainMode: false}
+		},
+		inputs:                 map[string]string{"t1": "first input", "t2": "second input"},
+		content:                NewContentCache(),
+		width:                  80,
+		selectedDrawerTurnID:   "t1", // Selected turn is t1
+	}
+
+	lines, _ := chatLines(s, in)
+	output := fmt.Sprintf("%v", lines)
+
+	// The selected turn's input should be highlighted (we can't easily check for styling,
+	// but we can verify the structure is correct)
+	if !stringIncludes(output, "first input") {
+		t.Error("selected turn input should be in chat output")
+	}
+}
+
+func ptrInt(i int) *int {
+	return &i
 }

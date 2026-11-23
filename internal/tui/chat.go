@@ -10,10 +10,11 @@ import (
 
 // chatInput is everything the chat tab needs beyond the State.
 type chatInput struct {
-	answer  func(turnID string) answerInput // what the answer part of one turn needs
-	inputs  map[string]string               // what the user typed, for the turns this process submitted
-	content *ContentCache                   // bodies of the inputs of the other turns
-	width   int                             // terminal width; user text is wrapped and indented to it when positive
+	answer               func(turnID string) answerInput // what the answer part of one turn needs
+	inputs               map[string]string               // what the user typed, for the turns this process submitted
+	content              *ContentCache                   // bodies of the inputs of the other turns
+	width                int                             // terminal width; user text is wrapped and indented to it when positive
+	selectedDrawerTurnID string                          // ID of the selected turn in the drawer, or empty if drawer not open
 }
 
 // userMark begins a user input in column 0.
@@ -23,6 +24,7 @@ const userMark = "› "
 const notInContext = "not in context"
 
 var dimmed = lipgloss.NewStyle().Faint(true)
+var selectedInput = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "75"})
 
 // chatTurns lists the turns of the chat, oldest first.
 func chatTurns(s State) []string {
@@ -114,6 +116,7 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 		lastTurn = len(lines)
 		starts = append(starts, lastTurn)
 		ai := in.answer(id)
+		isSelected := id == in.selectedDrawerTurnID
 		var turn []string
 		text, ok := in.inputs[id]
 		if !ok && s.Turns[id].InputRef != "" && in.content != nil {
@@ -127,15 +130,25 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 					if i == 0 {
 						l = userMark + strings.TrimPrefix(l, contentPrefix)
 					}
+					if isSelected && !ai.plainMode {
+						l = selectedInput.Render(l)
+					}
 					turn = append(turn, l)
 				}
 			} else {
 				lines := strings.Split(ToSafeText([]byte(text)), "\n")
 				lines[0] = userMark + lines[0]
+				if isSelected && !ai.plainMode {
+					lines[0] = selectedInput.Render(lines[0])
+				}
 				turn = append(turn, strings.Join(lines, "\n"+contentPrefix))
 			}
 		} else {
-			turn = append(turn, userMark+"(input not loaded)")
+			l := userMark + "(input not loaded)"
+			if isSelected && !ai.plainMode {
+				l = selectedInput.Render(l)
+			}
+			turn = append(turn, l)
 		}
 		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
 		if trimmed[id] {

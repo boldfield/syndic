@@ -212,6 +212,7 @@ func (a *App) draftsOn(turnID string) bool {
 
 // answerIn gathers what the answer tab needs for the turn.
 func (a *App) answerIn(turnID string) answerInput {
+	ti := a.state.Turns[turnID]
 	return answerInput{
 		content:        a.content,
 		drafts:         a.draftsOn(turnID),
@@ -222,12 +223,17 @@ func (a *App) answerIn(turnID string) answerInput {
 		rawMode:        a.rawMode,
 		now:            a.now(),
 		width:          a.width,
+		reviewCount:    ti.ReviewCount,
 	}
 }
 
 // chatIn gathers what the chat tab needs.
 func (a *App) chatIn() chatInput {
-	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content, width: a.width}
+	ci := chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content, width: a.width}
+	if a.reviewsDrawer.IsOpen() {
+		ci.selectedDrawerTurnID = a.reviewsDrawer.selectedTurnID()
+	}
+	return ci
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
@@ -257,45 +263,51 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 		limit := 50
 
 		for {
-			reply, err := a.cl.Reviews(a.ctx, turnID, cursor, &limit)
-			if err != nil {
-				return reviewsMsg{turnID: turnID, items: nil, content: map[string]string{}, err: err}
-			}
-			items, err := reply.DecodeItems()
+			items, nextCursor, err := a.cl.VerifiedReviewsPage(a.ctx, turnID, cursor, &limit)
 			if err != nil {
 				return reviewsMsg{turnID: turnID, items: nil, content: map[string]string{}, err: err}
 			}
 			allItems = append(allItems, items...)
-			if reply.NextCursor == nil {
+			if nextCursor == nil {
 				break
 			}
-			cursor = reply.NextCursor
+			cursor = nextCursor
 		}
 
 		content := make(map[string]string)
-		refs := make(map[string]bool)
-		for _, item := range allItems {
-			if item.Commentary != nil {
-				refs[item.Commentary.Ref] = true
-			}
+		for i, item := range allItems {
+			// Fetch oversized record if present
 			if item.Oversized && item.Record != nil {
-				refs[item.Record.Ref] = true
-			} else {
-				for _, block := range item.Blocks {
-					if block.Evidence != nil {
-						refs[block.Evidence.Ref] = true
-					}
-					if block.Remedy != nil {
-						refs[block.Remedy.Ref] = true
-					}
+				fullItem, err := a.cl.FetchOversizedRecord(a.ctx, &item)
+				if err != nil {
+					continue
+				}
+				allItems[i] = fullItem
+				item = fullItem
+			}
+
+			// Fetch commentary
+			if item.Commentary != nil {
+				data, err := a.cl.FetchReviewContent(a.ctx, item.Commentary)
+				if err == nil {
+					content[item.Commentary.Ref] = string(data)
 				}
 			}
-		}
 
-		for ref := range refs {
-			data, err := a.cl.Content(a.ctx, ref)
-			if err == nil {
-				content[ref] = string(data)
+			// Fetch blocks' evidence and remedy
+			for _, block := range item.Blocks {
+				if block.Evidence != nil {
+					data, err := a.cl.FetchReviewContent(a.ctx, block.Evidence)
+					if err == nil {
+						content[block.Evidence.Ref] = string(data)
+					}
+				}
+				if block.Remedy != nil {
+					data, err := a.cl.FetchReviewContent(a.ctx, block.Remedy)
+					if err == nil {
+						content[block.Remedy.Ref] = string(data)
+					}
+				}
 			}
 		}
 
@@ -533,16 +545,14 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "up":
 			a.reviewsDrawer.SelectUp()
-			turns := chatTurns(a.state)
-			if len(turns) > 0 {
-				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			if turnID := a.reviewsDrawer.selectedTurnID(); turnID != "" {
+				return a, a.fetchReviewsForTurn(turnID)
 			}
 			return a, nil
 		case "down":
 			a.reviewsDrawer.SelectDown()
-			turns := chatTurns(a.state)
-			if len(turns) > 0 {
-				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			if turnID := a.reviewsDrawer.selectedTurnID(); turnID != "" {
+				return a, a.fetchReviewsForTurn(turnID)
 			}
 			return a, nil
 		case "left":
@@ -1484,6 +1494,7 @@ type reviewsMsg struct {
 func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
 	a.reviewsLoading[msg.turnID] = false
 	if msg.err != nil {
+		a.say("reviews: " + formatRefusal(msg.err))
 		return a, nil
 	}
 	for ref, data := range msg.content {
