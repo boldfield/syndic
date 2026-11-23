@@ -142,6 +142,11 @@ type Options struct {
 	// Submit already answer. The daemon opens its control socket here. An
 	// error aborts Start.
 	OnRunOpened func() error
+	// AuthorChangeLines, when set, gives an author result its sorted
+	// change-set lines in place of the engine's own (which, until tools,
+	// are none). It exists for tests of unchanged-revision detection; the
+	// daemon never sets it.
+	AuthorChangeLines func(transport.CompleteResult) []string
 }
 
 // Engine is the review engine.
@@ -161,6 +166,7 @@ type Engine struct {
 	probeExportDir  string
 	noStartupProbes bool
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
+	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -242,6 +248,7 @@ func New(o Options) (*Engine, error) {
 		noStartupProbes: o.NoStartupProbes,
 		onRunOpened:     o.OnRunOpened,
 		newAdapter:      o.NewAdapter,
+		changeLines:     o.AuthorChangeLines,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),

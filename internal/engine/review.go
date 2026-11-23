@@ -87,7 +87,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
-		lines = authorChangeLines(res)
+		if e.changeLines != nil {
+			lines = e.changeLines(res)
+		} else {
+			lines = authorChangeLines(res)
+		}
 		if t.revising && sameRevision(t.candidate, t.changeLines, res.Text, lines) {
 			// The author produced nothing new; the human decides with the
 			// blocks still open.
