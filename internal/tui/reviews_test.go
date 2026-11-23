@@ -2,9 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/wire"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -465,10 +468,10 @@ func TestSelectedInputHighlighting(t *testing.T) {
 		answer: func(id string) answerInput {
 			return answerInput{width: 80, plainMode: false}
 		},
-		inputs:                 map[string]string{"t1": "first input", "t2": "second input"},
-		content:                NewContentCache(),
-		width:                  80,
-		selectedDrawerTurnID:   "t1", // Selected turn is t1
+		inputs:               map[string]string{"t1": "first input", "t2": "second input"},
+		content:              NewContentCache(),
+		width:                80,
+		selectedDrawerTurnID: "t1", // Selected turn is t1
 	}
 
 	lines, _ := chatLines(s, in)
@@ -483,4 +486,47 @@ func TestSelectedInputHighlighting(t *testing.T) {
 
 func ptrInt(i int) *int {
 	return &i
+}
+
+// TestReviewsDrawerEndToEnd drives the App through the drawer against a real
+// engine with fake adapters: Ctrl+O opens it, typing and Enter change and
+// submit nothing, Esc closes it.
+func TestReviewsDrawerEndToEnd(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turn := r.until(t, "a settled turn", func(a *App) (string, bool) {
+		id := answerTurn(a.state)
+		return id, id != "" && a.input.Value() == "" && a.state.Turns[id].State != "reviewers_dispatched" && a.state.Turns[id].State != "open"
+	})
+	_ = turn
+
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	v := untilView(t, r, "reviewer", "b7")
+	turnsBefore := r.until(t, "turn count", func(a *App) (string, bool) { return fmt.Sprint(len(a.state.Turns)), true })
+
+	// Typing, pasting and Enter are ignored while the drawer holds focus.
+	send(r,
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("typed")},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pasted"), Paste: true},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		tea.KeyMsg{Type: tea.KeyPgDown},
+		tea.KeyMsg{Type: tea.KeyPgUp},
+		tea.KeyMsg{Type: tea.KeyLeft},
+		tea.KeyMsg{Type: tea.KeyRight},
+	)
+	after := r.until(t, "input unchanged", func(a *App) (string, bool) {
+		return fmt.Sprint(len(a.state.Turns), "|", a.input.Value(), "|", a.reviewsDrawer.IsOpen()), true
+	})
+	if after != turnsBefore+"||true" {
+		t.Fatalf("drawer let input through or closed: %q (was %q)", after, turnsBefore)
+	}
+	if !strings.Contains(view(t, r), "b7") {
+		t.Fatalf("drawer lost its content:\n%s", v)
+	}
+
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	r.until(t, "drawer closed", func(a *App) (string, bool) { return "", !a.reviewsDrawer.IsOpen() })
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	r.until(t, "typing works again", func(a *App) (string, bool) { return a.input.Value(), a.input.Value() == "x" })
 }

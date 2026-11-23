@@ -275,11 +275,13 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 		}
 
 		content := make(map[string]string)
+		var failed []string
 		for i, item := range allItems {
 			// Fetch oversized record if present
 			if item.Oversized && item.Record != nil {
 				fullItem, err := a.cl.FetchOversizedRecord(a.ctx, &item)
 				if err != nil {
+					failed = append(failed, formatRefusal(err))
 					continue
 				}
 				allItems[i] = fullItem
@@ -289,7 +291,9 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 			// Fetch commentary
 			if item.Commentary != nil {
 				data, err := a.cl.FetchReviewContent(a.ctx, item.Commentary)
-				if err == nil {
+				if err != nil {
+					failed = append(failed, formatRefusal(err))
+				} else {
 					content[item.Commentary.Ref] = string(data)
 				}
 			}
@@ -298,20 +302,28 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 			for _, block := range item.Blocks {
 				if block.Evidence != nil {
 					data, err := a.cl.FetchReviewContent(a.ctx, block.Evidence)
-					if err == nil {
+					if err != nil {
+						failed = append(failed, formatRefusal(err))
+					} else {
 						content[block.Evidence.Ref] = string(data)
 					}
 				}
 				if block.Remedy != nil {
 					data, err := a.cl.FetchReviewContent(a.ctx, block.Remedy)
-					if err == nil {
+					if err != nil {
+						failed = append(failed, formatRefusal(err))
+					} else {
 						content[block.Remedy.Ref] = string(data)
 					}
 				}
 			}
 		}
 
-		return reviewsMsg{turnID: turnID, items: allItems, content: content, err: nil}
+		var warn error
+		if len(failed) > 0 {
+			warn = errors.New(strings.Join(failed, "; "))
+		}
+		return reviewsMsg{turnID: turnID, items: allItems, content: content, err: nil, warn: warn}
 	}
 }
 
@@ -1488,6 +1500,7 @@ type reviewsMsg struct {
 	items   []wire.ReviewItem
 	content map[string]string // ref -> fetched content
 	err     error
+	warn    error // content that could not be fetched or verified; the rest is still shown
 }
 
 // onReviews processes a reviews response and stores fetched content.
@@ -1501,6 +1514,9 @@ func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
 		a.content.Store(ref, data, nil)
 	}
 	a.reviewsDrawer.UpdateReviews(msg.turnID, msg.items)
+	if msg.warn != nil {
+		a.say("reviews: some content is unavailable: " + msg.warn.Error())
+	}
 	return a, nil
 }
 
