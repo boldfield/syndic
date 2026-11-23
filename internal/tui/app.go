@@ -95,6 +95,9 @@ type App struct {
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
 
+	reviewsDrawer  *ReviewsDrawer  // the reviews drawer state
+	reviewsLoading map[string]bool // turns whose reviews are being fetched
+
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
 	convTurns      int      // turns the open conversation holds
@@ -163,6 +166,8 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		overrideReasons:   make(map[string]string),
 		quarantined:       make(map[string]bool),
 		blockDetail:       make(map[string]wire.OpenBlock),
+		reviewsDrawer:     NewReviewsDrawer(),
+		reviewsLoading:    make(map[string]bool),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -238,6 +243,18 @@ func (a *App) transcriptIn() transcriptInput {
 // fetchTranscriptContent starts the fetches the transcript tab is waiting on.
 func (a *App) fetchTranscriptContent() tea.Cmd {
 	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, transcriptRefs(a.tItems))...)
+}
+
+// fetchReviewsForTurn starts fetching reviews for a turn.
+func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
+	if turnID == "" || a.reviewsLoading[turnID] || a.cl == nil {
+		return nil
+	}
+	a.reviewsLoading[turnID] = true
+	return func() tea.Msg {
+		reply, err := a.cl.Reviews(a.ctx, turnID, nil, nil)
+		return reviewsMsg{turnID: turnID, reply: reply, err: err}
+	}
 }
 
 // syncTranscript points the transcript at the turn the UI is showing, and
@@ -405,6 +422,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onContent(msg)
 	case transcriptMsg:
 		return a.onTranscript(msg)
+	case reviewsMsg:
+		return a.onReviews(msg)
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
@@ -459,16 +478,37 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		a.panel, a.refusal, a.panelRow = nil, "", 0
+		a.reviewsDrawer.Close()
+		a.want.Drawer = false
+		return a, nil
+	case "ctrl+o":
+		if a.tab == tabChat {
+			if a.reviewsDrawer.IsOpen() {
+				a.reviewsDrawer.Close()
+				a.want.Drawer = false
+			} else {
+				// Open drawer on the last turn if available
+				turns := chatTurns(a.state)
+				if len(turns) > 0 {
+					a.reviewsDrawer.SetTurns(turns)
+					a.reviewsDrawer.Open(len(turns) - 1)
+					a.want.Drawer = true
+					return a, a.fetchReviewsForTurn(turns[len(turns)-1])
+				}
+			}
+		}
 		return a, nil
 	case "tab":
 		a.panel = nil
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
+		a.reviewsDrawer.SetTurns(chatTurns(a.state))
 		return a, nil
 	case "shift+tab":
 		a.panel = nil
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
+		a.reviewsDrawer.SetTurns(chatTurns(a.state))
 		return a, nil
 	case "enter":
 		return a, a.enter()
@@ -532,6 +572,40 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.pScroll == 0 && page < 0 {
 				a.pScrolled = false
 			}
+			return a, nil
+		}
+	}
+
+	if a.reviewsDrawer.IsOpen() {
+		switch msg.String() {
+		case "up":
+			a.reviewsDrawer.SelectUp()
+			turns := chatTurns(a.state)
+			if len(turns) > 0 {
+				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			}
+			return a, nil
+		case "down":
+			a.reviewsDrawer.SelectDown()
+			turns := chatTurns(a.state)
+			if len(turns) > 0 {
+				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			}
+			return a, nil
+		case "left":
+			a.reviewsDrawer.SelectRoundLeft()
+			return a, nil
+		case "right":
+			a.reviewsDrawer.SelectRoundRight()
+			return a, nil
+		case "pgup":
+			a.reviewsDrawer.ScrollUp(1)
+			return a, nil
+		case "pgdown":
+			a.reviewsDrawer.ScrollDown(1, 20)
+			return a, nil
+		default:
+			// Input cannot change while drawer is focused; ignore other keys
 			return a, nil
 		}
 	}
@@ -1276,9 +1350,20 @@ func (a *App) View() string {
 	output := []string{ansi.Truncate(tabBar, w, "")}
 	output = append(output, lines...)
 	output = append(output, banners...)
-	for range hs.Drawer + hs.List + hs.Attached + hs.Help {
+
+	// Add drawer, list, attached, and help lines
+	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content), "\n")
+	for i := 0; i < hs.Drawer; i++ {
+		if i < len(drawerLines) {
+			output = append(output, ansi.Truncate(drawerLines[i], w, ""))
+		} else {
+			output = append(output, "")
+		}
+	}
+	for range hs.List + hs.Attached + hs.Help {
 		output = append(output, "")
 	}
+
 	output = append(output, inputLines)
 	output = append(output, a.statusLine(w))
 	return strings.Join(output, "\n")
@@ -1308,6 +1393,30 @@ func (a *App) participantsMaxScroll() int {
 // within the roster as it stands.
 func (a *App) selectedParticipant() int {
 	return min(max(a.pSelected, 0), max(len(a.state.Participants)-1, 0))
+}
+
+// reviewsMsg carries the response from a reviews request.
+type reviewsMsg struct {
+	turnID string
+	reply  *wire.ReviewsReply
+	err    error
+}
+
+// onReviews processes a reviews response.
+func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
+	a.reviewsLoading[msg.turnID] = false
+	if msg.err != nil {
+		return a, nil
+	}
+	if msg.reply == nil {
+		return a, nil
+	}
+	items, err := msg.reply.DecodeItems()
+	if err != nil {
+		return a, nil
+	}
+	a.reviewsDrawer.UpdateReviews(msg.turnID, items)
+	return a, nil
 }
 
 // ExitMessage is what to print after the TUI exits: a turn still open keeps
