@@ -937,25 +937,40 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	return nil
 }
 
+const (
+	// probeOutputLimit is the output limit the probe sends; some gateways
+	// refuse a limit of 1.
+	probeOutputLimit = 16
+	// probeRetryOutputLimit is the limit sent once when probeOutputLimit is
+	// reported as too small.
+	probeRetryOutputLimit = 256
+)
+
+// outputLimitTooSmallPhrase is matched case-insensitively against a 400 body.
+const outputLimitTooSmallPhrase = "output limit was reached"
+
+// isOutputLimitTooSmall reports whether a response says the request's output
+// limit was too small (as opposed to the limit field being unsupported).
+func isOutputLimitTooSmall(status int, body []byte) bool {
+	return status == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(string(body)), outputLimitTooSmallPhrase)
+}
+
 func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions) (*ResponseBody, int, string, error) {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
-	var maxTokensBody *ResponseBody
 	var latency int
 	var serverVersion string
 
-	for idx, field := range []string{"max_tokens", "max_completion_tokens"} {
+	// send issues one request for field at limit and records it as stepName.
+	send := func(field, stepName string, limit int) (*http.Response, []byte, error) {
 		reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-
-		messages := []MessageInput{
-			{Role: "user", Content: "test"},
-		}
 
 		requestBody := map[string]any{
 			"model":    model,
-			"messages": messages,
+			"messages": []MessageInput{{Role: "user", Content: "test"}},
 			"stream":   false,
-			field:      1,
+			field:      limit,
 		}
 
 		bodyBytes, _ := json.Marshal(requestBody)
@@ -963,70 +978,78 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
 			cancel()
-			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: err}
+			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: err}
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if err := a.addProbeAuth(httpReq, secrets); err != nil {
 			cancel()
-			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: err}
+			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: err}
 		}
 
 		if opts.BeforeSend != nil {
-			stepName := field
 			if err := opts.BeforeSend(&transport.ProbeRequest{
 				Model:   model,
 				Step:    stepName,
 				Timeout: opts.Timeout,
 			}); err != nil {
 				cancel()
-				return nil, 0, "", &transport.ProbeStepError{Step: field, Err: fmt.Errorf("%w: %w", transport.ErrNotSent, err)}
+				return nil, nil, &transport.ProbeStepError{Step: stepName, Err: fmt.Errorf("%w: %w", transport.ErrNotSent, err)}
 			}
 		}
 
 		startTime := time.Now()
-		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: field, Timeout: opts.Timeout})
+		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: stepName, Timeout: opts.Timeout})
 		if err != nil {
 			cancel()
 			if isConnectionRefusedOrDNSErr(err) {
-				stepName := "max_tokens"
-				if idx == 1 {
-					stepName = "max_completion_tokens"
-				}
-				recordRawStep(rawSteps, stepName, "/chat/completions", 0, nil, nil)
-				return nil, 0, "", &transport.ProbeStepError{Step: field, Err: transport.ErrUnreachable}
+				recordRawStepWithRequest(rawSteps, stepName, "/chat/completions", 0, nil, nil, bodyBytes)
+				return nil, nil, &transport.ProbeStepError{Step: stepName, Err: transport.ErrUnreachable}
 			}
-			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(err)}
+			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(err)}
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
 		closeErr := httpResp.Body.Close()
 		cancel()
 		if readErr != nil {
-			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(readErr)}
+			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(readErr)}
 		}
 		if closeErr != nil {
-			return nil, 0, "", &transport.ProbeStepError{Step: field, Err: uncertainErr(closeErr)}
+			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(closeErr)}
 		}
 		latency = int(time.Since(startTime).Milliseconds())
 
-		stepName := "max_tokens"
-		if idx == 1 {
-			stepName = "max_completion_tokens"
-		}
-		recordRawStep(rawSteps, stepName, "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+		recordRawStepWithRequest(rawSteps, stepName, "/chat/completions", httpResp.StatusCode, httpResp.Header, body, bodyBytes)
 
 		if serverVersion == "" && httpResp.Header.Get("Server") != "" {
 			serverVersion = httpResp.Header.Get("Server")
 		}
+		return httpResp, body, nil
+	}
+
+	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+		step := field
+		httpResp, body, err := send(field, step, probeOutputLimit)
+		if err != nil {
+			return nil, latency, serverVersion, err
+		}
+
+		if isOutputLimitTooSmall(httpResp.StatusCode, body) {
+			step = field + "_retry"
+			httpResp, body, err = send(field, step, probeRetryOutputLimit)
+			if err != nil {
+				return nil, latency, serverVersion, err
+			}
+		}
 
 		if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
 			record.AuthMode = "unknown"
-			return nil, latency, serverVersion, &transport.ProbeStepError{Step: field, Status: httpResp.StatusCode, Err: transport.ErrUnauthorized}
+			return nil, latency, serverVersion, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: transport.ErrUnauthorized}
 		}
 
 		if httpResp.StatusCode == 404 {
-			return nil, latency, serverVersion, &transport.ProbeStepError{Step: field, Status: httpResp.StatusCode, Err: transport.ErrModelUnavailable}
+			return nil, latency, serverVersion, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: transport.ErrModelUnavailable}
 		}
 
 		if httpResp.StatusCode == 400 {
@@ -1041,19 +1064,16 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 			return nil, latency, serverVersion, nil
 		}
 
-		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-			record.MaxTokensField = field
+		record.MaxTokensField = field
 
-			var respData ResponseBody
-			if err := json.Unmarshal(body, &respData); err == nil {
-				maxTokensBody = &respData
-			}
-
-			return maxTokensBody, latency, serverVersion, nil
+		var respData ResponseBody
+		if err := json.Unmarshal(body, &respData); err == nil {
+			return &respData, latency, serverVersion, nil
 		}
+		return nil, latency, serverVersion, nil
 	}
 
-	return maxTokensBody, latency, serverVersion, nil
+	return nil, latency, serverVersion, nil
 }
 
 func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions, finishReasons map[string]transport.CompletionStatus) error {
@@ -1404,6 +1424,23 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	return nil
 }
 
+// calibrationRequest sends one calibration request at probeOutputLimit and,
+// when the gateway says the limit was too small, once more at
+// probeRetryOutputLimit. The retry's response replaces the first for the caller.
+func (a *Adapter) calibrationRequest(ctx context.Context, endpoint *url.URL, model, content, stepName, maxTokensField string, opts transport.ProbeOptions, secrets *[]string, rawSteps map[string]any) (int, http.Header, []byte, error) {
+	status, headers, body, reqBody, err := a.makeCalibrationRequest(ctx, endpoint, model, content, stepName, maxTokensField, probeOutputLimit, opts, secrets)
+	recordRawStepWithRequest(rawSteps, stepName, "/chat/completions", status, headers, body, reqBody)
+	if err == nil && isOutputLimitTooSmall(status, body) {
+		stepName += "_retry"
+		status, headers, body, reqBody, err = a.makeCalibrationRequest(ctx, endpoint, model, content, stepName, maxTokensField, probeRetryOutputLimit, opts, secrets)
+		recordRawStepWithRequest(rawSteps, stepName, "/chat/completions", status, headers, body, reqBody)
+	}
+	if err != nil {
+		err = &transport.ProbeStepError{Step: stepName, Status: status, Err: err}
+	}
+	return status, headers, body, err
+}
+
 func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions) error {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
@@ -1412,8 +1449,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		maxTokensField = "max_tokens"
 	}
 
-	baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody, baselineErr := a.makeCalibrationRequest(ctx, endpoint, model, "", maxTokensField, opts, secrets)
-	recordRawStepWithRequest(rawSteps, "calibration_baseline", "/chat/completions", baselineStatusCode, baselineHeaders, baselineBody, baselineReqBody)
+	baselineStatusCode, _, baselineBody, baselineErr := a.calibrationRequest(ctx, endpoint, model, "", "calibration_baseline", maxTokensField, opts, secrets, rawSteps)
 
 	// A pre-send failure or sent-but-uncertain failure stops the probe before the next request.
 	if baselineErr != nil && (errors.Is(baselineErr, transport.ErrNotSent) || errors.Is(baselineErr, transport.ErrUncertain)) {
@@ -1425,8 +1461,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	// non-2xx status triggers the one-byte fallback baseline.
 	baselineBytes := 0
 	if baselineErr == nil && baselineStatusCode != 0 && (baselineStatusCode < 200 || baselineStatusCode >= 300) {
-		fbStatus, fbHeaders, fbBody, fbReqBody, fbErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationBaselineNonEmpty, maxTokensField, opts, secrets)
-		recordRawStepWithRequest(rawSteps, "calibration_baseline_nonempty", "/chat/completions", fbStatus, fbHeaders, fbBody, fbReqBody)
+		fbStatus, _, fbBody, fbErr := a.calibrationRequest(ctx, endpoint, model, calibrationBaselineNonEmpty, "calibration_baseline_nonempty", maxTokensField, opts, secrets, rawSteps)
 		if fbErr != nil && (errors.Is(fbErr, transport.ErrNotSent) || errors.Is(fbErr, transport.ErrUncertain)) {
 			record.Calibration.Available = false
 			return fbErr
@@ -1435,8 +1470,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		baselineBytes = len(calibrationBaselineNonEmpty)
 	}
 
-	calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody, calibrationErr := a.makeCalibrationRequest(ctx, endpoint, model, calibrationText, maxTokensField, opts, secrets)
-	recordRawStepWithRequest(rawSteps, "calibration", "/chat/completions", calibrationStatusCode, calibrationHeaders, calibrationBody, calibrationReqBody)
+	calibrationStatusCode, _, calibrationBody, calibrationErr := a.calibrationRequest(ctx, endpoint, model, calibrationText, "calibration", maxTokensField, opts, secrets, rawSteps)
 
 	// ErrNotSent and ErrUncertain must propagate; other errors just mark calibration unavailable
 	if baselineErr != nil {
@@ -1494,7 +1528,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	return nil
 }
 
-func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, maxTokensField string, opts transport.ProbeOptions, secrets *[]string) (int, http.Header, []byte, []byte, error) {
+func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL, model string, messageContent string, stepName string, maxTokensField string, limit int, opts transport.ProbeOptions, secrets *[]string) (int, http.Header, []byte, []byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
@@ -1506,7 +1540,7 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		"model":        model,
 		"messages":     messages,
 		"stream":       false,
-		maxTokensField: 1,
+		maxTokensField: limit,
 	}
 
 	bodyBytes, _ := json.Marshal(requestBody)
@@ -1521,13 +1555,6 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		return 0, nil, nil, nil, err
 	}
 
-	stepName := "calibration"
-	switch messageContent {
-	case "":
-		stepName = "calibration_baseline"
-	case calibrationBaselineNonEmpty:
-		stepName = "calibration_baseline_nonempty"
-	}
 	if opts.BeforeSend != nil {
 		if err := opts.BeforeSend(&transport.ProbeRequest{
 			Model:   model,
