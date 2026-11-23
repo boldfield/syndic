@@ -75,6 +75,14 @@ func newSuite(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, o
 		Adapters:   h.Adapters,
 		RosterPath: h.RosterPath,
 	}
+	s.serve(t)
+	return s
+}
+
+// serve puts the suite's engine behind a server on a Unix socket in a
+// temporary directory and subscribes the suite's own client from seq 0.
+func (s *suite) serve(t *testing.T) {
+	t.Helper()
 
 	// A socket path must fit in 108 bytes; the test's temp directory may not.
 	dir, err := os.MkdirTemp("", "acc")
@@ -93,7 +101,6 @@ func newSuite(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, o
 	})
 	s.startServer()
 	s.events = s.subscribe()
-	return s
 }
 
 // observeFrame is the hook on the server's writer: it records the largest
