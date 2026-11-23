@@ -361,6 +361,25 @@ func (c *Client) Conversation(ctx context.Context, idPrefix string) (wire.Conver
 	return reply, nil
 }
 
+func (c *Client) Reviews(ctx context.Context, turnID string, cursor *string, limit *int) (*wire.ReviewsReply, error) {
+	var reply wire.ReviewsReply
+	req := wire.ReviewsRequest{TurnID: turnID}
+	if cursor != nil {
+		req.Cursor = cursor
+	}
+	if limit != nil {
+		req.Limit = limit
+	}
+	body, err := c.doRequest(ctx, wire.RequestReviews, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return nil, fmt.Errorf("unmarshal reviews reply: %w", err)
+	}
+	return &reply, nil
+}
+
 // SubmitToConversation resolves prefix, any unique prefix of a conversation
 // id, and submits req to the conversation it names. An unknown or ambiguous
 // prefix is returned before anything is sent: no submit frame is written. A
