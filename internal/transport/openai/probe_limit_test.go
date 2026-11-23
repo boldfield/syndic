@@ -291,6 +291,41 @@ func TestProbeBeforeSendRefusesRetry(t *testing.T) {
 	if s.count("max_tokens", 256) != 0 {
 		t.Error("retry was sent")
 	}
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) || pe.Step != "max_tokens_retry" {
+		t.Errorf("step error %v, want Step max_tokens_retry", err)
+	}
+}
+
+func TestCalibrationRetryFailureStep(t *testing.T) {
+	emptyTooSmall := func(r limitReq) (int, string) {
+		if r.content == "" && !r.system && r.limit < 256 {
+			return 400, limitRefusal
+		}
+		return 200, okBody(r)
+	}
+	var pe *transport.ProbeStepError
+
+	_, a := newLimitServer(t, emptyTooSmall)
+	_, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{
+		DisableOverLength: true,
+		BeforeSend: func(pr *transport.ProbeRequest) error {
+			if pr.Step == "calibration_baseline_retry" {
+				return errors.New("refused")
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, transport.ErrNotSent) || !errors.As(err, &pe) || pe.Step != "calibration_baseline_retry" {
+		t.Errorf("err %v, want ErrNotSent at calibration_baseline_retry", err)
+	}
+
+	_, a = newLimitServer(t, emptyTooSmall)
+	a.client.Transport = failOnRetryLimit{http.DefaultTransport}
+	_, err = a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{DisableOverLength: true})
+	if !errors.Is(err, transport.ErrUncertain) || !errors.As(err, &pe) || pe.Step != "calibration_baseline_retry" {
+		t.Errorf("err %v, want ErrUncertain at calibration_baseline_retry", err)
+	}
 }
 
 func TestCalibrationFallbackRules(t *testing.T) {
@@ -353,4 +388,19 @@ func TestProbeRetryStepsScrubbed(t *testing.T) {
 	if strings.Contains(string(rec.Raw), "tok-123") {
 		t.Error("secret in raw record")
 	}
+}
+
+// failOnRetryLimit fails any request sent at the retry limit.
+type failOnRetryLimit struct{ next http.RoundTripper }
+
+func (f failOnRetryLimit) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body == nil {
+		return f.next.RoundTrip(req)
+	}
+	raw, _ := io.ReadAll(req.Body)
+	req.Body = io.NopCloser(strings.NewReader(string(raw)))
+	if strings.Contains(string(raw), `":256`) {
+		return nil, errors.New("boom")
+	}
+	return f.next.RoundTrip(req)
 }
