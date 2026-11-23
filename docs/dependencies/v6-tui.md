@@ -46,7 +46,7 @@ Inventory of the six presentation modules added for v6, their versions, existing
 - Graph-only modules (transitive, not in go.mod):
   - `github.com/alecthomas/assert/v2@v2.11.0` (MIT, via chroma)
   - `github.com/alecthomas/repr@v0.5.1` (MIT, via chroma)
-  - `github.com/hexops/gotextdiff@v1.0.3` (MIT, via chroma)
+  - `github.com/hexops/gotextdiff@v1.0.3` (BSD-3-Clause, via chroma)
   - `golang.org/x/crypto@v0.42.0` (BSD-3-Clause, via x/net)
   - `golang.org/x/telemetry@v0.0.0-20250908211612-aef8a434d053` (BSD-3-Clause, via x/tools)
 
@@ -96,11 +96,14 @@ The operator accepted all six modules, and the transitive modules listed here, o
 
 ## Notes
 
+**Archived module:**
+- `github.com/mitchellh/hashstructure/v2@v2.0.2`, added by Huh, comes from an upstream repository (`github.com/mitchellh/hashstructure`) that its owner has archived. It is MIT licensed and has no further releases expected.
+
 **Graph-only module dependencies (not in go.mod):**
 - Huh depends on PTY and process control modules via go mod graph: `github.com/creack/pty`, `github.com/charmbracelet/x/conpty`, `github.com/charmbracelet/x/termios`, and `github.com/charmbracelet/x/xpty`. These are pruned from go.mod under Go's minimal version selection but are still requirements in the module graph. They provide access to terminal pseudo-devices and process spawning, adding system-level dependencies on PTY device access and process control APIs if Huh is used to spawn processes.
-- Glamour depends on code-analysis and diff-reporting modules via go mod graph: `github.com/alecthomas/assert/v2`, `github.com/alecthomas/repr`, and `github.com/hexops/gotextdiff` (via chroma). These are transitive but pruned from go.mod.
+- `github.com/alecthomas/assert/v2`, `github.com/alecthomas/repr` and `github.com/hexops/gotextdiff` are test-only requirements of chroma. They appear in the module graph, are pruned from go.mod, and are not built into the application.
 
-**Pre-release version and standard library upgrades:**
+**Pre-release version and `golang.org/x` upgrades:**
 - Glamour requires `github.com/charmbracelet/lipgloss@v1.1.1-0.20250404203927-76690c660834`, a pre-release version, which is an upgrade from the currently pinned `v1.1.0`.
-- Glamour brings multiple upgrades to standard library modules: `golang.org/x/mod@v0.28.0`, `golang.org/x/net@v0.44.0`, `golang.org/x/sync@v0.17.0`, `golang.org/x/term@v0.36.0`, `golang.org/x/text@v0.30.0`, and `golang.org/x/tools@v0.37.0`. These are compatible upgrades standard for TUI applications.
+- Glamour brings multiple upgrades to `golang.org/x` modules (not the standard library): `golang.org/x/mod@v0.28.0`, `golang.org/x/net@v0.44.0`, `golang.org/x/sync@v0.17.0`, `golang.org/x/term@v0.36.0`, `golang.org/x/text@v0.30.0`, and `golang.org/x/tools@v0.37.0`. These are compatible upgrades standard for TUI applications.
 - Glamour and x/tools bring in updates to `golang.org/x/crypto` and `golang.org/x/telemetry` via the module graph.

@@ -18,59 +18,21 @@ Illustrations supplied by the operator on 2026-11-21, showing the v6 TUI present
 
 ## Disagreements with the ratified design
 
-Four disagreements found between the frames and `docs/design/v6-delta-tui-presentation.md` sections 0–7:
+Seven disagreements found between the frames or the style table and `docs/design/v6-delta-tui-presentation.md`. In each, the design governs. Section numbers are the design's.
 
-**File: `chat-idle-100x30.txt`, line 5**
+1. **`chat-idle-100x30.txt`, line 5.** Line 5 is `  approved by codex, muse against 5d20e9b1 · not in context`. Section 1 requires an outcome line to begin in column 0 with a one-character mark and a space (`✓` for approved), and section 2 requires every outcome line to end with `· <n> reviews`. The line has neither. It should read `✓ approved by codex, muse against 5d20e9b1 · not in context · <n> reviews`.
 
-The ratified design section 1 specifies: "An outcome line begins in column 0 with a one-character mark and a space: `✓` approved, `!` incomplete or overridden, `×` cancelled, `·` solo." Section 2 (line 76) further specifies: "Every outcome line ends with `· <n> reviews`."
+2. **`chat-dumb-80x24.txt`, line 23.** The input prompt is `>`. Section 1 specifies the input prompt `┃ `, and section 6 (plain terminal) does not override it.
 
-Frame shows:
-```
-4	› what does the gate check before a reviewer result counts?
-5	  approved by codex, muse against 5d20e9b1 · not in context
-```
+3. **`style.md`, line 39.** The table prescribes `> ` as the input prompt in a plain terminal, for the same reason as item 2.
 
-Line 5 shows an approved outcome (marked as "approved by...") but lacks the required `✓` mark and the reviews count. According to the design, this line should start with the mark and end with the count:
-```
-5	✓ approved by codex, muse against 5d20e9b1 · not in context · <n> reviews
-```
+4. **`chat-outcomes-100x30.txt`, line 30.** The status line, with the chat tab active and the drawer closed, keeps the budget meter and omits `ctrl+o: reviews`. Section 1, "Status line", says: "At the right edge, `ctrl+o: reviews` when the chat tab is active, then the v5 hint `tab: switch  /help` unchanged." It also contradicts the operator ruling below, which hides the meter before the reviews hint. For comparison, `chat-idle-100x30.txt` line 30 and `chat-attach-100x30.txt` line 30 show the hint, and the two 80-column frames already hide the meter.
 
-**File: `chat-dumb-80x24.txt`, line 23**
+5. **`chat-attach-100x30.txt`, line 28.** The attached line is drawn below the input (line 27). Section 3 says: "The attached line above the input lists exactly the set that the next submit will send."
 
-The ratified design section 1 specifies: "A multi-line text area with the prompt `┃ `." Section 6 says that in plain terminal mode (TERM=dumb) with no colour, "prompts are single-line questions as in v4" but does not override the input prompt character.
+6. **`chat-dumb-80x24.txt`, line 2.** The conversation line (`conversation 7c2e41 · 5 turns`) shows neither the number of earlier turns above the view nor the scroll percentage. Section 1, "Scroll position", requires both, and section 6 does not exempt the plain terminal.
 
-Frame shows:
-```
-23	>
-```
-
-The input prompt uses `>` but the design specifies `┃ `. The design does not provide an exception for TERM=dumb, so this is a disagreement.
-
-**File: `style.md`, line 39**
-
-The style table specifies:
-```
-39	| `┃ ` | 0 | the input prompt (`> ` in a plain terminal) |
-```
-
-The table documents `┃` as the input prompt with `> ` as a fallback for plain terminals. However, the design section 1 specifies `┃` as the input prompt and does not override it for plain terminals (section 6 does not mention the input prompt). This is inconsistent with the design's lack of exception for TERM=dumb.
-
-**File: `chat-outcomes-100x30.txt`, line 30**
-
-The ratified design section 1 specifies: "The status line shows (at 100×30 width, all elements visible) `review · reviews_dispatched · <elapsed>/<budget> · <meter> · round <r>/<n> · ctrl+o: reviews   tab: switch  /help`." The status line element order is defined in section 1 and applies when the chat tab is active.
-
-Frame shows:
-```
-30	review · reviewers_dispatched · 0:18/10:00 · █░░░░░░░░░ 12k/120k · round 0/2      tab: switch  /help
-```
-
-Line 30 is the status line with the chat tab active and the drawer closed. It retains the budget meter (`█░░░░░░░░░ 12k/120k`) but omits `ctrl+o: reviews`. According to the operator's overflow ruling (recorded below), the budget meter is hidden before the reviews hint; this frame contradicts both the design's requirement that the reviews hint appear on the active chat tab and the ruling's ordering. For comparison: `chat-idle-100x30.txt` line 26 and `chat-attach-100x30.txt` show the reviews hint; `chat-dumb-80x24.txt` and `chat-drawer-80x24.txt` at 80 columns are consistent with the ruling (meter already hidden, then the hint is hidden or hidden).
-
-The frame should show:
-```
-30	review · reviewers_dispatched · 0:18/10:00 · round 0/2 · ctrl+o: reviews      tab: switch  /help
-```
-(with the meter hidden by the overflow rule and the reviews hint present).
+7. **`changes-apply-100x30.txt`, line 4.** The outcome line `✓ approved by codex, muse after 1 revision against d07a5b62` does not end with `· <n> reviews`. Section 2 says "Every outcome line ends with `· <n> reviews` from `review_count`. Solo turns have none." The design does not limit this to the chat tab, so the line disagrees.
 
 ## Operator ruling: status line overflow
 
