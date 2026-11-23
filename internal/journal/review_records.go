@@ -61,13 +61,14 @@ func (tx *Tx) StoreReviewRecord(turnID string, round int, candidateHash, partici
 		return "", fmt.Errorf("marshal verdict json: %w", err)
 	}
 
-	recordRefJSON := ""
+	var recordRefJSON *string
 	if recordRef != nil {
 		refBytes, err := json.Marshal(recordRef)
 		if err != nil {
 			return "", fmt.Errorf("marshal record ref: %w", err)
 		}
-		recordRefJSON = string(refBytes)
+		refStr := string(refBytes)
+		recordRefJSON = &refStr
 	}
 
 	_, err = tx.tx.Exec(`
@@ -95,6 +96,21 @@ func (tx *Tx) StoreReviewRecord(turnID string, round int, candidateHash, partici
 func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (records []ReviewRecord, nextCursor *string, err error) {
 	if limit <= 0 || limit > 50 {
 		limit = 50
+	}
+
+	// First, check if we have any review records for this turn
+	var existingCount int
+	if err := tx.tx.QueryRow(`
+		SELECT COUNT(*) FROM review_records WHERE turn_id = ?
+	`, turnID).Scan(&existingCount); err != nil {
+		return nil, nil, fmt.Errorf("check existing records: %w", err)
+	}
+
+	// If no records exist, try to materialize them from verdicts/blocks for older verdicts
+	if existingCount == 0 {
+		if err := tx.materializeReviewRecords(turnID); err != nil {
+			return nil, nil, fmt.Errorf("materialize review records: %w", err)
+		}
 	}
 
 	query := `
@@ -135,9 +151,16 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 		r.CreatedAt = createdAt
 
 		// Parse the verdict_json to extract blocks and commentary references
-		if err := json.Unmarshal(r.VerdictJSON, &r); err != nil {
+		// Use a dedicated struct to avoid overwriting ReviewRecord fields
+		var verdictData struct {
+			Blocks     []ReviewBlock `json:"blocks"`
+			Commentary *ContentRef   `json:"commentary"`
+		}
+		if err := json.Unmarshal(r.VerdictJSON, &verdictData); err != nil {
 			return nil, nil, fmt.Errorf("parse verdict json: %w", err)
 		}
+		r.Blocks = verdictData.Blocks
+		r.Commentary = verdictData.Commentary
 
 		// Parse record_ref if present
 		if recordRefJSON.Valid {
@@ -161,6 +184,112 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 	}
 
 	return records, nextCursor, nil
+}
+
+// materializeReviewRecords derives review records from existing verdict/block/attempt data
+// for verdicts accepted before the review_records table was introduced.
+// Only creates records for valid (non-malformed, non-rejected, non-revision-request) verdicts.
+func (tx *Tx) materializeReviewRecords(turnID string) error {
+	// Query for all verdicts of this turn that were parsed as valid
+	// We derive records for all valid verdicts to create a historical record
+	rows, err := tx.tx.Query(`
+		SELECT v.id, v.attempt_id, v.candidate_hash, v.parsed_verdict,
+		       a.participant, a.epoch, t.round
+		FROM verdicts v
+		JOIN attempts a ON v.attempt_id = a.id
+		JOIN turns t ON a.turn_id = t.id
+		WHERE a.turn_id = ? AND v.validation_status = 'valid' AND a.state = 'completed'
+		ORDER BY t.round ASC, a.epoch ASC
+	`, turnID)
+	if err != nil {
+		return fmt.Errorf("query verdicts for materialization: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	// Get participant order info by querying the roster (we'll estimate based on epoch order)
+	type verdictRecord struct {
+		verdictID        string
+		attemptID        string
+		candidate        string
+		kind             string
+		participant      string
+		participantOrder int
+		round            int
+	}
+	var records []verdictRecord
+
+	for rows.Next() {
+		var verdictID, attemptID, candidate, kind, participant string
+		var participantOrder, round int
+		if err := rows.Scan(&verdictID, &attemptID, &candidate, &kind, &participant, &participantOrder, &round); err != nil {
+			return fmt.Errorf("scan verdict: %w", err)
+		}
+		records = append(records, verdictRecord{
+			verdictID:        verdictID,
+			attemptID:        attemptID,
+			candidate:        candidate,
+			kind:             kind,
+			participant:      participant,
+			participantOrder: participantOrder,
+			round:            round,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate verdicts: %w", err)
+	}
+
+	// For each verdict, create a review record
+	for _, rec := range records {
+		blocks := []ReviewBlock{}
+
+		// If this is a block verdict, get the blocks
+		if rec.kind == "block" {
+			blockRows, err := tx.tx.Query(`
+				SELECT id, severity, state FROM blocks WHERE verdict_id = ?
+			`, rec.verdictID)
+			if err != nil {
+				return fmt.Errorf("query blocks: %w", err)
+			}
+			for blockRows.Next() {
+				var blockID, severity, state string
+				if err := blockRows.Scan(&blockID, &severity, &state); err != nil {
+					_ = blockRows.Close()
+					return fmt.Errorf("scan block: %w", err)
+				}
+				blocks = append(blocks, ReviewBlock{
+					BlockID:  blockID,
+					State:    state,
+					Severity: &severity,
+				})
+			}
+			_ = blockRows.Close()
+		}
+
+		// Create the review record
+		recordID, err := generateID()
+		if err != nil {
+			return fmt.Errorf("generate id: %w", err)
+		}
+
+		recordData := map[string]interface{}{
+			"blocks": blocks,
+		}
+		verdictJSON, err := json.Marshal(recordData)
+		if err != nil {
+			return fmt.Errorf("marshal verdict json: %w", err)
+		}
+
+		_, err = tx.tx.Exec(`
+			INSERT OR IGNORE INTO review_records
+			(id, turn_id, round, candidate_hash, participant, participant_order, attempt_id, kind, verdict_json, oversized, record_ref, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, recordID, turnID, rec.round, rec.candidate, rec.participant, rec.participantOrder, rec.attemptID, rec.kind, verdictJSON, false, nil, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return fmt.Errorf("insert materialized record: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // GetReviewCount returns the number of accepted review records for a turn.

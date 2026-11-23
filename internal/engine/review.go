@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -39,6 +40,15 @@ func (e *Engine) participantConfig(id string) config.Participant {
 		}
 	}
 	return config.Participant{}
+}
+
+func (e *Engine) participantOrder(id string) int {
+	for i, p := range e.roster.Participants {
+		if p.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // completeAuthorReview runs accept and gate for the author's result in a
@@ -609,6 +619,62 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 					revise = true
 				} else {
 					endState, endReason = StateIncomplete, reasonRoundsExhausted
+				}
+			}
+			// Store review record for accepted verdicts (approve or block)
+			if parsed.Classification == verdict.Valid && (v.Decision == "approve" || v.Decision == "block") {
+				participantOrder := e.participantOrder(d.participant)
+				blocks := []journal.ReviewBlock{}
+
+				// Construct blocks from verdict block states and the opened block info
+				if v.Decision == "block" {
+					blocks = append(blocks, journal.ReviewBlock{
+						BlockID:  v.BlockID,
+						State:    "opened",
+						Severity: &v.Severity,
+						Evidence: (*journal.ContentRef)(nil), // Will be set from stored attempt content
+						Remedy:   (*journal.ContentRef)(nil), // Will be set from stored attempt content
+					})
+				}
+
+				// Add maintained/withdrawn block states from v2 verdicts
+				for _, bs := range v.BlockStates {
+					if bs.State != "withdrawn" && bs.State != "maintained" {
+						continue
+					}
+					// Find if this is a new block or existing
+					found := false
+					for i, b := range blocks {
+						if b.BlockID == bs.BlockID {
+							blocks[i].State = bs.State
+							found = true
+							break
+						}
+					}
+					if !found {
+						blocks = append(blocks, journal.ReviewBlock{
+							BlockID: bs.BlockID,
+							State:   bs.State,
+						})
+					}
+				}
+
+				// Get commentary from the parsed attempt
+				var commentary *journal.ContentRef
+				if parsed.Commentary != "" {
+					// Store commentary as a content reference
+					// For now, reference the attempt's raw output
+					commentaryHash := fmt.Sprintf("%x", sha256.Sum256([]byte(parsed.Commentary)))
+					commentary = &journal.ContentRef{
+						Ref:     fmt.Sprintf("attempt:%s:commentary", d.attemptID),
+						SHA256:  commentaryHash,
+						ByteLen: int64(len(parsed.Commentary)),
+					}
+				}
+
+				_, err := tx.StoreReviewRecord(t.id, round, echoed, d.participant, participantOrder, d.attemptID, v.Decision, blocks, commentary, false, nil)
+				if err != nil {
+					return fmt.Errorf("store review record: %w", err)
 				}
 			}
 		case verdict.Rejected:
