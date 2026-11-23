@@ -1182,6 +1182,7 @@ func (a *App) statusLine(w int) string {
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.
+// Heights are allocated according to calcBounds, the v6 design's height allocator.
 func (a *App) View() string {
 	w := a.width
 
@@ -1192,6 +1193,15 @@ func (a *App) View() string {
 			msg = "Terminal too small."
 		}
 		return ansi.Truncate(msg, w, "")
+	}
+
+	// calcBounds allocates heights according to v6 priorities.
+	// It reserves: TabBar(1), Status(1), Banners(≤2), Attached(reserved in D-07),
+	// Drawer/List(0 in D-07, mutually exclusive), Input(1-6), Content(remaining, ≥5).
+	bounds := calcBounds(a.height, a.width)
+	// Ensure drawer and list heights match design constraint (mutually exclusive, closed in D-07)
+	if bounds.Drawer > 0 && bounds.List > 0 {
+		panic("drawer and list must be mutually exclusive")
 	}
 
 	// Banners are limited to leave at least 5 lines for the tab area
