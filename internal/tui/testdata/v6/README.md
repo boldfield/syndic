@@ -18,7 +18,7 @@ Illustrations supplied by the operator on 2026-11-21, showing the v6 TUI present
 
 ## Disagreements with the ratified design
 
-Seven disagreements found between the frames or the style table and `docs/design/v6-delta-tui-presentation.md`. In each, the design governs. Section numbers are the design's.
+Ten disagreements found between the frames or the style table and `docs/design/v6-delta-tui-presentation.md`. In each, the design governs. Section numbers are the design's.
 
 1. **`chat-idle-100x30.txt`, line 5.** Line 5 is `  approved by codex, muse against 5d20e9b1 · not in context`. Section 1 requires an outcome line to begin in column 0 with a one-character mark and a space (`✓` for approved), and section 2 requires every outcome line to end with `· <n> reviews`. The line has neither. It should read `✓ approved by codex, muse against 5d20e9b1 · not in context · <n> reviews`.
 
@@ -33,6 +33,14 @@ Seven disagreements found between the frames or the style table and `docs/design
 6. **`chat-dumb-80x24.txt`, line 2.** The conversation line (`conversation 7c2e41 · 5 turns`) shows neither the number of earlier turns above the view nor the scroll percentage. Section 1, "Scroll position", requires both, and section 6 does not exempt the plain terminal.
 
 7. **`changes-apply-100x30.txt`, line 4.** The outcome line `✓ approved by codex, muse after 1 revision against d07a5b62` does not end with `· <n> reviews`. Section 2 says "Every outcome line ends with `· <n> reviews` from `review_count`. Solo turns have none." The design does not limit this to the chat tab, so the line disagrees.
+
+8. **`transcript-100x30.txt`, line 27.** The outcome line `✓ approved by codex, muse after 2 revisions against 81b04d7a` does not end with `· <n> reviews`. Section 2 applies the rule to every outcome line, so the transcript tab is not exempt.
+
+9. **`chat-outcomes-100x30.txt`, line 23.** `UNREVIEWED DRAFT` is presented without the one-character outcome mark section 1 requires; the style table (line 36) gives `· ` for solo and unreviewed turns.
+
+10. **`chat-outcomes-100x30.txt`, line 30.** The status line shows `round 0/2` while the first candidate is still being reviewed (line 26 also shows round 0). Section 1, "Status line", shows round text only during a revision.
+
+Frame artifact, not a design disagreement: `transcript-100x30.txt` lines 13-15 show an overlapping second pane that cuts the tokens column to `2.  │`.
 
 ## Operator ruling: status line overflow
 
