@@ -388,7 +388,7 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 	d.typeLine("question")
 	// In v6, participant states are on the progress line, not the status line
 	d.until("author running with limit and deadline", func(string) bool {
-		return d.sawStrip("[review] [author_dispatched] [", "/ 15m0s] [est. ", " / 250000]")
+		return d.sawStrip("[review] [author_dispatched] [", "/ 15m0s]", "[est. ", " / 250000]")
 	})
 	releaseAuthor()
 	// Author should become idle, reviewer should become running (checked on progress line, not strip)

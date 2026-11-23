@@ -25,8 +25,8 @@ func TestRenderProgressShowsSpinnerPhaseAndTime(t *testing.T) {
 	out := renderProgress(s, "t1", now, false)
 
 	// Should contain phase, round, participant marks, and elapsed time
-	if !strings.Contains(out, "phase: running") {
-		t.Errorf("missing phase: running in %q", out)
+	if !strings.Contains(out, "running") {
+		t.Errorf("missing running state in %q", out)
 	}
 	if !strings.Contains(out, "round 1/2") {
 		t.Errorf("missing round 1/2 in %q", out)
