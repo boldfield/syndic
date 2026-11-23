@@ -142,3 +142,49 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 	}
 	return lines, lastTurn
 }
+
+// buildTurnLineMap creates a TurnLineMap from the chat state.
+// It tracks where each turn begins in the rendered line list.
+func buildTurnLineMap(s State, in chatInput) *TurnLineMap {
+	ids := chatTurns(s)
+	trimmed := trimmedTurns(s, ids)
+
+	var lineCount int
+	turnStarts := make([]int, len(ids))
+
+	for i, id := range ids {
+		turnStarts[i] = lineCount
+		ai := in.answer(id)
+		var turn []string
+		text, ok := in.inputs[id]
+		if !ok && s.Turns[id].InputRef != "" && in.content != nil {
+			text, ok = bodyRaw(in.content, s.Turns[id].InputRef), true
+		}
+		if ok {
+			if in.width > 0 {
+				for i, l := range SafeTextWithPrefix(text, in.width) {
+					if i == 0 {
+						l = userMark + strings.TrimPrefix(l, contentPrefix)
+					}
+					turn = append(turn, l)
+				}
+			} else {
+				lines := strings.Split(ToSafeText([]byte(text)), "\n")
+				lines[0] = userMark + lines[0]
+				turn = append(turn, strings.Join(lines, "\n"+contentPrefix))
+			}
+		} else {
+			turn = append(turn, userMark+"(input not loaded)")
+		}
+		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
+		if trimmed[id] {
+			turn = append(turn, notInContext)
+		}
+		lineCount += len(turn)
+	}
+
+	return &TurnLineMap{
+		turnStarts: turnStarts,
+		totalLines: lineCount,
+	}
+}

@@ -790,9 +790,15 @@ func (a *App) conversationHeader() string {
 // conversationHeaderWithScroll formats the conversation header with scroll position info.
 // It appends the count of earlier turns and scroll percentage to the right edge,
 // only if there is room without truncating the header significantly.
-func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answerHeight int, startLine int) string {
+func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answerHeight int, startLine int, turnMap *TurnLineMap) string {
 	header := a.conversationHeader()
-	scroll := calcScrollPosition(totalLines, answerHeight, startLine)
+
+	var scroll ScrollInfo
+	if turnMap != nil {
+		scroll = calcScrollPositionByTurns(totalLines, answerHeight, startLine, turnMap)
+	} else {
+		scroll = calcScrollPosition(totalLines, answerHeight, startLine)
+	}
 
 	// Format scroll info: "N earlier · X%"
 	scrollStr := fmt.Sprintf("%d earlier · %d%%", scroll.Above, scroll.Percentage)
@@ -806,7 +812,7 @@ func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answ
 
 	// If not enough room, try to fit header + scroll with minimal truncation.
 	// Leave room for scroll info plus a space and one character of buffer.
-	minHeaderRoom := max(1, headerWidth-len(scrollStr)-2)
+	minHeaderRoom := max(1, headerWidth-ansi.StringWidth(scrollStr)-2)
 	headerClipped := ansi.Truncate(header, minHeaderRoom, "")
 	result := headerClipped + " " + scrollStr
 
@@ -1235,8 +1241,10 @@ func (a *App) View() string {
 		for len(lines) < a.answerHeight() {
 			lines = append(lines, "")
 		}
+		// Build turn line map to count earlier turns correctly
+		turnMap := buildTurnLineMap(a.state, a.chatIn())
 		// The first line of the chat names the open conversation with scroll position.
-		headerWithScroll := a.conversationHeaderWithScroll(w, len(lines)+start, a.answerHeight(), start)
+		headerWithScroll := a.conversationHeaderWithScroll(w, len(lines)+start, a.answerHeight(), start, turnMap)
 		lines = append([]string{headerWithScroll}, lines[:a.answerHeight()]...)
 	}
 	for len(lines) < bodyHeight {

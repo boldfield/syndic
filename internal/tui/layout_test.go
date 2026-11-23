@@ -159,3 +159,112 @@ func TestInputRowsConstraint(t *testing.T) {
 		}
 	}
 }
+
+// TestBoundsAllocation verifies that bounds allocation satisfies the design constraints.
+func TestBoundsAllocation(t *testing.T) {
+	testCases := []struct {
+		h, w            int
+		name            string
+		minContent      int
+		expectDrawer    int
+		expectList      int
+		expectShortHelp int
+	}{
+		{80, 24, "80x24 crowded", 5, 0, 0, 0},
+		{80, 31, "80x31 large", 5, 0, 0, 0},
+		{79, 24, "79x24 too narrow", 0, 0, 0, 0},
+		{80, 23, "80x23 too short", 0, 0, 0, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := calcBounds(tc.h, tc.w)
+
+			// Check drawer and list allocation
+			if b.Drawer != tc.expectDrawer {
+				t.Errorf("Drawer = %d, want %d", b.Drawer, tc.expectDrawer)
+			}
+			if b.List != tc.expectList {
+				t.Errorf("List = %d, want %d", b.List, tc.expectList)
+			}
+			if b.ShortHelp != tc.expectShortHelp {
+				t.Errorf("ShortHelp = %d, want %d", b.ShortHelp, tc.expectShortHelp)
+			}
+
+			// Check content minimum when at 80x24+
+			if tc.w >= 80 && tc.h >= 24 && b.Content < tc.minContent {
+				t.Errorf("At %dx%d: Content = %d, want at least %d", tc.w, tc.h, b.Content, tc.minContent)
+			}
+
+			// Verify bounds don't exceed terminal size
+			total := b.TabBar + b.Status + b.Content + b.Input + b.Banners + b.Drawer + b.List + b.ShortHelp + b.Attached
+			if total > b.Height {
+				t.Errorf("At %dx%d: total allocated %d exceeds height %d", tc.w, tc.h, total, b.Height)
+			}
+		})
+	}
+}
+
+// TestTurnLineMapCounting verifies correct turn boundary tracking.
+func TestTurnLineMapCounting(t *testing.T) {
+	testCases := []struct {
+		name       string
+		turnStarts []int
+		lineIndex  int
+		wantTurns  int
+	}{
+		{"line in first turn", []int{0, 5, 10}, 2, 0},
+		{"line at second turn", []int{0, 5, 10}, 5, 1},
+		{"line in second turn", []int{0, 5, 10}, 7, 1},
+		{"line at third turn", []int{0, 5, 10}, 10, 2},
+		{"line in third turn", []int{0, 5, 10}, 12, 2},
+		{"empty turns", []int{}, 0, 0},
+		{"single turn", []int{0}, 0, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &TurnLineMap{
+				turnStarts: tc.turnStarts,
+				totalLines: 100,
+			}
+			got := m.countEarlierTurns(tc.lineIndex)
+			if got != tc.wantTurns {
+				t.Errorf("countEarlierTurns(%d) = %d, want %d", tc.lineIndex, got, tc.wantTurns)
+			}
+		})
+	}
+}
+
+// TestScrollPositionByTurns verifies scroll position calculation using turns.
+func TestScrollPositionByTurns(t *testing.T) {
+	turns := &TurnLineMap{
+		turnStarts: []int{0, 10, 20, 30},
+		totalLines: 40,
+	}
+
+	testCases := []struct {
+		name        string
+		total       int
+		visible     int
+		firstLine   int
+		wantAbove   int
+		wantPercent int
+	}{
+		{"at start", 40, 10, 0, 0, 0},
+		{"in middle", 40, 10, 15, 1, 50}, // 15 * 100 / (40 - 10) = 50
+		{"at end", 40, 10, 30, 3, 100},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := calcScrollPositionByTurns(tc.total, tc.visible, tc.firstLine, turns)
+			if got.Above != tc.wantAbove {
+				t.Errorf("Above = %d, want %d", got.Above, tc.wantAbove)
+			}
+			if got.Percentage != tc.wantPercent {
+				t.Errorf("Percentage = %d, want %d", got.Percentage, tc.wantPercent)
+			}
+		})
+	}
+}

@@ -42,11 +42,6 @@ func calcBounds(height, width int) Bounds {
 	// At 80x24+, allocate from the fixed regions inward.
 	remaining := height - b.TabBar - b.Status
 
-	// Input: 1 to 6 lines, but input rows calculation is dynamic based on actual text.
-	// Here we just reserve the minimum and let inputRows() handle expansion up to 6.
-	b.Input = 1
-	remaining -= b.Input
-
 	// Banners: at most 2 lines
 	b.Banners = min(2, remaining)
 	remaining -= b.Banners
@@ -57,15 +52,19 @@ func calcBounds(height, width int) Bounds {
 
 	// Drawer and lists are mutually exclusive. They are shown only when there's
 	// room for both them and minimum content (5 lines).
-
-	// Drawer (7 or 9 lines for height >= 30) and lists (up to 5 lines) are mutually
-	// exclusive. For D-07, they are always closed by default, so all remaining
-	// lines go to content. When drawer or lists are opened in future tasks, the
-	// caller will adjust these values and ensure content never falls below 5 lines.
-	b.Content = remaining
+	// For D-07, drawer and lists are always closed, so they don't take space.
+	// When they open in future tasks, the allocation will ensure content >= 5 lines.
 	b.Drawer = 0
 	b.List = 0
 	b.ShortHelp = 0
+
+	// Input: 1 to 6 lines, allocated last to leave maximum for content.
+	// Reserve minimum 1 line for input.
+	b.Input = min(6, remaining)
+	remaining -= b.Input
+
+	// Content gets remaining lines, but always at least 5 when possible
+	b.Content = remaining
 
 	return b
 }
@@ -99,4 +98,47 @@ func calcScrollPosition(total, visible, firstLine int) ScrollInfo {
 	}
 
 	return ScrollInfo{firstLine, percentage}
+}
+
+// TurnLineMap maps turn indices to their starting line numbers in the rendered chat.
+// turnStarts[i] is the line index where turn i begins; len(turnStarts) is the number of turns.
+type TurnLineMap struct {
+	turnStarts []int // line index where each turn begins
+	totalLines int   // total number of lines
+}
+
+// countEarlierTurns returns the number of complete turns before the given line index.
+func (m *TurnLineMap) countEarlierTurns(lineIndex int) int {
+	// Find which turn contains this line
+	for i := len(m.turnStarts) - 1; i >= 0; i-- {
+		if lineIndex >= m.turnStarts[i] {
+			return i
+		}
+	}
+	return 0
+}
+
+// calcScrollPositionByTurns computes scroll position by turn count instead of line count.
+// It takes the total number of lines, visible lines, the first visible line, and the turn boundaries.
+func calcScrollPositionByTurns(total, visible, firstLine int, turns *TurnLineMap) ScrollInfo {
+	if total <= 0 || visible <= 0 {
+		return ScrollInfo{0, 0}
+	}
+
+	firstLine = max(0, min(firstLine, max(total-visible, 0)))
+
+	// Count how many complete turns are above the view
+	earlierTurns := turns.countEarlierTurns(firstLine)
+
+	// Calculate percentage based on total lines
+	percentage := 0
+	if total > visible {
+		percentage = (firstLine * 100) / (total - visible)
+		// Clamp at 100 when at the end
+		if firstLine+visible >= total {
+			percentage = 100
+		}
+	}
+
+	return ScrollInfo{earlierTurns, percentage}
 }
