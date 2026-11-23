@@ -464,7 +464,8 @@ func (tx *Tx) transcriptItem(r transcriptRef) (TranscriptItem, error) {
 }
 
 // ContentRange returns a byte range of content from a message, attempt output, or candidate.
-// ref is "msg:<id>", "attempt:<id>", or "candidate:<id>".
+// ref is "msg:<id>", "attempt:<id>", "candidate:<id>", or a review content ref:
+// "commentary:<attempt id>", "evidence:<block id>", "remedy:<block id>", "record:<verdict id>".
 // offset and limit are in raw bytes. limit is clamped to 262144.
 // total and sha256 describe the whole body, not the returned range.
 func (s *Store) ContentRange(ref string, offset, limit int64) (data []byte, total int64, sha256 string, err error) {
@@ -497,12 +498,32 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 		query = `SELECT COALESCE(raw_output, '') FROM attempts WHERE id = ?`
 	case "candidate":
 		query = `SELECT content FROM candidates WHERE id = ?`
+	case "commentary":
+		query = `SELECT COALESCE(commentary, '') FROM attempts WHERE id = ?`
+	case "evidence":
+		query = `SELECT evidence FROM blocks WHERE id = ?`
+	case "remedy":
+		query = `SELECT remedy FROM blocks WHERE id = ?`
+	case "record":
+		query = `SELECT record FROM review_records WHERE verdict_id = ?`
 	default:
 		return nil, 0, "", fmt.Errorf("unknown content ref %q: %w", ref, ErrNoSuchContent)
 	}
 
 	var content string
-	if err := tx.tx.QueryRow(query, id).Scan(&content); err != nil {
+	err := sql.ErrNoRows
+	switch kind {
+	case "commentary", "evidence", "remedy":
+		// A ref a review record cites is served from the bytes it froze.
+		var frozen []byte
+		if err = tx.tx.QueryRow(`SELECT body FROM review_content WHERE ref = ?`, ref).Scan(&frozen); err == nil {
+			content = string(frozen)
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.tx.QueryRow(query, id).Scan(&content)
+	}
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, "", fmt.Errorf("content %q: %w", ref, ErrNoSuchContent)
 		}
