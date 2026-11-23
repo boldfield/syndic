@@ -451,7 +451,22 @@ func getConversation(store *journal.Store, openState func(turnID string) (string
 		} else if state == "" {
 			state = "submitted"
 		}
-		reply.Turns[i] = wire.ConversationTurnSummary{ID: t.ID, State: state}
+		summary := wire.ConversationTurnSummary{ID: t.ID, State: state}
+
+		// Add review_count for non-solo turns
+		turnRow, err := store.GetTurn(t.ID)
+		if err != nil {
+			return nil, err
+		}
+		if turnRow.Mode != "solo" {
+			count, err := store.ReviewCount(t.ID)
+			if err != nil {
+				return nil, err
+			}
+			summary.ReviewCount = &count
+		}
+
+		reply.Turns[i] = summary
 	}
 	if !replyFits(id, reply) {
 		return nil, errReplyTooLarge
