@@ -18,6 +18,7 @@ type answerInput struct {
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
 	plainMode      bool   // true when colors should not be used
+	rawMode        bool   // true when Markdown rendering is disabled
 	width          int    // terminal width; content is wrapped and indented to it when positive
 	now            time.Time
 }
@@ -97,13 +98,11 @@ func bodyRaw(cc *ContentCache, ref string) string {
 	return strings.TrimRight(item.Data, "\n")
 }
 
-// shown is the one way untrusted text enters the answer and chat tabs: escaped
+// shownWithMode is the one way untrusted text enters the answer and chat tabs: escaped
 // once, and wrapped and indented as content lines when the width is known.
-func shown(raw string, width int) string {
-	if width <= 0 {
-		return ToSafeText([]byte(raw))
-	}
-	return strings.Join(SafeTextWithPrefix(raw, width), "\n")
+// When rawMode is true, only safe text escaping is applied; Markdown rendering is skipped.
+func shownWithMode(raw string, width int, rawMode bool) string {
+	return RenderMarkdown(raw, width, rawMode)
 }
 
 func firstLine(s string) string {
@@ -120,7 +119,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	var lines []string
 	candidate := func() {
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, shownWithMode(bodyRaw(in.content, refs[0]), in.width, in.rawMode))
 		} else if ti.CandidateHash != nil {
 			lines = append(lines, "loading…")
 		}
@@ -142,7 +141,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	case "solo_complete":
 		lines = append(lines, "UNREVIEWED (solo)")
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, shownWithMode(bodyRaw(in.content, refs[0]), in.width, in.rawMode))
 		} else {
 			lines = append(lines, "loading…")
 		}
@@ -150,9 +149,9 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	case "incomplete":
 		if ti.TerminalReason != nil {
 			// Escape terminal reason which may contain untrusted content
-			lines = append(lines, shown(*ti.TerminalReason, in.width))
+			lines = append(lines, shownWithMode(*ti.TerminalReason, in.width, in.rawMode))
 		}
-		lines = append(lines, blockLines(in.openBlocks, in.width)...)
+		lines = append(lines, blockLines(in.openBlocks, in.width, in.rawMode)...)
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
 		}
@@ -166,7 +165,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, shown("HUMAN OVERRIDE: "+reason, in.width))
+		lines = append(lines, shownWithMode("HUMAN OVERRIDE: "+reason, in.width, in.rawMode))
 		candidate()
 
 	case "cancelled":
@@ -175,7 +174,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			break
 		}
 		lines = append(lines, "CANCELLED, not approved", noApprovedAnswer(ti.State))
-		lines = append(lines, blockLines(in.openBlocks, in.width)...)
+		lines = append(lines, blockLines(in.openBlocks, in.width, in.rawMode)...)
 		candidate()
 
 	default:
@@ -186,7 +185,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			} else {
 				draftText = draftBanner.Render(draftText)
 			}
-			lines = append(lines, draftText, shown(bodyRaw(in.content, refs[0]), in.width))
+			lines = append(lines, draftText, shownWithMode(bodyRaw(in.content, refs[0]), in.width, in.rawMode))
 		}
 		lines = append(lines, progressLine(ti, in.now))
 	}
@@ -224,7 +223,7 @@ func progressLine(ti TurnInfo, now time.Time) string {
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 
 // blockLines lists open blocks with severity, evidence and remedy.
-func blockLines(blocks []wire.OpenBlock, width int) []string {
+func blockLines(blocks []wire.OpenBlock, width int, rawMode bool) []string {
 	var lines []string
 	for _, b := range blocks {
 		if b.State != "open" {
@@ -232,22 +231,22 @@ func blockLines(blocks []wire.OpenBlock, width int) []string {
 		}
 		lines = append(lines, safeLine(fmt.Sprintf("[%s] %s", b.Severity, b.ID)))
 		if b.Evidence != "" {
-			lines = append(lines, shownLabelled("evidence: ", b.Evidence, width))
+			lines = append(lines, shownLabelledWithMode("evidence: ", b.Evidence, width, rawMode))
 		}
 		if b.Remedy != "" {
-			lines = append(lines, shownLabelled("remedy: ", b.Remedy, width))
+			lines = append(lines, shownLabelledWithMode("remedy: ", b.Remedy, width, rawMode))
 		}
 	}
 	return lines
 }
 
-// shownLabelled is shown for a labelled value; without a width the label is
+// shownLabelledWithMode is shown for a labelled value; without a width the label is
 // indented in the legacy way.
-func shownLabelled(label, raw string, width int) string {
+func shownLabelledWithMode(label, raw string, width int, rawMode bool) string {
 	if width <= 0 {
 		return "  " + label + ToSafeText([]byte(raw))
 	}
-	return shown(label+raw, width)
+	return shownWithMode(label+raw, width, rawMode)
 }
 
 // approvers are the reviewers with a valid verdict on the turn.

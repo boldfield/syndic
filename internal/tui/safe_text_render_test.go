@@ -332,7 +332,7 @@ func TestOneLineFieldsEscapeLineFeeds(t *testing.T) {
 	prof := inj
 	assertNoInjectedRow(t, "banners", renderBanners(State{UnapprovedProfile: &prof, QuickInvalid: "quick: invalid " + inj}))
 
-	assertNoInjectedRow(t, "blocks", blockLines([]wire.OpenBlock{{ID: inj, Severity: inj, State: "open"}}, 80))
+	assertNoInjectedRow(t, "blocks", blockLines([]wire.OpenBlock{{ID: inj, Severity: inj, State: "open"}}, 80, false))
 	assertNoInjectedRow(t, "block rows", blockRowLines([]blockRow{{id: inj, severity: inj, state: inj}}, 80))
 
 	reason := "gate: " + inj
