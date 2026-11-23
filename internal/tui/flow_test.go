@@ -278,7 +278,7 @@ func openTurnState(reviewers ...string) State {
 func TestRenderStripFull(t *testing.T) {
 	s := openTurnState("r1", "r2")
 	now := s.Turns["t1"].SubmittedAt.Add(75 * time.Second)
-	want := "[review] [author_dispatched] [1m15s / 15m0s] [est. 1234 / 250000] author:author running reviewers: r1 queued r2 queued"
+	want := "[review] [author_dispatched] [1m15s / 15m0s] [░░░░░░░░ est. 1234 / 250000]"
 	if got := renderStrip(s, 200, now); got != want {
 		t.Fatalf("strip =\n%q\nwant\n%q", got, want)
 	}
@@ -311,24 +311,14 @@ func TestRenderStripEstimateIsLabelled(t *testing.T) {
 	}
 }
 
-func TestRenderStripFiveReviewersAt80(t *testing.T) {
+func TestRenderStripLeavesParticipantsToTheProgressLine(t *testing.T) {
 	s := openTurnState("reviewer-1", "reviewer-2", "reviewer-3", "reviewer-4", "reviewer-5")
-	got := renderStrip(s, 80, s.Turns["t1"].SubmittedAt)
-	if w := runewidth.StringWidth(got); w > 80 {
-		t.Fatalf("strip is %d cells: %q", w, got)
-	}
-	if strings.Contains(got, "\n") || !strings.HasSuffix(got, "…") {
-		t.Fatalf("strip = %q", got)
-	}
-	if !strings.HasPrefix(got, "[review] [author_dispatched] ") || strings.Contains(got, "identity") {
-		t.Fatalf("segments must drop from the right: %q", got)
-	}
-	// Whole segments: the reviewers segment is either complete or gone.
-	if i := strings.Index(got, "reviewers:"); i >= 0 && !strings.Contains(got, "reviewer-5 queued") {
-		t.Fatalf("partial reviewers segment: %q", got)
+	got := renderStrip(s, 200, s.Turns["t1"].SubmittedAt)
+	if strings.Contains(got, "reviewer-") || strings.Contains(got, "author:") {
+		t.Fatalf("strip carries participant states: %q", got)
 	}
 	for _, w := range []int{1, 5, 20, 40, 79} {
-		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt); runewidth.StringWidth(g) > w {
+		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt); runewidth.StringWidth(g) > w || strings.Contains(g, "\n") {
 			t.Fatalf("width %d: strip is %d cells: %q", w, runewidth.StringWidth(g), g)
 		}
 	}
@@ -381,11 +371,22 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 	}
 	d.typeLine("question")
 	d.until("author running with limit and deadline", func(string) bool {
-		return d.sawStrip("[review] [author_dispatched] [", "/ 15m0s] [est. ", " / 250000] author:author running")
+		return d.sawStrip("[review] [author_dispatched] [", "/ 15m0s] [", "est. ", " / 250000]")
+	})
+	spinning := func(v, id string) bool {
+		for _, f := range spinnerFrames {
+			if strings.Contains(v, ", "+f+" "+id) {
+				return true
+			}
+		}
+		return false
+	}
+	d.until("the progress line to show the author working", func(v string) bool {
+		return strings.Contains(v, " turn in progress: author_dispatched") && spinning(v, "author")
 	})
 	releaseAuthor()
-	d.until("reviewer running", func(string) bool {
-		return d.sawStrip("author:author idle reviewers: reviewer running")
+	d.until("the author done and the reviewer working", func(v string) bool {
+		return strings.Contains(v, "turn in progress: reviewers_dispatched") && strings.Contains(v, ", ✓ author, ") && spinning(v, "reviewer")
 	})
 	releaseReviewer()
 	turn := d.app.state.CurrentTurn
@@ -419,7 +420,7 @@ func TestTickAdvancesElapsed(t *testing.T) {
 	defer h.Hold("author")()
 	d := startRig(t, h)
 	d.typeLine("question")
-	d.until("author running", func(string) bool { return d.sawStrip("author:author running") })
+	d.until("author running", func(v string) bool { return strings.Contains(v, "turn in progress: author_dispatched") })
 	// Nothing else happens while the author is held; only the tick can move
 	// the elapsed time.
 	d.until("elapsed to reach 2s", func(string) bool { return d.sawStrip("[2s / ") })
@@ -552,4 +553,32 @@ func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
 	if got := ti.Remaining(t0.Add(5 * time.Minute)); got != 10*time.Minute {
 		t.Errorf("Remaining = %v", got)
 	}
+}
+
+// TestLiveProgressMarksPoolQueuedReviewer: with two reviewers sharing a pool of
+// one slot, the engine queues the second before it has an attempt, and the
+// progress line marks it queued beside the first one working.
+func TestLiveProgressMarksPoolQueuedReviewer(t *testing.T) {
+	roster := strings.Replace(enginetest.RosterTOML, `required_reviewers = ["reviewer"]`, `required_reviewers = ["reviewer", "second"]`, 1)
+	at := strings.Index(roster, "[[endpoints]]")
+	roster = roster[:at] + "[[participants]]\nid = \"second\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\naccept_unknown_truncation = true\n\n" + roster[at:] + "\n[pools.default]\nconcurrency = 1\n"
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author":   {enginetest.Reply(answerText)},
+		"reviewer": {approve()},
+		"second":   {approve()},
+	})
+	release := h.Hold("reviewer")
+	d := startRig(t, h)
+	d.send(resizeMsg(200, 24))
+	d.typeLine("question")
+	d.until("the first reviewer working and the second queued", func(v string) bool {
+		for _, f := range spinnerFrames {
+			if strings.Contains(v, ", ✓ author, "+f+" reviewer, ○ second, ") {
+				return true
+			}
+		}
+		return false
+	})
+	release()
+	h.WaitTurnState(d.app.state.CurrentTurn, engine.StateApproved)
 }

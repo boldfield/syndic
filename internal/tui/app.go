@@ -1143,18 +1143,10 @@ func (a *App) tabBar() string {
 	return strings.Join(parts, "  ")
 }
 
-// keyHint sits at the right edge of the status line.
-const keyHint = "tab: switch  /help"
-
-// statusLine is the strip with the key hint at its right edge, w cells wide.
-// The strip compacts itself to leave room for the hint.
+// statusLine is the strip with the hints at its right edge, w cells wide:
+// ctrl+o: reviews while the chat tab is active, then keyHint.
 func (a *App) statusLine(w int) string {
-	hw := ansi.StringWidth(keyHint)
-	if w < hw+20 {
-		return ansi.Truncate(renderStrip(a.state, w, a.now()), w, "")
-	}
-	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true), w-hw-1, "")
-	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-hw) + keyHint
+	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat)
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.

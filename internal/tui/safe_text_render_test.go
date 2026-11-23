@@ -228,8 +228,8 @@ func assertSafeLines(t *testing.T, label string, lines []string) {
 func TestStatusLineEscapesRecordValues(t *testing.T) {
 	a := hostileRecordApp(t)
 	for _, w := range []int{40, 80, 400} {
-		for _, compact := range []bool{false, true} {
-			line := renderStripFor(a.state, w, chatNow, compact)
+		for _, reviews := range []bool{false, true} {
+			line := renderStatusLine(a.state, w, chatNow, reviews)
 			assertSafeRunes(t, "strip", line)
 			if strings.Contains(line, "\n") {
 				t.Errorf("w=%d: strip broke onto two lines: %q", w, line)
