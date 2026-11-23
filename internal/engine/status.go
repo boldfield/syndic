@@ -111,6 +111,13 @@ func (e *Engine) Status() (wire.StatusReply, error) {
 		})
 	}
 
+	// The round limits in force are those of a submit that names no preset.
+	eff, err := r.Resolve(r.DefaultPreset, "")
+	if err != nil {
+		return wire.StatusReply{}, err
+	}
+	reply.Revision.Default, reply.Revision.Ceiling = revisionLimits(eff)
+
 	if e.open != nil {
 		reply.TurnsOpen = append(reply.TurnsOpen, e.open.id)
 	}
