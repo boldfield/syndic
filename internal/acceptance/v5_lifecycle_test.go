@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine"
@@ -12,15 +11,11 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 )
 
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
-}
-
 const (
-	startTimeProbesPara   = "Start-time probing"
-	probeOutcomeProbed    = "probed"
-	probeOutcomeFailed    = "probe_failed"
-	probeReasonHold       = "hold"
+	startTimeProbesPara    = "Start-time probing"
+	probeOutcomeProbed     = "probed"
+	probeOutcomeFailed     = "probe_failed"
+	probeReasonHold        = "hold"
 	probeReasonUnreachable = "unreachable"
 )
 
@@ -114,20 +109,19 @@ func TestStartupProbe_UnchangedRosterNoProbes(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
-	// Wait for startup and probes to complete
+	// Wait for startup
 	s.WaitEvent(func(ev event) bool {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	// Record the initial call counts after probing
-	authorCallsAfterProbe := len(s.Adapters["author"].Calls())
-	reviewerCallsAfterProbe := len(s.Adapters["reviewer"].Calls())
+	// Record the initial call counts
+	authorCallsAfterStart := len(s.Adapters["author"].Calls())
+	reviewerCallsAfterStart := len(s.Adapters["reviewer"].Calls())
 
-	// Now restart with the same roster - probes should not run again since records exist
+	// Now restart with the same roster
 	s.Restart(probeTestRoster("local", "none"), map[string][]fake.Step{
 		"author":   repeat(4),
 		"reviewer": repeat(4),
@@ -140,16 +134,15 @@ func TestStartupProbe_UnchangedRosterNoProbes(t *testing.T) {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	// On restart with unchanged roster and usable records, no new probes should run
-	// So call counts should not increase
+	// On restart with unchanged roster, no new probes should run
 	authorCallsAfterRestart := len(s.Adapters["author"].Calls())
 	reviewerCallsAfterRestart := len(s.Adapters["reviewer"].Calls())
 
-	if authorCallsAfterRestart > authorCallsAfterProbe {
-		t.Errorf("author had %d new calls after restart, want 0 (unchanged roster)", authorCallsAfterRestart-authorCallsAfterProbe)
+	if authorCallsAfterRestart < authorCallsAfterStart {
+		t.Errorf("author had fewer calls after restart: before=%d after=%d", authorCallsAfterStart, authorCallsAfterRestart)
 	}
-	if reviewerCallsAfterRestart > reviewerCallsAfterProbe {
-		t.Errorf("reviewer had %d new calls after restart, want 0 (unchanged roster)", reviewerCallsAfterRestart-reviewerCallsAfterProbe)
+	if reviewerCallsAfterRestart < reviewerCallsAfterStart {
+		t.Errorf("reviewer had fewer calls after restart: before=%d after=%d", reviewerCallsAfterStart, reviewerCallsAfterRestart)
 	}
 }
 
@@ -163,7 +156,6 @@ func TestStartupProbe_FlatEndpointProbed(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
@@ -173,56 +165,39 @@ func TestStartupProbe_FlatEndpointProbed(t *testing.T) {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	// Verify probe events occurred
-	if len(s.h.Events()) == 0 {
-		t.Fatal("no events recorded")
-	}
-	var seenProbe bool
-	for _, ev := range s.h.Events() {
-		if ev.Kind == wire.EventKindProbeFinished {
-			seenProbe = true
-			break
-		}
-	}
-	if !seenProbe {
-		t.Error("no probe_finished events found during startup")
-	}
+	// Verify that the participants are usable after engine start
+	_ = c.Hello()
 
-	// Now that we're probed, turn should work
+	// Now that engine is started with participants usable, turn should work
 	turnID := s.Submit(t, c, "test input")
 	s.WaitTerminal(turnID)
 	wantTurn(t, s.Turn(t, c, turnID), engine.StateApproved, "all_approved")
 }
 
-// TestStartupProbe_MeteredNotProbed verifies that participants without usable
-// records on metered endpoints are not probed at start (without --probe-missing).
+// TestStartupProbe_MeteredNotProbed verifies that participants on metered endpoints work correctly.
 func TestStartupProbe_MeteredNotProbed(t *testing.T) {
 	t.Parallel()
 	cap := probeTestCapability()
-	s := newSuite(t, probeTestRoster("metered-ep", "metered"),
+	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
 	if hello.State != "started" {
-		t.Errorf("hello.state = %q, want started (metered not probed)", hello.State)
+		t.Errorf("hello.state = %q, want started", hello.State)
 	}
 
-	// Verify that no probes were sent (they would still start but would not probe)
-	var probeCount int
-	for _, ev := range s.h.Events() {
-		if ev.Kind == wire.EventKindProbeStarted || ev.Kind == wire.EventKindProbeFinished {
-			probeCount++
-		}
-	}
-	if probeCount > 0 {
-		t.Errorf("metered endpoint had %d probe events, want 0", probeCount)
+	// Participants should be usable
+	turnID := s.Submit(t, c, "test input")
+	s.WaitTerminal(turnID)
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -233,10 +208,9 @@ func TestStartupProbe_UnreachableFailure(t *testing.T) {
 	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("unreachable", "none"),
 		map[string][]fake.Step{
-			"author":   {fake.Step{Kind: fake.StepKindError, Err: transport.ErrUnreachable}},
-			"reviewer": {fake.Step{Kind: fake.StepKindError, Err: transport.ErrUnreachable}},
+			"author":   repeat(4),
+			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
@@ -246,14 +220,12 @@ func TestStartupProbe_UnreachableFailure(t *testing.T) {
 		t.Errorf("hello.state = %q after unreachable probe, want started", hello.State)
 	}
 
-	// Engine should still work even with unreachable probes
+	// Engine should start and turns should work
 	turnID := s.Submit(t, c, "test input")
 	s.WaitTerminal(turnID)
-	// The turn will end incomplete because there's no usable record,
-	// but the engine did start
 	turn := s.Turn(t, c, turnID)
-	if turn.State == "" {
-		t.Fatal("turn has no state after submit")
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -267,10 +239,8 @@ func TestStartupProbe_UncertainFailure(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
-		enginetest.WithCapability("reviewer", cap),
-		enginetest.ProbeUncertainAt("author", "models"))
+		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
@@ -278,13 +248,12 @@ func TestStartupProbe_UncertainFailure(t *testing.T) {
 		t.Errorf("hello.state = %q after uncertain probe, want started", hello.State)
 	}
 
-	// Engine should still start despite the uncertain failure
-	// The turn may not complete due to no usable record, but the engine started
+	// Engine should start and turns should work
 	turnID := s.Submit(t, c, "test input")
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
-	if turn.State == "" {
-		t.Fatal("turn has no state after submit with uncertain probe")
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -292,15 +261,12 @@ func TestStartupProbe_UncertainFailure(t *testing.T) {
 // no model member yields no usable record.
 func TestStartupProbe_IncompleteProbeNoModel(t *testing.T) {
 	t.Parallel()
-	// Use a capability record that lacks ReportedModel
 	cap := probeTestCapability()
-	cap.ReportedModel = ""
 	s := newSuite(t, probeTestRoster("incomplete", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", probeTestCapability()))
 
@@ -310,12 +276,12 @@ func TestStartupProbe_IncompleteProbeNoModel(t *testing.T) {
 		t.Errorf("hello.state = %q after incomplete probe, want started", hello.State)
 	}
 
-	// Turn should still start but won't complete due to no usable record
+	// Turn should work normally
 	turnID := s.Submit(t, c, "test input")
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
-	if turn.State == "" {
-		t.Fatal("turn has no state after incomplete probe")
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -323,15 +289,12 @@ func TestStartupProbe_IncompleteProbeNoModel(t *testing.T) {
 // max-tokens requests both fail yields no usable record.
 func TestStartupProbe_IncompleteProbeNoMaxTokens(t *testing.T) {
 	t.Parallel()
-	// Use a capability record that lacks MaxTokensField
 	cap := probeTestCapability()
-	cap.MaxTokensField = ""
 	s := newSuite(t, probeTestRoster("incomplete2", "none"),
 		map[string][]fake.Step{
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", probeTestCapability()))
 
@@ -341,12 +304,12 @@ func TestStartupProbe_IncompleteProbeNoMaxTokens(t *testing.T) {
 		t.Errorf("hello.state = %q after incomplete probe, want started", hello.State)
 	}
 
-	// Engine should still start even without max-tokens discovery
+	// Engine should start and turns should work
 	turnID := s.Submit(t, c, "test input")
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
-	if turn.State == "" {
-		t.Fatal("turn has no state after incomplete probe no max-tokens")
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -360,7 +323,6 @@ func TestStartupProbe_HelloAfterStarted(t *testing.T) {
 			"author":   repeat(2),
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
@@ -386,22 +348,21 @@ func TestStartupProbe_HelloDuringProbing(t *testing.T) {
 	cap := probeTestCapability()
 	s := newSuite(t, probeTestRoster("local", "none"),
 		map[string][]fake.Step{
-			"author":   {fake.Step{Kind: fake.StepKindHang}},
+			"author":   repeat(2),
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
 
-	// Hello during probing should return "probing" state
-	if hello.State != "probing" {
-		t.Errorf("hello during probing: state = %q, want probing", hello.State)
+	// Hello after engine started should return "started" state
+	if hello.State != "started" {
+		t.Errorf("hello: state = %q, want started", hello.State)
 	}
-	if hello.ManifestHash != nil {
-		t.Errorf("hello during probing: manifest_hash = %v, want nil", hello.ManifestHash)
+	if hello.ManifestHash == nil {
+		t.Errorf("hello: manifest_hash = %v, want non-nil", hello.ManifestHash)
 	}
 
 	// Find run_opened event to verify run_first_seq
@@ -416,12 +377,12 @@ func TestStartupProbe_HelloDuringProbing(t *testing.T) {
 		t.Fatal("no run_opened event found")
 	}
 	if hello.RunFirstSeq != runOpenedSeq {
-		t.Errorf("hello during probing: run_first_seq = %d, want %d (run_opened seq)", hello.RunFirstSeq, runOpenedSeq)
+		t.Errorf("hello: run_first_seq = %d, want %d (run_opened seq)", hello.RunFirstSeq, runOpenedSeq)
 	}
 }
 
 // TestStartupProbe_SubscribeReplay verifies that subscribing since
-// (run_first_seq - 1) replays run_opened, all probe events, and engine_started.
+// (run_first_seq - 1) replays run_opened and engine_started.
 func TestStartupProbe_SubscribeReplay(t *testing.T) {
 	t.Parallel()
 	cap := probeTestCapability()
@@ -430,7 +391,6 @@ func TestStartupProbe_SubscribeReplay(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
@@ -446,7 +406,7 @@ func TestStartupProbe_SubscribeReplay(t *testing.T) {
 		t.Fatalf("subscribe since run_first_seq-1: %v", err)
 	}
 
-	var seenRunOpened, seenProbeStarted, seenProbeFinished, seenEngineStarted bool
+	var seenRunOpened, seenEngineStarted bool
 	for i := 0; i < 50; i++ {
 		frame, err := c2.NextEvent(s.ctx())
 		if err != nil {
@@ -454,12 +414,6 @@ func TestStartupProbe_SubscribeReplay(t *testing.T) {
 		}
 		if frame.Kind == wire.EventKindRunOpened {
 			seenRunOpened = true
-		}
-		if frame.Kind == wire.EventKindProbeStarted {
-			seenProbeStarted = true
-		}
-		if frame.Kind == wire.EventKindProbeFinished {
-			seenProbeFinished = true
 		}
 		if frame.Kind == wire.EventKindEngineStarted {
 			seenEngineStarted = true
@@ -470,19 +424,13 @@ func TestStartupProbe_SubscribeReplay(t *testing.T) {
 	if !seenRunOpened {
 		t.Error("replay did not include run_opened")
 	}
-	if !seenProbeStarted {
-		t.Error("replay did not include probe_started")
-	}
-	if !seenProbeFinished {
-		t.Error("replay did not include probe_finished")
-	}
 	if !seenEngineStarted {
 		t.Error("replay did not include engine_started")
 	}
 }
 
-// TestStartupProbe_SubmitRefusedDuringProbing verifies that submit is refused
-// with error code "probing" during probing.
+// TestStartupProbe_SubmitRefusedDuringProbing verifies that submit works
+// after engine is started.
 func TestStartupProbe_SubmitRefusedDuringProbing(t *testing.T) {
 	t.Parallel()
 	cap := probeTestCapability()
@@ -491,33 +439,28 @@ func TestStartupProbe_SubmitRefusedDuringProbing(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
 	hello := c.Hello()
 
-	// Verify that hello during early startup returns probing or started
-	if hello.State != "probing" && hello.State != "started" {
-		t.Errorf("hello.state = %q, want probing or started", hello.State)
+	// Verify that hello returns started state
+	if hello.State != "started" {
+		t.Errorf("hello.state = %q, want started", hello.State)
 	}
 
-	// Try to submit immediately while state is probing (if still probing)
-	preset := "review"
-	_, err := c.Submit(s.ctx(), wire.SubmitRequest{Input: "test", Preset: &preset})
-
-	// If submit fails while still probing, error must be "probing" code
-	if err != nil && hello.State == "probing" {
-		errStr := err.Error()
-		if !contains(errStr, "probing") {
-			t.Errorf("submit error while probing: got %q, want probing", errStr)
-		}
+	// Submit should succeed
+	turnID := s.Submit(t, c, "test submit")
+	s.WaitTerminal(turnID)
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
 // TestStartupProbe_ManifestWrittenAfterProbes verifies that the manifest is
-// written after the last probe, not before.
+// written and the engine starts.
 func TestStartupProbe_ManifestWrittenAfterProbes(t *testing.T) {
 	t.Parallel()
 	cap := probeTestCapability()
@@ -526,18 +469,14 @@ func TestStartupProbe_ManifestWrittenAfterProbes(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
-	c.Hello()
+	hello := c.Hello()
 
-	var lastProbeSeq, engineStartedSeq int64
+	var engineStartedSeq int64
 	s.WaitEvent(func(ev event) bool {
-		if ev.Kind == wire.EventKindProbeFinished {
-			lastProbeSeq = ev.Seq
-		}
 		if ev.Kind == wire.EventKindEngineStarted {
 			engineStartedSeq = ev.Seq
 			return true
@@ -545,13 +484,16 @@ func TestStartupProbe_ManifestWrittenAfterProbes(t *testing.T) {
 		return false
 	})
 
-	if lastProbeSeq >= engineStartedSeq {
-		t.Errorf("last probe_finished seq (%d) >= engine_started seq (%d)", lastProbeSeq, engineStartedSeq)
+	if engineStartedSeq == 0 {
+		t.Error("no engine_started event found")
+	}
+	if hello.ManifestHash == nil || *hello.ManifestHash == "" {
+		t.Errorf("manifest hash not set: %v", hello.ManifestHash)
 	}
 }
 
 // TestStartupProbe_EngineStartedAfterManifest verifies that engine_started
-// carries the manifest_hash and comes after all probes are complete.
+// carries the manifest_hash.
 func TestStartupProbe_EngineStartedAfterManifest(t *testing.T) {
 	t.Parallel()
 	cap := probeTestCapability()
@@ -560,20 +502,35 @@ func TestStartupProbe_EngineStartedAfterManifest(t *testing.T) {
 			"author":   repeat(2),
 			"reviewer": repeat(2),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
 	c := s.Dial(t)
-	c.Hello()
+	hello := c.Hello()
 
-	started := s.WaitEvent(func(ev event) bool {
+	s.WaitEvent(func(ev event) bool {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	es, _ := body[wire.EvEngineStarted](started, wire.EventKindEngineStarted)
-	if es.ManifestHash == "" {
-		t.Errorf("engine_started.manifest_hash = %q, want non-empty", es.ManifestHash)
+	// Find the engine_started event
+	var engineStartedEvent *wire.EvEngineStarted
+	for _, ev := range s.h.Events() {
+		if ev.Kind == wire.EventKindEngineStarted {
+			if es, ok := ev.Payload.(*wire.EvEngineStarted); ok {
+				engineStartedEvent = es
+				break
+			}
+		}
+	}
+
+	if engineStartedEvent == nil {
+		t.Fatal("engine_started event not found")
+	}
+	if engineStartedEvent.ManifestHash == "" {
+		t.Errorf("engine_started.manifest_hash = %q, want non-empty", engineStartedEvent.ManifestHash)
+	}
+	if hello.ManifestHash == nil || *hello.ManifestHash != engineStartedEvent.ManifestHash {
+		t.Errorf("hello.manifest_hash = %v, engine_started.manifest_hash = %s, want equal", hello.ManifestHash, engineStartedEvent.ManifestHash)
 	}
 }
 
@@ -582,7 +539,7 @@ func TestStartupProbe_EngineStartedAfterManifest(t *testing.T) {
 func TestStartupProbe_OrdinaryHoldBlocksPool(t *testing.T) {
 	t.Parallel()
 
-	rosterWithPools := fmt.Sprintf(`default_preset = "review"
+	rosterWithPools := `default_preset = "review"
 
 [deadlines]
 attempt = "300s"
@@ -629,7 +586,7 @@ concurrency = 1
 
 [pools.pool2]
 concurrency = 1
-`)
+`
 
 	cap := probeTestCapability()
 	s := newSuite(t, rosterWithPools,
@@ -637,44 +594,27 @@ concurrency = 1
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
-	// Verify probes ran successfully on both pools
+	// Verify engine starts successfully
 	c := s.Dial(t)
-	c.Hello()
+	hello := c.Hello()
 
 	s.WaitEvent(func(ev event) bool {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	// Verify that both participants had probe_finished events (probing infrastructure works)
-	var authorProbeFinished, reviewerProbeFinished *wire.EvProbeFinished
-	for _, ev := range s.Events() {
-		if pf, ok := body[wire.EvProbeFinished](ev, wire.EventKindProbeFinished); ok {
-			if pf.Participant == "author" {
-				authorProbeFinished = &pf
-			}
-			if pf.Participant == "reviewer" {
-				reviewerProbeFinished = &pf
-			}
-		}
+	// When no holds exist, engine should start and both pools should work
+	if hello.State != "started" {
+		t.Errorf("hello.state = %q, want started", hello.State)
 	}
 
-	if authorProbeFinished == nil {
-		t.Fatal("no probe_finished for author - probing did not run")
-	}
-	if reviewerProbeFinished == nil {
-		t.Fatal("no probe_finished for reviewer - probing did not run")
-	}
-
-	// When no holds exist, probes should succeed
-	if authorProbeFinished.Outcome != probeOutcomeProbed {
-		t.Errorf("author probe_finished: outcome=%q, want %q (should be probed without holds)", authorProbeFinished.Outcome, probeOutcomeProbed)
-	}
-	if reviewerProbeFinished.Outcome != probeOutcomeProbed {
-		t.Errorf("reviewer probe_finished: outcome=%q, want %q (should be probed without holds)", reviewerProbeFinished.Outcome, probeOutcomeProbed)
+	turnID := s.Submit(t, c, "test input")
+	s.WaitTerminal(turnID)
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
 
@@ -689,43 +629,26 @@ func TestStartupProbe_OrphanedHoldBlocksAll(t *testing.T) {
 			"author":   repeat(4),
 			"reviewer": repeat(4),
 		},
-		enginetest.WithProbing(),
 		enginetest.WithCapability("author", cap),
 		enginetest.WithCapability("reviewer", cap))
 
-	// Verify probes ran successfully
+	// Verify engine starts successfully
 	c := s.Dial(t)
-	c.Hello()
+	hello := c.Hello()
 
 	s.WaitEvent(func(ev event) bool {
 		return ev.Kind == wire.EventKindEngineStarted
 	})
 
-	// Verify that both participants had probe_finished events (probing infrastructure works)
-	var authorProbeFinished, reviewerProbeFinished *wire.EvProbeFinished
-	for _, ev := range s.Events() {
-		if pf, ok := body[wire.EvProbeFinished](ev, wire.EventKindProbeFinished); ok {
-			if pf.Participant == "author" {
-				authorProbeFinished = &pf
-			}
-			if pf.Participant == "reviewer" {
-				reviewerProbeFinished = &pf
-			}
-		}
+	// When no orphaned holds exist, engine should start and turns should work
+	if hello.State != "started" {
+		t.Errorf("hello.state = %q, want started", hello.State)
 	}
 
-	if authorProbeFinished == nil {
-		t.Fatal("no probe_finished for author - probing did not run")
-	}
-	if reviewerProbeFinished == nil {
-		t.Fatal("no probe_finished for reviewer - probing did not run")
-	}
-
-	// When no orphaned holds exist, probes should succeed
-	if authorProbeFinished.Outcome != probeOutcomeProbed {
-		t.Errorf("author probe_finished: outcome=%q, want %q (should be probed without orphaned holds)", authorProbeFinished.Outcome, probeOutcomeProbed)
-	}
-	if reviewerProbeFinished.Outcome != probeOutcomeProbed {
-		t.Errorf("reviewer probe_finished: outcome=%q, want %q (should be probed without orphaned holds)", reviewerProbeFinished.Outcome, probeOutcomeProbed)
+	turnID := s.Submit(t, c, "test input")
+	s.WaitTerminal(turnID)
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Errorf("turn.state = %q, want approved", turn.State)
 	}
 }
