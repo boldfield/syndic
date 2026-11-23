@@ -18,7 +18,7 @@ Illustrations supplied by the operator on 2026-11-21, showing the v6 TUI present
 
 ## Disagreements with the ratified design
 
-Ten disagreements found between the frames or the style table and `docs/design/v6-delta-tui-presentation.md`. In each, the design governs. Section numbers are the design's.
+Twelve disagreements found between the frames or the style table and `docs/design/v6-delta-tui-presentation.md`. In each, the design governs. Section numbers are the design's.
 
 1. **`chat-idle-100x30.txt`, line 5.** Line 5 is `  approved by codex, muse against 5d20e9b1 · not in context`. Section 1 requires an outcome line to begin in column 0 with a one-character mark and a space (`✓` for approved), and section 2 requires every outcome line to end with `· <n> reviews`. The line has neither. It should read `✓ approved by codex, muse against 5d20e9b1 · not in context · <n> reviews`.
 
@@ -40,7 +40,13 @@ Ten disagreements found between the frames or the style table and `docs/design/v
 
 10. **`chat-outcomes-100x30.txt`, line 30.** The status line shows `round 0/2` while the first candidate is still being reviewed (line 26 also shows round 0). Section 1, "Status line", shows round text only during a revision.
 
+11. **`chat-dumb-80x24.txt`, line 18.** The progress line shows `claude done` and `muse done`. Section 1, "Progress line", requires each participant with `✓` when done, a spinner when working and `○` when queued. Section 6 overrides only the spinner, so the `✓` mark still applies, and line 5 of the same frame uses `✓`.
+
+12. **`chat-dumb-80x24.txt`, line 18.** The column-0 spinner is dropped, leaving two spaces. Section 6 says the state word replaces the spinner in a plain terminal; no state word appears in that position.
+
 Frame artifact, not a design disagreement: `transcript-100x30.txt` lines 13-15 show an overlapping second pane that cuts the tokens column to `2.  │`.
+
+Frame artifact, not a design disagreement: `chat-drawer-80x24.txt` line 2 says `↑ 3 earlier turns` of 5, so turns 4-5 are visible, while the drawer header (line 15) shows turn 3, which is above the view.
 
 ## Operator ruling: status line overflow
 

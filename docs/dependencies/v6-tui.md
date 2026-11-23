@@ -87,8 +87,8 @@ Inventory of the six presentation modules added for v6, their versions, existing
 
 **Existing Bubble Tea, Bubbles and Lip Gloss:**
 - Bubble Tea: currently `v1.3.10`, required by existing tests. Huh requires `v1.3.6` (compatible; `v1.3.10` is later). bubblezone requires `v1.3.4` (compatible). Glamour has no direct Bubble Tea requirement in its go.mod. MVS selects `v1.3.10`. No conflict.
-- Bubbles: currently `v1.0.0`. Huh and bubblezone depend on Bubbles. Under Go's minimal version selection (MVS), the highest required version is selected. MVS keeps `v1.0.0` as the pinned version. No conflict.
-- Lip Gloss: currently `v1.1.0`. Glamour requires `v1.1.1-0.20250404203927-76690c660834` (a pre-release via go.mod). Huh depends on Bubbles and Bubble Tea but not directly on Lip Gloss. Under MVS, `v1.1.1-0.20250404203927-76690c660834` is selected as it is higher than `v1.1.0`. This upgrade is within the v1.1 pre-release series and poses no major version conflict.
+- Bubbles: currently `v1.0.0`. Huh requires Bubbles; bubblezone does not. Under Go's minimal version selection (MVS), the highest required version is selected. MVS keeps `v1.0.0` as the pinned version. No conflict.
+- Lip Gloss: currently `v1.1.0`. Glamour requires `v1.1.1-0.20250404203927-76690c660834` (a pre-release via go.mod). Huh and bubblezone both directly require Lip Gloss `v1.1.0`. Under MVS, `v1.1.1-0.20250404203927-76690c660834` is selected as it is higher than `v1.1.0`. This upgrade is within the v1.1 pre-release series and poses no major version conflict.
 
 ## Operator decision
 
@@ -105,5 +105,5 @@ The operator accepted all six modules, and the transitive modules listed here, o
 
 **Pre-release version and `golang.org/x` upgrades:**
 - Glamour requires `github.com/charmbracelet/lipgloss@v1.1.1-0.20250404203927-76690c660834`, a pre-release version, which is an upgrade from the currently pinned `v1.1.0`.
-- Glamour brings multiple upgrades to `golang.org/x` modules (not the standard library), and adds `golang.org/x/term@v0.36.0` as a new module: `golang.org/x/mod@v0.28.0`, `golang.org/x/net@v0.44.0`, `golang.org/x/sync@v0.17.0`, `golang.org/x/text@v0.30.0`, and `golang.org/x/tools@v0.37.0`. These are compatible upgrades standard for TUI applications.
+- Glamour upgrades `golang.org/x/mod` (`v0.28.0`), `golang.org/x/net` (`v0.44.0`), `golang.org/x/sync` (`v0.17.0`), `golang.org/x/text` (`v0.30.0`) and `golang.org/x/tools` (`v0.37.0`), and adds `golang.org/x/term@v0.36.0`. These are `golang.org/x` modules, not the standard library.
 - Glamour and x/tools bring in updates to `golang.org/x/crypto` and `golang.org/x/telemetry` via the module graph.
