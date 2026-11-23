@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,9 +17,10 @@ type ReviewsDrawer struct {
 	selectedRound int      // index in rounds list
 	turns         []string // turn IDs to display, oldest first
 	reviewsByTurn map[string]*drawerReviews
-	scrollOffset  int            // scroll position within the drawer content
-	contentLines  int            // cached line count for paging calculations
-	roster        map[string]int // participant -> order in roster
+	scrollOffset  int      // scroll position within the drawer content
+	contentLines  int      // cached line count for paging calculations
+	roster        []string // participant IDs in roster order
+	drawerHeight  int      // allocated height for rendering
 }
 
 // drawerReviews holds the reviews for one turn, grouped by round.
@@ -31,26 +33,27 @@ type drawerReviews struct {
 func NewReviewsDrawer() *ReviewsDrawer {
 	return &ReviewsDrawer{
 		reviewsByTurn: make(map[string]*drawerReviews),
-		roster:        make(map[string]int),
+		roster:        []string{},
 	}
 }
 
 // SetTurns updates the drawer's turn list.
 func (d *ReviewsDrawer) SetTurns(turns []string) {
 	d.turns = turns
-	// Keep selectedTurn in bounds
 	if d.selectedTurn >= len(d.turns) {
 		d.selectedTurn = max(0, len(d.turns)-1)
 	}
 	d.scrollOffset = 0
 }
 
-// SetRoster sets the participant ordering for the drawer.
+// SetRoster sets the participant ordering for the drawer from a list in roster order.
 func (d *ReviewsDrawer) SetRoster(participants []string) {
-	d.roster = make(map[string]int)
-	for i, p := range participants {
-		d.roster[p] = i
-	}
+	d.roster = append([]string{}, participants...)
+}
+
+// SetDrawerHeight sets the allocated height for the drawer.
+func (d *ReviewsDrawer) SetDrawerHeight(height int) {
+	d.drawerHeight = height
 }
 
 // Open opens the drawer on the given turn index.
@@ -75,7 +78,7 @@ func (d *ReviewsDrawer) IsOpen() bool {
 	return d.open
 }
 
-// UpdateReviews stores reviews for a turn.
+// UpdateReviews stores reviews for a turn, including decoded oversized records.
 func (d *ReviewsDrawer) UpdateReviews(turnID string, items []wire.ReviewItem) {
 	if len(items) == 0 {
 		d.reviewsByTurn[turnID] = nil
@@ -156,14 +159,18 @@ func (d *ReviewsDrawer) SelectRoundRight() {
 	}
 }
 
-// ScrollUp scrolls the drawer content up.
+// ScrollUp scrolls the drawer content up by one line.
 func (d *ReviewsDrawer) ScrollUp(lines int) {
 	d.scrollOffset = max(d.scrollOffset-lines, 0)
 }
 
-// ScrollDown scrolls the drawer content down.
+// ScrollDown scrolls the drawer content down by a page.
 func (d *ReviewsDrawer) ScrollDown(lines int, maxContent int) {
-	maxScroll := max(0, maxContent-lines)
+	viewport := d.drawerHeight
+	if viewport <= 0 {
+		viewport = lines
+	}
+	maxScroll := max(0, maxContent-viewport)
 	d.scrollOffset = min(d.scrollOffset+lines, maxScroll)
 }
 
@@ -172,7 +179,12 @@ func (d *ReviewsDrawer) ContentLines() int {
 	return d.contentLines
 }
 
-// renderDrawer renders the drawer at a given width and height.
+// SelectedTurnIndex returns the index of the currently selected turn.
+func (d *ReviewsDrawer) SelectedTurnIndex() int {
+	return d.selectedTurn
+}
+
+// render renders the drawer at a given width and height, using content from cache.
 func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 	if !d.open {
 		return ""
@@ -219,57 +231,83 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 	var lines []string
 	lines = append(lines, header)
 
-	// Add review items in roster order
+	// Get items for this round
 	itemsByParticipant := make(map[string]*wire.ReviewItem)
-	participants := []string{}
-	for i := range itemIndices {
-		idx := itemIndices[i]
-		item := rev.items[idx]
-		itemsByParticipant[item.Participant] = &rev.items[idx]
-		if !slices.Contains(participants, item.Participant) {
-			participants = append(participants, item.Participant)
+	for _, idx := range itemIndices {
+		if idx >= 0 && idx < len(rev.items) {
+			item := rev.items[idx]
+			itemsByParticipant[item.Participant] = &item
 		}
 	}
 
-	// Sort by roster order
-	slices.SortFunc(participants, func(a, b string) int {
-		orderA := d.roster[a]
-		orderB := d.roster[b]
-		return orderA - orderB
-	})
+	// Sort participants by roster order
+	var sortedParticipants []string
+	for _, p := range d.roster {
+		if _, ok := itemsByParticipant[p]; ok {
+			sortedParticipants = append(sortedParticipants, p)
+		}
+	}
+	// Add any participants not in roster
+	for p := range itemsByParticipant {
+		if !slices.Contains(sortedParticipants, p) {
+			sortedParticipants = append(sortedParticipants, p)
+		}
+	}
 
-	for _, participant := range participants {
+	// Render each participant's verdict
+	for _, participant := range sortedParticipants {
 		item := itemsByParticipant[participant]
-		itemLine := fmt.Sprintf("  %s (%s)", safeText(participant), item.Kind)
+		itemLine := fmt.Sprintf("  %s (%s)", safeLine(participant), item.Kind)
 		lines = append(lines, ansi.Truncate(itemLine, w, ""))
+
+		// Handle oversized record
+		if item.Oversized && item.Record != nil {
+			ci := cc.Get(item.Record.Ref)
+			if ci.Ready && ci.Err == nil {
+				var fullItem wire.ReviewItem
+				if err := json.Unmarshal([]byte(ci.Data), &fullItem); err == nil {
+					item = &fullItem
+				}
+			}
+		}
 
 		// Show blocks
 		for _, block := range item.Blocks {
-			blockID := safeText(block.BlockID)
+			blockID := safeLine(block.BlockID)
 			blockLine := fmt.Sprintf("    • %s: %s", blockID, block.State)
 			lines = append(lines, ansi.Truncate(blockLine, w, ""))
 
-			// Show evidence and remedy refs if present (fetched content not shown here, just refs)
+			// Show evidence if present
 			if block.Evidence != nil {
-				lines = append(lines, ansi.Truncate(fmt.Sprintf("      evidence: %d bytes", block.Evidence.ByteLen), w, ""))
+				ci := cc.Get(block.Evidence.Ref)
+				if ci.Ready && ci.Err == nil {
+					lines = append(lines, ansi.Truncate("      evidence:", w, ""))
+					for _, line := range SafeTextWithPrefix(ci.Data, w-8) {
+						lines = append(lines, ansi.Truncate(line, w, ""))
+					}
+				}
 			}
+
+			// Show remedy if present
 			if block.Remedy != nil {
-				lines = append(lines, ansi.Truncate(fmt.Sprintf("      remedy: %d bytes", block.Remedy.ByteLen), w, ""))
+				ci := cc.Get(block.Remedy.Ref)
+				if ci.Ready && ci.Err == nil {
+					lines = append(lines, ansi.Truncate("      remedy:", w, ""))
+					for _, line := range SafeTextWithPrefix(ci.Data, w-8) {
+						lines = append(lines, ansi.Truncate(line, w, ""))
+					}
+				}
 			}
 		}
 
 		// Show commentary if present
 		if item.Commentary != nil {
 			ci := cc.Get(item.Commentary.Ref)
-			if ci.Ready && ci.Err == nil && ci.Data != "" {
-				commentText := safeText(ci.Data)
-				commentText = "commentary: " + commentText
-				wrapped := wrapText(commentText, w-6)
-				for _, line := range wrapped {
-					lines = append(lines, ansi.Truncate("      "+line, w, ""))
+			if ci.Ready && ci.Err == nil {
+				lines = append(lines, ansi.Truncate("    commentary:", w, ""))
+				for _, line := range SafeTextWithPrefix(ci.Data, w-6) {
+					lines = append(lines, ansi.Truncate(line, w, ""))
 				}
-			} else if !ci.Ready {
-				lines = append(lines, ansi.Truncate("      commentary: <loading>", w, ""))
 			}
 		}
 	}
@@ -284,19 +322,4 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// safeText converts content to safe text by replacing control characters and invalid UTF-8 with escapes.
-func safeText(s string) string {
-	var result strings.Builder
-	for _, r := range s {
-		if r >= 0x20 && r < 0x7F && r != 0x7F {
-			result.WriteRune(r)
-		} else if r == '\n' || r == '\t' {
-			result.WriteRune(r)
-		} else {
-			fmt.Fprintf(&result, "\\x%02x", r)
-		}
-	}
-	return result.String()
 }

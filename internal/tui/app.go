@@ -256,15 +256,14 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 		cursor := (*string)(nil)
 		limit := 50
 
-		// Page through all reviews
 		for {
 			reply, err := a.cl.Reviews(a.ctx, turnID, cursor, &limit)
 			if err != nil {
-				return reviewsMsg{turnID: turnID, items: nil, err: err}
+				return reviewsMsg{turnID: turnID, items: nil, content: map[string]string{}, err: err}
 			}
 			items, err := reply.DecodeItems()
 			if err != nil {
-				return reviewsMsg{turnID: turnID, items: nil, err: err}
+				return reviewsMsg{turnID: turnID, items: nil, content: map[string]string{}, err: err}
 			}
 			allItems = append(allItems, items...)
 			if reply.NextCursor == nil {
@@ -273,33 +272,34 @@ func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 			cursor = reply.NextCursor
 		}
 
-		// Fetch content references for commentary, evidence, remedy, and oversized records
-		refs := []string{}
+		content := make(map[string]string)
+		refs := make(map[string]bool)
 		for _, item := range allItems {
 			if item.Commentary != nil {
-				refs = append(refs, item.Commentary.Ref)
+				refs[item.Commentary.Ref] = true
 			}
 			if item.Oversized && item.Record != nil {
-				refs = append(refs, item.Record.Ref)
+				refs[item.Record.Ref] = true
 			} else {
 				for _, block := range item.Blocks {
 					if block.Evidence != nil {
-						refs = append(refs, block.Evidence.Ref)
+						refs[block.Evidence.Ref] = true
 					}
 					if block.Remedy != nil {
-						refs = append(refs, block.Remedy.Ref)
+						refs[block.Remedy.Ref] = true
 					}
 				}
 			}
 		}
 
-		// Fetch all content references
-		for _, ref := range refs {
-			content, err := a.cl.Content(a.ctx, ref)
-			a.content.Store(ref, string(content), err)
+		for ref := range refs {
+			data, err := a.cl.Content(a.ctx, ref)
+			if err == nil {
+				content[ref] = string(data)
+			}
 		}
 
-		return reviewsMsg{turnID: turnID, items: allItems, err: nil}
+		return reviewsMsg{turnID: turnID, items: allItems, content: content, err: nil}
 	}
 }
 
@@ -308,11 +308,11 @@ func (a *App) updateDrawerTurns() {
 	turns := chatTurns(a.state)
 	a.reviewsDrawer.SetTurns(turns)
 
-	// Build roster from participants, in order
-	participants := make([]string, 0, len(a.state.Participants))
-	// Sort by participant ID to get a stable order
-	for id := range a.state.Participants {
-		participants = append(participants, id)
+	var participants []string
+	if a.state.Status != nil {
+		for _, p := range a.state.Status.Participants {
+			participants = append(participants, p.ID)
+		}
 	}
 	a.reviewsDrawer.SetRoster(participants)
 }
@@ -529,6 +529,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Drawer focus takes priority: it blocks input changes and navigation keys.
 	if a.reviewsDrawer.IsOpen() && a.tab == tabChat {
+		drawerHeight := a.layout().Drawer
 		switch msg.String() {
 		case "up":
 			a.reviewsDrawer.SelectUp()
@@ -551,13 +552,9 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.SelectRoundRight()
 			return a, nil
 		case "pgup":
-			a.reviewsDrawer.ScrollUp(1)
+			a.reviewsDrawer.ScrollUp(drawerHeight)
 			return a, nil
 		case "pgdown":
-			drawerHeight := 7
-			if a.height > 30 {
-				drawerHeight = 9
-			}
 			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines())
 			return a, nil
 		case "esc", "ctrl+o":
@@ -590,11 +587,12 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.reviewsDrawer.IsOpen() {
 				a.reviewsDrawer.Close()
 				a.want.Drawer = false
-			} else {
-				// Open drawer on the last turn if available
+			} else if a.width >= regionMinWidth && a.height >= regionMinHeight {
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
 					a.updateDrawerTurns()
+					hs := a.layout()
+					a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
 					a.reviewsDrawer.Open(len(turns) - 1)
 					a.want.Drawer = true
 					return a, a.fetchReviewsForTurn(turns[len(turns)-1])
@@ -608,6 +606,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
 			a.reviewsDrawer.Close()
+			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
 		return a, nil
@@ -617,6 +616,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
 			a.reviewsDrawer.Close()
+			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
 		return a, nil
@@ -1428,6 +1428,7 @@ func (a *App) View() string {
 	output = append(output, banners...)
 
 	// Add drawer, list, attached, and help lines
+	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
 	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {
@@ -1473,16 +1474,20 @@ func (a *App) selectedParticipant() int {
 
 // reviewsMsg carries the response from a reviews request.
 type reviewsMsg struct {
-	turnID string
-	items  []wire.ReviewItem
-	err    error
+	turnID   string
+	items    []wire.ReviewItem
+	content  map[string]string // ref -> fetched content
+	err      error
 }
 
-// onReviews processes a reviews response.
+// onReviews processes a reviews response and stores fetched content.
 func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
 	a.reviewsLoading[msg.turnID] = false
 	if msg.err != nil {
 		return a, nil
+	}
+	for ref, data := range msg.content {
+		a.content.Store(ref, data, nil)
 	}
 	a.reviewsDrawer.UpdateReviews(msg.turnID, msg.items)
 	return a, nil

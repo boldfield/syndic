@@ -99,6 +99,7 @@ type TurnInfo struct {
 	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
 	InputRef        string // content ref of what the user typed, once the record says
 	ContextFrom     string // first earlier turn the turn's history included, once the record says
+	ReviewCount     *int   // number of accepted verdicts for this turn, from conversation info
 
 	// The two round sources each count from the turn's start, so Round takes
 	// the larger rather than adding them: a record fetched between replayed
