@@ -51,8 +51,6 @@ func init() {
 	cover(socket, "with two holds it is refused `ambiguous` listing both", "TestSocket_ReleaseTwoHoldsAmbiguous")
 	cover(socket, "on a pool with none it is refused `no_hold`", "TestSocket_ReleaseNoHold")
 	cover(socket, "with an empty `reason` it is refused", "TestSocket_ReleaseEmptyReason")
-	cover(socket, "review_count from conversation matches the total returned by AllReviews across all pages", "TestSocket_ReviewCountParity")
-	cover(socket, "a solo turn has zero reviews and an empty list from AllReviews", "TestSocket_ReviewCountEmptyForSoloTurn")
 }
 
 // wantRefusal requires err to be the engine's refusal with the code, and
@@ -1094,112 +1092,6 @@ func TestSocket_ReleaseEmptyReason(t *testing.T) {
 	for _, ev := range s.Events() {
 		if cp, ok := body[wire.EvCapacity](ev, wire.EventKindCapacity); ok && cp.State == "released" {
 			t.Fatalf("capacity event %+v after a refused release", cp)
-		}
-	}
-}
-
-func TestSocket_ReviewCountParity(t *testing.T) {
-	t.Parallel()
-	// Test multi-page reviews with accepted repairs
-	s := newSuite(t, enginetest.RosterTOML, reviewScripts(
-		verdict(fake.VerdictApprove),
-		verdict(fake.VerdictApprove),
-	))
-	start := s.maxSeq(t)
-
-	c := s.Dial(t)
-	if _, err := c.Subscribe(s.ctx(), start); err != nil {
-		t.Fatal(err)
-	}
-
-	// Open a turn and get its ID, and the conversation ID from the submit response
-	release := s.h.Hold("author")
-	submitReply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "review-count-1", Input: "what is the answer?"})
-	if err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	turnID := submitReply.TurnID
-	convID := submitReply.ConversationID
-	s.WaitTurnState(turnID, engine.StateAuthorDispatched)
-	s.WaitTerminal(turnID)
-	release()
-
-	// Get conversation with the turn
-	conv, err := c.Conversation(s.ctx(), convID)
-	if err != nil {
-		t.Fatalf("Conversation: %v", err)
-	}
-
-	// Find the turn in the conversation
-	var turn *wire.ConversationTurnSummary
-	for i := range conv.Turns {
-		if conv.Turns[i].ID == turnID {
-			turn = &conv.Turns[i]
-			break
-		}
-	}
-	if turn == nil {
-		t.Fatalf("turn %s not found in conversation", turnID)
-	}
-
-	// If review_count is set, verify AllReviews matches it
-	if turn.ReviewCount != nil {
-		allReviews, err := c.AllReviews(s.ctx(), turnID)
-		if err != nil {
-			t.Fatalf("AllReviews: %v", err)
-		}
-		if len(allReviews) != *turn.ReviewCount {
-			t.Errorf("AllReviews returned %d items, want %d per review_count", len(allReviews), *turn.ReviewCount)
-		}
-	}
-}
-
-func TestSocket_ReviewCountEmptyForSoloTurn(t *testing.T) {
-	t.Parallel()
-	// Test solo turn (no reviews)
-	s := newSuite(t, enginetest.RosterTOML, reviewScripts(
-		verdict(fake.VerdictApprove),
-	))
-	start := s.maxSeq(t)
-
-	c := s.Dial(t)
-	if _, err := c.Subscribe(s.ctx(), start); err != nil {
-		t.Fatal(err)
-	}
-
-	// Open a solo turn and get conversation ID
-	release := s.h.Hold("author")
-	submitReply, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "solo-1", Input: "what is the answer?"})
-	if err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	turnID := submitReply.TurnID
-	convID := submitReply.ConversationID
-	s.WaitTurnState(turnID, engine.StateAuthorDispatched)
-	s.WaitTerminal(turnID)
-	release()
-
-	// Get the turn's reviews
-	allReviews, err := c.AllReviews(s.ctx(), turnID)
-	if err != nil {
-		t.Fatalf("AllReviews: %v", err)
-	}
-	if len(allReviews) != 0 {
-		t.Errorf("solo turn AllReviews returned %d items, want 0", len(allReviews))
-	}
-
-	// Check conversation turn summary
-	conv, err := c.Conversation(s.ctx(), convID)
-	if err != nil {
-		t.Fatalf("Conversation: %v", err)
-	}
-
-	for i := range conv.Turns {
-		if conv.Turns[i].ID == turnID {
-			if conv.Turns[i].ReviewCount != nil && *conv.Turns[i].ReviewCount != 0 {
-				t.Errorf("solo turn review_count = %d, want 0 or nil", *conv.Turns[i].ReviewCount)
-			}
-			break
 		}
 	}
 }

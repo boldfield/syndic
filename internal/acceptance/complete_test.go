@@ -33,7 +33,7 @@ func init() {
 // items matches the number of clauses in the design.
 func TestCoverage_ParagraphCounts(t *testing.T) {
 	const (
-		protocolCount       = 10
+		protocolCount       = 12
 		dispatchCount       = 9
 		runsManifestCount   = 13 // 12 semicolon-separated clauses; last clause split into 2 items (usage vs no_usage)
 		rosterStopCount     = 10
