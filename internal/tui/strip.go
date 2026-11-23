@@ -218,7 +218,7 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 	// Keep at least tokens/limit visible at the right edge
 	for len(segments) > 1 && indices.tokens >= 0 {
 		// Stop if we're about to remove tokens/limit
-		if indices.tokens < len(segments) {
+		if indices.tokens >= len(segments) {
 			break
 		}
 		segments = segments[:len(segments)-1]
