@@ -44,27 +44,47 @@ func TestRenderProgressShowsSpinnerPhaseAndTime(t *testing.T) {
 
 func TestRenderProgressShowsParticipantMarks(t *testing.T) {
 	tests := []struct {
-		name  string
-		state string
-		mark  string
+		name        string
+		turnState   string
+		authorState string
+		mark        string
 	}{
-		{"done participant", "done", "✓"},
-		{"working participant", "working", "◜"},
-		{"queued participant", "queued", "○"},
+		{"author running", "running", "running", "◜"},
+		{"author queued", "running", "queued", "○"},
+		{"author idle waiting", "running", "idle", "○"},
+		{"author idle after dispatch", "reviewers_dispatched", "idle", "✓"},
+		{"reviewer running", "running", "running", "◜"},
+		{"reviewer queued", "running", "queued", "○"},
+		{"reviewer idle", "running", "idle", "○"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			s := NewState()
-			s.Turns["t1"] = TurnInfo{
-				State:          "running",
-				Round:          1,
-				MaxRounds:      1,
-				Author:         "alice",
-				AuthorState:    test.state,
-				Reviewers:      nil,
-				ReviewerStates: map[string]string{},
-				SubmittedAt:    progressNow,
+			isAuthor := strings.HasPrefix(test.name, "author")
+
+			if isAuthor {
+				s.Turns["t1"] = TurnInfo{
+					State:          test.turnState,
+					Round:          1,
+					MaxRounds:      1,
+					Author:         "alice",
+					AuthorState:    test.authorState,
+					Reviewers:      nil,
+					ReviewerStates: map[string]string{},
+					SubmittedAt:    progressNow,
+				}
+			} else {
+				s.Turns["t1"] = TurnInfo{
+					State:          test.turnState,
+					Round:          1,
+					MaxRounds:      1,
+					Author:         "alice",
+					AuthorState:    "idle",
+					Reviewers:      []string{"bob"},
+					ReviewerStates: map[string]string{"bob": test.authorState},
+					SubmittedAt:    progressNow,
+				}
 			}
 
 			out := renderProgress(s, "t1", progressNow, false)
@@ -102,10 +122,10 @@ func TestRenderProgressPlainMode(t *testing.T) {
 	s := NewState()
 	s.Turns["t1"] = TurnInfo{
 		State:          "running",
-		Round:          1,
-		MaxRounds:      2,
+		Round:          2,
+		MaxRounds:      3,
 		Author:         "alice",
-		AuthorState:    "working",
+		AuthorState:    "running",
 		Reviewers:      nil,
 		ReviewerStates: map[string]string{},
 		SubmittedAt:    progressNow,
@@ -114,12 +134,16 @@ func TestRenderProgressPlainMode(t *testing.T) {
 
 	out := renderProgress(s, "t1", now, true)
 
-	// In plain mode, no pips
+	// In plain mode, should not have graphic pips (● ○)
 	if strings.Contains(out, "●") || strings.Contains(out, "○") {
-		t.Errorf("plain mode should not have pips in %q", out)
+		t.Errorf("plain mode should not have graphic pips in %q", out)
+	}
+	// Should have text pips like (1)(2)
+	if !strings.Contains(out, "(1)(2)") {
+		t.Errorf("plain mode should have text pips in %q", out)
 	}
 	// Should still have round text
-	if !strings.Contains(out, "round 1/2") {
+	if !strings.Contains(out, "round 2/3") {
 		t.Errorf("plain mode should have round text in %q", out)
 	}
 }
@@ -131,7 +155,7 @@ func TestRenderProgressNotRunning(t *testing.T) {
 		Round:          1,
 		MaxRounds:      1,
 		Author:         "alice",
-		AuthorState:    "done",
+		AuthorState:    "idle",
 		Reviewers:      nil,
 		ReviewerStates: map[string]string{},
 		SubmittedAt:    progressNow,
@@ -140,8 +164,8 @@ func TestRenderProgressNotRunning(t *testing.T) {
 
 	out := renderProgress(s, "t1", now, false)
 
-	// Should be empty for non-running turns
+	// Should be empty for terminal state turns
 	if out != "" {
-		t.Errorf("non-running turn should produce empty progress, got %q", out)
+		t.Errorf("terminal state turn should produce empty progress, got %q", out)
 	}
 }

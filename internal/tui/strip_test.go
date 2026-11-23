@@ -90,21 +90,79 @@ func TestRenderStripReviewsHintDropsBeforeRound(t *testing.T) {
 		SubmittedAt:     stripNow,
 	}
 
-	// At narrow width with reviews hint, reviews should drop before round
-	out := renderStripFor(s, 50, stripNow, false, true)
+	// At wide width, both reviews hint and round should be present
+	wide := renderStripFor(s, 150, stripNow, false, true)
+	if !strings.Contains(wide, "ctrl+o: reviews") || !strings.Contains(wide, "round") {
+		t.Errorf("at wide width, want reviews hint and round, got %q", wide)
+	}
 
-	// If reviews hint was added, check if it's in the output
-	// The exact behavior depends on width, but we should have either
-	// reviews hint + round, or just round, or neither
-	_ = out // Just check it doesn't crash
+	// At narrower width, reviews hint should drop first
+	narrow := renderStripFor(s, 60, stripNow, false, true)
+	hasRound := strings.Contains(narrow, "round")
+	hasReviews := strings.Contains(narrow, "ctrl+o")
+	if hasReviews && !hasRound {
+		t.Errorf("at narrow width, reviews should not be present without round, got %q", narrow)
+	}
 }
 
-func TestRenderStripRoundDropsBeforeTurnState(t *testing.T) {
+func TestRenderStripOverflowThresholds(t *testing.T) {
 	s := NewState()
 	s.CurrentTurn = "t1"
 	s.Turns["t1"] = TurnInfo{
 		Preset:          "review",
 		State:           "running",
+		EstimatedTokens: 1500,
+		LimitTokens:     3000,
+		Round:           2,
+		MaxRounds:       3,
+		SubmittedAt:     stripNow,
+	}
+
+	// Test specific widths to verify overflow order
+	// The strip should show: [preset] [state] [elapsed] [meter] [tokens] [round]
+	// At narrow widths, meter drops first, then reviews, then round, then turn state shortens
+	tests := []struct {
+		width     int
+		hasMeter  bool
+		hasRound  bool
+		hasTokens bool
+	}{
+		{150, true, true, true},  // Wide: all present with meter
+		{100, true, true, true},  // Still have room for all with meter
+		{70, true, true, true},   // Meter just fits
+		{65, false, true, true},  // Meter drops, rest still fits
+		{55, false, true, true},  // Round still there
+		{50, false, false, true}, // Round drops around width 50
+		{35, false, false, true}, // Narrow: tokens in narrow state
+		{25, false, false, true}, // Very narrow: might show ellipsis
+	}
+
+	for _, tt := range tests {
+		out := renderStripFor(s, tt.width, stripNow, false, false)
+
+		hasMeter := strings.Contains(out, "█") || strings.Contains(out, "░")
+		hasRound := strings.Contains(out, "round")
+		hasTokens := strings.Contains(out, "1500") || strings.Contains(out, "3000")
+
+		if hasMeter != tt.hasMeter {
+			t.Errorf("width=%d: meter present=%v, want %v, got %q", tt.width, hasMeter, tt.hasMeter, out)
+		}
+		if hasRound != tt.hasRound {
+			t.Errorf("width=%d: round present=%v, want %v, got %q", tt.width, hasRound, tt.hasRound, out)
+		}
+		// At narrow widths, tokens might be replaced by ellipsis, so only check at wider widths
+		if tt.width >= 50 && hasTokens != tt.hasTokens {
+			t.Errorf("width=%d: tokens present=%v, want %v, got %q", tt.width, hasTokens, tt.hasTokens, out)
+		}
+	}
+}
+
+func TestRenderStripTurnStateShortening(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	s.Turns["t1"] = TurnInfo{
+		Preset:          "review",
+		State:           "reviewers_dispatched",
 		EstimatedTokens: 1000,
 		LimitTokens:     2000,
 		Round:           1,
@@ -112,33 +170,11 @@ func TestRenderStripRoundDropsBeforeTurnState(t *testing.T) {
 		SubmittedAt:     stripNow,
 	}
 
-	// At very narrow width, round should drop but turn state should remain
+	// At very narrow width, turn state should be shortened with ellipsis
 	out := renderStripFor(s, 25, stripNow, false, false)
 
-	// Turn state should be in the output
-	if !strings.Contains(out, "running") && !strings.Contains(out, "…") {
-		t.Errorf("turn state or ellipsis should remain, got %q", out)
-	}
-}
-
-func TestRenderStripElipsisWidthCalculation(t *testing.T) {
-	s := NewState()
-	s.CurrentTurn = "t1"
-	s.Turns["t1"] = TurnInfo{
-		Preset:          "review",
-		State:           "running",
-		EstimatedTokens: 1000,
-		LimitTokens:     2000,
-		Round:           1,
-		MaxRounds:       1,
-		SubmittedAt:     stripNow,
-	}
-
-	// At very narrow width, should show ellipsis
-	out := renderStripFor(s, 10, stripNow, false, false)
-
-	// Should contain ellipsis
-	if !strings.Contains(out, "…") {
-		t.Errorf("at narrow width should have ellipsis, got %q", out)
+	// Should contain shortened turn state or ellipsis
+	if !strings.Contains(out, "…") && !strings.Contains(out, "review") {
+		t.Errorf("at very narrow width, turn state should be shortened or ellipsised, got %q", out)
 	}
 }

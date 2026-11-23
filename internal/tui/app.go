@@ -1148,14 +1148,23 @@ const keyHint = "tab: switch  /help"
 
 // statusLine is the strip with the key hint at its right edge, w cells wide.
 // The strip includes ctrl+o: reviews when the chat tab is active.
+// The right-edge hint is always kept, even at narrow widths.
 func (a *App) statusLine(w int) string {
 	hw := ansi.StringWidth(keyHint)
 	includeReviewsHint := a.tab == tabChat
-	if w < hw+20 {
-		return ansi.Truncate(renderStripFor(a.state, w, a.now(), false, includeReviewsHint), w, "")
+
+	// Always reserve space for the hint at the right edge
+	stripWidth := w - hw - 1
+	if stripWidth < 0 {
+		stripWidth = 0
 	}
-	strip := ansi.Truncate(renderStripFor(a.state, w-hw-1, a.now(), true, includeReviewsHint), w-hw-1, "")
-	return strip + strings.Repeat(" ", w-ansi.StringWidth(strip)-hw) + keyHint
+
+	strip := ansi.Truncate(renderStripFor(a.state, stripWidth, a.now(), stripWidth < w-hw-20, includeReviewsHint), stripWidth, "")
+	padding := w - ansi.StringWidth(strip) - hw
+	if padding < 1 {
+		padding = 1
+	}
+	return strip + strings.Repeat(" ", padding) + keyHint
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.

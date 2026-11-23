@@ -87,10 +87,10 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 	}
 
 	// [budget meter] - droppable
-	indices.budget = len(segments)
 	if ti.LimitTokens > 0 {
 		meter := budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
 		if meter != "" {
+			indices.budget = len(segments)
 			segments = append(segments, meter)
 		}
 	}
@@ -128,8 +128,13 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		return line
 	}
 
-	// Overflow strategy per design: drop in order
-	// 1. Budget meter (drop first, keep tokens/limit)
+	// Overflow strategy per design (design §1):
+	// Drop in order: budget meter, ctrl+o: reviews, round, then shorten turn state
+	// ALWAYS keep: tokens/limit and the right-edge hint (tab: switch /help)
+	ellipsis := "…"
+	ellipsisWidth := runewidth.StringWidth(ellipsis)
+
+	// 1. Try dropping budget meter (drop first, keep tokens/limit)
 	if indices.budget >= 0 && indices.budget < len(segments) && segments[indices.budget] != "" {
 		kept := append(append([]string{}, segments[:indices.budget]...), segments[indices.budget+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
@@ -143,9 +148,12 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		if indices.round > indices.budget {
 			indices.round--
 		}
+		if indices.tokens > indices.budget {
+			indices.tokens--
+		}
 	}
 
-	// 2. ctrl+o: reviews
+	// 2. Try dropping ctrl+o: reviews
 	if indices.reviews >= 0 && indices.reviews < len(segments) {
 		kept := append(append([]string{}, segments[:indices.reviews]...), segments[indices.reviews+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
@@ -156,44 +164,63 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		if indices.round > indices.reviews {
 			indices.round--
 		}
+		if indices.tokens > indices.reviews {
+			indices.tokens--
+		}
 	}
 
-	// 3. Round n/m
+	// 3. Try dropping round n/m
 	if indices.round >= 0 && indices.round < len(segments) {
 		kept := append(append([]string{}, segments[:indices.round]...), segments[indices.round+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 		segments = kept
-	}
-
-	// 4. Drop the preset if it's the first segment and matches "[...]"
-	if compact && len(segments) > 0 && indices.preset == 0 && strings.HasPrefix(segments[0], "[") && strings.HasSuffix(segments[0], "]") && !strings.Contains(segments[0], "quick") {
-		segments = segments[1:]
-		if line := strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
-			return line
+		// Adjust indices after removal
+		if indices.tokens > indices.round {
+			indices.tokens--
 		}
 	}
 
-	// 5. Shorten turn state with ellipsis instead of dropping whole segments
-	ellipsis := "…"
-	ellipsisWidth := runewidth.StringWidth(ellipsis)
+	// 4. Try shortening turn state with ellipsis
 	if indices.turnStateIdx >= 0 && indices.turnStateIdx < len(segments) {
 		state := segments[indices.turnStateIdx]
-		// Try shortening the turn state with ellipsis
+		// Extract the state text from [state] format
 		if strings.HasPrefix(state, "[") && strings.HasSuffix(state, "]") {
-			shortened := "[" + string([]rune(state)[1:min(5, len(state)-1)]) + "…]"
-			segments[indices.turnStateIdx] = shortened
-			line := strings.Join(segments, " ")
-			if runewidth.StringWidth(line) <= width {
+			inner := state[1 : len(state)-1]
+			// Try progressively shorter versions until it fits
+			for len(inner) > 1 {
+				inner = inner[:len(inner)-1]
+				shortened := "[" + inner + "…]"
+				segments[indices.turnStateIdx] = shortened
+				line := strings.Join(segments, " ")
+				if runewidth.StringWidth(line) <= width {
+					return line
+				}
+			}
+		}
+	}
+
+	// 5. Drop the preset if it's the first segment and compact mode
+	if compact && len(segments) > 0 && indices.preset == 0 {
+		preset := segments[0]
+		// Only drop if it's exactly the preset segment [preset_name], not quick profile or next
+		if strings.HasPrefix(preset, "[") && strings.HasSuffix(preset, "]") &&
+			!strings.Contains(preset, "quick") && !strings.Contains(preset, "next") {
+			segments = segments[1:]
+			if line := strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
 				return line
 			}
 		}
 	}
 
-	// 6. Last resort: drop segments from the right, adding … at the end.
-	// Keep at least the turn state and tokens/limit visible.
-	for len(segments) > 2 {
+	// 6. Last resort: drop segments from the right, keeping tokens/limit and hint
+	// Keep at least tokens/limit visible at the right edge
+	for len(segments) > 1 && indices.tokens >= 0 {
+		// Stop if we're about to remove tokens/limit
+		if indices.tokens < len(segments) {
+			break
+		}
 		segments = segments[:len(segments)-1]
 		line := strings.Join(segments, " ")
 		lineWidth := runewidth.StringWidth(line)
@@ -202,6 +229,7 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		}
 	}
 
+	// If nothing fits, return just ellipsis
 	return ellipsis
 }
 
