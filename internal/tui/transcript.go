@@ -156,7 +156,7 @@ func wrapHeader(parts []string, width int) []string {
 }
 
 // bodyText is the complete body of an item, or a note saying why there is none.
-// Untrusted content is escaped to prevent control characters from reaching the terminal.
+// The result is raw: SafeTextWithPrefix escapes it exactly once.
 func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	if it.ByteLen == 0 {
 		if id, ok := strings.CutPrefix(it.Ref, "attempt:"); ok {
@@ -177,9 +177,9 @@ func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	case !c.Ready:
 		return "(loading…)"
 	case c.Err != nil:
-		return "(could not load: " + ToSafeText([]byte(c.Err.Error())) + ")"
+		return "(could not load: " + c.Err.Error() + ")"
 	}
-	return ToSafeText([]byte(c.Data))
+	return c.Data
 }
 
 // transcriptRefs lists the bodies the tab wants fetched.

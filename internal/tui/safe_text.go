@@ -21,77 +21,74 @@ var bidiChars = map[rune]bool{
 	'⁩': true, // POP DIRECTIONAL ISOLATE
 }
 
-// ToSafeText converts untrusted bytes to safe terminal text.
-// - C0 controls (0x00-0x1F) except LF (0x0A) and tab (0x09) are escaped as \xNN
-// - DEL (0x7F) is escaped as \xNN
-// - C1 controls (U+0080-U+009F) are escaped as the \xNN of their UTF-8 bytes
-// - Unicode bidi overrides/isolates are escaped as \uXXXX
-// - Invalid UTF-8 bytes are escaped as \xNN
-// - Tab (0x09) is expanded to spaces according to tabStop
-func ToSafeText(data []byte) string {
+// safeToken is one displayed unit of safe text: a printable rune, an expanded
+// tab space, a visible escape (atomic, never split across lines) or a newline.
+type safeToken struct {
+	text  string
+	width int
+	nl    bool
+}
+
+// safeTokens is the single escaping pass over untrusted bytes. It reports
+// token boundaries so wrapping never re-parses its own output.
+//   - C0 controls except LF and tab, and DEL, become \xNN
+//   - C1 controls (U+0080-U+009F) become the \xNN of their UTF-8 bytes
+//   - bidi overrides and isolates become \uXXXX
+//   - bytes that are not valid UTF-8 become \xNN
+//   - tab expands to the next multiple of four columns
+func safeTokens(data []byte) []safeToken {
 	const tabStop = 4
-	var out strings.Builder
+	var toks []safeToken
 	col := 0
+	esc := func(s string) {
+		toks = append(toks, safeToken{text: s, width: len(s)})
+		col += len(s)
+	}
 
 	for len(data) > 0 {
 		r, size := utf8.DecodeRune(data)
-
 		if r == utf8.RuneError && size == 1 {
-			// Invalid UTF-8: escape the first byte as \xNN
-			fmt.Fprintf(&out, "\\x%02x", data[0])
-			col += 4
+			esc(fmt.Sprintf("\\x%02x", data[0]))
 			data = data[1:]
 			continue
 		}
-
+		raw := data[:size]
 		data = data[size:]
 
 		switch {
 		case r == '\t':
-			// Expand tab to next multiple of tabStop
-			spacesToAdd := tabStop - (col % tabStop)
-			for i := 0; i < spacesToAdd; i++ {
-				out.WriteRune(' ')
+			n := tabStop - (col % tabStop)
+			for i := 0; i < n; i++ {
+				toks = append(toks, safeToken{text: " ", width: 1})
 			}
-			col += spacesToAdd
-
+			col += n
 		case r == '\n':
-			// Line feed: keep as-is, reset column
-			out.WriteRune(r)
+			toks = append(toks, safeToken{text: "\n", nl: true})
 			col = 0
-
-		case r < 0x20 && r != '\n':
-			// C0 control (except LF): escape as \xHH
-			fmt.Fprintf(&out, "\\x%02x", r)
-			col += 4
-
-		case r == 0x7F:
-			// DEL: escape as \xHH
-			fmt.Fprintf(&out, "\\x%02x", r)
-			col += 4
-
+		case r < 0x20 || r == 0x7F:
+			esc(fmt.Sprintf("\\x%02x", r))
 		case r >= 0x80 && r <= 0x9F:
-			// C1 control: escape as \xHH (UTF-8 encoded)
-			for _, b := range []byte(string(r)) {
-				fmt.Fprintf(&out, "\\x%02x", b)
+			for _, b := range raw {
+				esc(fmt.Sprintf("\\x%02x", b))
 			}
-			col += len([]byte(string(r))) * 4
-
 		case bidiChars[r]:
-			// Bidi override/isolate: escape as \uXXXX
-			fmt.Fprintf(&out, "\\u%04x", r)
-			col += 6
-
+			esc(fmt.Sprintf("\\u%04x", r))
 		default:
-			// Regular character
-			out.WriteRune(r)
-			w := runewidth.RuneWidth(r)
-			if w > 0 {
-				col += w
-			}
+			w := max(runewidth.RuneWidth(r), 0)
+			toks = append(toks, safeToken{text: string(raw), width: w})
+			col += w
 		}
 	}
+	return toks
+}
 
+// ToSafeText converts untrusted bytes to safe terminal text; see safeTokens
+// for the rules. Original bytes are never modified, only their rendering.
+func ToSafeText(data []byte) string {
+	var out strings.Builder
+	for _, t := range safeTokens(data) {
+		out.WriteString(t.text)
+	}
 	return out.String()
 }
 
@@ -104,131 +101,39 @@ const contentPrefix = "  "
 const minContentWidth = len(contentPrefix) + 6
 
 // SafeTextWithPrefix is the single content-to-terminal boundary for untrusted
-// text: it escapes the text with ToSafeText, wraps it within width cells (the
-// full line, prefix included) and prefixes every terminal line with two
-// spaces. Escaping is idempotent, so already-safe text may be passed again.
+// text: it escapes the raw text once, wraps it so every line, prefix included,
+// fits max(width, minContentWidth) cells, and prefixes every terminal line
+// with two spaces. Callers pass raw text, never already-escaped text.
 func SafeTextWithPrefix(text string, width int) []string {
-	const prefix = contentPrefix
-	const minWidth = minContentWidth
+	width = max(width, minContentWidth) - len(contentPrefix)
 
-	if width < minWidth {
-		width = minWidth
-	}
-
-	// First pass: escape the text to safe form
-	safeText := ToSafeText([]byte(text))
-
-	// Split into paragraphs on newlines, trim trailing empty line
-	paragraphs := strings.Split(safeText, "\n")
-	if len(paragraphs) > 0 && paragraphs[len(paragraphs)-1] == "" {
-		paragraphs = paragraphs[:len(paragraphs)-1]
-	}
-
-	// Split into paragraphs on newlines
 	var out []string
-	for _, para := range paragraphs {
-		// Wrap paragraph to width, accounting for the prefix
-		lines := wrapParagraph(para, width-len(prefix))
-		// Add prefix to each line
-		for _, line := range lines {
-			out = append(out, prefix+line)
-		}
-	}
-
-	// If input was entirely empty or only newlines, return at least one empty prefixed line
-	if len(out) == 0 {
-		out = []string{prefix}
-	}
-
-	return out
-}
-
-// wrapParagraph wraps a single paragraph to width cells using runewidth for correct cell counting.
-// Keeps escape sequences atomic so they don't split across lines.
-// The width is the available width for content (before prefix is added).
-// ToSafeText has already expanded tabs, so we don't handle tabs here.
-func wrapParagraph(para string, width int) []string {
-	const minWidth = 1
-	if width < minWidth {
-		width = minWidth
-	}
-
-	var lines []string
 	var cur strings.Builder
 	col := 0
-
-	i := 0
-	for i < len(para) {
-		if para[i] == '\\' && i+1 < len(para) {
-			// This might be an escape sequence; check what it is
-			switch para[i+1] {
-			case 'x':
-				// \xNN escape - 4 characters total
-				if i+3 < len(para) {
-					escLen := 4
-					w := 4 // escape sequences always render as 4 cells visually
-					if col > 0 && col+w > width {
-						// Need to wrap before this escape
-						lines = append(lines, cur.String())
-						cur.Reset()
-						col = 0
-					}
-					cur.WriteString(para[i : i+escLen])
-					col += w
-					i += escLen
-					continue
-				}
-			case 'u':
-				// \uXXXX escape - 6 characters total
-				if i+5 < len(para) {
-					escLen := 6
-					w := 6 // escape sequences always render as 6 cells visually
-					if col > 0 && col+w > width {
-						// Need to wrap before this escape
-						lines = append(lines, cur.String())
-						cur.Reset()
-						col = 0
-					}
-					cur.WriteString(para[i : i+escLen])
-					col += w
-					i += escLen
-					continue
-				}
-			}
-		}
-
-		// Regular rune - decode it properly
-		r, size := utf8.DecodeRuneInString(para[i:])
-		if r == utf8.RuneError && size == 0 {
-			// Should not happen since input is from ToSafeText which produces valid UTF-8
-			i++
+	flush := func() {
+		out = append(out, contentPrefix+cur.String())
+		cur.Reset()
+		col = 0
+	}
+	pending := false // a line is open, so a trailing LF does not add another
+	for _, t := range safeTokens([]byte(text)) {
+		if t.nl {
+			flush()
+			pending = false
 			continue
 		}
-
-		w := runewidth.RuneWidth(r)
-		if w < 0 {
-			w = 0
+		if col > 0 && col+t.width > width {
+			flush()
 		}
-
-		if col > 0 && col+w > width && cur.Len() > 0 {
-			// Need to wrap before this rune
-			lines = append(lines, cur.String())
-			cur.Reset()
-			col = 0
-		}
-		cur.WriteString(para[i : i+size])
-		col += w
-		i += size
+		cur.WriteString(t.text)
+		col += t.width
+		pending = true
 	}
-
-	if cur.Len() > 0 {
-		lines = append(lines, cur.String())
+	if pending {
+		flush()
 	}
-
-	// Ensure at least one line
-	if len(lines) == 0 {
-		lines = []string{""}
+	if len(out) == 0 {
+		out = []string{contentPrefix}
 	}
-
-	return lines
+	return out
 }

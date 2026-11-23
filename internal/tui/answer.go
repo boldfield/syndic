@@ -18,6 +18,7 @@ type answerInput struct {
 	openBlocks     []wire.OpenBlock
 	overrideReason string // the reason the human gave; the turn record only says "override"
 	plainMode      bool   // true when colors should not be used
+	width          int    // terminal width; content is wrapped and indented to it when positive
 	now            time.Time
 }
 
@@ -83,20 +84,31 @@ func answerRefs(s State, turnID string, in answerInput) []string {
 	return nil
 }
 
-// body renders the text behind a ref: loading, a one-line error, or the text.
-// Untrusted content is escaped to prevent control characters from reaching the terminal.
-func body(cc *ContentCache, ref string) string {
+// bodyRaw is the text behind a ref, unescaped: loading, a one-line error, or
+// the content. It must reach the terminal only through shown or body.
+func bodyRaw(cc *ContentCache, ref string) string {
 	item := cc.Get(ref)
 	switch {
 	case item.Err != nil:
-		// Escape error message text to prevent control characters
-		errMsg := ToSafeText([]byte(item.Err.Error()))
-		return "error: " + firstLine(errMsg)
+		return "error: " + firstLine(item.Err.Error())
 	case !item.Ready:
 		return "loading…"
 	}
-	safeText := ToSafeText([]byte(item.Data))
-	return strings.TrimRight(safeText, "\n")
+	return strings.TrimRight(item.Data, "\n")
+}
+
+// body is bodyRaw escaped for the terminal.
+func body(cc *ContentCache, ref string) string {
+	return ToSafeText([]byte(bodyRaw(cc, ref)))
+}
+
+// shown is the one way untrusted text enters the answer and chat tabs: escaped
+// once, and wrapped and indented as content lines when the width is known.
+func shown(raw string, width int) string {
+	if width <= 0 {
+		return ToSafeText([]byte(raw))
+	}
+	return strings.Join(SafeTextWithPrefix(raw, width), "\n")
 }
 
 func firstLine(s string) string {
@@ -113,7 +125,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	var lines []string
 	candidate := func() {
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, body(in.content, refs[0]))
+			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
 		} else if ti.CandidateHash != nil {
 			lines = append(lines, "loading…")
 		}
@@ -135,7 +147,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	case "solo_complete":
 		lines = append(lines, "UNREVIEWED (solo)")
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, body(in.content, refs[0]))
+			lines = append(lines, shown(bodyRaw(in.content, refs[0]), in.width))
 		} else {
 			lines = append(lines, "loading…")
 		}
@@ -143,9 +155,9 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 	case "incomplete":
 		if ti.TerminalReason != nil {
 			// Escape terminal reason which may contain untrusted content
-			lines = append(lines, ToSafeText([]byte(*ti.TerminalReason)))
+			lines = append(lines, shown(*ti.TerminalReason, in.width))
 		}
-		lines = append(lines, blockLines(in.openBlocks)...)
+		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		if ti.CandidateHash != nil {
 			lines = append(lines, "INCOMPLETE, not approved")
 		}
@@ -159,9 +171,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		// Escape override reason which may contain untrusted content
-		safeReason := ToSafeText([]byte(reason))
-		lines = append(lines, "HUMAN OVERRIDE: "+safeReason)
+		lines = append(lines, shown("HUMAN OVERRIDE: "+reason, in.width))
 		candidate()
 
 	case "cancelled":
@@ -170,7 +180,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			break
 		}
 		lines = append(lines, "CANCELLED, not approved", noApprovedAnswer(ti.State))
-		lines = append(lines, blockLines(in.openBlocks)...)
+		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		candidate()
 
 	default:
@@ -181,7 +191,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			} else {
 				draftText = draftBanner.Render(draftText)
 			}
-			lines = append(lines, draftText, body(in.content, refs[0]))
+			lines = append(lines, draftText, shown(bodyRaw(in.content, refs[0]), in.width))
 		}
 		lines = append(lines, progressLine(ti, in.now))
 	}
@@ -219,25 +229,30 @@ func progressLine(ti TurnInfo, now time.Time) string {
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 
 // blockLines lists open blocks with severity, evidence and remedy.
-func blockLines(blocks []wire.OpenBlock) []string {
+func blockLines(blocks []wire.OpenBlock, width int) []string {
 	var lines []string
 	for _, b := range blocks {
 		if b.State != "open" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("[%s] %s", b.Severity, b.ID))
+		lines = append(lines, ToSafeText([]byte(fmt.Sprintf("[%s] %s", b.Severity, b.ID))))
 		if b.Evidence != "" {
-			// Escape evidence which is untrusted content
-			safeEvidence := ToSafeText([]byte(b.Evidence))
-			lines = append(lines, "  evidence: "+safeEvidence)
+			lines = append(lines, shownLabelled("evidence: ", b.Evidence, width))
 		}
 		if b.Remedy != "" {
-			// Escape remedy which is untrusted content
-			safeRemedy := ToSafeText([]byte(b.Remedy))
-			lines = append(lines, "  remedy: "+safeRemedy)
+			lines = append(lines, shownLabelled("remedy: ", b.Remedy, width))
 		}
 	}
 	return lines
+}
+
+// shownLabelled is shown for a labelled value; without a width the label is
+// indented in the legacy way.
+func shownLabelled(label, raw string, width int) string {
+	if width <= 0 {
+		return "  " + label + ToSafeText([]byte(raw))
+	}
+	return shown(label+raw, width)
 }
 
 // approvers are the reviewers with a valid verdict on the turn.

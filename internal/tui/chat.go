@@ -13,6 +13,7 @@ type chatInput struct {
 	answer  func(turnID string) answerInput // what the answer part of one turn needs
 	inputs  map[string]string               // what the user typed, for the turns this process submitted
 	content *ContentCache                   // bodies of the inputs of the other turns
+	width   int                             // terminal width; user text is wrapped and indented to it when positive
 }
 
 // notInContext marks a turn that /trim dropped from the history later turns see.
@@ -105,12 +106,22 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 		var turn []string
 		text, ok := in.inputs[id]
 		if !ok && s.Turns[id].InputRef != "" && in.content != nil {
-			text, ok = body(in.content, s.Turns[id].InputRef), true
+			text, ok = bodyRaw(in.content, s.Turns[id].InputRef), true
 		}
 		if ok {
-			// Escape user input to prevent control characters
-			safeText := ToSafeText([]byte(text))
-			turn = append(turn, "you: "+strings.ReplaceAll(safeText, "\n", "\n     "))
+			if in.width > 0 {
+				// The label takes the place of the first line's indent, so the
+				// v5 "you: " row stays; the text is wrapped to fit beside it.
+				for i, l := range SafeTextWithPrefix(text, in.width-3) {
+					lead := "     "
+					if i == 0 {
+						lead = "you: "
+					}
+					turn = append(turn, lead+strings.TrimPrefix(l, contentPrefix))
+				}
+			} else {
+				turn = append(turn, "you: "+strings.ReplaceAll(ToSafeText([]byte(text)), "\n", "\n     "))
+			}
 		} else {
 			turn = append(turn, "you: (input not loaded)")
 		}

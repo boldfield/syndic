@@ -52,12 +52,55 @@ func TestSafeTextWithPrefix_HostileProperty(t *testing.T) {
 	}
 }
 
-func TestSafeTextWithPrefix_Idempotent(t *testing.T) {
-	for _, in := range hostileInputs {
-		once := SafeTextWithPrefix(in, 20)
-		twice := SafeTextWithPrefix(ToSafeText([]byte(in)), 20)
-		if strings.Join(once, "\n") != strings.Join(twice, "\n") {
-			t.Errorf("not idempotent for %q", in)
+// A literal backslash-x or backslash-u followed by multibyte text is ordinary
+// content; wrapping must never cut a rune in half or emit invalid UTF-8.
+func TestSafeTextWithPrefix_LiteralEscapeLookalikes(t *testing.T) {
+	inputs := []string{"abcd\\xaÛ", "abcd\\x日", "C:\\users\\日本語\\u00é", "\\u\\x\\", "a\\x\x9b日\u009b\\u"}
+	for _, in := range inputs {
+		for w := 1; w <= 14; w++ {
+			for _, l := range SafeTextWithPrefix(in, w) {
+				if !utf8.ValidString(l) {
+					t.Fatalf("w=%d %q: invalid UTF-8 line %q", w, in, l)
+				}
+				for _, r := range l {
+					if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || bidiChars[r] {
+						t.Fatalf("w=%d %q: control %U in %q", w, in, r, l)
+					}
+				}
+				if got := runewidth.StringWidth(l); got > max(w, 8) {
+					t.Fatalf("w=%d %q: line %q is %d cells", w, in, l, got)
+				}
+			}
+		}
+	}
+}
+
+func TestAppViewHostileSourcesAreSafeAndIndented(t *testing.T) {
+	hostile := "x \x1b]8;;http://e\x1b\\link\x1b[2J\r\u009b31m\u202e\xff " + strings.Repeat("long ", 20)
+	a := chatApp(t)
+	a.width = 40
+	a.workDir = "/tmp/\x1b]8;;http://w\x1b\\dir\u202e"
+	addTurn(a, "t1", 1, "approved", hostile, hostile)
+	a.openBlocksByTurn["t1"] = []wire.OpenBlock{{ID: "b\x1b", State: "open", Severity: "high", Evidence: hostile, Remedy: hostile}}
+	a.state.Turns["t2"] = TurnInfo{ID: "t2", State: "incomplete", SubmitSeq: 2, TerminalReason: &hostile}
+	a.state.TurnState["t2"] = "incomplete"
+	a.inputs["t2"] = hostile
+
+	view := a.View()
+	if h := a.conversationHeader(); !strings.Contains(h, "workspace /tmp/\\x1b]8;;http://w\\x1b") || strings.ContainsAny(h, "\x1b\u202e") {
+		t.Errorf("workspace path not escaped visibly: %q", h)
+	}
+	for _, l := range strings.Split(view, "\n") {
+		for _, r := range l {
+			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || bidiChars[r] {
+				t.Fatalf("control %U on line %q", r, l)
+			}
+		}
+		if strings.Contains(l, "long long") && !strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "you: ") && !strings.HasPrefix(l, "     ") {
+			t.Errorf("content line not indented: %q", l)
+		}
+		if runewidth.StringWidth(l) > 40 {
+			t.Errorf("line wider than the terminal: %q", l)
 		}
 	}
 }

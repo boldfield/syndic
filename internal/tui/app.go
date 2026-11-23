@@ -217,12 +217,13 @@ func (a *App) answerIn(turnID string) answerInput {
 		overrideReason: a.overrideReasons[turnID],
 		plainMode:      !a.terminalCapabilities.Color,
 		now:            a.now(),
+		width:          a.width,
 	}
 }
 
 // chatIn gathers what the chat tab needs.
 func (a *App) chatIn() chatInput {
-	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content}
+	return chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content, width: a.width}
 }
 
 // fetchAnswerContent starts the fetches the answer tab is waiting on.
@@ -779,9 +780,9 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 // conversationHeader names the open conversation by id prefix and turn count.
 func (a *App) conversationHeader() string {
 	if a.conversationID == "" {
-		return "conversation: new (created at the first submit) · workspace " + a.workDir
+		return "conversation: new (created at the first submit) · workspace " + ToSafeText([]byte(a.workDir))
 	}
-	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, a.workDir)
+	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, ToSafeText([]byte(a.workDir)))
 }
 
 // shortID is the first eight characters of an id.
