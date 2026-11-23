@@ -126,6 +126,26 @@ func remedyRef(b originBlock) *ContentRef {
 	return textRef("remedy:"+b.id, b.remedy)
 }
 
+// freezeContent returns the bytes a content ref stands for, storing live as
+// them the first time the ref is cited. A ref is thereafter served from the
+// stored bytes, so its sha256 and byte_len match retrieval even if the source
+// attempt or block is later changed.
+func (tx *Tx) freezeContent(ref, live string) (string, error) {
+	var body []byte
+	err := tx.tx.QueryRow(`SELECT body FROM review_content WHERE ref = ?`, ref).Scan(&body)
+	if err == nil {
+		return string(body), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("query review content: %w", err)
+	}
+	if _, err := tx.tx.Exec(`INSERT INTO review_content (ref, body) VALUES (?, ?)`, ref, []byte(live)); err != nil {
+		return "", fmt.Errorf("freeze review content: %w", err)
+	}
+	return live, nil
+}
+
+// textRef returns the ref to body.
 func textRef(ref, body string) *ContentRef {
 	return &ContentRef{Ref: ref, SHA256: computeSHA256([]byte(body)), ByteLen: int64(len(body))}
 }
@@ -218,6 +238,10 @@ func (tx *Tx) insertReviewRecord(a AcceptedReview, round int, srcs []reviewBlock
 	if err := tx.tx.QueryRow(`SELECT commentary FROM attempts WHERE id = ?`, a.AttemptID).Scan(&commentary); err != nil {
 		return fmt.Errorf("query attempt commentary: %w", err)
 	}
+	commentaryText, err := tx.freezeContent("commentary:"+a.AttemptID, commentary.String)
+	if err != nil {
+		return err
+	}
 	rec := ReviewRecord{
 		Round:         round,
 		CandidateHash: a.CandidateHash,
@@ -225,14 +249,21 @@ func (tx *Tx) insertReviewRecord(a AcceptedReview, round int, srcs []reviewBlock
 		AttemptID:     a.AttemptID,
 		Kind:          a.Kind,
 		Blocks:        []ReviewBlock{},
-		Commentary:    *textRef("commentary:"+a.AttemptID, commentary.String),
+		Commentary:    *textRef("commentary:"+a.AttemptID, commentaryText),
 	}
 	for _, s := range srcs {
 		b := ReviewBlock{BlockID: s.blockID, State: s.state}
 		if s.origin != nil {
 			b.Severity = s.origin.severity
-			b.Evidence = evidenceRef(*s.origin)
-			b.Remedy = remedyRef(*s.origin)
+			o := *s.origin
+			if o.evidence, err = tx.freezeContent("evidence:"+o.id, o.evidence); err != nil {
+				return err
+			}
+			if o.remedy, err = tx.freezeContent("remedy:"+o.id, o.remedy); err != nil {
+				return err
+			}
+			b.Evidence = evidenceRef(o)
+			b.Remedy = remedyRef(o)
 		}
 		rec.Blocks = append(rec.Blocks, b)
 	}
@@ -398,6 +429,8 @@ func (tx *Tx) MaterializeReviewRecords(turnID string, roster []string) (int, err
 // least one and at most limit items (limit is clamped to ReviewMaxLimit) while
 // any remain, as many as encode within frameBytes, and the cursor to resume
 // with, empty when none remain. An item over ReviewOversizedBytes is short form.
+// roster must be the participant order the engine records with (its required
+// reviewers): a verdict by a participant not on it sorts after those that are.
 func (s *Store) ReviewsPage(turnID string, roster []string, cursor string, limit, frameBytes int) (items []ReviewItem, next string, err error) {
 	err = s.Tx(func(tx *Tx) error {
 		var txErr error

@@ -28,3 +28,24 @@ CREATE TRIGGER review_records_delete_prevented BEFORE DELETE ON review_records
 BEGIN
 	SELECT RAISE(ABORT, 'review_records table is immutable');
 END;
+
+-- The bytes behind each content ref a record cites, frozen when the record is
+-- written so a ref's sha256 and byte_len always match what retrieval returns,
+-- whatever later happens to the attempt or block it came from.
+CREATE TABLE review_content (
+	ref TEXT PRIMARY KEY,
+	body BLOB NOT NULL
+);
+
+CREATE TRIGGER review_content_update_prevented BEFORE UPDATE ON review_content
+BEGIN
+	SELECT RAISE(ABORT, 'review_content table is immutable');
+END;
+
+CREATE TRIGGER review_content_delete_prevented BEFORE DELETE ON review_content
+BEGIN
+	SELECT RAISE(ABORT, 'review_content table is immutable');
+END;
+
+-- Finds the block a later verdict maintains or withdraws.
+CREATE INDEX blocks_reviewer_block_idx ON blocks(reviewer_block_id);

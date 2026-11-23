@@ -511,7 +511,19 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	}
 
 	var content string
-	if err := tx.tx.QueryRow(query, id).Scan(&content); err != nil {
+	err := sql.ErrNoRows
+	switch kind {
+	case "commentary", "evidence", "remedy":
+		// A ref a review record cites is served from the bytes it froze.
+		var frozen []byte
+		if err = tx.tx.QueryRow(`SELECT body FROM review_content WHERE ref = ?`, ref).Scan(&frozen); err == nil {
+			content = string(frozen)
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.tx.QueryRow(query, id).Scan(&content)
+	}
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, "", fmt.Errorf("content %q: %w", ref, ErrNoSuchContent)
 		}
