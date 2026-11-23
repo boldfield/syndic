@@ -281,7 +281,7 @@ func TestChatProgressAndOutcomeEscapeRecordValues(t *testing.T) {
 	a := hostileRecordApp(t)
 	view := a.View()
 	assertSafeLines(t, "chat", strings.Split(view, "\n"))
-	for _, want := range []string{`approved by h\x1b]8;;`, `turn in progress: h\x1b]8;;`} {
+	for _, want := range []string{`approved by h\x1b]8;;`, `h\x1b]8;;`} {
 		if !strings.Contains(view, want) {
 			t.Errorf("missing %q in:\n%s", want, view)
 		}

@@ -11,8 +11,9 @@ import (
 
 // renderStrip returns the status line. It is a single line showing:
 // [preset] [quick:<name>?] [turn state] [elapsed / turn_deadline]
-// [est. tokens / limit] [round n/m] ctrl+o: reviews tab: switch  /help
-// At narrow widths, segments are dropped in order: budget meter, reviews hint, round, then turn state is shortened.
+// [budget meter] [est. tokens / limit] [round n/m] [ctrl+o: reviews] tab: switch  /help
+// At narrow widths, segments are dropped in order: budget meter, ctrl+o: reviews, round,
+// then turn state is shortened. Tokens/limit and the right-edge hint always remain.
 // Uses terminal display width. Participant states are on the progress line.
 func renderStrip(s State, width int, now time.Time) string {
 	return renderStripFor(s, width, now, false, false)
@@ -20,7 +21,7 @@ func renderStrip(s State, width int, now time.Time) string {
 
 // renderStripFor is renderStrip; compact also drops the preset when the line
 // is too wide, so the open turn's state keeps its room beside the key hint.
-// includedReviewsHint controls whether to include "ctrl+o: reviews" (true for chat tab).
+// includeReviewsHint controls whether to include "ctrl+o: reviews" (true for chat tab).
 func renderStripFor(s State, width int, now time.Time, compact bool, includeReviewsHint bool) string {
 	switch s.ConnState {
 	case ConnStateConnecting:
@@ -46,9 +47,14 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		return ""
 	}
 
+	// Build segments with tracking indices for overflow
 	segments := []string{}
+	indices := struct {
+		preset, state, turnStateIdx, budget, tokens, reviews, round int
+	}{-1, -1, -1, -1, -1, -1, -1}
 
 	// [preset]
+	indices.preset = len(segments)
 	segments = append(segments, fmt.Sprintf("[%s]", ti.Preset))
 	if s.NextPreset != "" {
 		segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
@@ -63,7 +69,8 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		}
 	}
 
-	// [turn state]
+	// [turn state] - track this for ellipsis shortening
+	indices.turnStateIdx = len(segments)
 	segments = append(segments, fmt.Sprintf("[%s]", ti.State))
 
 	// [elapsed / turn deadline]
@@ -79,8 +86,17 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		}
 	}
 
-	// [budget meter and tokens/limit]; track position for overflow shedding
-	budgetIdx := len(segments)
+	// [budget meter] - droppable
+	indices.budget = len(segments)
+	if ti.LimitTokens > 0 {
+		meter := budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
+		if meter != "" {
+			segments = append(segments, meter)
+		}
+	}
+
+	// [est. tokens / limit] - must stay
+	indices.tokens = len(segments)
 	switch {
 	case ti.LimitTokens > 0:
 		segments = append(segments, fmt.Sprintf("[est. %d / %d]", ti.EstimatedTokens, ti.LimitTokens))
@@ -88,20 +104,19 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		segments = append(segments, fmt.Sprintf("[est. %d]", ti.EstimatedTokens))
 	}
 
-	// [ctrl+o: reviews] when reviews are present and hint is requested
-	reviewsIdx := len(segments)
-	if includeReviewsHint {
-		segments = append(segments, "ctrl+o: reviews")
-	}
-
-	// [round n/m] during revision
-	roundIdx := len(segments)
+	// [round n/m] during revision - droppable
+	indices.round = len(segments)
 	if ti.Round > 0 && ti.MaxRounds > 0 {
 		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
 	}
 
-	// Presets, profile names, and states come from the engine
-	// and the workspace: escape each segment before it is measured.
+	// [ctrl+o: reviews] when reviews are requested - droppable
+	indices.reviews = len(segments)
+	if includeReviewsHint {
+		segments = append(segments, "ctrl+o: reviews")
+	}
+
+	// Escape all segments
 	for i, seg := range segments {
 		segments[i] = safeLine(seg)
 	}
@@ -113,52 +128,74 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 		return line
 	}
 
-	// Overflow strategy per design: drop in order:
-	// 1. Budget meter (drop first to keep tokens/limit visible)
-	if budgetIdx >= 0 && budgetIdx < len(segments) {
-		kept := append(append([]string{}, segments[:budgetIdx]...), segments[budgetIdx+1:]...)
+	// Overflow strategy per design: drop in order
+	// 1. Budget meter (drop first, keep tokens/limit)
+	if indices.budget >= 0 && indices.budget < len(segments) && segments[indices.budget] != "" {
+		kept := append(append([]string{}, segments[:indices.budget]...), segments[indices.budget+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 		segments = kept
-		reviewsIdx--
-		roundIdx--
+		// Adjust indices after removal
+		if indices.reviews > indices.budget {
+			indices.reviews--
+		}
+		if indices.round > indices.budget {
+			indices.round--
+		}
 	}
 
-	// 2. Reviews hint
-	if includeReviewsHint && reviewsIdx >= 0 && reviewsIdx < len(segments) {
-		kept := append(append([]string{}, segments[:reviewsIdx]...), segments[reviewsIdx+1:]...)
+	// 2. ctrl+o: reviews
+	if indices.reviews >= 0 && indices.reviews < len(segments) {
+		kept := append(append([]string{}, segments[:indices.reviews]...), segments[indices.reviews+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 		segments = kept
-		roundIdx--
+		// Adjust indices after removal
+		if indices.round > indices.reviews {
+			indices.round--
+		}
 	}
 
 	// 3. Round n/m
-	if roundIdx >= 0 && roundIdx < len(segments) {
-		kept := append(append([]string{}, segments[:roundIdx]...), segments[roundIdx+1:]...)
+	if indices.round >= 0 && indices.round < len(segments) {
+		kept := append(append([]string{}, segments[:indices.round]...), segments[indices.round+1:]...)
 		if line := strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 		segments = kept
 	}
 
-	// Next the preset goes: the running turn's state matters more.
-	if compact && len(segments) > 0 && strings.HasPrefix(segments[0], "[") {
+	// 4. Drop the preset if it's the first segment and matches "[...]"
+	if compact && len(segments) > 0 && indices.preset == 0 && strings.HasPrefix(segments[0], "[") && strings.HasSuffix(segments[0], "]") && !strings.Contains(segments[0], "quick") {
 		segments = segments[1:]
-		if line = strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
+		if line := strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
 			return line
 		}
 	}
 
-	// 4. Drop segments from the right, adding … at the end.
-	// But never drop to fewer than 2 segments to keep turn state and key info visible.
+	// 5. Shorten turn state with ellipsis instead of dropping whole segments
 	ellipsis := "…"
 	ellipsisWidth := runewidth.StringWidth(ellipsis)
+	if indices.turnStateIdx >= 0 && indices.turnStateIdx < len(segments) {
+		state := segments[indices.turnStateIdx]
+		// Try shortening the turn state with ellipsis
+		if strings.HasPrefix(state, "[") && strings.HasSuffix(state, "]") {
+			shortened := "[" + string([]rune(state)[1:min(5, len(state)-1)]) + "…]"
+			segments[indices.turnStateIdx] = shortened
+			line := strings.Join(segments, " ")
+			if runewidth.StringWidth(line) <= width {
+				return line
+			}
+		}
+	}
+
+	// 6. Last resort: drop segments from the right, adding … at the end.
+	// Keep at least the turn state and tokens/limit visible.
 	for len(segments) > 2 {
 		segments = segments[:len(segments)-1]
-		line = strings.Join(segments, " ")
+		line := strings.Join(segments, " ")
 		lineWidth := runewidth.StringWidth(line)
 		if lineWidth+ellipsisWidth <= width {
 			return line + ellipsis
@@ -166,6 +203,25 @@ func renderStripFor(s State, width int, now time.Time, compact bool, includeRevi
 	}
 
 	return ellipsis
+}
+
+// budgetMeter returns a visual representation of budget usage as a meter,
+// or empty string if there is no limit or no usage to show.
+func budgetMeter(estimated, limit int64) string {
+	if limit <= 0 {
+		return ""
+	}
+	meterWidth := int64(10)
+	filledWidth := (estimated * meterWidth) / limit
+	if filledWidth < 0 {
+		filledWidth = 0
+	}
+	if filledWidth > meterWidth {
+		filledWidth = meterWidth
+	}
+	filled := strings.Repeat("█", int(filledWidth))
+	empty := strings.Repeat("░", int(meterWidth-filledWidth))
+	return "[" + filled + empty + "]"
 }
 
 // formatDuration returns a human-readable duration string (e.g., "1m23s", "12s").

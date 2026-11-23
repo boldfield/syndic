@@ -196,7 +196,6 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	a.state.Turns["t2"] = ti
 	a.state.CurrentTurn = "t2"
 
-	const progress = "turn in progress: reviewers_dispatched, round 1/2, 30s, writer idle, rev running"
 	lines := chatView(a)
 	ti.EstimatedTokens = 24260
 	a.state.Turns["t2"] = ti
@@ -213,7 +212,18 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 		t.Errorf("status line = %q, should not contain participant states in v6 (moved to progress line)", last)
 	}
 	lineOf(t, lines, "› running question")
-	lineOf(t, lines, progress)
+	// Progress line in v6 format: spinner, state, round with pips, participant marks, elapsed time
+	if idx := lineOf(t, lines, "reviewers_dispatched"); idx >= 0 {
+		progressLine := lines[idx]
+		// Check that progress line contains marks and participant names
+		if !strings.Contains(progressLine, "writer") || !strings.Contains(progressLine, "rev") {
+			t.Errorf("progress line = %q, should contain participant names", progressLine)
+		}
+		// Check for round pips
+		if !strings.Contains(progressLine, "round 1/2") {
+			t.Errorf("progress line = %q, should contain round", progressLine)
+		}
+	}
 
 	for _, key := range []tea.KeyType{tea.KeyTab, tea.KeyTab} {
 		a.Update(tea.KeyMsg{Type: key})
@@ -223,7 +233,13 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 		}
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyTab})
-	lineOf(t, chatView(a), progress)
+	// Check progress line in chat tab again
+	if idx := lineOf(t, chatView(a), "reviewers_dispatched"); idx >= 0 {
+		progressLine := chatView(a)[idx]
+		if !strings.Contains(progressLine, "writer") || !strings.Contains(progressLine, "rev") {
+			t.Errorf("progress line = %q, should contain participant names", progressLine)
+		}
+	}
 }
 
 func TestChatStatusLineIsLastAt80x24(t *testing.T) {

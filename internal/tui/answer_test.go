@@ -110,7 +110,7 @@ func TestAnswerOpenTurnShowsNoAuthorText(t *testing.T) {
 	release := h.Hold("reviewer")
 	r := startAnswerRig(t, h)
 	openReviewTurn(t, r)
-	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) || strings.Contains(v, "UNREVIEWED DRAFT") {
+	if v := untilView(t, r, "reviewers_dispatched"); strings.Contains(v, answerText) || strings.Contains(v, "UNREVIEWED DRAFT") {
 		t.Fatalf("author text shown during an open turn:\n%s", v)
 	}
 	release()
@@ -247,7 +247,7 @@ func TestAnswerDraftsToggledOnMidTurn(t *testing.T) {
 	defer h.Hold("reviewer")()
 	r := startAnswerRig(t, h)
 	openReviewTurn(t, r)
-	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) {
+	if v := untilView(t, r, "reviewers_dispatched"); strings.Contains(v, answerText) {
 		t.Fatalf("author text shown with drafts off:\n%s", v)
 	}
 	// Set through the program, so the App is not touched from this goroutine.
@@ -280,7 +280,7 @@ func TestAnswerQuickProfileDraftsOffByUser(t *testing.T) {
 	quick := "fast"
 	submit(t, r, wire.SubmitRequest{SubmissionID: "s1", Input: "q", QuickProfile: &quick})
 	turnIn(t, r, "reviewers_dispatched")
-	if v := untilView(t, r, "turn in progress"); strings.Contains(v, answerText) {
+	if v := untilView(t, r, "reviewers_dispatched"); strings.Contains(v, answerText) {
 		t.Fatalf("draft shown although the user turned drafts off:\n%s", v)
 	}
 }

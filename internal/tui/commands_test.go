@@ -313,7 +313,7 @@ func TestDraftsToggle(t *testing.T) {
 	r := startAnswerRig(t, h)
 	r.typeLine("question")
 	turnIn(t, r, "reviewers_dispatched")
-	untilView(t, r, "turn in progress")
+	untilView(t, r, "reviewers_dispatched")
 	r.typeLine("/drafts on")
 	untilView(t, r, "UNREVIEWED DRAFT", answerText)
 	r.typeLine("/drafts off")
