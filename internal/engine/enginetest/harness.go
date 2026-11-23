@@ -113,9 +113,12 @@ type options struct {
 	eligible       map[string]transport.Tri
 	contextBound   map[string]int
 	calibration    map[string]float64
+	capability     map[string]transport.CapabilityRecord
+	probeUncertain map[string]string
 	noStart        bool
 	unconfirmed    bool
 	blockingCancel bool
+	enableProbing  bool
 	clockStart     time.Time
 }
 
@@ -172,6 +175,21 @@ func NoStart() Option {
 	return func(o *options) { o.noStart = true }
 }
 
+// WithProbing enables start-time probing instead of seeding probe records.
+func WithProbing() Option {
+	return func(o *options) { o.enableProbing = true }
+}
+
+// WithCapability sets a custom capability record for a participant.
+func WithCapability(id string, cap transport.CapabilityRecord) Option {
+	return func(o *options) { o.capability[id] = cap }
+}
+
+// ProbeUncertainAt makes the probe for a participant fail after a possible send at the named step.
+func ProbeUncertainAt(id string, step string) Option {
+	return func(o *options) { o.probeUncertain[id] = step }
+}
+
 // Harness is a running engine with its journal, adapters, clock and event
 // stream.
 type Harness struct {
@@ -220,12 +238,14 @@ func ReplyFunc(build func(req transport.CompleteRequest) string) fake.Step {
 func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts ...Option) *Harness {
 	t.Helper()
 	o := &options{
-		skip:         map[string]bool{},
-		outputBound:  map[string]int{},
-		eligible:     map[string]transport.Tri{},
-		contextBound: map[string]int{},
-		calibration:  map[string]float64{},
-		clockStart:   time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
+		skip:           map[string]bool{},
+		outputBound:    map[string]int{},
+		eligible:       map[string]transport.Tri{},
+		contextBound:   map[string]int{},
+		calibration:    map[string]float64{},
+		capability:     map[string]transport.CapabilityRecord{},
+		probeUncertain: map[string]string{},
+		clockStart:     time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -267,7 +287,16 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		done:       make(chan struct{}),
 	}
 	for _, p := range roster.Participants {
-		fa := fake.New(scripts[p.ID], fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed, BlockingCancel: o.blockingCancel})
+		opts := fake.Options{
+			DefaultReportedModel: DefaultReportedModel,
+			CancelUnconfirmed:    o.unconfirmed,
+			BlockingCancel:       o.blockingCancel,
+			ProbeUncertainStep:   o.probeUncertain[p.ID],
+		}
+		if cap, ok := o.capability[p.ID]; ok {
+			opts.Capability = cap
+		}
+		fa := fake.New(scripts[p.ID], opts)
 		hn.Adapters[p.ID] = fa
 		hn.gated[p.ID] = &gatedAdapter{inner: fa, dead: &hn.dead}
 	}
@@ -279,8 +308,9 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		EngineVersion: EngineVersion,
 		Clock:         crashClock{inner: hn.Clock, dead: &hn.dead},
 		// The harness seeds the records it wants; start-time probing would
-		// replace the states SkipProbe sets up.
-		NoStartupProbes: true,
+		// replace the states SkipProbe sets up. WithProbing() disables seeding
+		// and enables probing instead.
+		NoStartupProbes: !o.enableProbing,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {
@@ -310,6 +340,10 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 
 func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster, o *options) {
 	t.Helper()
+	if o.enableProbing {
+		// Skip seeding when probing is enabled; let the engine probe instead.
+		return
+	}
 	seeded := map[[2]string]bool{}
 	for _, p := range roster.Participants {
 		key := [2]string{p.Endpoint, p.Model}
