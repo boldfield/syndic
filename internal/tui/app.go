@@ -1474,10 +1474,10 @@ func (a *App) selectedParticipant() int {
 
 // reviewsMsg carries the response from a reviews request.
 type reviewsMsg struct {
-	turnID   string
-	items    []wire.ReviewItem
-	content  map[string]string // ref -> fetched content
-	err      error
+	turnID  string
+	items   []wire.ReviewItem
+	content map[string]string // ref -> fetched content
+	err     error
 }
 
 // onReviews processes a reviews response and stores fetched content.
