@@ -24,7 +24,7 @@ var bidiChars = map[rune]bool{
 // ToSafeText converts untrusted bytes to safe terminal text.
 // - C0 controls (0x00-0x1F) except LF (0x0A) and tab (0x09) are escaped as \xNN
 // - DEL (0x7F) is escaped as \xNN
-// - C1 controls (0x80-0x9F) are escaped as \xNN
+// - C1 controls (U+0080-U+009F) are escaped as the \xNN of their UTF-8 bytes
 // - Unicode bidi overrides/isolates are escaped as \uXXXX
 // - Invalid UTF-8 bytes are escaped as \xNN
 // - Tab (0x09) is expanded to spaces according to tabStop
@@ -95,12 +95,21 @@ func ToSafeText(data []byte) string {
 	return out.String()
 }
 
-// SafeTextWithPrefix wraps text to width and prefixes each line with two spaces.
-// Lines are separated by newlines and wrapped at width cells.
-// The width is the target width for the full line including the two-space prefix.
+// contentPrefix indents every terminal line of displayed content.
+const contentPrefix = "  "
+
+// minContentWidth is the narrowest full line SafeTextWithPrefix honours: the
+// prefix plus the widest atomic token (a six-cell \uXXXX escape). Narrower
+// requests are widened to it, so no line is ever wider than max(width, 8).
+const minContentWidth = len(contentPrefix) + 6
+
+// SafeTextWithPrefix is the single content-to-terminal boundary for untrusted
+// text: it escapes the text with ToSafeText, wraps it within width cells (the
+// full line, prefix included) and prefixes every terminal line with two
+// spaces. Escaping is idempotent, so already-safe text may be passed again.
 func SafeTextWithPrefix(text string, width int) []string {
-	const prefix = "  "
-	const minWidth = 3 // minimum 3: prefix (2) + at least 1 for content
+	const prefix = contentPrefix
+	const minWidth = minContentWidth
 
 	if width < minWidth {
 		width = minWidth

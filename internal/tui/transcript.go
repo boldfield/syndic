@@ -76,8 +76,7 @@ func transcriptLines(s State, turnID string, in transcriptInput, width int) []st
 			lines = append(lines, blockRowLines(blocks[rid], width)...)
 		} else {
 			lines = append(lines, wrapHeader(headerParts(s, in, it), width)...)
-			// Use content-line wrapping for body content (already escaped by bodyText)
-			lines = append(lines, WrapSafeTextWithPrefix(bodyText(s, in, it), width)...)
+			lines = append(lines, SafeTextWithPrefix(bodyText(s, in, it), width)...)
 			if isAttempt {
 				lines = append(lines, blockRowLines(blocks[id], width)...)
 			}
@@ -178,7 +177,7 @@ func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	case !c.Ready:
 		return "(loading…)"
 	case c.Err != nil:
-		return "(could not load: " + c.Err.Error() + ")"
+		return "(could not load: " + ToSafeText([]byte(c.Err.Error())) + ")"
 	}
 	return ToSafeText([]byte(c.Data))
 }
@@ -206,7 +205,7 @@ func repairPair(s State, in transcriptInput, orig, repair wire.TranscriptItem, w
 	side := func(label string, it wire.TranscriptItem, w int) []string {
 		lines := []string{label}
 		lines = append(lines, wrapHeader(headerParts(s, in, it), w)...)
-		return append(lines, wrapText(bodyText(s, in, it), w)...)
+		return append(lines, SafeTextWithPrefix(bodyText(s, in, it), w)...)
 	}
 	if col < minColumn {
 		return append(side("original", orig, width), side("repair", repair, width)...)
@@ -264,14 +263,12 @@ func blocksByAttempt(s State, detail map[string]wire.OpenBlock) map[string][]blo
 func blockRowLines(rows []blockRow, width int) []string {
 	var out []string
 	for _, r := range rows {
-		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", r.id, r.severity, r.state), width)...)
+		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", ToSafeText([]byte(r.id)), ToSafeText([]byte(r.severity)), ToSafeText([]byte(r.state))), width)...)
 		if r.evidence != "" {
-			safeEvidence := ToSafeText([]byte(r.evidence))
-			out = append(out, wrapText("    evidence: "+safeEvidence, width)...)
+			out = append(out, SafeTextWithPrefix("evidence: "+r.evidence, width)...)
 		}
 		if r.remedy != "" {
-			safeRemedy := ToSafeText([]byte(r.remedy))
-			out = append(out, wrapText("    remedy: "+safeRemedy, width)...)
+			out = append(out, SafeTextWithPrefix("remedy: "+r.remedy, width)...)
 		}
 	}
 	return out

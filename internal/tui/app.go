@@ -854,8 +854,8 @@ func (a *App) requestApproval(def wire.QuickProfile) {
 		}
 	}
 	a.ask(&question{approval: ap, yes: approvalYes(ap), no: approvalNo(ap), lines: []string{
-		"Project file: " + qs.ProjectFilePath,
-		fmt.Sprintf("selects quick profile %q:", qs.ProjectProfile),
+		"Project file: " + ToSafeText([]byte(qs.ProjectFilePath)),
+		"selects quick profile \"" + ToSafeText([]byte(qs.ProjectProfile)) + "\":",
 		"",
 		"  preset:  " + def.Preset,
 		fmt.Sprintf("  drafts:  %v", def.Drafts),

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"strings"
 
 	"github.com/boldfield/syndic/internal/client"
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,19 +12,6 @@ import (
 type ContentCache struct {
 	data    map[string]ContentItem
 	pending map[string]bool
-}
-
-// SafeData returns the content as safe terminal text: control characters and
-// invalid UTF-8 are escaped. Ready and Err have the same meaning as Get.
-func (cc *ContentCache) SafeData(ref string) (data string, ready bool, err error) {
-	item := cc.Get(ref)
-	if !item.Ready {
-		return "", false, nil
-	}
-	if item.Err != nil {
-		return "", true, item.Err
-	}
-	return ToSafeText([]byte(item.Data)), true, nil
 }
 
 // ContentItem holds a fetched content body.
@@ -88,46 +74,4 @@ func fetchRefs(ctx context.Context, cl *client.Client, cc *ContentCache, refs []
 		}
 	}
 	return cmds
-}
-
-// WrapContentLines wraps safe text to width and prefixes every terminal line with two spaces.
-// It applies the content-line indentation requirement: the prefix is applied last, to each
-// terminal line, so no content can place a character in column 0 or 1.
-func WrapContentLines(text string, width int) []string {
-	return SafeTextWithPrefix(text, width)
-}
-
-// WrapSafeTextWithPrefix wraps already-escaped text to width and prefixes every terminal line.
-// Unlike SafeTextWithPrefix, this does NOT call ToSafeText - it assumes the input is already
-// safe (escaped). Use this when the text has already been escaped by ToSafeText.
-func WrapSafeTextWithPrefix(safeText string, width int) []string {
-	const prefix = "  "
-	const minWidth = 3 // minimum 3: prefix (2) + at least 1 for content
-
-	if width < minWidth {
-		width = minWidth
-	}
-
-	// Split into paragraphs on newlines, trim trailing empty line
-	paragraphs := strings.Split(safeText, "\n")
-	if len(paragraphs) > 0 && paragraphs[len(paragraphs)-1] == "" {
-		paragraphs = paragraphs[:len(paragraphs)-1]
-	}
-
-	var out []string
-	for _, para := range paragraphs {
-		// Wrap paragraph to width, accounting for the prefix
-		lines := wrapParagraph(para, width-len(prefix))
-		// Add prefix to each line
-		for _, line := range lines {
-			out = append(out, prefix+line)
-		}
-	}
-
-	// If input was entirely empty or only newlines, return at least one empty prefixed line
-	if len(out) == 0 {
-		out = []string{prefix}
-	}
-
-	return out
 }
