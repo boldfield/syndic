@@ -88,17 +88,22 @@ func authorDone(s State, turnID, id string) bool {
 }
 
 // reviewerDone: the reviewer finished a review of the current candidate.
-// Storing a candidate bumps the turn's epoch, so a review of the current one
-// has an epoch above every author attempt's.
+// The first candidate is reviewed at its author attempt's epoch. A revision's
+// author attempt runs at the epoch of the reviews it answers, and storing its
+// candidate bumps the epoch, so once a revision has started the current
+// candidate's reviews are one epoch above the latest author attempt.
 func reviewerDone(s State, turnID, id string) bool {
-	authorEpoch, seen := int64(0), false
+	current, seen := int64(0), false
 	for _, ai := range s.Attempts {
-		if ai.TurnID == turnID && ai.Phase == "author" && (!seen || ai.Epoch > authorEpoch) {
-			authorEpoch, seen = ai.Epoch, true
+		if ai.TurnID == turnID && ai.Phase == "author" && (!seen || ai.Epoch > current) {
+			current, seen = ai.Epoch, true
 		}
 	}
+	if s.Turns[turnID].Round > 0 {
+		current++
+	}
 	for _, ai := range s.Attempts {
-		if ai.TurnID == turnID && ai.Participant == id && ai.Phase == "review" && attemptDone(ai) && (!seen || ai.Epoch > authorEpoch) {
+		if ai.TurnID == turnID && ai.Participant == id && ai.Phase == "review" && attemptDone(ai) && (!seen || ai.Epoch >= current) {
 			return true
 		}
 	}

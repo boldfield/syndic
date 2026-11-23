@@ -51,7 +51,7 @@ func TestProgressLineMarks(t *testing.T) {
 		{
 			name: "author done and idle, one reviewer queued, one working",
 			s: func() State {
-				s := progressState("reviewers_dispatched", 0, authored, AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 2, Status: "in_progress"})
+				s := progressState("reviewers_dispatched", 0, authored, AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 1, Status: "in_progress"})
 				setStates(s, "idle", "queued", "running")
 				return s
 			}(),
@@ -60,24 +60,25 @@ func TestProgressLineMarks(t *testing.T) {
 		{
 			name: "a reviewer done and idle again",
 			s: progressState("reviewers_dispatched", 0, authored,
-				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 2, Status: "complete"},
-				AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 2, Status: "in_progress"}),
+				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 1, Status: "in_progress"}),
 			want: spin + " turn in progress: reviewers_dispatched, round 0/3 ○○○, ✓ w, ✓ r1, ○ r2, 42s",
 		},
 		{
 			name: "revision dispatched: the earlier reviews are not of this candidate",
 			s: progressState("revision_dispatched", 1, authored,
-				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 2, Status: "complete"},
-				AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 2, Status: "complete"},
-				AttemptInfo{ID: "a2", Participant: "w", Phase: "author", Epoch: 2, Status: "in_progress"}),
+				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "a2", Participant: "w", Phase: "author", Epoch: 1, Status: "in_progress"}),
 			want: spin + " turn in progress: revision_dispatched, round 1/3 ●○○, ○ w, ○ r1, ○ r2, 42s",
 		},
 		{
 			name: "second round's reviews",
 			s: progressState("reviewers_dispatched", 1, authored,
-				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 2, Status: "complete"},
-				AttemptInfo{ID: "a2", Participant: "w", Phase: "author", Epoch: 2, Status: "complete"},
-				AttemptInfo{ID: "v3", Participant: "r1", Phase: "review", Epoch: 3, Status: "complete"}),
+				AttemptInfo{ID: "v1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "v2", Participant: "r2", Phase: "review", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "a2", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"},
+				AttemptInfo{ID: "v3", Participant: "r1", Phase: "review", Epoch: 2, Status: "complete"}),
 			want: spin + " turn in progress: reviewers_dispatched, round 1/3 ●○○, ✓ w, ✓ r1, ○ r2, 42s",
 		},
 		{
@@ -142,8 +143,13 @@ func TestChatViewShowsProgressMarks(t *testing.T) {
 	ti.ReviewerStates = map[string]string{"r1": "idle", "r2": "running"}
 	a.state.Turns["t1"] = ti
 	a.state.CurrentTurn = "t1"
-	a.state.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 2, Status: "complete"}
-	a.state.Attempts["v1"] = AttemptInfo{ID: "v1", TurnID: "t1", Participant: "r1", Phase: "review", Epoch: 3, Status: "complete"}
+	// The engine's epochs: the first candidate and its reviews at 1, the
+	// revision's author attempt at 1, and its candidate's reviews at 2.
+	a.state.Attempts["a0"] = AttemptInfo{ID: "a0", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"}
+	a.state.Attempts["v0"] = AttemptInfo{ID: "v0", TurnID: "t1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"}
+	a.state.Attempts["u0"] = AttemptInfo{ID: "u0", TurnID: "t1", Participant: "r2", Phase: "review", Epoch: 1, Status: "complete"}
+	a.state.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"}
+	a.state.Attempts["v1"] = AttemptInfo{ID: "v1", TurnID: "t1", Participant: "r1", Phase: "review", Epoch: 2, Status: "complete"}
 
 	spin := spinnerAt(chatNow)
 	lineOf(t, chatView(a), spin+" turn in progress: reviewers_dispatched, round 1/2 ●○, ✓ w, ✓ r1, "+spin+" r2, 5s")
@@ -156,4 +162,25 @@ func TestChatViewShowsProgressMarks(t *testing.T) {
 	if last, want := chatView(a)[23], fields+strings.Repeat(" ", 90-len(fields)-len(keyHint)-len(reviewsHint)-2)+reviewsHint+"  "+keyHint; last != want {
 		t.Errorf("status line at 90 = %q, want %q", last, want)
 	}
+}
+
+// TestChatViewMarksFirstRoundReviewDone: the engine reviews the first
+// candidate at its author attempt's epoch, so a reviewer finished at that same
+// epoch shows done, and one whose review has not begun shows queued.
+func TestChatViewMarksFirstRoundReviewDone(t *testing.T) {
+	a := chatApp(t)
+	addTurn(a, "t1", 1, "reviewers_dispatched", "running question", "")
+	ti := a.state.Turns["t1"]
+	ti.SubmittedAt = chatNow.Add(-5 * time.Second)
+	ti.Round, ti.MaxRounds = 0, 2
+	ti.Author, ti.AuthorState = "w", "idle"
+	ti.Reviewers = []string{"r1", "r2"}
+	ti.ReviewerStates = map[string]string{"r1": "idle", "r2": "idle"}
+	a.state.Turns["t1"] = ti
+	a.state.CurrentTurn = "t1"
+	a.state.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"}
+	a.state.Attempts["v1"] = AttemptInfo{ID: "v1", TurnID: "t1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"}
+
+	spin := spinnerAt(chatNow)
+	lineOf(t, chatView(a), spin+" turn in progress: reviewers_dispatched, round 0/2 ○○, ✓ w, ✓ r1, ○ r2, 5s")
 }
