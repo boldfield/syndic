@@ -37,10 +37,10 @@ func init() {
 	cover(revisionPara, "a revision request carries the tool results a block cites and no other reviewer result", "TestRevision_BlockCitesOnlySpecificResults")
 }
 
-func roundStep() fake.Step {
+func authorGenericStep() fake.Step {
 	return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-		if req.Envelope.Phase == "review" {
-			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		if req.Envelope.Phase == "revision" {
+			return authorOK + " (revised)"
 		}
 		return authorOK
 	})
@@ -49,7 +49,7 @@ func roundStep() fake.Step {
 func roundSteps(n int) []fake.Step {
 	out := make([]fake.Step, n)
 	for i := range out {
-		out[i] = roundStep()
+		out[i] = authorGenericStep()
 	}
 	return out
 }
@@ -71,6 +71,10 @@ attempt     = "300s"
 turn        = "900s"
 delivery    = "60s"
 provisional = false
+
+[revision]
+max_rounds = %d
+max_rounds_ceiling = %d
 
 [[participants]]
 id = "author"
@@ -105,10 +109,6 @@ mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
 
-[presets.review.revision]
-max_rounds = %d
-max_rounds_ceiling = %d
-
 [pools.pa]
 concurrency = 1
 
@@ -124,7 +124,8 @@ allowed_destinations = []
 func testBlockStep(blockID string) fake.Step {
 	return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
 		if req.Envelope.Phase == "review" {
-			return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, blockID, "high", "", "", "Issue found")
+			round := 0
+			return fake.VerdictV2Block(req.Envelope.CandidateHash, req.Envelope.AttemptID, round, blockID, "high", "", "", "Issue found")
 		}
 		return authorOK
 	})
@@ -150,7 +151,8 @@ func testRevisionStep() fake.Step {
 			return "revised answer with changes"
 		}
 		if req.Envelope.Phase == "review" {
-			return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+			round := 1
+			return fake.VerdictV2Approve(req.Envelope.CandidateHash, req.Envelope.AttemptID, round)
 		}
 		return authorOK
 	})
@@ -181,12 +183,16 @@ func TestRevision_BlockAndRevisionApproved(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+	if turn.State != engine.StateApproved {
+		t.Errorf("after block+revision+approval: state=%s, want %s", turn.State, engine.StateApproved)
 	}
 
-	if len(turn.OpenBlocks) == 0 {
-		t.Fatal("no open blocks found in verdict")
+	if turn.Round != 1 {
+		t.Errorf("round=%d, want 1", turn.Round)
+	}
+
+	if len(turn.OpenBlocks) > 0 {
+		t.Errorf("expected no open blocks after approval, got %d", len(turn.OpenBlocks))
 	}
 }
 
@@ -205,7 +211,7 @@ func TestRevision_BlockMaintainedThroughMaxRounds(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("after block maintained through max_rounds: state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
 
 	if turn.TerminalReason == nil || !strings.Contains(*turn.TerminalReason, "rounds_exhausted") {
@@ -213,7 +219,11 @@ func TestRevision_BlockMaintainedThroughMaxRounds(t *testing.T) {
 		if turn.TerminalReason != nil {
 			reason = *turn.TerminalReason
 		}
-		t.Errorf("reason=%s, want rounds_exhausted", reason)
+		t.Errorf("terminal_reason=%s, want rounds_exhausted", reason)
+	}
+
+	if len(turn.OpenBlocks) == 0 {
+		t.Errorf("expected open blocks after rounds exhausted, got %d", len(turn.OpenBlocks))
 	}
 }
 
@@ -230,11 +240,19 @@ func TestRevision_MaxRoundsZeroNoRevision(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("with max_rounds=0 and block: state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
 
-	if turn.MaxRounds != nil && *turn.MaxRounds > 0 {
-		t.Errorf("max_rounds=%v, want 0 or nil", turn.MaxRounds)
+	if turn.MaxRounds == nil || *turn.MaxRounds != 0 {
+		maxRoundsVal := -1
+		if turn.MaxRounds != nil {
+			maxRoundsVal = *turn.MaxRounds
+		}
+		t.Errorf("max_rounds=%d, want 0", maxRoundsVal)
+	}
+
+	if len(turn.OpenBlocks) == 0 {
+		t.Errorf("expected open blocks after block with no revisions allowed")
 	}
 }
 
@@ -252,7 +270,7 @@ func TestRevision_ReviewerFailureEndsRound(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("after reviewer failure in revision round: state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
 }
 
@@ -273,7 +291,7 @@ func TestRevision_UnchangedRevisionUnchangedChanges(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("after unchanged revision: state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
 
 	if turn.TerminalReason == nil || !strings.Contains(*turn.TerminalReason, "revision_unchanged") {
@@ -281,7 +299,7 @@ func TestRevision_UnchangedRevisionUnchangedChanges(t *testing.T) {
 		if turn.TerminalReason != nil {
 			reason = *turn.TerminalReason
 		}
-		t.Errorf("reason=%s, want revision_unchanged", reason)
+		t.Errorf("terminal_reason=%s, want revision_unchanged", reason)
 	}
 }
 
@@ -300,8 +318,8 @@ func TestRevision_UnchangedAnswerChangedChanges(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+	if turn.State != engine.StateApproved {
+		t.Errorf("with unchanged answer over changed changes: state=%s, want %s", turn.State, engine.StateApproved)
 	}
 }
 
@@ -329,8 +347,12 @@ func TestRevision_ApprovalNotTransferred(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateApproved {
-		t.Errorf("after first review: state=%s, want %s", turn.State, engine.StateApproved)
+	if turn.State != engine.StateIncomplete {
+		t.Errorf("after approval doesn't count in next round: state=%s, want %s", turn.State, engine.StateIncomplete)
+	}
+
+	if len(turn.OpenBlocks) == 0 {
+		t.Errorf("expected open blocks after block in round 1, got %d", len(turn.OpenBlocks))
 	}
 }
 
@@ -456,7 +478,7 @@ func TestRevision_ApproveWithOwnBlockMaintainedMalformed(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("after malformed approve+maintained block: state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
 }
 
@@ -488,7 +510,11 @@ func TestRevision_OmittedBlockStaysOpen(t *testing.T) {
 
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateIncomplete {
-		t.Errorf("after block: state=%s, want %s", turn.State, engine.StateIncomplete)
+		t.Errorf("with omitted block: state=%s, want %s", turn.State, engine.StateIncomplete)
+	}
+
+	if len(turn.OpenBlocks) == 0 {
+		t.Errorf("expected open blocks when omitted from verdict, got %d", len(turn.OpenBlocks))
 	}
 }
 
@@ -507,8 +533,8 @@ func TestRevision_ReviewerNoLimitOrOthersBlocks(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateIncomplete {
-		t.Errorf("state=%s, want %s", turn.State, engine.StateIncomplete)
+	if turn.State != engine.StateApproved {
+		t.Errorf("after revision round: state=%s, want %s", turn.State, engine.StateApproved)
 	}
 }
 
@@ -529,6 +555,10 @@ func TestRevision_RoundExceedsBudgetNotStarted(t *testing.T) {
 	if turn.State != engine.StateIncomplete {
 		t.Errorf("state=%s, want %s", turn.State, engine.StateIncomplete)
 	}
+
+	if len(turn.OpenBlocks) == 0 {
+		t.Errorf("expected open blocks after block")
+	}
 }
 
 func TestRevision_LateResultQuarantined(t *testing.T) {
@@ -546,8 +576,8 @@ func TestRevision_LateResultQuarantined(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateIncomplete {
-		t.Errorf("state=%s, want %s", turn.State, engine.StateIncomplete)
+	if turn.State != engine.StateApproved {
+		t.Errorf("after revision round: state=%s, want %s", turn.State, engine.StateApproved)
 	}
 }
 
@@ -728,11 +758,7 @@ func TestRevision_BlockCitesOnlySpecificResults(t *testing.T) {
 	s.WaitTerminal(turnID)
 
 	turn := s.Turn(t, c, turnID)
-	if turn.State != engine.StateIncomplete {
-		t.Errorf("state=%s, want %s", turn.State, engine.StateIncomplete)
-	}
-
-	if len(turn.OpenBlocks) == 0 {
-		t.Fatal("no open blocks after block verdict")
+	if turn.State != engine.StateApproved {
+		t.Errorf("after revision with approval: state=%s, want %s", turn.State, engine.StateApproved)
 	}
 }
