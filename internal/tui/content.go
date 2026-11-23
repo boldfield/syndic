@@ -14,6 +14,19 @@ type ContentCache struct {
 	pending map[string]bool
 }
 
+// SafeData returns the content as safe terminal text: control characters and
+// invalid UTF-8 are escaped. Ready and Err have the same meaning as Get.
+func (cc *ContentCache) SafeData(ref string) (data string, ready bool, err error) {
+	item := cc.Get(ref)
+	if !item.Ready {
+		return "", false, nil
+	}
+	if item.Err != nil {
+		return "", true, item.Err
+	}
+	return ToSafeText([]byte(item.Data)), true, nil
+}
+
 // ContentItem holds a fetched content body.
 type ContentItem struct {
 	Data  string // UTF-8 text

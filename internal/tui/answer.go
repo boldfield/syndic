@@ -84,6 +84,7 @@ func answerRefs(s State, turnID string, in answerInput) []string {
 }
 
 // body renders the text behind a ref: loading, a one-line error, or the text.
+// Untrusted content is escaped to prevent control characters from reaching the terminal.
 func body(cc *ContentCache, ref string) string {
 	item := cc.Get(ref)
 	switch {
@@ -92,7 +93,8 @@ func body(cc *ContentCache, ref string) string {
 	case !item.Ready:
 		return "loading…"
 	}
-	return strings.TrimRight(item.Data, "\n")
+	safeText := ToSafeText([]byte(item.Data))
+	return strings.TrimRight(safeText, "\n")
 }
 
 func firstLine(s string) string {

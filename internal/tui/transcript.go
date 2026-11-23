@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/mattn/go-runewidth"
@@ -156,6 +155,7 @@ func wrapHeader(parts []string, width int) []string {
 }
 
 // bodyText is the complete body of an item, or a note saying why there is none.
+// Untrusted content is escaped to prevent control characters from reaching the terminal.
 func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	if it.ByteLen == 0 {
 		if id, ok := strings.CutPrefix(it.Ref, "attempt:"); ok {
@@ -178,7 +178,7 @@ func bodyText(s State, in transcriptInput, it wire.TranscriptItem) string {
 	case c.Err != nil:
 		return "(could not load: " + c.Err.Error() + ")"
 	}
-	return c.Data
+	return ToSafeText([]byte(c.Data))
 }
 
 // transcriptRefs lists the bodies the tab wants fetched.
@@ -264,18 +264,20 @@ func blockRowLines(rows []blockRow, width int) []string {
 	for _, r := range rows {
 		out = append(out, wrapText(fmt.Sprintf("  block %s · severity %s · state %s", r.id, r.severity, r.state), width)...)
 		if r.evidence != "" {
-			out = append(out, wrapText("    evidence: "+r.evidence, width)...)
+			safeEvidence := ToSafeText([]byte(r.evidence))
+			out = append(out, wrapText("    evidence: "+safeEvidence, width)...)
 		}
 		if r.remedy != "" {
-			out = append(out, wrapText("    remedy: "+r.remedy, width)...)
+			safeRemedy := ToSafeText([]byte(r.remedy))
+			out = append(out, wrapText("    remedy: "+safeRemedy, width)...)
 		}
 	}
 	return out
 }
 
 // wrapText splits text into lines of at most width cells. Every rune is kept;
-// a line longer than width continues on the next row. Control characters are
-// shown as a dot so a body cannot drive the terminal.
+// a line longer than width continues on the next row. Text must be pre-escaped;
+// no control characters are expected in input.
 func wrapText(text string, width int) []string {
 	width = max(width, 1)
 	text = strings.ReplaceAll(text, "\r\n", "\n")
@@ -285,8 +287,8 @@ func wrapText(text string, width int) []string {
 		var cur strings.Builder
 		cells := 0
 		for _, r := range para {
-			switch {
-			case r == '\t':
+			switch r {
+			case '\t':
 				for i := 0; i < tabStop; i++ {
 					if cells == width {
 						out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
@@ -295,8 +297,6 @@ func wrapText(text string, width int) []string {
 					cells++
 				}
 				continue
-			case unicode.IsControl(r):
-				r = '·'
 			}
 			w := runewidth.RuneWidth(r)
 			if cells > 0 && cells+w > width {
