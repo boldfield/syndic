@@ -107,3 +107,16 @@ The operator accepted all six modules, and the transitive modules listed here, o
 - Glamour requires `github.com/charmbracelet/lipgloss@v1.1.1-0.20250404203927-76690c660834`, a pre-release version, which is an upgrade from the currently pinned `v1.1.0`.
 - Glamour upgrades `golang.org/x/mod` (`v0.28.0`), `golang.org/x/net` (`v0.44.0`), `golang.org/x/sync` (`v0.17.0`), `golang.org/x/text` (`v0.30.0`) and `golang.org/x/tools` (`v0.37.0`), and adds `golang.org/x/term@v0.36.0`. These are `golang.org/x` modules, not the standard library.
 - Glamour and x/tools bring in updates to `golang.org/x/crypto` and `golang.org/x/telemetry` via the module graph.
+
+## Pinned
+
+Committed versions of the six direct v6 TUI modules (2026-11-23):
+
+- `github.com/charmbracelet/bubbles`: `v1.0.0` (matches inventory)
+- `github.com/charmbracelet/glamour`: `v1.0.0` (matches inventory)
+- `github.com/charmbracelet/huh`: `v1.0.0` (matches inventory)
+- `github.com/charmbracelet/harmonica`: `v0.2.0` (matches inventory)
+- `github.com/charmbracelet/lipgloss`: `v1.1.1-0.20250404203927-76690c660834` (matches inventory, pre-release upgrade)
+- `github.com/lrstanley/bubblezone`: `v1.0.0` (matches inventory)
+
+All versions match the inventory documented above. The Lip Gloss upgrade from `v1.1.0` to the pre-release version `v1.1.1-0.20250404203927-76690c660834` is required by Glamour and poses no major version conflict.
