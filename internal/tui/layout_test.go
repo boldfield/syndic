@@ -9,7 +9,7 @@ func TestCalcBounds80x24(t *testing.T) {
 	// - Reserve 1 line for tab bar, 1 for status = 2
 	// - Reserve at least 1 for input, 2 for banners = 3
 	// - Leave remaining for content (at least 5)
-	b := calcBounds(24, 80)
+	b := calcBounds(24, 80, RegionState{})
 	if b.TabBar != 1 {
 		t.Errorf("TabBar = %d, want 1", b.TabBar)
 	}
@@ -48,7 +48,7 @@ func TestCalcBoundsBelow80x24(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w)
+			b := calcBounds(tc.h, tc.w, RegionState{})
 			if b.Drawer != 0 || b.List != 0 {
 				t.Errorf("At %dx%d: drawer=%d list=%d, want both 0", tc.w, tc.h, b.Drawer, b.List)
 			}
@@ -58,7 +58,7 @@ func TestCalcBoundsBelow80x24(t *testing.T) {
 
 func TestCalcBoundsSmallTerminal(t *testing.T) {
 	// Very small terminal (less than tab+status+1 line of content)
-	b := calcBounds(2, 40)
+	b := calcBounds(2, 40, RegionState{})
 	if b.TabBar+b.Status+b.Content > b.Height {
 		t.Errorf("At 40x2: total allocated = %d + %d + %d = %d, exceeds height %d",
 			b.TabBar, b.Status, b.Content, b.TabBar+b.Status+b.Content, b.Height)
@@ -68,7 +68,7 @@ func TestCalcBoundsSmallTerminal(t *testing.T) {
 func TestCalcBoundsLargeTerminal(t *testing.T) {
 	// At 30+ rows, drawer should be 9 lines (not applicable in D-07 since drawer
 	// is always closed, but we reserve the space calculation).
-	b := calcBounds(40, 120)
+	b := calcBounds(40, 120, RegionState{})
 	if b.TabBar != 1 || b.Status != 1 {
 		t.Errorf("At 120x40: TabBar=%d Status=%d, want 1 each", b.TabBar, b.Status)
 	}
@@ -121,7 +121,7 @@ func TestCalcScrollPosition(t *testing.T) {
 func TestCalcBounds80x24CrowdedLayout(t *testing.T) {
 	// Acceptance test: 80x24 crowded layout retains five chat lines and identity warning.
 	// This checks the specific constraint from the task.
-	b := calcBounds(24, 80)
+	b := calcBounds(24, 80, RegionState{})
 
 	// At 80x24:
 	// - Tab bar: 1 line
@@ -152,7 +152,7 @@ func TestInputRowsConstraint(t *testing.T) {
 	// This test verifies the bounds structure doesn't violate that.
 	for h := 10; h <= 50; h++ {
 		for w := 40; w <= 200; w += 20 {
-			b := calcBounds(h, w)
+			b := calcBounds(h, w, RegionState{})
 			if b.Input > 6 {
 				t.Errorf("At %dx%d: Input = %d, exceeds max 6", w, h, b.Input)
 			}
@@ -178,7 +178,7 @@ func TestBoundsAllocation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w)
+			b := calcBounds(tc.h, tc.w, RegionState{})
 
 			// Check drawer and list allocation
 			if b.Drawer != tc.expectDrawer {
@@ -272,7 +272,7 @@ func TestScrollPositionByTurns(t *testing.T) {
 // TestBoundsDefinesAllRegions verifies bounds allocation covers all regions.
 func TestBoundsDefinesAllRegions(t *testing.T) {
 	// At 80x24, verify all regions are properly allocated
-	b := calcBounds(24, 80)
+	b := calcBounds(24, 80, RegionState{})
 
 	// Verify all regions are non-negative
 	regions := map[string]int{
@@ -319,7 +319,7 @@ func TestAttachmentSeamReserved(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := calcBounds(tc.h, tc.w)
+			b := calcBounds(tc.h, tc.w, RegionState{})
 			if b.Attached != tc.shouldReserved {
 				t.Errorf("At %dx%d: Attached = %d, want %d", tc.w, tc.h, b.Attached, tc.shouldReserved)
 			}
@@ -330,7 +330,7 @@ func TestAttachmentSeamReserved(t *testing.T) {
 // TestBounds80x24CrowdedContent verifies content allocation at the crowded size.
 func TestBounds80x24CrowdedContent(t *testing.T) {
 	// At 80x24 crowded layout: must retain 5 chat lines minimum
-	b := calcBounds(24, 80)
+	b := calcBounds(24, 80, RegionState{})
 
 	// Verify the allocation satisfies crowded constraints:
 	// TabBar(1) + Content(≥5) + Attached(1) + Banners(2) + Input(1) + Status(1) = 24
@@ -363,7 +363,7 @@ func TestBounds80x24CrowdedContent(t *testing.T) {
 // TestBounds80x31Large verifies allocation at larger size.
 func TestBounds80x31Large(t *testing.T) {
 	// At 80x31, drawer should be 9 lines when closed in D-07
-	b := calcBounds(31, 80)
+	b := calcBounds(31, 80, RegionState{})
 
 	// Content must still be at least 5 lines
 	if b.Content < 5 {
@@ -384,7 +384,7 @@ func TestBounds80x31Large(t *testing.T) {
 // TestBounds79x24NoDrawer verifies no drawer/list below 80x24.
 func TestBounds79x24NoDrawer(t *testing.T) {
 	// Below 80 columns, drawer and lists do not open
-	b := calcBounds(24, 79)
+	b := calcBounds(24, 79, RegionState{})
 
 	if b.Drawer != 0 {
 		t.Errorf("At 79x24: Drawer = %d, want 0", b.Drawer)

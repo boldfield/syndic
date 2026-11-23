@@ -19,8 +19,8 @@ const (
 )
 
 // maxInputRows is the most lines the input shows; a longer input scrolls
-// within them, so the active tab keeps its room.
-const maxInputRows = 5
+// within them, so the active tab keeps its room. Per v6 spec, input is 1-6 lines.
+const maxInputRows = 6
 
 // newInput returns the input: plain, unstyled and multi-line. Enter is the
 // App's (submit); Alt+Enter inserts a newline.
