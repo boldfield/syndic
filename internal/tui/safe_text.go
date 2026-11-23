@@ -3,8 +3,9 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // bidiChars are Unicode bidirectional override and isolate characters that must be escaped.
@@ -35,7 +36,7 @@ func ToSafeText(data []byte) string {
 	for len(data) > 0 {
 		r, size := utf8.DecodeRune(data)
 
-		if r == utf8.RuneError {
+		if r == utf8.RuneError && size == 1 {
 			// Invalid UTF-8: escape the first byte as \xNN
 			fmt.Fprintf(&out, "\\x%02x", data[0])
 			col += 4
@@ -84,8 +85,7 @@ func ToSafeText(data []byte) string {
 		default:
 			// Regular character
 			out.WriteRune(r)
-			// Update column width based on character width
-			w := runeWidth(r)
+			w := runewidth.RuneWidth(r)
 			if w > 0 {
 				col += w
 			}
@@ -93,19 +93,6 @@ func ToSafeText(data []byte) string {
 	}
 
 	return out.String()
-}
-
-// runeWidth returns the display width of a rune.
-// This is a simple version; for full support we'd use go-runewidth.
-func runeWidth(r rune) int {
-	if r < 0x20 || r == 0x7F {
-		return 0
-	}
-	if unicode.IsControl(r) {
-		return 0
-	}
-	// For now, assume most characters are 1 wide; wide characters would need external library
-	return 1
 }
 
 // SafeTextWithPrefix wraps text to width and prefixes each line with two spaces.
@@ -136,9 +123,10 @@ func SafeTextWithPrefix(text string, width int) []string {
 	return out
 }
 
-// wrapParagraph wraps a single paragraph to width cells, handling tabs.
+// wrapParagraph wraps a single paragraph to width cells using runewidth for correct cell counting.
 // The width is the available width for content (before prefix is added).
-func wrapParagraph(para string, width int, tabStop int) []string {
+// ToSafeText has already expanded tabs, so we don't handle tabs here.
+func wrapParagraph(para string, width int, _ int) []string {
 	const minWidth = 1
 	if width < minWidth {
 		width = minWidth
@@ -149,31 +137,19 @@ func wrapParagraph(para string, width int, tabStop int) []string {
 	col := 0
 
 	for _, r := range para {
-		switch r {
-		case '\t':
-			// Expand tab to next multiple of tabStop
-			spacesToAdd := tabStop - (col % tabStop)
-			for i := 0; i < spacesToAdd; i++ {
-				if col >= width {
-					lines = append(lines, cur.String())
-					cur.Reset()
-					col = 0
-				}
-				cur.WriteRune(' ')
-				col++
-			}
-
-		default:
-			w := 1 // Assume single-width rune
-			if col > 0 && col+w > width {
-				// Need to wrap
-				lines = append(lines, cur.String())
-				cur.Reset()
-				col = 0
-			}
-			cur.WriteRune(r)
-			col += w
+		w := runewidth.RuneWidth(r)
+		if w < 0 {
+			w = 0
 		}
+
+		if col > 0 && col+w > width {
+			// Need to wrap before this rune
+			lines = append(lines, cur.String())
+			cur.Reset()
+			col = 0
+		}
+		cur.WriteRune(r)
+		col += w
 	}
 
 	if cur.Len() > 0 {

@@ -2,7 +2,10 @@ package tui
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/mattn/go-runewidth"
 )
 
 func TestToSafeText_C0Controls(t *testing.T) {
@@ -194,9 +197,24 @@ func TestToSafeText_AdversarialCases(t *testing.T) {
 			contains: []string{"file", "\\x00", "name", "\\x1f", "txt"},
 		},
 		{
-			name:     "event details with C1",
-			data:     []byte("Error: \x80\x81\x9f"),
-			contains: []string{"Error", "\\x80", "\\x81", "\\x9f"},
+			name:     "OSC hyperlink escape",
+			data:     []byte("text\x1b]8;;https://example.com\x1b\\link"),
+			contains: []string{"\\x1b", "text", "link"},
+		},
+		{
+			name:     "cursor movement escape",
+			data:     []byte("before\x1b[2Jafter"),
+			contains: []string{"\\x1b", "before", "after"},
+		},
+		{
+			name:     "user text with CR",
+			data:     []byte("line1\rline2"),
+			contains: []string{"line1", "\\x0d", "line2"},
+		},
+		{
+			name:     "attachment-like binary bytes",
+			data:     []byte("data\x00\x01\x02\x03end"),
+			contains: []string{"data", "\\x00", "\\x01", "\\x02", "\\x03", "end"},
 		},
 	}
 
@@ -206,6 +224,156 @@ func TestToSafeText_AdversarialCases(t *testing.T) {
 			for _, substr := range tt.contains {
 				if !bytes.Contains([]byte(got), []byte(substr)) {
 					t.Errorf("ToSafeText(%q) = %q, missing substring %q", tt.data, got, substr)
+				}
+			}
+		})
+	}
+}
+
+func TestToSafeText_NoRawControls(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			name: "model output with escape sequence",
+			data: []byte("Red text: \x1b[31mHello\x1b[0m"),
+		},
+		{
+			name: "cursor movement",
+			data: []byte("Position: \x1b[2J\x1b[H"),
+		},
+		{
+			name: "C1 controls",
+			data: []byte("Error: \x80\x85\x9f"),
+		},
+		{
+			name: "CR and LF",
+			data: []byte("line1\r\nline2"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ToSafeText(tt.data)
+
+			// Verify no raw terminal control bytes
+			dangerousBytes := []byte{0x1b, 0x07, 0x0d}
+			for _, b := range dangerousBytes {
+				if bytes.Contains([]byte(got), []byte{b}) {
+					t.Errorf("ToSafeText output contains raw control byte 0x%02x: %q", b, got)
+				}
+			}
+
+			// Verify no C1 controls
+			for b := 0x80; b <= 0x9f; b++ {
+				if bytes.Contains([]byte(got), []byte{byte(b)}) {
+					t.Errorf("ToSafeText output contains raw C1 byte 0x%02x: %q", b, got)
+				}
+			}
+		})
+	}
+}
+
+func TestToSafeText_ValidUTF8Replacement(t *testing.T) {
+	// Test that valid U+FFFD is preserved, not escaped
+	validReplacementChar := string(rune(0xFFFD))
+	data := []byte("before" + validReplacementChar + "after")
+	got := ToSafeText(data)
+
+	// Should contain the actual replacement character, not escaped bytes
+	if !strings.Contains(got, validReplacementChar) {
+		t.Errorf("ToSafeText corrupted valid U+FFFD: got %q", got)
+	}
+	if strings.Contains(got, "\\xef\\xbf\\xbd") {
+		t.Errorf("ToSafeText escaped valid U+FFFD as bytes: got %q", got)
+	}
+}
+
+func TestSafeTextWithPrefix_WidthCompliance(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		width int
+	}{
+		{
+			name:  "ASCII text",
+			text:  "Hello, World!",
+			width: 10,
+		},
+		{
+			name:  "Wide CJK characters",
+			text:  "日本語日本語日本語",
+			width: 10,
+		},
+		{
+			name:  "Emoji",
+			text:  "👨👩👧👦👨👩👧👦",
+			width: 10,
+		},
+		{
+			name:  "Mixed ASCII and wide",
+			text:  "Hello 世界 test",
+			width: 15,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SafeTextWithPrefix(tt.text, tt.width)
+
+			for i, line := range got {
+				// Check prefix exists
+				if !strings.HasPrefix(line, "  ") {
+					t.Errorf("Line %d missing two-space prefix: %q", i, line)
+				}
+
+				// Check width compliance
+				content := strings.TrimPrefix(line, "  ")
+				cellWidth := runewidth.StringWidth(content)
+				if cellWidth > tt.width {
+					t.Errorf("Line %d exceeds width %d (got %d cells): %q", i, tt.width, cellWidth, line)
+				}
+			}
+		})
+	}
+}
+
+func TestSafeTextWithPrefix_AllLinesHavePrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		width int
+	}{
+		{
+			name:  "single line",
+			text:  "hello",
+			width: 20,
+		},
+		{
+			name:  "multi-line",
+			text:  "line1\nline2\nline3",
+			width: 20,
+		},
+		{
+			name:  "long text that wraps",
+			text:  "This is a very long text that should wrap to multiple lines when formatted",
+			width: 15,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SafeTextWithPrefix(tt.text, tt.width)
+
+			if len(got) == 0 {
+				t.Errorf("SafeTextWithPrefix returned empty result for %q", tt.text)
+				return
+			}
+
+			for i, line := range got {
+				if !strings.HasPrefix(line, "  ") {
+					t.Errorf("Line %d (of %d) missing prefix: %q", i, len(got), line)
 				}
 			}
 		})

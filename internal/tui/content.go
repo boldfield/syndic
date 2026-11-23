@@ -88,3 +88,10 @@ func fetchRefs(ctx context.Context, cl *client.Client, cc *ContentCache, refs []
 	}
 	return cmds
 }
+
+// WrapContentLines wraps safe text to width and prefixes every terminal line with two spaces.
+// It applies the content-line indentation requirement: the prefix is applied last, to each
+// terminal line, so no content can place a character in column 0 or 1.
+func WrapContentLines(text string, width int) []string {
+	return SafeTextWithPrefix(text, width)
+}
