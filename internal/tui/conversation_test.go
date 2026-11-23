@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -57,11 +58,16 @@ func header(d *driver) string {
 	lines := strings.Split(d.app.View(), "\n")
 	for i, l := range lines {
 		if strings.HasPrefix(l, "[") && i+1 < len(lines) {
-			return lines[i+1]
+			return stripScrollInfo(lines[i+1])
 		}
 	}
 	return ""
 }
+
+var scrollInfoRE = regexp.MustCompile(`\s+\d+ earlier · \d+%$`)
+
+// stripScrollInfo drops the scroll position at the right of a chat header.
+func stripScrollInfo(line string) string { return scrollInfoRE.ReplaceAllString(line, "") }
 
 func TestChatHeaderNamesTheOpenConversation(t *testing.T) {
 	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}), WithWorkDir("/ws/x"))

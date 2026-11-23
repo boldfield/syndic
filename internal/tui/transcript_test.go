@@ -423,9 +423,10 @@ func TestTranscriptViewFollowsWhileAtTheBottom(t *testing.T) {
 	}
 	// Moving up leaves the bottom: later items no longer move the view.
 	a.Update(tea.KeyMsg{Type: tea.KeyUp})
-	held := a.View()
+	body := func() string { return strings.SplitN(a.View(), "\n", 2)[1] } // below the tab bar's percentage
+	held := body()
 	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 80)})
-	if a.View() != held {
+	if body() != held {
 		t.Fatal("the view moved after scrolling up from the bottom")
 	}
 }

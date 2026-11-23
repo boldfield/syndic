@@ -101,10 +101,18 @@ func renderChat(s State, in chatInput) string {
 
 // chatLines is renderChat by line, with the index of the newest turn's first line.
 func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
+	lines, lastTurn, _ = chatLinesWithStarts(s, in)
+	return lines, lastTurn
+}
+
+// chatLinesWithStarts is chatLines with the index of each turn's first line,
+// oldest first, so a view can count the turns above it.
+func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, starts []int) {
 	ids := chatTurns(s)
 	trimmed := trimmedTurns(s, ids)
 	for _, id := range ids {
 		lastTurn = len(lines)
+		starts = append(starts, lastTurn)
 		ai := in.answer(id)
 		var turn []string
 		text, ok := in.inputs[id]
@@ -140,5 +148,5 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 		}
 		lines = append(lines, turn...)
 	}
-	return lines, lastTurn
+	return lines, lastTurn, starts
 }

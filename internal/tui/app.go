@@ -32,10 +32,6 @@ const (
 	stripHeight  = 1
 )
 
-// inputHeight is the bottom region at its smallest: a refusal line and one
-// input line. A multi-line input takes more; see inputRows.
-const inputHeight = 2
-
 // App is the root Bubble Tea model. All of its state changes in Update; the
 // commands it starts only carry results back as messages.
 type App struct {
@@ -77,6 +73,7 @@ type App struct {
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
+	want                 regionWant                  // optional regions the layout reserves lines for; none in milestone D
 	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
 	rawMode              bool                        // /raw on|off; true disables Markdown rendering
 
@@ -374,7 +371,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
+// update handles one message, then sets the input viewport the layout now
+// gives it: View only reads the model.
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	w := a.input.Width()
+	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -787,6 +788,33 @@ func (a *App) conversationHeader() string {
 	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, safeLine(a.workDir))
 }
 
+// withScrollInfo returns text with info flush against the right edge of a
+// line w cells wide, or text alone when both do not fit: scroll info never
+// costs the text a character.
+func withScrollInfo(text string, w int, info string) string {
+	gap := w - ansi.StringWidth(text) - ansi.StringWidth(info)
+	if gap < 1 && text != "" {
+		return text
+	}
+	return text + strings.Repeat(" ", max(gap, 0)) + info
+}
+
+// turnsAbove is how many turns lie wholly above line first, given the line
+// each turn starts at and the total number of lines.
+func turnsAbove(starts []int, total, first int) int {
+	n := 0
+	for i := range starts {
+		end := total
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		if end <= first {
+			n++
+		}
+	}
+	return n
+}
+
 // shortID is the first eight characters of an id.
 func shortID(id string) string {
 	if len(id) > 8 {
@@ -1075,21 +1103,23 @@ func (a *App) quit() tea.Cmd {
 	return tea.Quit
 }
 
-// bodyHeight is the number of lines left for the active tab: what the tab
-// bar, the banners, the input and the status line leave.
-func (a *App) bodyHeight() int {
-	banners := renderBanners(a.state)
-	banners = capBannersForHeight(banners, a.height, 5)
-	return max(a.height-len(banners)-tabBarHeight-stripHeight-inputHeight-(a.inputRows()-1), 0)
+// layout allocates the screen's lines to its regions; see allocate.
+func (a *App) layout() heights {
+	return allocate(layoutIn{
+		Height:     a.height,
+		Width:      a.width,
+		Banners:    len(renderBanners(a.state)),
+		InputLines: inputLines(a.input),
+		Want:       a.want,
+	})
 }
 
-// inputRows is how many lines the input shows: one per line of its text, up
-// to maxInputRows, and never so many that the active tab gets fewer than five.
-func (a *App) inputRows() int {
-	banners := capBannersForHeight(renderBanners(a.state), a.height, 5)
-	room := a.height - len(banners) - tabBarHeight - stripHeight - inputHeight - 5
-	return 1 + min(inputLines(a.input)-1, maxInputRows-1, max(room, 0))
-}
+// bodyHeight is the number of lines left for the active tab.
+func (a *App) bodyHeight() int { return a.layout().Body }
+
+// inputRows is how many lines the input viewport shows, 1 to maxInputViewport;
+// a longer text scrolls inside it.
+func (a *App) inputRows() int { return a.layout().Input }
 
 // panelLines is the panel as shown, wrapped to the width.
 func (a *App) panelLines() []string { return strings.Split(renderPanel(a.panel, a.width), "\n") }
@@ -1162,23 +1192,23 @@ func (a *App) View() string {
 		return ansi.Truncate(msg, w, "")
 	}
 
-	// Banners are limited to leave at least 5 lines for the tab area
-	banners := renderBanners(a.state)
-	banners = capBannersForHeight(banners, a.height, 5)
+	hs := a.layout()
+	banners := foldBanners(renderBanners(a.state), hs.Banners)
 
 	// Clip all banners to width
 	for i, banner := range banners {
 		banners[i] = ansi.Truncate(banner, w, "")
 	}
 
-	bodyHeight := a.bodyHeight()
+	bodyHeight := hs.Body
 
 	var tabView string
 	lastTurn := 0
+	var turnStarts []int
 	switch a.tab {
 	case tabChat:
 		var chat []string
-		chat, lastTurn = chatLines(a.state, a.chatIn())
+		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
 		tabView = strings.Join(chat, "\n")
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
@@ -1204,13 +1234,18 @@ func (a *App) View() string {
 	}
 
 	if a.tab == tabChat && len(a.panel) == 0 {
+		answerHeight := max(bodyHeight-1, 0)
 		start := a.chatStart(len(lines), lastTurn)
+		total := len(lines)
 		lines = lines[start:]
-		for len(lines) < a.answerHeight() {
+		for len(lines) < answerHeight {
 			lines = append(lines, "")
 		}
-		// The first line of the chat names the open conversation.
-		lines = append([]string{a.conversationHeader()}, lines[:a.answerHeight()]...)
+		// The first line of the chat names the open conversation, and at its
+		// right how many turns are above the view and where the view stands.
+		header := a.conversationHeader()
+		lines = append([]string{withScrollInfo(header, w, fmt.Sprintf("%d earlier · %d%%",
+			turnsAbove(turnStarts, total, start), scrollPercent(total, answerHeight, start)))}, lines[:answerHeight]...)
 	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
@@ -1223,17 +1258,27 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, a.inputRows())
+	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")
 	}
 	inputLines = strings.Join(inputLinesList, "\n")
 
-	// Build output: tab bar, tab, banners, input, status line.
-	output := []string{ansi.Truncate(a.tabBar(), w, "")}
+	// Build output: tab bar, tab, banners, the drawer or list, the attached
+	// line, short help, input, status line. The optional regions' lines are
+	// reserved here and filled by the tasks that own them.
+	tabBar := a.tabBar()
+	if a.tab == tabTranscript {
+		// The transcript shows where its view stands at the tab bar's right.
+		tabBar = withScrollInfo(tabBar, w, fmt.Sprintf("%d%%", scrollPercent(len(a.tLines), bodyHeight, a.tRow)))
+	}
+	output := []string{ansi.Truncate(tabBar, w, "")}
 	output = append(output, lines...)
 	output = append(output, banners...)
+	for range hs.Drawer + hs.List + hs.Attached + hs.Help {
+		output = append(output, "")
+	}
 	output = append(output, inputLines)
 	output = append(output, a.statusLine(w))
 	return strings.Join(output, "\n")

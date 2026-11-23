@@ -236,13 +236,13 @@ func TestIdentityBannerSurvivesHeightPressure(t *testing.T) {
 	if len(all) != 5 || !strings.HasPrefix(all[0], "identity: unknown(name-matched)") {
 		t.Fatalf("banners = %q", all)
 	}
-	for _, h := range []int{24, 30, 40} {
-		got := capBannersForHeight(all, h, 5)
-		if len(got) == 0 || got[0] != all[0] {
-			t.Errorf("height %d: identity banner not first among %q", h, got)
+	for _, lines := range []int{1, 2} {
+		got := foldBanners(all, lines)
+		if len(got) == 0 || !strings.HasPrefix(got[0], all[0]) {
+			t.Errorf("%d lines: identity banner not first among %q", lines, got)
 		}
-		if len(got) < len(all) && got[len(got)-1] != fmt.Sprintf("+%d more", len(all)-1) {
-			t.Errorf("height %d: banners = %q", h, got)
+		if last := got[len(got)-1]; !strings.HasSuffix(last, fmt.Sprintf("+%d more", len(all)-1)) {
+			t.Errorf("%d lines: banners = %q", lines, got)
 		}
 	}
 }

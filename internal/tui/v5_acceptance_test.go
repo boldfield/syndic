@@ -47,7 +47,7 @@ func TestV5ChatFirstLineNamesTheConversation(t *testing.T) {
 	} {
 		a := convApp(t, "0123456789abcdef", tc.turns)
 		lines := strings.Split(a.View(), "\n")
-		if len(lines) < 2 || lines[1] != tc.want {
+		if len(lines) < 2 || stripScrollInfo(lines[1]) != tc.want {
 			t.Errorf("%d turns: first line of the chat = %q, want %q\n%s", len(tc.turns), lines[1], tc.want, a.View())
 		}
 	}

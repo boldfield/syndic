@@ -280,7 +280,7 @@ func TestRegionsAndTabs(t *testing.T) {
 	if len(lines) != 24 {
 		t.Fatalf("view has %d lines, want 24", len(lines))
 	}
-	if lines[0] != "chat  [transcript]  participants" {
+	if !strings.HasPrefix(lines[0], "chat  [transcript]  participants") || !strings.HasSuffix(lines[0], "100%") {
 		t.Errorf("tab bar = %q", lines[0])
 	}
 	if !strings.Contains(lines[1], "no turn yet") {
@@ -578,43 +578,27 @@ func TestClipToWidth(t *testing.T) {
 	}
 }
 
-// TestBannerCappingAt80x24 verifies that the +N more marker appears at 80x24 with 4 banners.
-func TestBannerCappingAt80x24(t *testing.T) {
+// TestFoldBanners verifies the two-line cap: the first banner shows, and the
+// last shown line ends "+N more" when more apply than fit.
+func TestFoldBanners(t *testing.T) {
 	banners := []string{"deadline: provisional", "roster file changed", "engine: reconnecting", "quick: unapproved profile"}
 
-	result := capBannersForHeight(banners, 24, 5)
-
-	if len(result) != 2 {
-		t.Fatalf("capBannersForHeight at 80×24 with 4 banners: got %d results, want 2 (first + marker)", len(result))
+	got := foldBanners(banners, 2)
+	if len(got) != 2 || got[0] != banners[0] || got[1] != "+3 more" {
+		t.Errorf("two lines, four banners: %q", got)
 	}
-
-	if result[0] != banners[0] {
-		t.Errorf("first banner: got %q, want %q", result[0], banners[0])
+	got = foldBanners(banners, 1)
+	if len(got) != 1 || got[0] != banners[0]+" +3 more" {
+		t.Errorf("one line, four banners: %q", got)
 	}
-
-	if !strings.Contains(result[1], "+3 more") {
-		t.Errorf("marker: got %q, want to contain '+3 more'", result[1])
+	if got := foldBanners(banners[:2], 2); len(got) != 2 || got[1] != banners[1] {
+		t.Errorf("two banners in two lines: %q", got)
+	}
+	if got := foldBanners(banners, 0); len(got) != 0 {
+		t.Errorf("no lines: %q", got)
 	}
 }
 
-// TestBannerCappingWithSpace verifies that all banners fit at larger heights.
-func TestBannerCappingWithSpace(t *testing.T) {
-	banners := []string{"deadline: provisional", "roster file changed", "engine: reconnecting", "quick: unapproved profile"}
-
-	result := capBannersForHeight(banners, 40, 5)
-
-	if len(result) != 4 {
-		t.Fatalf("capBannersForHeight at 80×40 with 4 banners: got %d results, want 4 (all banners)", len(result))
-	}
-
-	for i, want := range banners {
-		if result[i] != want {
-			t.Errorf("banner %d: got %q, want %q", i, result[i], want)
-		}
-	}
-}
-
-// TestPlainTerminalDetection verifies TERM=dumb detection and plain mode activation.
 func TestPlainTerminalDetection(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 	caps := DetectTerminalCapabilities()

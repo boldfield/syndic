@@ -20,7 +20,7 @@ const (
 
 // maxInputRows is the most lines the input shows; a longer input scrolls
 // within them, so the active tab keeps its room.
-const maxInputRows = 5
+const maxInputRows = maxInputViewport
 
 // newInput returns the input: plain, unstyled and multi-line. Enter is the
 // App's (submit); Alt+Enter inserts a newline.
@@ -49,6 +49,28 @@ func setInputPrompt(in *textarea.Model, prompt string, width int) {
 		return pad
 	})
 	in.SetWidth(max(width, 1))
+}
+
+// fitInput sets the input's viewport to rows lines. When that changes it, the
+// input is laid out again from its first line and scrolled to its cursor, so
+// the top of the text is not left scrolled out by the old height and the
+// cursor line stays in view however few lines the layout gives it. refit
+// does the same when only the width changed, as the text rewraps. It runs in
+// Update, never View.
+func fitInput(in *textarea.Model, rows int, refit bool) {
+	rows = max(rows, 1)
+	if in.Height() == rows && !refit {
+		return
+	}
+	row, li := in.Line(), in.LineInfo()
+	in.SetHeight(rows)
+	in.SetValue(in.Value())
+	for in.Line() > row {
+		in.CursorUp()
+	}
+	in.SetCursor(li.StartColumn + li.ColumnOffset)
+	_ = in.View()
+	*in, _ = in.Update(nil)
 }
 
 // inputLines is how many screen lines the input's text takes at its width,
@@ -114,7 +136,11 @@ func normalizePaste(runes []rune) string {
 func renderInput(in textarea.Model, refusal string, width, rows int) string {
 	clip := lipgloss.NewStyle().MaxWidth(max(width, 1))
 	lines := strings.Split(in.View(), "\n")
-	lines = lines[:min(max(rows, 1), len(lines))]
+	rows = max(rows, 1)
+	lines = lines[:min(rows, len(lines))]
+	for len(lines) < rows {
+		lines = append(lines, "")
+	}
 	for i, l := range lines {
 		lines[i] = clip.Render(l)
 	}
