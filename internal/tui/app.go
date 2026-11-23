@@ -789,7 +789,7 @@ func (a *App) conversationHeader() string {
 
 // conversationHeaderWithScroll formats the conversation header with scroll position info.
 // It appends the count of earlier turns and scroll percentage to the right edge,
-// only if there is room without truncating the header significantly.
+// only if there is room without truncating the header.
 func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answerHeight int, startLine int, turnMap *TurnLineMap) string {
 	header := a.conversationHeader()
 
@@ -803,20 +803,16 @@ func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answ
 	// Format scroll info: "N earlier · X%"
 	scrollStr := fmt.Sprintf("%d earlier · %d%%", scroll.Above, scroll.Percentage)
 
-	// Only append scroll info if the full header fits with scroll info and buffer.
-	// Otherwise, just show the header without scroll info to avoid excessive truncation.
+	// Only append scroll info if the full header fits with scroll info, without truncating.
+	// Avoid truncating the workspace path.
 	fullResult := header + " " + scrollStr
 	if ansi.StringWidth(fullResult) <= headerWidth {
 		return fullResult
 	}
 
-	// If not enough room, try to fit header + scroll with minimal truncation.
-	// Leave room for scroll info plus a space and one character of buffer.
-	minHeaderRoom := max(1, headerWidth-ansi.StringWidth(scrollStr)-2)
-	headerClipped := ansi.Truncate(header, minHeaderRoom, "")
-	result := headerClipped + " " + scrollStr
-
-	return ansi.Truncate(result, headerWidth, "")
+	// If not enough room, return just the header without scroll info.
+	// Keep the workspace path intact rather than truncating for scroll text.
+	return ansi.Truncate(header, headerWidth, "")
 }
 
 // shortID is the first eight characters of an id.
@@ -1276,6 +1272,9 @@ func (a *App) View() string {
 	inputLines = strings.Join(inputLinesList, "\n")
 
 	// Build output: tab bar, tab, banners, input, status line.
+	// Note: bounds reserves 1 line for attachments (Attached seam),
+	// but in D-07 attachments are not yet implemented, so the line is not rendered.
+	// When attachments are implemented in D-08+, this will render the attachment line.
 	output := []string{ansi.Truncate(a.tabBar(), w, "")}
 	output = append(output, lines...)
 	output = append(output, banners...)

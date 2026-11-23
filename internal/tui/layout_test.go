@@ -170,10 +170,10 @@ func TestBoundsAllocation(t *testing.T) {
 		expectList      int
 		expectShortHelp int
 	}{
-		{80, 24, "80x24 crowded", 5, 0, 0, 0},
-		{80, 31, "80x31 large", 5, 0, 0, 0},
-		{79, 24, "79x24 too narrow", 0, 0, 0, 0},
-		{80, 23, "80x23 too short", 0, 0, 0, 0},
+		{24, 80, "80x24 crowded", 5, 0, 0, 0},
+		{31, 80, "80x31 large", 5, 0, 0, 0},
+		{24, 79, "79x24 too narrow", 0, 0, 0, 0},
+		{23, 80, "80x23 too short", 0, 0, 0, 0},
 	}
 
 	for _, tc := range testCases {
@@ -301,5 +301,98 @@ func TestBoundsDefinesAllRegions(t *testing.T) {
 	// Content should be at least 5 lines at 80x24
 	if b.Content < 5 {
 		t.Errorf("Content = %d, want at least 5 at 80x24", b.Content)
+	}
+}
+
+// TestAttachmentSeamReserved verifies that the attachment seam is reserved at 80x24+.
+func TestAttachmentSeamReserved(t *testing.T) {
+	testCases := []struct {
+		h, w           int
+		name           string
+		shouldReserved int
+	}{
+		{24, 80, "80x24", 1},
+		{31, 80, "80x31", 1},
+		{24, 79, "79x24 no seam", 0},
+		{23, 80, "80x23 no seam", 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := calcBounds(tc.h, tc.w)
+			if b.Attached != tc.shouldReserved {
+				t.Errorf("At %dx%d: Attached = %d, want %d", tc.w, tc.h, b.Attached, tc.shouldReserved)
+			}
+		})
+	}
+}
+
+// TestBounds80x24CrowdedContent verifies content allocation at the crowded size.
+func TestBounds80x24CrowdedContent(t *testing.T) {
+	// At 80x24 crowded layout: must retain 5 chat lines minimum
+	b := calcBounds(24, 80)
+
+	// Verify the allocation satisfies crowded constraints:
+	// TabBar(1) + Content(≥5) + Attached(1) + Banners(2) + Input(1) + Status(1) = 24
+	minTotal := b.TabBar + 5 + b.Attached + b.Banners + b.Input + b.Status
+	if minTotal > b.Height {
+		t.Errorf("At 80x24: minimum allocation %d exceeds height %d", minTotal, b.Height)
+	}
+
+	// Content must be at least 5 lines
+	if b.Content < 5 {
+		t.Errorf("At 80x24: Content = %d, want >= 5", b.Content)
+	}
+
+	// Attachment seam must be 1 line
+	if b.Attached != 1 {
+		t.Errorf("At 80x24: Attached = %d, want 1", b.Attached)
+	}
+
+	// Banners at most 2 lines
+	if b.Banners != 2 {
+		t.Errorf("At 80x24: Banners = %d, want 2", b.Banners)
+	}
+
+	// Input 1-6 lines
+	if b.Input < 1 || b.Input > 6 {
+		t.Errorf("At 80x24: Input = %d, want 1-6", b.Input)
+	}
+}
+
+// TestBounds80x31Large verifies allocation at larger size.
+func TestBounds80x31Large(t *testing.T) {
+	// At 80x31, drawer should be 9 lines when closed in D-07
+	b := calcBounds(31, 80)
+
+	// Content must still be at least 5 lines
+	if b.Content < 5 {
+		t.Errorf("At 80x31: Content = %d, want >= 5", b.Content)
+	}
+
+	// Drawer should still be 0 in D-07 (closed)
+	if b.Drawer != 0 {
+		t.Errorf("At 80x31: Drawer = %d, want 0 (closed in D-07)", b.Drawer)
+	}
+
+	// Attachment seam must be 1 line
+	if b.Attached != 1 {
+		t.Errorf("At 80x31: Attached = %d, want 1", b.Attached)
+	}
+}
+
+// TestBounds79x24NoDrawer verifies no drawer/list below 80x24.
+func TestBounds79x24NoDrawer(t *testing.T) {
+	// Below 80 columns, drawer and lists do not open
+	b := calcBounds(24, 79)
+
+	if b.Drawer != 0 {
+		t.Errorf("At 79x24: Drawer = %d, want 0", b.Drawer)
+	}
+	if b.List != 0 {
+		t.Errorf("At 79x24: List = %d, want 0", b.List)
+	}
+	if b.Attached != 0 {
+		t.Errorf("At 79x24: Attached = %d, want 0 (no features below 80x24)", b.Attached)
 	}
 }

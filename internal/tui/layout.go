@@ -47,8 +47,8 @@ func calcBounds(height, width int) Bounds {
 	remaining -= b.Banners
 
 	// Attached line: 1 line reserved for file attachments (D-07 reserved, no attachments yet)
-	b.Attached = 0 // No attachments in D-07, but seam is reserved for future tasks
-	// remaining -= b.Attached (not consumed yet, available for content)
+	b.Attached = 1
+	remaining -= b.Attached
 
 	// Drawer and lists are mutually exclusive. They are shown only when there's
 	// room for both them and minimum content (5 lines).
