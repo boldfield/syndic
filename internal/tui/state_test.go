@@ -377,9 +377,9 @@ func TestApplyPureOnParticipantState(t *testing.T) {
 	}
 }
 
-// TestRenderStripWithReviewersInOrder verifies reviewers are shown in order,
+// TestProgressLineWithReviewersInOrder verifies reviewers are shown in order,
 // not random map iteration.
-func TestRenderStripWithReviewersInOrder(t *testing.T) {
+func TestProgressLineWithReviewersInOrder(t *testing.T) {
 	s := NewState()
 	s.Status = &wire.StatusReply{DefaultPreset: "review"}
 	s.CurrentTurn = "turn-1"
@@ -397,8 +397,9 @@ func TestRenderStripWithReviewersInOrder(t *testing.T) {
 		},
 	}
 
-	strip := renderStrip(s, 200, testTime)
-	if !contains(strip, "r1 queued") || !contains(strip, "r2 running") || !contains(strip, "r3 idle") {
+	strip := progressLine(s, "turn-1", testTime)
+	spin := spinnerAt(testTime)
+	if !contains(strip, "○ r1") || !contains(strip, spin+" r2") || !contains(strip, "○ r3") {
 		t.Errorf("strip = %s", strip)
 	}
 	// Verify order: r1 should come before r2 should come before r3
@@ -427,13 +428,13 @@ func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 		},
 	}
 
-	strip := renderStrip(s, 80, testTime)
+	strip := renderStrip(s, 15, testTime)
 	displayWidth := runewidth.StringWidth(strip)
-	if displayWidth > 80 {
-		t.Errorf("strip display width = %d, want <= 80", displayWidth)
+	if displayWidth > 15 {
+		t.Errorf("strip display width = %d, want <= 15", displayWidth)
 	}
-	if !strings.HasSuffix(strip, "…") {
-		t.Errorf("strip should end with ellipsis: %s", strip)
+	if strip != "[review] [sub…]" {
+		t.Errorf("strip = %q, want the turn state shortened with an ellipsis", strip)
 	}
 	if strings.Count(strip, "\n") > 0 {
 		t.Errorf("strip should be a single line, got: %s", strip)

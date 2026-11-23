@@ -196,12 +196,18 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	a.state.Turns["t2"] = ti
 	a.state.CurrentTurn = "t2"
 
-	const progress = "turn in progress: reviewers_dispatched, round 1/2, 30s, writer idle, rev running"
+	// The author drafted the candidate at epoch 1 and went idle; the reviewer
+	// works on it at epoch 2.
+	a.state.Attempts["w1"] = AttemptInfo{ID: "w1", TurnID: "t2", Participant: "writer", Phase: "author", Epoch: 1, Status: "complete"}
+	a.state.Attempts["r1"] = AttemptInfo{ID: "r1", TurnID: "t2", Participant: "rev", Phase: "review", Epoch: 2, Status: "in_progress"}
+
+	spin := spinnerAt(chatNow)
+	progress := spin + " turn in progress: reviewers_dispatched, round 1/2 ●○, ✓ writer, " + spin + " rev, 30s"
 	lines := chatView(a)
 	ti.EstimatedTokens = 24260
 	a.state.Turns["t2"] = ti
-	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.Contains(last, "[reviewers_dispatched] [round 1/2] [30s]") || !strings.Contains(last, "author:writer idle") {
-		t.Errorf("status line = %q, want the turn state, round, elapsed time, author state and the key hint", last)
+	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.HasPrefix(last, "[review] [reviewers_dispatched] [30s] [est. 24260]") || strings.Contains(last, "writer") {
+		t.Errorf("status line = %q, want the turn state, elapsed time, tokens and the key hint, and no participant states", last)
 	}
 	lineOf(t, lines, "› running question")
 	lineOf(t, lines, progress)
@@ -209,7 +215,8 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	for _, key := range []tea.KeyType{tea.KeyTab, tea.KeyTab} {
 		a.Update(tea.KeyMsg{Type: key})
 		v := a.View()
-		if !strings.Contains(v, "[reviewers_dispatched]") || !strings.Contains(v, "round 1/2") {
+		// At 80 columns round n/m is shed before the turn state; wider, it stays.
+		if !strings.Contains(v, "[reviewers_dispatched]") || !strings.Contains(a.statusLine(120), "[round 1/2]") {
 			t.Errorf("status line lost the running turn on tab %d:\n%s", a.tab, v)
 		}
 	}

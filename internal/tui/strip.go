@@ -9,149 +9,235 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// renderStrip returns the status strip line. It is a single line showing:
-// [preset] [quick:<name>?] [turn state] [elapsed / turn_deadline]
-// [est. tokens / limit] author:<id> <state> reviewers: <id> <state> … identity: unknown(name-matched)
-// At 80 columns with five reviewers the strip is at most 80 cells wide and ends with …
-// when needed, dropping segments from the right in whole segments. Uses terminal display width.
+// renderStrip returns the status fields alone, width cells at most: preset,
+// the next preset, quick:<name> when one governs, the turn state or idle,
+// elapsed/turn_deadline, the budget meter with tokens/limit, and round n/m
+// during a revision. Participant states are on the chat's progress line and
+// in the participants tab, not here.
 func renderStrip(s State, width int, now time.Time) string {
-	return renderStripFor(s, width, now, false)
+	return statusFieldsOf(s, now).fit(width, false, false)
 }
 
-// renderStripFor is renderStrip; compact also drops the preset when the line
-// is too wide, so the open turn's state keeps its room beside the key hint.
-func renderStripFor(s State, width int, now time.Time, compact bool) string {
-	switch s.ConnState {
-	case ConnStateConnecting:
-		return "engine: connecting"
-	}
+// renderStatusLine is the strip with the right-edge hints, exactly width
+// cells when they fit: ctrl+o: reviews when reviews is set, then keyHint.
+func renderStatusLine(s State, width int, now time.Time, reviews bool) string {
+	return statusFieldsOf(s, now).fit(width, true, reviews)
+}
 
-	// No turn open: show idle state.
-	if s.CurrentTurn == "" {
-		segments := []string{}
-		if s.Status != nil {
-			segments = append(segments, fmt.Sprintf("[%s]", s.Status.DefaultPreset))
-			if s.NextPreset != "" {
-				segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
-			}
-			segments = append(segments, "[idle]")
+// reviewsHint names the reviews drawer's key; it sits left of keyHint while
+// the chat tab is active.
+const reviewsHint = "ctrl+o: reviews"
+
+// keyHint sits at the right edge of the status line.
+const keyHint = "tab: switch  /help"
+
+// budgetMeterCells is how many cells the budget meter takes.
+const budgetMeterCells = 8
+
+// statusFields are the status line's fields, each already escaped. The
+// overflow order names them, so none is found by position.
+type statusFields struct {
+	fixed   string   // a whole line in place of the fields, such as engine: connecting
+	lead    []string // preset, next preset and quick profile, bracketed
+	state   string   // the turn state or idle, unbracketed; "" when nothing is known
+	elapsed string   // [elapsed / deadline], or ""
+	meter   string   // the budget meter, or "" without a limit
+	tokens  string   // est. tokens / limit, or est. tokens; "" when unknown
+	round   string   // [round n/m] during a revision, or ""
+}
+
+func statusFieldsOf(s State, now time.Time) statusFields {
+	var f statusFields
+	if s.ConnState == ConnStateConnecting {
+		f.fixed = "engine: connecting"
+		return f
+	}
+	next := func() {
+		if s.NextPreset != "" {
+			f.lead = append(f.lead, safeLine(fmt.Sprintf("[next: %s]", s.NextPreset)))
 		}
-		return safeLine(strings.Join(segments, " "))
 	}
 
-	// Turn is open: build full strip.
+	if s.CurrentTurn == "" {
+		if s.Status != nil {
+			f.lead = append(f.lead, safeLine(fmt.Sprintf("[%s]", s.Status.DefaultPreset)))
+			next()
+			f.state = "idle"
+		}
+		return f
+	}
 	ti, ok := s.Turns[s.CurrentTurn]
 	if !ok {
-		return ""
+		return f
 	}
 
-	segments := []string{}
-
-	// [preset]
-	segments = append(segments, fmt.Sprintf("[%s]", ti.Preset))
-	if s.NextPreset != "" {
-		segments = append(segments, fmt.Sprintf("[next: %s]", s.NextPreset))
-	}
-
-	// [quick:<name>] or [quick:<name> (mode set by /mode)] when one governs
+	f.lead = append(f.lead, safeLine(fmt.Sprintf("[%s]", ti.Preset)))
+	next()
 	if ti.QuickProfile != nil && *ti.QuickProfile != "" {
 		if ti.ModeOverride {
-			segments = append(segments, fmt.Sprintf("[quick:%s (mode set by /mode)]", *ti.QuickProfile))
+			f.lead = append(f.lead, safeLine(fmt.Sprintf("[quick:%s (mode set by /mode)]", *ti.QuickProfile)))
 		} else {
-			segments = append(segments, fmt.Sprintf("[quick:%s]", *ti.QuickProfile))
+			f.lead = append(f.lead, safeLine(fmt.Sprintf("[quick:%s]", *ti.QuickProfile)))
 		}
 	}
+	f.state = safeLine(ti.State)
 
-	// [turn state]
-	segments = append(segments, fmt.Sprintf("[%s]", ti.State))
-
-	// [round n/m] while revising
-	if ti.Round > 0 && ti.MaxRounds > 0 {
-		segments = append(segments, fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds))
-	}
-
-	// [elapsed / turn deadline]
 	if !ti.SubmittedAt.IsZero() {
 		elapsed := formatDuration(max(now.Sub(ti.SubmittedAt), 0))
 		switch {
 		case ti.DeadlineDur > 0:
-			segments = append(segments, fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.DeadlineDur)))
+			f.elapsed = fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.DeadlineDur))
 		case ti.TurnDeadline != nil:
-			segments = append(segments, fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.TurnDeadline.Sub(ti.SubmittedAt))))
+			f.elapsed = fmt.Sprintf("[%s / %s]", elapsed, formatDuration(ti.TurnDeadline.Sub(ti.SubmittedAt)))
 		default:
-			segments = append(segments, fmt.Sprintf("[%s]", elapsed))
+			f.elapsed = fmt.Sprintf("[%s]", elapsed)
 		}
 	}
 
-	// [est. tokens / limit]; shed before participant state when the line is tight
-	estIdx := len(segments)
 	switch {
 	case ti.LimitTokens > 0:
-		segments = append(segments, fmt.Sprintf("[est. %d / %d]", ti.EstimatedTokens, ti.LimitTokens))
+		f.meter = budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
+		f.tokens = fmt.Sprintf("est. %d / %d", ti.EstimatedTokens, ti.LimitTokens)
 	case ti.EstimatedTokens > 0:
-		segments = append(segments, fmt.Sprintf("[est. %d]", ti.EstimatedTokens))
+		f.tokens = fmt.Sprintf("est. %d", ti.EstimatedTokens)
 	}
 
-	// author:<id> <state>
-	if ti.Author != "" {
-		segments = append(segments, fmt.Sprintf("author:%s %s", ti.Author, ti.AuthorState))
+	if ti.Round > 0 && ti.MaxRounds > 0 {
+		f.round = fmt.Sprintf("[round %d/%d]", ti.Round, ti.MaxRounds)
 	}
+	return f
+}
 
-	// reviewers: <id> <state> … (in order from Reviewers list, not map iteration)
-	if len(ti.Reviewers) > 0 {
-		reviewerParts := []string{"reviewers:"}
-		for _, id := range ti.Reviewers {
-			state := ti.ReviewerStates[id]
-			reviewerParts = append(reviewerParts, fmt.Sprintf("%s %s", id, state))
+// budgetMeter draws how much of the limit the estimate takes, in
+// budgetMeterCells cells. The numbers beside it carry the same meaning.
+func budgetMeter(est, limit int64) string {
+	filled := int(min(max(est, 0)*budgetMeterCells/limit, budgetMeterCells))
+	return strings.Repeat("█", filled) + strings.Repeat("░", budgetMeterCells-filled)
+}
+
+// statusLayout says which optional parts a candidate line keeps.
+type statusLayout struct {
+	meter, reviews, round bool
+	noTokens              bool   // leaves the budget out, for the last resort that places it itself
+	state                 string // the turn state as shown
+}
+
+// left joins the fields the layout keeps.
+func (f statusFields) left(l statusLayout) string { return strings.Join(f.segments(l), " ") }
+
+// segments are the fields the layout keeps, in order.
+func (f statusFields) segments(l statusLayout) []string {
+	segs := append([]string(nil), f.lead...)
+	if f.state != "" {
+		segs = append(segs, "["+l.state+"]")
+	}
+	if f.elapsed != "" {
+		segs = append(segs, f.elapsed)
+	}
+	if b := f.budget(l.meter); b != "" && !l.noTokens {
+		segs = append(segs, b)
+	}
+	if l.round && f.round != "" {
+		segs = append(segs, f.round)
+	}
+	return segs
+}
+
+func (f statusFields) budget(meter bool) string {
+	switch {
+	case f.tokens == "":
+		return ""
+	case meter && f.meter != "":
+		return "[" + f.meter + " " + f.tokens + "]"
+	default:
+		return "[" + f.tokens + "]"
+	}
+}
+
+// fit lays the fields out in width cells. With hint the line ends with the
+// right-edge hints, reviewsHint first when reviews is set. When the line is
+// too wide it sheds, in the operator's order: the budget meter, keeping
+// tokens/limit; then ctrl+o: reviews; then round n/m; then it shortens the
+// turn state with an ellipsis. keyHint and tokens/limit are never shed.
+func (f statusFields) fit(width int, hint, reviews bool) string {
+	withReviews := hint && reviews
+	right := func(r bool) string {
+		switch {
+		case !hint:
+			return ""
+		case r:
+			return reviewsHint + "  " + keyHint
+		default:
+			return keyHint
 		}
-		segments = append(segments, strings.Join(reviewerParts, " "))
+	}
+	// room is the width the fields may take beside the hints.
+	room := func(r bool) int {
+		if !hint {
+			return width
+		}
+		return width - runewidth.StringWidth(right(r)) - 1
+	}
+	if f.fixed != "" {
+		return f.join(runewidth.Truncate(f.fixed, max(room(false), 0), "…"), right(false), width)
 	}
 
-	// Presets, profile names, states and participant ids come from the engine
-	// and the workspace: escape each segment before it is measured.
-	for i, seg := range segments {
-		segments[i] = safeLine(seg)
+	steps := []statusLayout{
+		{meter: true, reviews: withReviews, round: true},
+		{reviews: withReviews, round: true},
+		{round: true},
+		{},
 	}
-	line := strings.Join(segments, " ")
+	for _, l := range steps {
+		l.state = f.state
+		if line := f.left(l); runewidth.StringWidth(line) <= room(l.reviews) {
+			return f.join(line, right(l.reviews), width)
+		}
+	}
 
-	// If line fits (measured by display width, not bytes), return it.
-	displayWidth := runewidth.StringWidth(line)
-	if displayWidth <= width {
+	// Shorten the turn state as far as it must go, down to a lone ellipsis.
+	r := room(false)
+	if f.state != "" {
+		bare := runewidth.StringWidth(f.left(statusLayout{}))
+		if avail := r - bare; avail >= 1 {
+			return f.join(f.left(statusLayout{state: runewidth.Truncate(f.state, avail, "…")}), right(false), width)
+		}
+	}
+
+	// Below what the ruling covers: keep tokens/limit whole and drop whole
+	// fields from the right of what stands before it, marking the cut with …
+	budget := f.budget(false)
+	avail := r
+	if budget != "" {
+		avail -= runewidth.StringWidth(budget) + 1
+	}
+	if avail < 1 {
+		return f.join(runewidth.Truncate(budget, max(r, 0), "…"), right(false), width)
+	}
+	rest := f.segments(statusLayout{state: "…", noTokens: true})
+	for len(rest) > 0 && runewidth.StringWidth(strings.Join(rest, " "))+1 > avail {
+		rest = rest[:len(rest)-1]
+	}
+	line := strings.Join(rest, " ") + "…"
+	if budget != "" {
+		line += " " + budget
+	}
+	return f.join(line, right(false), width)
+}
+
+// join puts the hints at the right edge of a width-cell line, one cell at
+// least from the fields. Without hints it is the fields alone.
+func (f statusFields) join(line, right string, width int) string {
+	if right == "" {
 		return line
 	}
-
-	// Participant state is worth more than the token estimate: drop it
-	// first, keeping the rest in order.
-	kept := segments
-	if estIdx < len(kept) && strings.HasPrefix(kept[estIdx], "[est.") {
-		kept = append(append([]string{}, kept[:estIdx]...), kept[estIdx+1:]...)
+	if width < runewidth.StringWidth(right) {
+		return runewidth.Truncate(right, max(width, 0), "")
 	}
-	if line = strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
-		return line
+	if line == "" {
+		return strings.Repeat(" ", max(width-runewidth.StringWidth(right), 0)) + right
 	}
-	segments = kept
-
-	// Next the preset goes: the running turn's state matters more.
-	if compact && len(segments) > 0 && segments[0] == safeLine(fmt.Sprintf("[%s]", ti.Preset)) {
-		segments = segments[1:]
-		if line = strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
-			return line
-		}
-	}
-
-	// Drop segments from the right, adding … at the end.
-	ellipsis := "…"
-	ellipsisWidth := runewidth.StringWidth(ellipsis)
-	for len(segments) > 0 {
-		segments = segments[:len(segments)-1]
-		line = strings.Join(segments, " ")
-		lineWidth := runewidth.StringWidth(line)
-		if lineWidth+ellipsisWidth <= width {
-			return line + ellipsis
-		}
-	}
-
-	return ellipsis
+	return line + strings.Repeat(" ", max(width-runewidth.StringWidth(line)-runewidth.StringWidth(right), 1)) + right
 }
 
 // formatDuration returns a human-readable duration string (e.g., "1m23s", "12s").
