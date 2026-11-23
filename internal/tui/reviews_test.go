@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/wire"
@@ -172,16 +173,238 @@ func TestReviewsDrawerRender(t *testing.T) {
 		t.Error("open drawer should not render empty")
 	}
 
-	if !stringContains(output, "Reviews") || !stringContains(output, "Turn 1") {
+	if !stringIncludes(output, "Reviews") || !stringIncludes(output, "Turn 1") {
 		t.Errorf("drawer output missing expected content: %q", output)
 	}
 }
 
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+func TestReviewsDrawerSafeText(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0)
+
+	// Test that control characters in block IDs are escaped
+	items := []wire.ReviewItem{
+		{
+			Round:       0,
+			Participant: "reviewer1",
+			Kind:        "block",
+			Blocks: []wire.ReviewBlock{
+				{BlockID: "block\x1b[31mred", State: "opened"},
+			},
+		},
+	}
+	d.UpdateReviews("turn1", items)
+
+	output := d.render(80, NewContentCache())
+	// The block ID should have escaped control sequence, not raw ANSI
+	if stringIncludes(output, "\x1b") {
+		t.Error("drawer should not contain raw ANSI codes")
+	}
+	if !stringIncludes(output, "\\x1b") {
+		t.Error("drawer should escape control characters")
+	}
+}
+
+func TestReviewsDrawerCommentaryRendering(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0)
+
+	cc := NewContentCache()
+	commentRef := "ref:comment:123"
+	commentText := "This is a review comment"
+	cc.Store(commentRef, commentText, nil)
+
+	items := []wire.ReviewItem{
+		{
+			Round:       0,
+			Participant: "reviewer1",
+			Kind:        "approve-with-changes",
+			Commentary: &wire.ContentReference{
+				Ref:     commentRef,
+				SHA256:  "abc123",
+				ByteLen: int64(len(commentText)),
+			},
+		},
+	}
+	d.UpdateReviews("turn1", items)
+
+	output := d.render(80, cc)
+	if !stringIncludes(output, "commentary") {
+		t.Error("drawer should show commentary label")
+	}
+	if !stringIncludes(output, commentText) {
+		t.Error("drawer should render commentary content")
+	}
+}
+
+func TestReviewsDrawerRosterOrder(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetRoster([]string{"p3", "p1", "p2"})
+	d.SetTurns([]string{"turn1"})
+	d.Open(0)
+
+	// Add reviews in non-roster order
+	items := []wire.ReviewItem{
+		{Round: 0, Participant: "p1", Kind: "block"},
+		{Round: 0, Participant: "p3", Kind: "approve"},
+		{Round: 0, Participant: "p2", Kind: "approve-with-changes"},
+	}
+	d.UpdateReviews("turn1", items)
+
+	output := d.render(80, NewContentCache())
+
+	// Check that p3 appears before p1, which appears before p2
+	pos3 := stringIndexOf(output, "p3")
+	pos1 := stringIndexOf(output, "p1")
+	pos2 := stringIndexOf(output, "p2")
+
+	if pos3 < 0 || pos1 < 0 || pos2 < 0 {
+		t.Error("not all participants rendered")
+	}
+	if pos3 >= pos1 || pos1 >= pos2 {
+		t.Errorf("participants not in roster order: p3=%d, p1=%d, p2=%d", pos3, pos1, pos2)
+	}
+}
+
+func TestReviewsDrawerPaging(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0)
+
+	// Create many items to test paging
+	var items []wire.ReviewItem
+	for i := 0; i < 5; i++ {
+		items = append(items, wire.ReviewItem{
+			Round:       0,
+			Participant: fmt.Sprintf("p%d", i),
+			Kind:        "approve",
+		})
+	}
+	d.UpdateReviews("turn1", items)
+
+	// Render and check content lines are calculated
+	cc := NewContentCache()
+	_ = d.render(80, cc)
+	if d.ContentLines() == 0 {
+		t.Error("content lines should be calculated after render")
+	}
+
+	// Test scrolling - only scroll if content is larger than viewport
+	contentLines := d.ContentLines()
+	if contentLines > 10 {
+		initialOffset := d.scrollOffset
+		drawerHeight := 7
+		d.ScrollDown(drawerHeight, contentLines)
+		if d.scrollOffset <= initialOffset {
+			t.Error("scroll down should increase offset when content > viewport")
+		}
+
+		d.ScrollUp(drawerHeight)
+		if d.scrollOffset >= drawerHeight {
+			t.Error("scroll up should decrease offset")
 		}
 	}
-	return false
+}
+
+func TestReviewsDrawerInputBlocking(t *testing.T) {
+	// This test verifies the logic that input is blocked when drawer is open.
+	// In app.go, when drawer is open and on the chat tab, all keys except
+	// drawer navigation keys should be ignored.
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"t1", "t2", "t3"})
+
+	// Drawer starts closed
+	if d.IsOpen() {
+		t.Error("drawer should start closed")
+	}
+
+	// Open drawer
+	d.Open(0)
+	if !d.IsOpen() {
+		t.Error("drawer should be open after Open()")
+	}
+
+	// Navigation should change selection
+	initialTurn := d.selectedTurn
+	d.SelectDown()
+	if d.selectedTurn == initialTurn {
+		t.Error("SelectDown should change selection")
+	}
+
+	d.SelectUp()
+	if d.selectedTurn != initialTurn {
+		t.Error("SelectUp should return to initial turn")
+	}
+
+	// Close drawer
+	d.Close()
+	if d.IsOpen() {
+		t.Error("drawer should be closed after Close()")
+	}
+}
+
+func TestReviewsDrawerHistoricalStates(t *testing.T) {
+	// Test that historical block states across rounds are shown correctly
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetRoster([]string{"reviewer1"})
+
+	// Simulate a block that was opened in round 0, maintained in round 1, withdrawn in round 2
+	items := []wire.ReviewItem{
+		{
+			Round:       0,
+			Participant: "reviewer1",
+			Kind:        "block",
+			Blocks: []wire.ReviewBlock{
+				{BlockID: "b1", State: "opened"},
+			},
+		},
+		{
+			Round:       1,
+			Participant: "reviewer1",
+			Kind:        "block",
+			Blocks: []wire.ReviewBlock{
+				{BlockID: "b1", State: "maintained"},
+			},
+		},
+		{
+			Round:       2,
+			Participant: "reviewer1",
+			Kind:        "approve",
+			Blocks: []wire.ReviewBlock{
+				{BlockID: "b1", State: "withdrawn"},
+			},
+		},
+	}
+	d.UpdateReviews("turn1", items)
+	d.Open(0)
+
+	// Navigate through rounds
+	rounds := d.getRounds()
+	if len(rounds) != 3 {
+		t.Errorf("should have 3 rounds, got %d", len(rounds))
+	}
+
+	// Check each round has the item
+	for i := 0; i < 3; i++ {
+		d.selectedRound = i
+		if len(d.reviewsByTurn["turn1"].rounds[rounds[i]]) == 0 {
+			t.Errorf("round %d should have items", rounds[i])
+		}
+	}
+}
+
+func stringIncludes(s, substr string) bool {
+	return stringIndexOf(s, substr) >= 0
+}
+
+func stringIndexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }

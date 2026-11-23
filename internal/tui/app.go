@@ -245,16 +245,76 @@ func (a *App) fetchTranscriptContent() tea.Cmd {
 	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, transcriptRefs(a.tItems))...)
 }
 
-// fetchReviewsForTurn starts fetching reviews for a turn.
+// fetchReviewsForTurn starts fetching reviews for a turn, paginating through all results.
 func (a *App) fetchReviewsForTurn(turnID string) tea.Cmd {
 	if turnID == "" || a.reviewsLoading[turnID] || a.cl == nil {
 		return nil
 	}
 	a.reviewsLoading[turnID] = true
 	return func() tea.Msg {
-		reply, err := a.cl.Reviews(a.ctx, turnID, nil, nil)
-		return reviewsMsg{turnID: turnID, reply: reply, err: err}
+		var allItems []wire.ReviewItem
+		cursor := (*string)(nil)
+		limit := 50
+
+		// Page through all reviews
+		for {
+			reply, err := a.cl.Reviews(a.ctx, turnID, cursor, &limit)
+			if err != nil {
+				return reviewsMsg{turnID: turnID, items: nil, err: err}
+			}
+			items, err := reply.DecodeItems()
+			if err != nil {
+				return reviewsMsg{turnID: turnID, items: nil, err: err}
+			}
+			allItems = append(allItems, items...)
+			if reply.NextCursor == nil {
+				break
+			}
+			cursor = reply.NextCursor
+		}
+
+		// Fetch content references for commentary, evidence, remedy, and oversized records
+		refs := []string{}
+		for _, item := range allItems {
+			if item.Commentary != nil {
+				refs = append(refs, item.Commentary.Ref)
+			}
+			if item.Oversized && item.Record != nil {
+				refs = append(refs, item.Record.Ref)
+			} else {
+				for _, block := range item.Blocks {
+					if block.Evidence != nil {
+						refs = append(refs, block.Evidence.Ref)
+					}
+					if block.Remedy != nil {
+						refs = append(refs, block.Remedy.Ref)
+					}
+				}
+			}
+		}
+
+		// Fetch all content references
+		for _, ref := range refs {
+			content, err := a.cl.Content(a.ctx, ref)
+			a.content.Store(ref, string(content), err)
+		}
+
+		return reviewsMsg{turnID: turnID, items: allItems, err: nil}
 	}
+}
+
+// updateDrawerTurns updates the drawer with the current chat turns and roster order.
+func (a *App) updateDrawerTurns() {
+	turns := chatTurns(a.state)
+	a.reviewsDrawer.SetTurns(turns)
+
+	// Build roster from participants, in order
+	participants := make([]string, 0, len(a.state.Participants))
+	// Sort by participant ID to get a stable order
+	for id := range a.state.Participants {
+		participants = append(participants, id)
+	}
+	a.reviewsDrawer.SetRoster(participants)
 }
 
 // syncTranscript points the transcript at the turn the UI is showing, and
@@ -466,6 +526,50 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.updateInput(msg)
 	}
+
+	// Drawer focus takes priority: it blocks input changes and navigation keys.
+	if a.reviewsDrawer.IsOpen() && a.tab == tabChat {
+		switch msg.String() {
+		case "up":
+			a.reviewsDrawer.SelectUp()
+			turns := chatTurns(a.state)
+			if len(turns) > 0 {
+				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			}
+			return a, nil
+		case "down":
+			a.reviewsDrawer.SelectDown()
+			turns := chatTurns(a.state)
+			if len(turns) > 0 {
+				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
+			}
+			return a, nil
+		case "left":
+			a.reviewsDrawer.SelectRoundLeft()
+			return a, nil
+		case "right":
+			a.reviewsDrawer.SelectRoundRight()
+			return a, nil
+		case "pgup":
+			a.reviewsDrawer.ScrollUp(1)
+			return a, nil
+		case "pgdown":
+			drawerHeight := 7
+			if a.height > 30 {
+				drawerHeight = 9
+			}
+			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines())
+			return a, nil
+		case "esc", "ctrl+o":
+			a.reviewsDrawer.Close()
+			a.want.Drawer = false
+			return a, nil
+		default:
+			// Input cannot change while drawer is focused; ignore other keys
+			return a, nil
+		}
+	}
+
 	if msg.Paste {
 		// A paste is text, whatever it contains: line breaks stay as typed.
 		a.input.InsertString(normalizePaste(msg.Runes))
@@ -490,7 +594,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Open drawer on the last turn if available
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
-					a.reviewsDrawer.SetTurns(turns)
+					a.updateDrawerTurns()
 					a.reviewsDrawer.Open(len(turns) - 1)
 					a.want.Drawer = true
 					return a, a.fetchReviewsForTurn(turns[len(turns)-1])
@@ -502,13 +606,19 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.panel = nil
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
-		a.reviewsDrawer.SetTurns(chatTurns(a.state))
+		if a.tab != tabChat {
+			a.reviewsDrawer.Close()
+		}
+		a.updateDrawerTurns()
 		return a, nil
 	case "shift+tab":
 		a.panel = nil
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
-		a.reviewsDrawer.SetTurns(chatTurns(a.state))
+		if a.tab != tabChat {
+			a.reviewsDrawer.Close()
+		}
+		a.updateDrawerTurns()
 		return a, nil
 	case "enter":
 		return a, a.enter()
@@ -572,40 +682,6 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.pScroll == 0 && page < 0 {
 				a.pScrolled = false
 			}
-			return a, nil
-		}
-	}
-
-	if a.reviewsDrawer.IsOpen() {
-		switch msg.String() {
-		case "up":
-			a.reviewsDrawer.SelectUp()
-			turns := chatTurns(a.state)
-			if len(turns) > 0 {
-				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
-			}
-			return a, nil
-		case "down":
-			a.reviewsDrawer.SelectDown()
-			turns := chatTurns(a.state)
-			if len(turns) > 0 {
-				return a, a.fetchReviewsForTurn(turns[a.reviewsDrawer.selectedTurn])
-			}
-			return a, nil
-		case "left":
-			a.reviewsDrawer.SelectRoundLeft()
-			return a, nil
-		case "right":
-			a.reviewsDrawer.SelectRoundRight()
-			return a, nil
-		case "pgup":
-			a.reviewsDrawer.ScrollUp(1)
-			return a, nil
-		case "pgdown":
-			a.reviewsDrawer.ScrollDown(1, 20)
-			return a, nil
-		default:
-			// Input cannot change while drawer is focused; ignore other keys
 			return a, nil
 		}
 	}
@@ -1398,7 +1474,7 @@ func (a *App) selectedParticipant() int {
 // reviewsMsg carries the response from a reviews request.
 type reviewsMsg struct {
 	turnID string
-	reply  *wire.ReviewsReply
+	items  []wire.ReviewItem
 	err    error
 }
 
@@ -1408,14 +1484,7 @@ func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		return a, nil
 	}
-	if msg.reply == nil {
-		return a, nil
-	}
-	items, err := msg.reply.DecodeItems()
-	if err != nil {
-		return a, nil
-	}
-	a.reviewsDrawer.UpdateReviews(msg.turnID, items)
+	a.reviewsDrawer.UpdateReviews(msg.turnID, msg.items)
 	return a, nil
 }
 

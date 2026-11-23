@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/wire"
@@ -15,7 +16,9 @@ type ReviewsDrawer struct {
 	selectedRound int      // index in rounds list
 	turns         []string // turn IDs to display, oldest first
 	reviewsByTurn map[string]*drawerReviews
-	scrollOffset  int // scroll position within the drawer content
+	scrollOffset  int            // scroll position within the drawer content
+	contentLines  int            // cached line count for paging calculations
+	roster        map[string]int // participant -> order in roster
 }
 
 // drawerReviews holds the reviews for one turn, grouped by round.
@@ -28,6 +31,7 @@ type drawerReviews struct {
 func NewReviewsDrawer() *ReviewsDrawer {
 	return &ReviewsDrawer{
 		reviewsByTurn: make(map[string]*drawerReviews),
+		roster:        make(map[string]int),
 	}
 }
 
@@ -39,6 +43,14 @@ func (d *ReviewsDrawer) SetTurns(turns []string) {
 		d.selectedTurn = max(0, len(d.turns)-1)
 	}
 	d.scrollOffset = 0
+}
+
+// SetRoster sets the participant ordering for the drawer.
+func (d *ReviewsDrawer) SetRoster(participants []string) {
+	d.roster = make(map[string]int)
+	for i, p := range participants {
+		d.roster[p] = i
+	}
 }
 
 // Open opens the drawer on the given turn index.
@@ -98,7 +110,7 @@ func (d *ReviewsDrawer) getRounds() []int {
 	for r := range rev.rounds {
 		rounds = append(rounds, r)
 	}
-	sortInts(rounds)
+	slices.Sort(rounds)
 	return rounds
 }
 
@@ -151,8 +163,13 @@ func (d *ReviewsDrawer) ScrollUp(lines int) {
 
 // ScrollDown scrolls the drawer content down.
 func (d *ReviewsDrawer) ScrollDown(lines int, maxContent int) {
-	maxScroll := max(0, maxContent-7) // 7 is drawer height
+	maxScroll := max(0, maxContent-lines)
 	d.scrollOffset = min(d.scrollOffset+lines, maxScroll)
+}
+
+// ContentLines returns the total number of lines in the drawer content for paging.
+func (d *ReviewsDrawer) ContentLines() int {
+	return d.contentLines
 }
 
 // renderDrawer renders the drawer at a given width and height.
@@ -202,18 +219,62 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 	var lines []string
 	lines = append(lines, header)
 
-	// Add review items
-	for _, idx := range itemIndices {
+	// Add review items in roster order
+	itemsByParticipant := make(map[string]*wire.ReviewItem)
+	participants := []string{}
+	for i := range itemIndices {
+		idx := itemIndices[i]
 		item := rev.items[idx]
-		itemLine := fmt.Sprintf("  %s (%s)", item.Participant, item.Kind)
+		itemsByParticipant[item.Participant] = &rev.items[idx]
+		if !slices.Contains(participants, item.Participant) {
+			participants = append(participants, item.Participant)
+		}
+	}
+
+	// Sort by roster order
+	slices.SortFunc(participants, func(a, b string) int {
+		orderA := d.roster[a]
+		orderB := d.roster[b]
+		return orderA - orderB
+	})
+
+	for _, participant := range participants {
+		item := itemsByParticipant[participant]
+		itemLine := fmt.Sprintf("  %s (%s)", safeText(participant), item.Kind)
 		lines = append(lines, ansi.Truncate(itemLine, w, ""))
 
 		// Show blocks
 		for _, block := range item.Blocks {
-			blockLine := fmt.Sprintf("    • %s: %s", block.BlockID, block.State)
+			blockID := safeText(block.BlockID)
+			blockLine := fmt.Sprintf("    • %s: %s", blockID, block.State)
 			lines = append(lines, ansi.Truncate(blockLine, w, ""))
+
+			// Show evidence and remedy refs if present (fetched content not shown here, just refs)
+			if block.Evidence != nil {
+				lines = append(lines, ansi.Truncate(fmt.Sprintf("      evidence: %d bytes", block.Evidence.ByteLen), w, ""))
+			}
+			if block.Remedy != nil {
+				lines = append(lines, ansi.Truncate(fmt.Sprintf("      remedy: %d bytes", block.Remedy.ByteLen), w, ""))
+			}
+		}
+
+		// Show commentary if present
+		if item.Commentary != nil {
+			ci := cc.Get(item.Commentary.Ref)
+			if ci.Ready && ci.Err == nil && ci.Data != "" {
+				commentText := safeText(ci.Data)
+				commentText = "commentary: " + commentText
+				wrapped := wrapText(commentText, w-6)
+				for _, line := range wrapped {
+					lines = append(lines, ansi.Truncate("      "+line, w, ""))
+				}
+			} else if !ci.Ready {
+				lines = append(lines, ansi.Truncate("      commentary: <loading>", w, ""))
+			}
 		}
 	}
+
+	d.contentLines = len(lines)
 
 	// Apply scroll offset and return
 	if d.scrollOffset < len(lines) {
@@ -225,11 +286,17 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 	return strings.Join(lines, "\n")
 }
 
-// sortInts sorts a slice of ints in place.
-func sortInts(nums []int) {
-	for i := 1; i < len(nums); i++ {
-		for j := i; j > 0 && nums[j-1] > nums[j]; j-- {
-			nums[j], nums[j-1] = nums[j-1], nums[j]
+// safeText converts content to safe text by replacing control characters and invalid UTF-8 with escapes.
+func safeText(s string) string {
+	var result strings.Builder
+	for _, r := range s {
+		if r >= 0x20 && r < 0x7F && r != 0x7F {
+			result.WriteRune(r)
+		} else if r == '\n' || r == '\t' {
+			result.WriteRune(r)
+		} else {
+			fmt.Fprintf(&result, "\\x%02x", r)
 		}
 	}
+	return result.String()
 }
