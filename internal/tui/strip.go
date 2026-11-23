@@ -179,7 +179,8 @@ func (f statusFields) fit(width int, hint, reviews bool) string {
 		return width - runewidth.StringWidth(right(r)) - 1
 	}
 	if f.fixed != "" {
-		return f.join(runewidth.Truncate(f.fixed, max(room(false), 0), "…"), right(false), width)
+		r := withReviews && runewidth.StringWidth(f.fixed) <= room(true)
+		return f.join(runewidth.Truncate(f.fixed, max(room(r), 0), "…"), right(r), width)
 	}
 
 	steps := []statusLayout{

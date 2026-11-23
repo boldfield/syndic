@@ -554,3 +554,31 @@ func TestMergeTurnStaleOpenReplyKeepsNewerEvents(t *testing.T) {
 		t.Errorf("Remaining = %v", got)
 	}
 }
+
+// TestLiveProgressMarksPoolQueuedReviewer: with two reviewers sharing a pool of
+// one slot, the engine queues the second before it has an attempt, and the
+// progress line marks it queued beside the first one working.
+func TestLiveProgressMarksPoolQueuedReviewer(t *testing.T) {
+	roster := strings.Replace(enginetest.RosterTOML, `required_reviewers = ["reviewer"]`, `required_reviewers = ["reviewer", "second"]`, 1)
+	at := strings.Index(roster, "[[endpoints]]")
+	roster = roster[:at] + "[[participants]]\nid = \"second\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"default\"\naccept_unknown_truncation = true\n\n" + roster[at:] + "\n[pools.default]\nconcurrency = 1\n"
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author":   {enginetest.Reply(answerText)},
+		"reviewer": {approve()},
+		"second":   {approve()},
+	})
+	release := h.Hold("reviewer")
+	d := startRig(t, h)
+	d.send(resizeMsg(200, 24))
+	d.typeLine("question")
+	d.until("the first reviewer working and the second queued", func(v string) bool {
+		for _, f := range spinnerFrames {
+			if strings.Contains(v, ", ✓ author, "+f+" reviewer, ○ second, ") {
+				return true
+			}
+		}
+		return false
+	})
+	release()
+	h.WaitTurnState(d.app.state.CurrentTurn, engine.StateApproved)
+}

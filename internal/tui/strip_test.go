@@ -183,3 +183,28 @@ func TestAppStatusLineHintsByTab(t *testing.T) {
 		t.Errorf("chat tab at 121: %q", got)
 	}
 }
+
+// TestStatusLineConnectingKeepsBothHints: the fixed connecting line keeps
+// ctrl+o: reviews beside keyHint on the chat tab, and sheds it before the
+// line itself when narrow.
+func TestStatusLineConnectingKeepsBothHints(t *testing.T) {
+	s := NewState()
+	s.ConnState = ConnStateConnecting
+	const fixed = "engine: connecting"
+	right := reviewsHint + "  " + keyHint
+	want := fixed + strings.Repeat(" ", 80-len(fixed)-len(right)) + right
+	if got := renderStatusLine(s, 80, stripT0, true); got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+	w := len(fixed) + 1 + len(right)
+	if got := renderStatusLine(s, w, stripT0, true); got != fixed+" "+right {
+		t.Errorf("w=%d: got %q", w, got)
+	}
+	want = fixed + strings.Repeat(" ", w-1-len(fixed)-len(keyHint)) + keyHint
+	if got := renderStatusLine(s, w-1, stripT0, true); got != want {
+		t.Errorf("w=%d: got %q\nwant %q", w-1, got, want)
+	}
+	if got := renderStatusLine(s, 80, stripT0, false); strings.Contains(got, reviewsHint) || !strings.HasSuffix(got, " "+keyHint) {
+		t.Errorf("without reviews: %q", got)
+	}
+}

@@ -364,6 +364,8 @@ func apply(s State, f wire.Frame) State {
 					if _, ok := ti.ReviewerStates[body.Participant]; ok {
 						ti.ReviewerStates = copyMap(ti.ReviewerStates)
 						ti.ReviewerStates[body.Participant] = body.State
+					} else if body.State == "queued" && ti.Author != body.Participant {
+						ti = withQueuedParticipant(ti, body.Participant)
 					}
 					turns[s.CurrentTurn] = ti
 				}
@@ -596,6 +598,25 @@ func copyMap[K comparable, V any](m map[K]V) map[K]V {
 		result[k] = v
 	}
 	return result
+}
+
+// withQueuedParticipant adds a participant the scheduler queued before its
+// attempt began to the turn's roster, so the progress line marks it queued.
+// The engine runs one turn at a time, so a queued dispatch is the open
+// turn's: its author while the turn is authoring, else one of its reviewers.
+func withQueuedParticipant(ti TurnInfo, id string) TurnInfo {
+	switch ti.State {
+	case "submitted", "author_dispatched":
+		if ti.Author == "" {
+			ti.Author = id
+			ti.AuthorState = "queued"
+		}
+	case "candidate_frozen", "reviewers_dispatched":
+		ti.Reviewers = append(append([]string(nil), ti.Reviewers...), id)
+		ti.ReviewerStates = copyMap(ti.ReviewerStates)
+		ti.ReviewerStates[id] = "queued"
+	}
+	return ti
 }
 
 func setTurnState(s State, turnID, state string) State {
