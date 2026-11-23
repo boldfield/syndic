@@ -149,3 +149,32 @@ func TestChatEchoesUserTextSafely(t *testing.T) {
 	out := renderChat(s, chatInput{inputs: map[string]string{"t1": hostileInputs[1]}, answer: func(string) answerInput { return answerInput{} }})
 	assertSafeRunes(t, "chat", out)
 }
+
+func TestPanelsAndBannersEscapeHostileText(t *testing.T) {
+	hostile := "p\x1b]8;;http://x\x1b\\L\x1b[2J\u202e"
+
+	lines := conversationLines([]wire.ConversationSummary{{ID: "c1", Preview: hostile}}, "", hostile, 80)
+	assertSafeRunes(t, "conversations", strings.Join(lines, "\n"))
+
+	reason := "block:" + hostile
+	tr := &wire.TurnReply{
+		State:          "incomplete",
+		TerminalReason: &reason,
+		OpenBlocks:     []wire.OpenBlock{{ID: hostile, Severity: hostile, Evidence: hostile, Remedy: hostile}},
+	}
+	assertSafeRunes(t, "why", strings.Join(whyLines("t1", tr, nil), "\n"))
+
+	prof := hostile
+	s := State{UnapprovedProfile: &prof, QuickInvalid: "quick: invalid /w/" + hostile}
+	assertSafeRunes(t, "banners", strings.Join(renderBanners(s), "\n"))
+
+	a := chatApp(t)
+	a.width = 60
+	a.refusal = "trim: " + hostile
+	a.workDir = "/w/" + hostile
+	a.state.UnapprovedProfile = &prof
+	a.state.QuickInvalid = "quick: invalid /w/" + hostile
+	for _, l := range strings.Split(a.View(), "\n") {
+		assertSafeRunes(t, "view", l)
+	}
+}

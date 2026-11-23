@@ -507,6 +507,14 @@ func figure(n *int64) string {
 // whyLines says why a finished turn ended, from its record: the terminal
 // reason verbatim, and the gate, parser, reviewer or budget detail behind it.
 func whyLines(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
+	lines := whyLinesRaw(id, tr, notice)
+	for i, l := range lines {
+		lines[i] = ToSafeText([]byte(l))
+	}
+	return lines
+}
+
+func whyLinesRaw(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 	reason := deref(tr.TerminalReason)
 	lines := []string{fmt.Sprintf("turn %s: %s", id, tr.State), "reason: " + reason}
 

@@ -189,6 +189,11 @@ func renderBanners(s State) []string {
 		banners = append(banners, s.QuickInvalid)
 	}
 
+	// Banners carry paths and profile names from the workspace; escape them
+	// here so no setter can bypass the boundary.
+	for i, b := range banners {
+		banners[i] = ToSafeText([]byte(b))
+	}
 	return banners
 }
 

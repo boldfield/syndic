@@ -1229,7 +1229,7 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	inputLines := renderInput(a.input, a.refusal, w, a.inputRows())
+	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, a.inputRows())
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")
