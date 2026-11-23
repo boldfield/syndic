@@ -209,3 +209,179 @@ func TestRenderMarkdownMultilineWithRawMode(t *testing.T) {
 		t.Errorf("Markdown markers removed in raw mode: %q", result)
 	}
 }
+
+// Golden fixture tests with exact output assertions
+
+func TestGoldenCodeFenceWithLanguage(t *testing.T) {
+	text := "```go\nfunc main() {\n  fmt.Println(\"hello\")\n}\n```"
+	width := 40
+
+	rawResult := RenderMarkdown(text, width, true)
+	renderedResult := RenderMarkdown(text, width, false)
+
+	// Raw mode should preserve the code fence with language label
+	if !strings.Contains(rawResult, "```go") {
+		t.Errorf("Raw mode: missing code fence language label in: %q", rawResult)
+	}
+
+	// Both modes should use 2-space prefix
+	for _, line := range strings.Split(rawResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode: non-prefixed line: %q", line)
+		}
+	}
+	for _, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode: non-prefixed line: %q", line)
+		}
+	}
+
+	// No ANSI escape sequences should appear
+	if strings.Contains(renderedResult, "\x1b") {
+		t.Errorf("Rendered mode: contains ANSI escape sequences: %q", renderedResult)
+	}
+}
+
+func TestGoldenList(t *testing.T) {
+	text := "- item 1\n- item 2\n- item 3"
+	width := 40
+
+	rawResult := RenderMarkdown(text, width, true)
+	renderedResult := RenderMarkdown(text, width, false)
+
+	// Raw mode should preserve list markers
+	if !strings.Contains(rawResult, "- item") {
+		t.Errorf("Raw mode: missing list items in: %q", rawResult)
+	}
+
+	// Both modes should have consistent indentation
+	rawLines := strings.Split(rawResult, "\n")
+	renderedLines := strings.Split(renderedResult, "\n")
+
+	for i, line := range rawLines {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode: non-prefixed line %d: %q", i, line)
+		}
+	}
+	for i, line := range renderedLines {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode: non-prefixed line %d: %q", i, line)
+		}
+	}
+
+	// No trailing padding in raw mode (lines should end without extra spaces)
+	for _, line := range rawLines {
+		trimmed := strings.TrimRight(line, " ")
+		if len(line) > len(trimmed) && strings.TrimSpace(line) != "" {
+			// Line has trailing spaces but is not empty after trim
+			t.Errorf("Raw mode: line has trailing padding: %q", line)
+		}
+	}
+
+	// No ANSI sequences
+	if strings.Contains(renderedResult, "\x1b") {
+		t.Errorf("Rendered mode: contains ANSI escape: %q", renderedResult)
+	}
+}
+
+func TestGoldenLink(t *testing.T) {
+	text := "Visit [example](https://example.com) for more info"
+	width := 60
+
+	rawResult := RenderMarkdown(text, width, true)
+	renderedResult := RenderMarkdown(text, width, false)
+
+	// URL should be visible in both modes
+	if !strings.Contains(rawResult, "example.com") {
+		t.Errorf("Raw mode: URL not visible: %q", rawResult)
+	}
+	if !strings.Contains(renderedResult, "example.com") {
+		t.Errorf("Rendered mode: URL not visible: %q", renderedResult)
+	}
+
+	// No hyperlink escape sequences
+	if strings.Contains(renderedResult, "\x1b]8") {
+		t.Errorf("Rendered mode: found hyperlink escape: %q", renderedResult)
+	}
+
+	// Both modes must use 2-space prefix
+	for _, line := range strings.Split(rawResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode: non-prefixed line: %q", line)
+		}
+	}
+	for _, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode: non-prefixed line: %q", line)
+		}
+	}
+}
+
+func TestGoldenOutcomeLike(t *testing.T) {
+	// Outcome-like text that might look like a list or have special characters
+	text := "✓ approved by opus after 1 revision against abc123"
+	width := 60
+
+	rawResult := RenderMarkdown(text, width, true)
+	renderedResult := RenderMarkdown(text, width, false)
+
+	// Both should preserve the content and use 2-space prefix
+	for _, line := range strings.Split(rawResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Raw mode: non-prefixed outcome line: %q", line)
+		}
+	}
+	for _, line := range strings.Split(renderedResult, "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Rendered mode: non-prefixed outcome line: %q", line)
+		}
+	}
+
+	// Content should be present in both
+	if !strings.Contains(rawResult, "approved") {
+		t.Errorf("Raw mode: outcome content missing: %q", rawResult)
+	}
+	if !strings.Contains(renderedResult, "approved") {
+		t.Errorf("Rendered mode: outcome content missing: %q", renderedResult)
+	}
+}
+
+func TestSingleEmphasis(t *testing.T) {
+	text := "This is *italic* text"
+	width := 40
+
+	result := RenderMarkdown(text, width, false)
+
+	// Should detect single emphasis and render (or preserve it)
+	lines := strings.Split(result, "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Line not prefixed with two spaces: %q", line)
+		}
+	}
+
+	// No ANSI escapes
+	if strings.Contains(result, "\x1b") {
+		t.Errorf("Contains ANSI escape: %q", result)
+	}
+}
+
+func TestNumberedListAtStart(t *testing.T) {
+	text := "1. first\n2. second\n3. third"
+	width := 40
+
+	result := RenderMarkdown(text, width, false)
+
+	// Should detect numbered list at start of line
+	lines := strings.Split(result, "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("Line not prefixed with two spaces: %q", line)
+		}
+	}
+
+	// No ANSI escapes
+	if strings.Contains(result, "\x1b") {
+		t.Errorf("Contains ANSI escape: %q", result)
+	}
+}

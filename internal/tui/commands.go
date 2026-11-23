@@ -27,6 +27,7 @@ var commands = map[string]commandHandler{
 	"override":      cmdOverride,
 	"release":       cmdRelease,
 	"drafts":        cmdDrafts,
+	"raw":           cmdRaw,
 	"help":          cmdHelp,
 	"new":           cmdNew,
 	"conversations": cmdConversations,
@@ -52,6 +53,7 @@ var commandHelp = []string{
 	"/override <reason>        accept an incomplete turn's candidate, with a reason",
 	"/release <pool> [attempt] release held capacity, after a confirmation",
 	"/drafts on|off            show or hide the author's unreviewed draft",
+	"/raw on|off               show or hide Markdown rendering in answer text",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -175,6 +177,16 @@ func cmdDrafts(a *App, args []string) tea.Cmd {
 	}
 	a.SetDraftsEnabled(args[0] == "on")
 	a.refusal = "drafts " + args[0]
+	return nil
+}
+
+func cmdRaw(a *App, args []string) tea.Cmd {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		a.refusal = "usage: /raw on|off"
+		return nil
+	}
+	a.rawMode = args[0] == "on"
+	a.refusal = "raw " + args[0]
 	return nil
 }
 
