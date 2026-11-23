@@ -168,11 +168,23 @@ func formatDuration(d time.Duration) string {
 }
 
 // renderBanners returns the banners to display above the strip.
-// Order: deadlines: provisional, roster file changed, engine: reconnecting, quick: unapproved.
+// Order: identity warning (always first), deadlines: provisional, roster file changed, engine: reconnecting, quick: unapproved.
 // If height constraint would leave the tab area with fewer than 5 lines (height - banners - strip - input),
-// only the first banner is shown with a "+N more" marker.
+// only the first banner (identity warning if present) is shown with a "+N more" marker.
 func renderBanners(s State) []string {
 	var banners []string
+
+	// Identity warning always goes first and is never folded
+	var unknownParticipants []string
+	for id, p := range s.Participants {
+		if p.Identity == "" || p.Identity == "unknown" {
+			unknownParticipants = append(unknownParticipants, id)
+		}
+	}
+	if len(unknownParticipants) > 0 {
+		names := strings.Join(unknownParticipants, ", ")
+		banners = append(banners, fmt.Sprintf("identity: unknown(name-matched) %s", names))
+	}
 
 	if s.Status != nil {
 		if s.Status.DeadlinesProvisional {
@@ -210,13 +222,14 @@ const bannerHeightDivisor = 8
 
 // capBannersForHeight returns the banners that fit above the strip. When they
 // exceed the allowance of height/bannerHeightDivisor lines, or would leave the
-// tab area fewer than minTabHeight lines, only the first banner shows,
-// followed by a "+N more" marker.
+// tab area fewer than minTabHeight lines, only the first banner shows (identity
+// warning, if present, is always kept), followed by a "+N more" marker.
 func capBannersForHeight(banners []string, height, minTabHeight int) []string {
 	room := height - tabBarHeight - stripHeight - inputHeight - minTabHeight
 	allowed := min(room, height/bannerHeightDivisor)
 	if len(banners) <= 1 || len(banners) <= allowed {
 		return banners
 	}
+	// Keep the first banner (which is identity warning if present) and fold the rest
 	return []string{banners[0], fmt.Sprintf("+%d more", len(banners)-1)}
 }

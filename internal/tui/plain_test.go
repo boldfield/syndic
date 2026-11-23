@@ -132,7 +132,7 @@ func TestNoColorKeepsAltScreen(t *testing.T) {
 	p := startPlainRig(t, h, 80, 24)
 	p.until(t, "drafts on", func(a *App) (string, bool) { a.SetDraftsEnabled(true); return "", true })
 	p.typeLine("question")
-	p.waitOutput(t, "!! UNREVIEWED DRAFT !!")
+	p.waitOutput(t, "· UNREVIEWED DRAFT")
 
 	out := p.captured(t)
 	assertNoColor(t, out)
@@ -165,7 +165,7 @@ func TestPlainDraftBannerInView(t *testing.T) {
 	p := startPlainRig(t, h, 80, 24)
 	p.until(t, "drafts on", func(a *App) (string, bool) { a.SetDraftsEnabled(true); return "", true })
 	p.typeLine("question")
-	v := untilView(t, p.rig, "!! UNREVIEWED DRAFT !!", answerText)
+	v := untilView(t, p.rig, "· UNREVIEWED DRAFT", answerText)
 	assertNoColor(t, v)
 }
 
@@ -212,10 +212,10 @@ func TestFourBannersCollapseAt80x24(t *testing.T) {
 	}
 	assertFits(t, "four banners", v, 80, 24)
 	lines := strings.Split(v, "\n")
-	// tab bar, tab area, banners, input, status line.
+	// tab bar, tab area, banners (identity first, then others collapsed), input, status line.
 	at := 1 + body
-	if lines[at] != "deadlines: provisional" || lines[at+1] != "+3 more" {
-		t.Errorf("banner region = %q, %q; want the first banner and +3 more", lines[at], lines[at+1])
+	if !strings.Contains(lines[at], "identity: unknown(name-matched)") || lines[at+1] != "+4 more" {
+		t.Errorf("banner region = %q, %q; want the identity banner and +4 more", lines[at], lines[at+1])
 	}
 	if body < 5 {
 		t.Errorf("tab area has %d lines, want at least 5", body)

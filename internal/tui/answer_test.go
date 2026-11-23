@@ -209,8 +209,8 @@ func TestAnswerCancelledDuringAuthor(t *testing.T) {
 	if err := dial(t, r.paths).Cancel(context.Background(), turn); err != nil {
 		t.Fatal(err)
 	}
-	v := untilView(t, r, "cancelled before candidate")
-	if strings.Contains(v, "CANCELLED, not approved") || strings.Contains(v, answerText) {
+	v := untilView(t, r, "× CANCELLED, not approved")
+	if strings.Contains(v, answerText) {
 		t.Fatalf("cancel before a candidate shows a candidate:\n%s", v)
 	}
 }

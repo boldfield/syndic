@@ -159,11 +159,11 @@ func TestV5NoApprovedAnswerAndNotInContextMarkers(t *testing.T) {
 	if n := count(notInContext); n != 2 {
 		t.Errorf("%d lines are exactly %q, want 2 (t1 and t2):\n%s", n, notInContext, strings.Join(lines, "\n"))
 	}
-	if i, j := lineOf(t, lines, "you: q3"), lineOf(t, lines, "you: q2"); i < j {
+	if i, j := lineOf(t, lines, "› q3"), lineOf(t, lines, "› q2"); i < j {
 		t.Fatalf("turn order broken: q3 at %d before q2 at %d", i, j)
 	}
 	// The marker closes the turn it names: none follows q3's block.
-	first := lineOf(t, lines, "you: q3")
+	first := lineOf(t, lines, "› q3")
 	for _, l := range lines[first:] {
 		if l == notInContext {
 			t.Errorf("a turn from the trim point on is marked %q", notInContext)

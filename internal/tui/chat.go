@@ -110,20 +110,20 @@ func chatLines(s State, in chatInput) (lines []string, lastTurn int) {
 		}
 		if ok {
 			if in.width > 0 {
-				// The label takes the place of the first line's indent, so the
-				// v5 "you: " row stays; the text is wrapped to fit beside it.
-				for i, l := range SafeTextWithPrefix(text, in.width-3) {
-					lead := "     "
+				// User input begins with › in column 0; continuation lines have
+				// two-space content prefix. Text is wrapped to fit in width.
+				for i, l := range SafeTextWithPrefix(text, in.width) {
 					if i == 0 {
-						lead = "you: "
+						turn = append(turn, "› "+strings.TrimPrefix(l, contentPrefix))
+					} else {
+						turn = append(turn, l)
 					}
-					turn = append(turn, lead+strings.TrimPrefix(l, contentPrefix))
 				}
 			} else {
-				turn = append(turn, "you: "+strings.ReplaceAll(ToSafeText([]byte(text)), "\n", "\n     "))
+				turn = append(turn, "› "+strings.ReplaceAll(ToSafeText([]byte(text)), "\n", "\n  "))
 			}
 		} else {
-			turn = append(turn, "you: (input not loaded)")
+			turn = append(turn, "› (input not loaded)")
 		}
 		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
 		if trimmed[id] {

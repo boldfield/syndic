@@ -248,7 +248,7 @@ func TestConversationsAndSwitch(t *testing.T) {
 	if got := header(r.driver); !strings.HasPrefix(got, "conversation: new") {
 		t.Errorf("header after /new = %q", got)
 	}
-	if v := r.app.View(); strings.Contains(v, "you: first question") {
+	if v := r.app.View(); strings.Contains(v, "› first question") {
 		t.Errorf("the chat after /new shows the old conversation:\n%s", v)
 	}
 	runTurn(t, r.driver, "second question")
@@ -286,11 +286,11 @@ func TestConversationsAndSwitch(t *testing.T) {
 	r.command("/switch zzzzzzzz", "not_found", "not switched")
 
 	// The first conversation opens by prefix, with its turn and only that.
-	r.command("/switch "+first[:6], "switched to conversation "+shortID(first)+", 1 turns", "you: first question")
+	r.command("/switch "+first[:6], "switched to conversation "+shortID(first)+", 1 turns", "› first question")
 	if got, want := header(r.driver), "conversation "+shortID(first)+", 1 turns · workspace /ws/here"; got != want {
 		t.Errorf("header after /switch = %q, want %q", got, want)
 	}
-	if v := r.app.View(); strings.Contains(v, "you: second question") {
+	if v := r.app.View(); strings.Contains(v, "› second question") {
 		t.Errorf("the chat after /switch shows the other conversation:\n%s", v)
 	}
 	runTurn(t, r.driver, "third question")
@@ -315,7 +315,7 @@ func TestNewAndSwitchLeaveARunningTurnAlone(t *testing.T) {
 	if line := strings.Join(r.app.panel, " "); !strings.HasSuffix(line, "keeps running in conversation "+shortID(conv)) {
 		t.Errorf("/new says %q, want it to name the running turn's conversation", line)
 	}
-	if v := r.app.View(); strings.Contains(v, "you: long question") {
+	if v := r.app.View(); strings.Contains(v, "› long question") {
 		t.Errorf("the chat after /new shows the running turn's conversation:\n%s", v)
 	}
 	if r.app.state.CurrentTurn != turn || strings.Contains(r.strip(), "idle") {
@@ -335,7 +335,7 @@ func TestNewAndSwitchLeaveARunningTurnAlone(t *testing.T) {
 		t.Errorf("ctrl+c did not clear the input")
 	}
 
-	r.command("/switch "+conv[:8], "switched to conversation "+shortID(conv), "you: long question")
+	r.command("/switch "+conv[:8], "switched to conversation "+shortID(conv), "› long question")
 	r.command("/new", "new conversation")
 	if line := strings.Join(r.app.panel, " "); !strings.HasSuffix(line, "keeps running in conversation "+shortID(conv)) {
 		t.Errorf("second /new says %q", line)

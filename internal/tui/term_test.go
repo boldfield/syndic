@@ -111,7 +111,7 @@ func TestPlainModeDraftBanner(t *testing.T) {
 		t.Error("renderAnswer returned empty string")
 	}
 
-	if !strings.Contains(rendered, "!! UNREVIEWED DRAFT !!") {
+	if !strings.Contains(rendered, "· UNREVIEWED DRAFT") {
 		t.Errorf("Expected plain draft banner with !! in: %q", rendered)
 	}
 }

@@ -146,19 +146,11 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 				}
 			}
 			banner += " against " + hash
-			reviews := -1
-			if ti.ReviewCount != nil {
-				reviews = *ti.ReviewCount
-			}
-			lines = append(lines, outcomeLine("✓", approvedMark, banner, reviews, in.plainMode))
+			lines = append(lines, outcomeLine("✓", approvedMark, banner, in.plainMode))
 		}
 
 	case "solo_complete":
-		reviews := -1
-		if ti.ReviewCount != nil {
-			reviews = *ti.ReviewCount
-		}
-		lines = append(lines, outcomeLine("·", soloMark, "UNREVIEWED (solo)", reviews, in.plainMode))
+		lines = append(lines, outcomeLine("·", soloMark, "UNREVIEWED (solo)", in.plainMode))
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
 			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else {
@@ -171,11 +163,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		}
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		if ti.CandidateHash != nil {
-			reviews := -1
-			if ti.ReviewCount != nil {
-				reviews = *ti.ReviewCount
-			}
-			lines = append(lines, outcomeLine("!", incompleteMark, "INCOMPLETE, not approved", reviews, in.plainMode))
+			lines = append(lines, outcomeLine("!", incompleteMark, "INCOMPLETE, not approved", in.plainMode))
 		}
 		lines = append(lines, noApprovedAnswer(ti.State))
 		if ti.CandidateHash != nil {
@@ -187,35 +175,22 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		reviews := -1
-		if ti.ReviewCount != nil {
-			reviews = *ti.ReviewCount
-		}
-		lines = append(lines, outcomeLine("!", incompleteMark, "HUMAN OVERRIDE: "+reason, reviews, in.plainMode))
+		lines = append(lines, outcomeLine("!", incompleteMark, "HUMAN OVERRIDE: "+reason, in.plainMode))
 		candidate()
 
 	case "cancelled":
 		if ti.CandidateHash == nil {
-			lines = append(lines, "cancelled before candidate", noApprovedAnswer(ti.State))
+			lines = append(lines, outcomeLine("×", cancelledMark, "CANCELLED, not approved", in.plainMode), noApprovedAnswer(ti.State))
 			break
 		}
-		reviews := -1
-		if ti.ReviewCount != nil {
-			reviews = *ti.ReviewCount
-		}
-		lines = append(lines, outcomeLine("×", cancelledMark, "CANCELLED, not approved", reviews, in.plainMode))
+		lines = append(lines, outcomeLine("×", cancelledMark, "CANCELLED, not approved", in.plainMode))
 		lines = append(lines, noApprovedAnswer(ti.State))
 		lines = append(lines, blockLines(in.openBlocks, in.width)...)
 		candidate()
 
 	default:
 		if refs := answerRefs(s, turnID, in); in.drafts && len(refs) > 0 {
-			draftText := "UNREVIEWED DRAFT"
-			if in.plainMode {
-				draftText = "!! UNREVIEWED DRAFT !!"
-			} else {
-				draftText = draftBanner.Render(draftText)
-			}
+			draftText := outcomeLine("·", soloMark, "UNREVIEWED DRAFT", in.plainMode)
 			lines = append(lines, draftText, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
 		lines = append(lines, progressLine(ti, in.now))
@@ -251,32 +226,23 @@ func progressLine(ti TurnInfo, now time.Time) string {
 	return safeLine(strings.Join(parts, ", "))
 }
 
-var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-
 // outcomeMark styles for outcome lines (light/dark pairs)
 var (
-	approvedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green for approved
-	incompleteMark = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow for incomplete/override
-	cancelledMark  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red for cancelled
-	soloMark       = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray for solo
+	approvedMark   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "2", Dark: "10"}) // green
+	incompleteMark = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "3", Dark: "11"}) // yellow
+	cancelledMark  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "1", Dark: "9"})  // red
+	soloMark       = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "8", Dark: "7"})  // gray
 )
 
-// outcomeLine formats a single outcome line with mark, banner, and optional reviews count.
-// mark is a single character (✓, !, ×, ·), and reviews is the review count (-1 means no count).
+// outcomeLine formats a single outcome line with mark and banner.
+// mark is a single character (✓, !, ×, ·).
 // Returns the line with safe text, applying colour when appropriate.
-func outcomeLine(mark string, style lipgloss.Style, banner string, reviews int, plainMode bool) string {
-	reviewsSuffix := ""
-	if reviews >= 0 {
-		if reviews == 1 {
-			reviewsSuffix = " · 1 reviews"
-		} else {
-			reviewsSuffix = fmt.Sprintf(" · %d reviews", reviews)
-		}
-	}
+func outcomeLine(mark string, style lipgloss.Style, banner string, plainMode bool) string {
+	line := mark + " " + banner
 	if plainMode {
-		return safeLine(mark + " " + banner + reviewsSuffix)
+		return safeLine(line)
 	}
-	return style.Render(mark) + " " + safeLine(banner+reviewsSuffix)
+	return style.Render(line)
 }
 
 // blockLines lists open blocks with severity, evidence and remedy.
