@@ -65,7 +65,8 @@ func header(d *driver) string {
 
 func TestChatHeaderNamesTheOpenConversation(t *testing.T) {
 	d, _ := startRigWith(t, WithConversation("0123456789abcdef", []string{"t1", "t2", "t3"}), WithWorkDir("/ws/x"))
-	if got, want := header(d), "conversation 01234567, 3 turns · workspace /ws/x"; got != want {
+	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
+	if got, want := header(d), "conversation 01234567, 3 turns · workspace /ws/x 0 earlier · 0%"; got != want {
 		t.Fatalf("first line of the chat = %q, want %q\n%s", got, want, d.app.View())
 	}
 }
@@ -183,7 +184,8 @@ func TestStartupShowsTheSelectedConversationOnly(t *testing.T) {
 	if strings.Contains(v, "BRAVO-ANSWER") {
 		t.Errorf("the other conversation's answer is shown:\n%s", v)
 	}
-	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns · workspace /ws/a"; got != want {
+	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
+	if got, want := header(re), "conversation "+shortID(a.app.conversationID)+", 1 turns · workspace /ws/a 0 earlier · 0%"; got != want {
 		t.Errorf("header = %q, want %q", got, want)
 	}
 

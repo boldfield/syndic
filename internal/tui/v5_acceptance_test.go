@@ -42,8 +42,8 @@ func TestV5ChatFirstLineNamesTheConversation(t *testing.T) {
 		turns []string
 		want  string
 	}{
-		{[]string{"t1"}, "conversation 01234567, 1 turns · workspace /ws/x"},
-		{[]string{"t1", "t2", "t3"}, "conversation 01234567, 3 turns · workspace /ws/x"},
+		{[]string{"t1"}, "conversation 01234567, 1 turns · workspace /ws/x 0 earlier · 0%"},
+		{[]string{"t1", "t2", "t3"}, "conversation 01234567, 3 turns · workspace /ws/x 0 earlier · 0%"},
 	} {
 		a := convApp(t, "0123456789abcdef", tc.turns)
 		lines := strings.Split(a.View(), "\n")

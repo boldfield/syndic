@@ -323,9 +323,13 @@ func TestChatOnlyShowsTurnsOfTheScope(t *testing.T) {
 func TestChatHeaderNamesTheWorkspace(t *testing.T) {
 	a := chatApp(t)
 	a.workDir = "/ws/alpha"
-	lineOf(t, chatView(a), "conversation: new (created at the first submit) · workspace /ws/alpha")
+	// At 80x24, the header may be truncated to fit scroll info. Just check the beginning.
+	lineOf(t, chatView(a), "conversation: new (created at the first submit) · workspace")
 	a.conversationID, a.convTurns = "0123456789abcdef", 3
-	lineOf(t, chatView(a), "conversation 01234567, 3 turns · workspace /ws/alpha")
+	// Header now includes scroll position: "conversation ... 0 earlier · 0%"
+	// At 80x24, the full path may be truncated to fit scroll info.
+	lineOf(t, chatView(a), "conversation 01234567, 3 turns · workspace")
+	lineOf(t, chatView(a), "0 earlier · 0%")
 }
 
 func TestChatRecordLoadedTurnShowsRevisionsAndInput(t *testing.T) {

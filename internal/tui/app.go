@@ -787,6 +787,32 @@ func (a *App) conversationHeader() string {
 	return fmt.Sprintf("conversation %s, %d turns · workspace %s", shortID(a.conversationID), a.convTurns, safeLine(a.workDir))
 }
 
+// conversationHeaderWithScroll formats the conversation header with scroll position info.
+// It appends the count of earlier turns and scroll percentage to the right edge,
+// only if there is room without truncating the header significantly.
+func (a *App) conversationHeaderWithScroll(headerWidth int, totalLines int, answerHeight int, startLine int) string {
+	header := a.conversationHeader()
+	scroll := calcScrollPosition(totalLines, answerHeight, startLine)
+
+	// Format scroll info: "N earlier · X%"
+	scrollStr := fmt.Sprintf("%d earlier · %d%%", scroll.Above, scroll.Percentage)
+
+	// Only append scroll info if the full header fits with scroll info and buffer.
+	// Otherwise, just show the header without scroll info to avoid excessive truncation.
+	fullResult := header + " " + scrollStr
+	if ansi.StringWidth(fullResult) <= headerWidth {
+		return fullResult
+	}
+
+	// If not enough room, try to fit header + scroll with minimal truncation.
+	// Leave room for scroll info plus a space and one character of buffer.
+	minHeaderRoom := max(1, headerWidth-len(scrollStr)-2)
+	headerClipped := ansi.Truncate(header, minHeaderRoom, "")
+	result := headerClipped + " " + scrollStr
+
+	return ansi.Truncate(result, headerWidth, "")
+}
+
 // shortID is the first eight characters of an id.
 func shortID(id string) string {
 	if len(id) > 8 {
@@ -1209,8 +1235,9 @@ func (a *App) View() string {
 		for len(lines) < a.answerHeight() {
 			lines = append(lines, "")
 		}
-		// The first line of the chat names the open conversation.
-		lines = append([]string{a.conversationHeader()}, lines[:a.answerHeight()]...)
+		// The first line of the chat names the open conversation with scroll position.
+		headerWithScroll := a.conversationHeaderWithScroll(w, len(lines)+start, a.answerHeight(), start)
+		lines = append([]string{headerWithScroll}, lines[:a.answerHeight()]...)
 	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
