@@ -30,8 +30,8 @@ func TestMigration004FreshVersion(t *testing.T) {
 	if err := db.Conn().QueryRow("SELECT MAX(version) FROM schema_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 11 {
-		t.Errorf("version = %d, want 11", v)
+	if v != 12 {
+		t.Errorf("version = %d, want 12", v)
 	}
 }
 

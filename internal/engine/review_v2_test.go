@@ -59,6 +59,19 @@ func TestReviewV2MalformedThenValidRepair(t *testing.T) {
 			if statuses[first.ID] != "malformed" || statuses[second.ID] != "valid" {
 				t.Fatalf("statuses = %v, want first malformed and repair valid", statuses)
 			}
+			// The acceptance wrote the record: the repair is listed once, under
+			// the repair attempt, and the malformed original is not.
+			items, next, err := h.Store.ReviewsPage(turnID, []string{"reviewer"}, "", 50, 1<<20)
+			if err != nil || next != "" || len(items) != 1 {
+				t.Fatalf("reviews = %d items, next %q, %v; want 1", len(items), next, err)
+			}
+			if items[0].AttemptID != second.ID || items[0].Kind != "approve" || items[0].Participant != first.Participant || items[0].Round != 0 {
+				t.Fatalf("review item = %+v, want approve by %s on repair attempt %s", items[0], first.Participant, second.ID)
+			}
+			var written int
+			if err := h.DB.Conn().QueryRow(`SELECT COUNT(*) FROM review_records WHERE turn_id = ?`, turnID).Scan(&written); err != nil || written != 1 {
+				t.Fatalf("records written at acceptance = %d, %v; want 1", written, err)
+			}
 		})
 	}
 }

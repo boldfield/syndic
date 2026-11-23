@@ -601,6 +601,11 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 					endState, endReason = StateApproved, reasonAllApproved
 				}
 			}
+			// The accepted verdict's record is written with the acceptance, so
+			// the reviews listing never reparses what the reviewer wrote.
+			if err := recordAcceptedReview(tx, t, d, verdictID, v); err != nil {
+				return err
+			}
 			// A loop waits for every required reviewer's accepted result on
 			// the candidate before it decides, so the author is sent all the
 			// feedback at once.
@@ -672,6 +677,32 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		e.startRevision(t)
 	}
 	return nil
+}
+
+// recordAcceptedReview journals the reviews-drawer record of an accepted
+// verdict: its kind as classified, and the blocks it opens, maintains or
+// withdraws. It runs in the acceptance transaction.
+func recordAcceptedReview(tx *journal.Tx, t *openTurn, d reviewerDispatch, verdictID string, v verdict.Verdict) error {
+	index := len(t.required)
+	for i, id := range t.required {
+		if id == d.participant {
+			index = i
+		}
+	}
+	states := make([]journal.ReviewBlockState, 0, len(v.BlockStates))
+	for _, st := range v.BlockStates {
+		states = append(states, journal.ReviewBlockState{BlockID: st.BlockID, State: st.State})
+	}
+	return tx.RecordAcceptedReview(journal.AcceptedReview{
+		TurnID:        t.id,
+		VerdictID:     verdictID,
+		AttemptID:     d.attemptID,
+		Participant:   d.participant,
+		RosterIndex:   index,
+		CandidateHash: t.candidateHash,
+		Kind:          v.Decision,
+		States:        states,
+	})
 }
 
 // resultsComplete reports whether every required reviewer has an accepted
