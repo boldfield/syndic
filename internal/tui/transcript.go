@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/mattn/go-runewidth"
@@ -17,8 +16,6 @@ const (
 	minColumn = 40
 	// columnGap separates the two columns of a repair pair.
 	columnGap = " │ "
-	// tabStop is how many cells a tab in a body is shown as.
-	tabStop = 4
 	// headerSep separates the parts of a header.
 	headerSep = " · "
 )
@@ -138,10 +135,12 @@ func headerParts(s State, in transcriptInput, it wire.TranscriptItem) []string {
 
 // wrapHeader lays the parts of a header out on lines of at most width cells,
 // breaking between parts; a part wider than a line is wrapped inside itself.
+// Parts come from records, so each is escaped as one line of safe text.
 func wrapHeader(parts []string, width int) []string {
 	var out []string
 	cur := ""
 	for _, p := range parts {
+		p = safeLine(p)
 		switch {
 		case cur == "":
 			cur = p
@@ -275,40 +274,10 @@ func blockRowLines(rows []blockRow, width int) []string {
 }
 
 // wrapText splits text into lines of at most width cells. Every rune is kept;
-// a line longer than width continues on the next row. Control characters are
-// shown as a dot so a body cannot drive the terminal.
+// a line longer than width continues on the next row. The text is escaped
+// through safeTokens, so a header or body cannot drive the terminal.
 func wrapText(text string, width int) []string {
-	width = max(width, 1)
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.TrimSuffix(text, "\n")
-	var out []string
-	for _, para := range strings.Split(text, "\n") {
-		var cur strings.Builder
-		cells := 0
-		for _, r := range para {
-			switch {
-			case r == '\t':
-				for i := 0; i < tabStop; i++ {
-					if cells == width {
-						out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
-					}
-					cur.WriteByte(' ')
-					cells++
-				}
-				continue
-			case unicode.IsControl(r):
-				r = '·'
-			}
-			w := runewidth.RuneWidth(r)
-			if cells > 0 && cells+w > width {
-				out, cur, cells = append(out, cur.String()), strings.Builder{}, 0
-			}
-			cur.WriteRune(r)
-			cells += w
-		}
-		out = append(out, cur.String())
-	}
-	return out
+	return wrapTokens(safeTokens([]byte(text)), max(width, 1))
 }
 
 // padCells pads s with spaces to width cells.

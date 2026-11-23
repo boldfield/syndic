@@ -148,7 +148,7 @@ func TestRenderParticipantsAuthorControlCharacters(t *testing.T) {
 	if strings.ContainsRune(out, 0x1b) {
 		t.Fatalf("escape reached the output: %q", out)
 	}
-	if !strings.Contains(out, "author: a·[Hx (model·[2J)") {
+	if !strings.Contains(out, `author: a\x1b[Hx (model\x1b[2J)`) {
 		t.Fatalf("author line not sanitized as expected: %q", out)
 	}
 }
@@ -855,8 +855,8 @@ func TestNoControlCharactersInRendering(t *testing.T) {
 	if strings.Contains(line, "\x1b") || strings.Contains(line, "\x00") {
 		t.Fatalf("detail should sanitize control characters, got:\n%s", line)
 	}
-	if !strings.Contains(line, "·") {
-		t.Fatalf("detail should replace control characters with middle dot, got:\n%s", line)
+	if !strings.Contains(line, `auth_error\x00status`) || !strings.Contains(line, `llama3\x1b[2J`) {
+		t.Fatalf("detail should show control characters as visible escapes, got:\n%s", line)
 	}
 }
 

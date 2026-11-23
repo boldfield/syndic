@@ -57,7 +57,7 @@ func (a *App) resendProvisional(sub submission) tea.Cmd {
 func (a *App) provisionalLines() []string {
 	roster := "the roster"
 	if a.state.Status != nil && a.state.Status.RosterPath != "" {
-		roster = a.state.Status.RosterPath
+		roster = safeLine(a.state.Status.RosterPath)
 	}
 	return []string{
 		"The engine refused the submit: provisional deadlines are in effect.",

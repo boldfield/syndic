@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/wire"
@@ -177,4 +178,129 @@ func TestPanelsAndBannersEscapeHostileText(t *testing.T) {
 	for _, l := range strings.Split(a.View(), "\n") {
 		assertSafeRunes(t, "view", l)
 	}
+}
+
+// recordHostile carries every class the boundary escapes: OSC 8, a clear-screen
+// CSI, CR, a valid-UTF-8 C1 (8-bit CSI), bidi override and isolate, an invalid
+// byte and a line feed that would break a one-line field.
+const recordHostile = "h\x1b]8;;http://x\x1b\\L\x1b[2J\r\u009b\u202e\u2066\xff\n2"
+
+// hostileRecordApp fills the engine-sourced state the status line, the chat,
+// the transcript and the participants tab show with recordHostile.
+func hostileRecordApp(t *testing.T) *App {
+	t.Helper()
+	h := recordHostile
+	a := chatApp(t)
+	a.width, a.height = 120, 60
+	a.state.Status.DefaultPreset = h
+	a.state.Status.RosterPath = h
+	a.state.NextPreset = h
+	a.state.Participants[h] = ParticipantInfo{
+		ID: h, State: h, Detail: h, Pool: h, ReportedModel: h, Identity: h,
+		EligibleRoles: []string{h}, FailingStep: h, ServerStatus: h, RetryCommand: h,
+		BytesPerTokenSource: h, ContextSource: h, DeclaredBilling: h,
+	}
+	a.state.ProbeSubjects[h] = ProbeSubjectInfo{Kind: h, Endpoint: h, Model: h, State: h, Detail: h, FailingStep: h, ServerStatus: h, RetryCommand: h}
+	group := []wire.GroupMember{{EndpointName: h, Model: h}}
+	a.state.Pools[h] = wire.Pool{Name: h, Concurrency: 1, Holds: []wire.PoolHold{{AttemptID: h, HeldSince: h, Group: group}}}
+	a.state.OrphanedHolds = []wire.Hold{{Pool: h, AttemptID: h, Group: group}}
+
+	addTurn(a, "t0", 1, "approved", "q", "answer")
+	approveBy(a, "t0", h)
+	addTurn(a, "t1", 3, "authoring", "q", "")
+	a.state.Turns["t1"] = TurnInfo{
+		ID: "t1", State: h, Preset: h, QuickProfile: &h, SubmitSeq: 3, SubmittedAt: chatNow.Add(-time.Minute),
+		Author: h, AuthorState: h, Reviewers: []string{h}, ReviewerStates: map[string]string{h: h},
+	}
+	a.state.CurrentTurn = "t1"
+	a.state.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: h, Phase: h, Status: h, TransportStatus: h, VerdictClass: h}
+	a.state.Messages["m1"] = MessageInfo{ID: "m1", TurnID: "t1", Sender: h, Phase: h}
+	return a
+}
+
+func assertSafeLines(t *testing.T, label string, lines []string) {
+	t.Helper()
+	for _, l := range lines {
+		assertSafeRunes(t, label, l)
+	}
+}
+
+func TestStatusLineEscapesRecordValues(t *testing.T) {
+	a := hostileRecordApp(t)
+	for _, w := range []int{40, 80, 400} {
+		for _, compact := range []bool{false, true} {
+			line := renderStripFor(a.state, w, chatNow, compact)
+			assertSafeRunes(t, "strip", line)
+			if strings.Contains(line, "\n") {
+				t.Errorf("w=%d: strip broke onto two lines: %q", w, line)
+			}
+		}
+	}
+	if line := renderStrip(a.state, 4000, chatNow); !strings.Contains(line, `[quick:h\x1b]8;;http://x\x1b\L\x1b[2J\x0d\xc2\x9b\u202e\u2066\xff\x0a2]`) {
+		t.Errorf("quick profile not shown with visible escapes: %q", line)
+	}
+	a.state.CurrentTurn = ""
+	assertSafeRunes(t, "idle strip", renderStrip(a.state, 400, chatNow))
+	assertSafeLines(t, "view", strings.Split(a.View(), "\n"))
+}
+
+func TestParticipantsTabEscapesRecordValues(t *testing.T) {
+	a := hostileRecordApp(t)
+	out := renderParticipants(a.state, 400, 0, recordHostile, chatNow)
+	assertSafeLines(t, "participants", strings.Split(out, "\n"))
+	for _, want := range []string{`model: h\x1b]8;;`, `probe failed at: h\x1b]8;;`, `server status: h\x1b]8;;`, `\u202e\u2066\xff\x0a2`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing visible escape %q in:\n%s", want, out)
+		}
+	}
+	a.tab = tabParticipants
+	assertSafeLines(t, "participants view", strings.Split(a.View(), "\n"))
+}
+
+func TestTranscriptHeadersEscapeRecordValues(t *testing.T) {
+	a := hostileRecordApp(t)
+	in := transcriptInput{
+		items: []wire.TranscriptItem{
+			{Ref: "attempt:a1"},
+			{Ref: "msg:m1"},
+			{Ref: "attempt:" + recordHostile},
+			{Ref: "msg:" + recordHostile},
+		},
+		content: NewContentCache(),
+	}
+	for _, w := range []int{20, 60, 200} {
+		lines := transcriptLines(a.state, "t1", in, w)
+		assertSafeLines(t, "transcript", lines)
+		if w == 200 && !strings.Contains(strings.Join(lines, "\n"), `attempt a1 · h\x1b]8;;`) {
+			t.Errorf("attempt header not visibly escaped:\n%s", strings.Join(lines, "\n"))
+		}
+	}
+}
+
+func TestChatProgressAndOutcomeEscapeRecordValues(t *testing.T) {
+	a := hostileRecordApp(t)
+	view := a.View()
+	assertSafeLines(t, "chat", strings.Split(view, "\n"))
+	for _, want := range []string{`approved by h\x1b]8;;`, `turn in progress: h\x1b]8;;`} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missing %q in:\n%s", want, view)
+		}
+	}
+}
+
+func TestPanelsAndPromptsEscapeEveryLine(t *testing.T) {
+	a := hostileRecordApp(t)
+	a.panel = a.provisionalLines()
+	view := a.View()
+	assertSafeLines(t, "provisional", strings.Split(view, "\n"))
+	if !strings.Contains(view, `placeholder`) || !strings.Contains(view, `h\x1b]8;;`) {
+		t.Errorf("provisional prompt not shown with the roster path escaped:\n%s", view)
+	}
+	// Any panel line, whoever set it, reaches the terminal as safe text.
+	a.panel = []string{"turn " + recordHostile + " is still running", "state: " + recordHostile}
+	assertSafeLines(t, "panel", strings.Split(a.View(), "\n"))
+
+	// The /trim preview echoes what the user typed before any panel wraps it.
+	a.inputs["t0"] = recordHostile
+	assertSafeLines(t, "trim preview", a.trimPreview([]string{"t0", "t1"}, "t1"))
 }

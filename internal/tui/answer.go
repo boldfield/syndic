@@ -85,7 +85,7 @@ func answerRefs(s State, turnID string, in answerInput) []string {
 }
 
 // bodyRaw is the text behind a ref, unescaped: loading, a one-line error, or
-// the content. It must reach the terminal only through shown or body.
+// the content. It must reach the terminal only through shown or safeLine.
 func bodyRaw(cc *ContentCache, ref string) string {
 	item := cc.Get(ref)
 	switch {
@@ -95,11 +95,6 @@ func bodyRaw(cc *ContentCache, ref string) string {
 		return "loading…"
 	}
 	return strings.TrimRight(item.Data, "\n")
-}
-
-// body is bodyRaw escaped for the terminal.
-func body(cc *ContentCache, ref string) string {
-	return ToSafeText([]byte(bodyRaw(cc, ref)))
 }
 
 // shown is the one way untrusted text enters the answer and chat tabs: escaped
@@ -141,7 +136,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			if ti.Round > 0 {
 				by += fmt.Sprintf(" after %d revisions", ti.Round)
 			}
-			lines = append(lines, fmt.Sprintf("approved by %s against %s", by, hash))
+			lines = append(lines, safeLine(fmt.Sprintf("approved by %s against %s", by, hash)))
 		}
 
 	case "solo_complete":
@@ -223,7 +218,7 @@ func progressLine(ti TurnInfo, now time.Time) string {
 			parts = append(parts, id+" "+ti.ReviewerStates[id])
 		}
 	}
-	return strings.Join(parts, ", ")
+	return safeLine(strings.Join(parts, ", "))
 }
 
 var draftBanner = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))

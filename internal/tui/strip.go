@@ -35,7 +35,7 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 			}
 			segments = append(segments, "[idle]")
 		}
-		return strings.Join(segments, " ")
+		return safeLine(strings.Join(segments, " "))
 	}
 
 	// Turn is open: build full strip.
@@ -109,6 +109,11 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 	// identity: unknown(name-matched)
 	segments = append(segments, "identity: unknown(name-matched)")
 
+	// Presets, profile names, states and participant ids come from the engine
+	// and the workspace: escape each segment before it is measured.
+	for i, seg := range segments {
+		segments[i] = safeLine(seg)
+	}
 	line := strings.Join(segments, " ")
 
 	// If line fits (measured by display width, not bytes), return it.
@@ -129,7 +134,7 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 	segments = kept
 
 	// Next the preset goes: the running turn's state matters more.
-	if compact && len(segments) > 0 && segments[0] == fmt.Sprintf("[%s]", ti.Preset) {
+	if compact && len(segments) > 0 && segments[0] == safeLine(fmt.Sprintf("[%s]", ti.Preset)) {
 		segments = segments[1:]
 		if line = strings.Join(segments, " "); runewidth.StringWidth(line) <= width {
 			return line

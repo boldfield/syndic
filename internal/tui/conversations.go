@@ -281,9 +281,9 @@ func (a *App) turnInputLine(id string) string {
 		if ref == "" {
 			return "(input not loaded)"
 		}
-		text = body(a.content, ref)
+		text = bodyRaw(a.content, ref)
 	}
-	return firstLine(text)
+	return safeLine(firstLine(text))
 }
 
 func cmdTrim(a *App, args []string) tea.Cmd {

@@ -10,15 +10,15 @@ import (
 
 // bidiChars are Unicode bidirectional override and isolate characters that must be escaped.
 var bidiChars = map[rune]bool{
-	'‪': true, // LEFT-TO-RIGHT EMBEDDING
-	'‫': true, // RIGHT-TO-LEFT EMBEDDING
-	'‬': true, // POP DIRECTIONAL FORMATTING
-	'‭': true, // LEFT-TO-RIGHT OVERRIDE
-	'‮': true, // RIGHT-TO-LEFT OVERRIDE
-	'⁦': true, // LEFT-TO-RIGHT ISOLATE
-	'⁧': true, // RIGHT-TO-LEFT ISOLATE
-	'⁨': true, // FIRST STRONG ISOLATE
-	'⁩': true, // POP DIRECTIONAL ISOLATE
+	'\u202a': true, // LEFT-TO-RIGHT EMBEDDING
+	'\u202b': true, // RIGHT-TO-LEFT EMBEDDING
+	'\u202c': true, // POP DIRECTIONAL FORMATTING
+	'\u202d': true, // LEFT-TO-RIGHT OVERRIDE
+	'\u202e': true, // RIGHT-TO-LEFT OVERRIDE
+	'\u2066': true, // LEFT-TO-RIGHT ISOLATE
+	'\u2067': true, // RIGHT-TO-LEFT ISOLATE
+	'\u2068': true, // FIRST STRONG ISOLATE
+	'\u2069': true, // POP DIRECTIONAL ISOLATE
 }
 
 // safeToken is one displayed unit of safe text: a printable rune, an expanded
@@ -106,17 +106,27 @@ const minContentWidth = len(contentPrefix) + 6
 // with two spaces. Callers pass raw text, never already-escaped text.
 func SafeTextWithPrefix(text string, width int) []string {
 	width = max(width, minContentWidth) - len(contentPrefix)
+	out := wrapTokens(safeTokens([]byte(text)), width)
+	for i, l := range out {
+		out[i] = contentPrefix + l
+	}
+	return out
+}
 
+// wrapTokens lays safe tokens out on lines of at most width cells. An escape
+// is never split, so a line holding only one wide token may exceed width.
+// A trailing LF ends the last line rather than opening another.
+func wrapTokens(toks []safeToken, width int) []string {
 	var out []string
 	var cur strings.Builder
 	col := 0
 	flush := func() {
-		out = append(out, contentPrefix+cur.String())
+		out = append(out, cur.String())
 		cur.Reset()
 		col = 0
 	}
 	pending := false // a line is open, so a trailing LF does not add another
-	for _, t := range safeTokens([]byte(text)) {
+	for _, t := range toks {
 		if t.nl {
 			flush()
 			pending = false
@@ -133,7 +143,22 @@ func SafeTextWithPrefix(text string, width int) []string {
 		flush()
 	}
 	if len(out) == 0 {
-		out = []string{contentPrefix}
+		out = []string{""}
 	}
 	return out
+}
+
+// safeLine is ToSafeText for a value shown on one line, such as an id, a
+// name, a path or a status detail: a line feed is escaped too, so the value
+// can neither break a row nor reach column 0.
+func safeLine(s string) string {
+	var out strings.Builder
+	for _, t := range safeTokens([]byte(s)) {
+		if t.nl {
+			out.WriteString("\\x0a")
+			continue
+		}
+		out.WriteString(t.text)
+	}
+	return out.String()
 }
