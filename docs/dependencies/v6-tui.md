@@ -7,8 +7,8 @@ Inventory of the six presentation modules added for v6, their versions, existing
 ### github.com/charmbracelet/lipgloss
 
 - Module path: `github.com/charmbracelet/lipgloss`
-- Version to pin: `v1.1.0`
-- Current version in `go.mod`: already present at `v1.1.0`
+- Version to pin: `v1.1.1-0.20250404203927-76690c660834`
+- Current version in `go.mod`: present at `v1.1.0` (upgraded by Glamour)
 - License: MIT
 - Transitive additions/upgrades: None (all transitive modules already in `go.mod`)
 
@@ -26,7 +26,7 @@ Inventory of the six presentation modules added for v6, their versions, existing
 - Version to pin: `v1.0.0`
 - Current version in `go.mod`: not present (NEW)
 - License: MIT
-- Transitive modules added/upgraded:
+- Transitive modules added/upgraded (from go.mod diff):
   - `github.com/charmbracelet/lipgloss@v1.1.1-0.20250404203927-76690c660834` (MIT, upgrade from v1.1.0)
   - `github.com/alecthomas/chroma/v2@v2.20.0` (MIT, new)
   - `github.com/aymerick/douceur@v0.2.0` (MIT, new)
@@ -43,6 +43,12 @@ Inventory of the six presentation modules added for v6, their versions, existing
   - `golang.org/x/term@v0.36.0` (BSD-3-Clause, new)
   - `golang.org/x/text@v0.30.0` (BSD-3-Clause, upgrade from v0.28.0)
   - `golang.org/x/tools@v0.37.0` (BSD-3-Clause, upgrade from v0.35.0)
+- Graph-only modules (transitive, not in go.mod):
+  - `github.com/alecthomas/assert/v2@v2.11.0` (MIT, via chroma)
+  - `github.com/alecthomas/repr@v0.5.1` (MIT, via chroma)
+  - `github.com/hexops/gotextdiff@v1.0.3` (MIT, via chroma)
+  - `golang.org/x/crypto@v0.42.0` (BSD-3-Clause, via x/net)
+  - `golang.org/x/telemetry@v0.0.0-20250908211612-aef8a434d053` (BSD-3-Clause, via x/tools)
 
 ### github.com/charmbracelet/huh
 
@@ -50,14 +56,16 @@ Inventory of the six presentation modules added for v6, their versions, existing
 - Version to pin: `v1.0.0`
 - Current version in `go.mod`: not present (NEW)
 - License: MIT
-- Transitive modules added:
+- Transitive modules added (from go.mod diff):
   - `github.com/catppuccin/go@v0.3.0` (MIT, new)
   - `github.com/charmbracelet/x/exp/strings@v0.0.0-20240722160745-212f7b056ed0` (MIT, new)
-  - `github.com/creack/pty@v1.1.24` (MIT, new)
-  - `github.com/charmbracelet/x/conpty@v0.1.0` (MIT, new)
-  - `github.com/charmbracelet/x/termios@v0.1.1` (MIT, new)
-  - `github.com/charmbracelet/x/xpty@v0.1.2` (MIT, new)
   - `github.com/mitchellh/hashstructure/v2@v2.0.2` (MIT, new)
+- Graph-only modules (transitive, not in go.mod):
+  - `github.com/charmbracelet/x/errors@v0.0.0-20240508181413-e8d8b6e2de86` (MIT, via huh)
+  - `github.com/creack/pty@v1.1.24` (MIT, via huh)
+  - `github.com/charmbracelet/x/conpty@v0.1.0` (MIT, via huh)
+  - `github.com/charmbracelet/x/termios@v0.1.1` (MIT, via huh)
+  - `github.com/charmbracelet/x/xpty@v0.1.2` (MIT, via huh)
 
 ### github.com/charmbracelet/harmonica
 
@@ -78,9 +86,9 @@ Inventory of the six presentation modules added for v6, their versions, existing
 ## Compatibility with existing versions
 
 **Existing Bubble Tea, Bubbles and Lip Gloss:**
-- Bubble Tea: currently `v1.3.10`, required by existing tests. Glamour requires `v1.3.10` (compatible). Huh requires `v1.3.6` (compatible; `v1.3.10` is later). No version conflict.
-- Bubbles: currently `v1.0.0`. Both Glamour and Huh depend on Bubbles. Under Go's minimal version selection (MVS), the highest required version is selected. MVS keeps `v1.0.0` as the pinned version. No conflict.
-- Lip Gloss: currently `v1.1.0`. Glamour requires `v1.1.1-0.20250404203927-76690c660834` (a pre-release). Huh is compatible with `v1.1.0`. Under MVS, the pre-release version `v1.1.1-0.20250404203927-76690c660834` is selected as it is higher than v1.1.0. This is an upgrade within the v1.1 series and poses no major version conflict.
+- Bubble Tea: currently `v1.3.10`, required by existing tests. Huh requires `v1.3.6` (compatible; `v1.3.10` is later). bubblezone requires `v1.3.4` (compatible). Glamour has no direct Bubble Tea requirement in its go.mod. MVS selects `v1.3.10`. No conflict.
+- Bubbles: currently `v1.0.0`. Huh and bubblezone depend on Bubbles. Under Go's minimal version selection (MVS), the highest required version is selected. MVS keeps `v1.0.0` as the pinned version. No conflict.
+- Lip Gloss: currently `v1.1.0`. Glamour requires `v1.1.1-0.20250404203927-76690c660834` (a pre-release via go.mod). Huh depends on Bubbles and Bubble Tea but not directly on Lip Gloss. Under MVS, `v1.1.1-0.20250404203927-76690c660834` is selected as it is higher than `v1.1.0`. This upgrade is within the v1.1 pre-release series and poses no major version conflict.
 
 ## Operator decision
 
@@ -88,9 +96,11 @@ The operator accepted all six modules, and the transitive modules listed here, o
 
 ## Notes
 
-**Process and system-level dependencies:**
-- Huh brings in PTY and process control libraries: `github.com/creack/pty@v1.1.24`, `github.com/charmbracelet/x/conpty@v0.1.0`, `github.com/charmbracelet/x/termios@v0.1.1`, and `github.com/charmbracelet/x/xpty@v0.1.2`. These provide access to terminal pseudo-devices and process spawning on the host, adding system-level dependencies on PTY device access and process control APIs.
+**Graph-only module dependencies (not in go.mod):**
+- Huh depends on PTY and process control modules via go mod graph: `github.com/creack/pty`, `github.com/charmbracelet/x/conpty`, `github.com/charmbracelet/x/termios`, and `github.com/charmbracelet/x/xpty`. These are pruned from go.mod under Go's minimal version selection but are still requirements in the module graph. They provide access to terminal pseudo-devices and process spawning, adding system-level dependencies on PTY device access and process control APIs if Huh is used to spawn processes.
+- Glamour depends on code-analysis and diff-reporting modules via go mod graph: `github.com/alecthomas/assert/v2`, `github.com/alecthomas/repr`, and `github.com/hexops/gotextdiff` (via chroma). These are transitive but pruned from go.mod.
 
-**Pre-release and standard library upgrades:**
+**Pre-release version and standard library upgrades:**
 - Glamour requires `github.com/charmbracelet/lipgloss@v1.1.1-0.20250404203927-76690c660834`, a pre-release version, which is an upgrade from the currently pinned `v1.1.0`.
 - Glamour brings multiple upgrades to standard library modules: `golang.org/x/mod@v0.28.0`, `golang.org/x/net@v0.44.0`, `golang.org/x/sync@v0.17.0`, `golang.org/x/term@v0.36.0`, `golang.org/x/text@v0.30.0`, and `golang.org/x/tools@v0.37.0`. These are compatible upgrades standard for TUI applications.
+- Glamour and x/tools bring in updates to `golang.org/x/crypto` and `golang.org/x/telemetry` via the module graph.
