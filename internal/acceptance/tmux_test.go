@@ -288,7 +288,7 @@ func (s *chatStub) chat(w http.ResponseWriter, r *http.Request) {
 	case reHeadMarker.MatchString(user.String()):
 		reply = reHeadMarker.FindString(user.String()) + " " + reTailMarker.FindString(user.String())
 	// An author request.
-	case strings.HasPrefix(r.URL.Path, "/author/") && strings.Contains(system.String(), "author of a document"):
+	case strings.HasPrefix(r.URL.Path, "/author/") && (strings.HasPrefix(system.String(), "You are answering a request") || strings.HasPrefix(system.String(), "You are revising your answer")):
 		reply = "Stub answer to: " + strings.TrimSpace(user.String())
 	default:
 		reply = "ok"

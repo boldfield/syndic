@@ -502,7 +502,7 @@ func TestBudgetQuarantinedUsageIsChargedNeverRefunded(t *testing.T) {
 
 func TestBudgetRacingDispatchesExactlyOne(t *testing.T) {
 	t.Cleanup(engine.DisableDelivery())
-	big := strings.Repeat("a", 60000)
+	big := strings.Repeat("a", 64000)
 	toml := reviewRoster("author", "r1", "r2")
 	// Different pools, so both dispatches are ready at the same moment.
 	toml = strings.Replace(toml, "id = \"r2\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"\neligible_roles = [\"reviewer\"]\npool = \"reviewers\"",
