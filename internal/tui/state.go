@@ -772,7 +772,9 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	// while the turn was open is a snapshot that events may already have
 	// outrun, so it only supplies what events do not carry (limit, deadline)
 	// and adds records the TUI does not know yet; it never overwrites.
-	final := isTerminalState(turn.State)
+	// An incomplete turn is overridden by an event; a reply read before the
+	// override can arrive after it and must not reopen the turn as incomplete.
+	final := isTerminalState(turn.State) && (ti.State != "overridden" || turn.State != "incomplete")
 	if final {
 		ti.State = turn.State
 		ti.Preset = turn.Preset

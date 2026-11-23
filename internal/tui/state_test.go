@@ -498,3 +498,11 @@ func contains(s, substr string) bool {
 func indexOf(s, substr string) int {
 	return strings.Index(s, substr)
 }
+
+func TestMergeTurnStaleIncompleteReplyKeepsOverride(t *testing.T) {
+	s := State{Turns: map[string]TurnInfo{"t1": {ID: "t1", State: "overridden"}}}
+	s = MergeTurn(s, "t1", &wire.TurnReply{State: "incomplete", Mode: "review", Preset: "review"}, testTime)
+	if got := s.Turns["t1"].State; got != "overridden" {
+		t.Fatalf("state = %q, want overridden", got)
+	}
+}
