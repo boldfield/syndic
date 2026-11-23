@@ -1,14 +1,16 @@
 package journal_test
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
+
+func strPtr(s string) *string {
+	return &s
+}
 
 func createTestAttempt(t *testing.T, conn *sql.DB, turnID, attemptID, participant string) {
 	t.Helper()
@@ -35,28 +37,20 @@ func TestStoreAndRetrieveReviewRecords(t *testing.T) {
 	// Create an attempt for the review record to reference
 	createTestAttempt(t, conn, turnID, "attempt-1", "reviewer1")
 
-	// Create test review record JSON
-	recordJSON := map[string]interface{}{
-		"blocks": []map[string]interface{}{
-			{
-				"block_id": "b1",
-				"state":    "opened",
-				"severity": "high",
-			},
+	// Create test blocks
+	blocks := []journal.ReviewBlock{
+		{
+			BlockID:  "b1",
+			State:    "opened",
+			Severity: strPtr("high"),
 		},
-		"commentary": nil,
-	}
-
-	recordJSONBytes, err := json.Marshal(recordJSON)
-	if err != nil {
-		t.Fatalf("failed to marshal record JSON: %v", err)
 	}
 
 	// Store a review record
 	var recordID string
-	err = store.Tx(func(tx *journal.Tx) error {
+	err := store.Tx(func(tx *journal.Tx) error {
 		var txErr error
-		recordID, txErr = tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", "attempt-1", "approve", recordJSONBytes, false)
+		recordID, txErr = tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", 0, "attempt-1", "approve", blocks, nil, false, nil)
 		return txErr
 	})
 	if err != nil {
@@ -103,11 +97,7 @@ func TestReviewRecordOrdering(t *testing.T) {
 	turnID := "turn-review-order"
 	setupTestData(t, conn, runID, turnID)
 
-	recordJSON := map[string]interface{}{
-		"blocks":     []map[string]interface{}{},
-		"commentary": nil,
-	}
-	recordJSONBytes, _ := json.Marshal(recordJSON)
+	blocks := []journal.ReviewBlock{}
 
 	// Store records in different rounds and by different participants
 	for round := 0; round < 2; round++ {
@@ -115,7 +105,7 @@ func TestReviewRecordOrdering(t *testing.T) {
 			attemptID := fmt.Sprintf("attempt-%d-%d", round, idx)
 			createTestAttempt(t, conn, turnID, attemptID, participant)
 			err := store.Tx(func(tx *journal.Tx) error {
-				_, err := tx.StoreReviewRecord(turnID, round, fmt.Sprintf("hash-%d", round), participant, attemptID, "block", recordJSONBytes, false)
+				_, err := tx.StoreReviewRecord(turnID, round, fmt.Sprintf("hash-%d", round), participant, idx, attemptID, "block", blocks, nil, false, nil)
 				return err
 			})
 			if err != nil {
@@ -157,18 +147,14 @@ func TestReviewRecordPaging(t *testing.T) {
 	turnID := "turn-review-page"
 	setupTestData(t, conn, runID, turnID)
 
-	recordJSON := map[string]interface{}{
-		"blocks":     []map[string]interface{}{},
-		"commentary": nil,
-	}
-	recordJSONBytes, _ := json.Marshal(recordJSON)
+	blocks := []journal.ReviewBlock{}
 
 	// Store 10 records
 	for i := 0; i < 10; i++ {
 		attemptID := fmt.Sprintf("attempt-%d", i)
 		createTestAttempt(t, conn, turnID, attemptID, fmt.Sprintf("reviewer%d", i%3))
 		err := store.Tx(func(tx *journal.Tx) error {
-			_, err := tx.StoreReviewRecord(turnID, i%3, fmt.Sprintf("hash-%d", i), fmt.Sprintf("reviewer%d", i%3), attemptID, "approve", recordJSONBytes, false)
+			_, err := tx.StoreReviewRecord(turnID, i%3, fmt.Sprintf("hash-%d", i), fmt.Sprintf("reviewer%d", i%3), i%3, attemptID, "approve", blocks, nil, false, nil)
 			return err
 		})
 		if err != nil {
@@ -219,11 +205,7 @@ func TestReviewCountUpdate(t *testing.T) {
 	turnID := "turn-review-count"
 	setupTestData(t, conn, runID, turnID)
 
-	recordJSON := map[string]interface{}{
-		"blocks":     []map[string]interface{}{},
-		"commentary": nil,
-	}
-	recordJSONBytes, _ := json.Marshal(recordJSON)
+	blocks := []journal.ReviewBlock{}
 
 	// Initially, review count should be 0
 	count, err := store.GetReviewCount(turnID)
@@ -239,7 +221,7 @@ func TestReviewCountUpdate(t *testing.T) {
 		attemptID := fmt.Sprintf("attempt-%d", i)
 		createTestAttempt(t, conn, turnID, attemptID, fmt.Sprintf("reviewer%d", i))
 		err := store.Tx(func(tx *journal.Tx) error {
-			_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", fmt.Sprintf("reviewer%d", i), attemptID, "approve", recordJSONBytes, false)
+			_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", fmt.Sprintf("reviewer%d", i), i, attemptID, "approve", blocks, nil, false, nil)
 			return err
 		})
 		if err != nil {
@@ -256,41 +238,170 @@ func TestReviewCountUpdate(t *testing.T) {
 	}
 }
 
-func TestStoreReviewRecordContent(t *testing.T) {
+func TestApproveWithChangesKind(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
 
 	store := journal.NewStore(db)
 	conn := db.Conn()
 
-	runID := "run-review-content"
-	turnID := "turn-review-content"
+	runID := "run-review-kinds"
+	turnID := "turn-review-kinds"
 	setupTestData(t, conn, runID, turnID)
 
-	// Store content
-	content := []byte("test content for review")
-	var contentRef *journal.ContentRef
+	createTestAttempt(t, conn, turnID, "attempt-1", "reviewer1")
+
+	blocks := []journal.ReviewBlock{}
+
+	// Test storing 'approve-with-changes' kind
 	err := store.Tx(func(tx *journal.Tx) error {
-		var txErr error
-		contentRef, txErr = tx.StoreReviewRecordContent(turnID, content)
-		return txErr
+		_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", 0, "attempt-1", "approve-with-changes", blocks, nil, false, nil)
+		return err
 	})
 	if err != nil {
-		t.Fatalf("failed to store review record content: %v", err)
+		t.Fatalf("failed to store review record with approve-with-changes kind: %v", err)
 	}
 
-	if contentRef == nil {
-		t.Fatal("expected contentRef to be non-nil")
+	// Retrieve and verify kind
+	records, _, err := store.GetReviewRecords(turnID, nil, 50)
+	if err != nil {
+		t.Fatalf("failed to get review records: %v", err)
 	}
 
-	expectedHash := sha256.Sum256(content)
-	expectedHashStr := fmt.Sprintf("%x", expectedHash)
-
-	if contentRef.SHA256 != expectedHashStr {
-		t.Errorf("hash mismatch: expected %s, got %s", expectedHashStr, contentRef.SHA256)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
 	}
-	if contentRef.ByteLen != int64(len(content)) {
-		t.Errorf("byte_len mismatch: expected %d, got %d", len(content), contentRef.ByteLen)
+
+	if records[0].Kind != "approve-with-changes" {
+		t.Errorf("expected kind 'approve-with-changes', got %s", records[0].Kind)
+	}
+}
+
+func TestReopenSurvival(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	conn := db.Conn()
+
+	runID := "run-reopen"
+	turnID := "turn-reopen"
+	setupTestData(t, conn, runID, turnID)
+
+	createTestAttempt(t, conn, turnID, "attempt-1-r0", "reviewer1")
+
+	// Create review record for round 0
+	blocks := []journal.ReviewBlock{
+		{
+			BlockID:  "block-1",
+			State:    "opened",
+			Severity: strPtr("high"),
+		},
+	}
+
+	err := store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.StoreReviewRecord(turnID, 0, "hash-round0", "reviewer1", 0, "attempt-1-r0", "block", blocks, nil, false, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to store review record for round 0: %v", err)
+	}
+
+	// Now simulate reopen - create round 1 with same participant maintaining the block
+	createTestAttempt(t, conn, turnID, "attempt-1-r1", "reviewer1")
+	blocks[0].State = "maintained" // Block is maintained in round 1
+
+	err = store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.StoreReviewRecord(turnID, 1, "hash-round1", "reviewer1", 0, "attempt-1-r1", "block", blocks, nil, false, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to store review record for round 1: %v", err)
+	}
+
+	// Retrieve all records and verify states survive across rounds
+	records, _, err := store.GetReviewRecords(turnID, nil, 50)
+	if err != nil {
+		t.Fatalf("failed to get review records: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records (one per round), got %d", len(records))
+	}
+
+	// Verify round 0 record
+	if records[0].Round != 0 {
+		t.Errorf("first record should be round 0, got %d", records[0].Round)
+	}
+	if len(records[0].Blocks) > 0 && records[0].Blocks[0].State != "opened" {
+		t.Errorf("block should be 'opened' in round 0, got %s", records[0].Blocks[0].State)
+	}
+
+	// Verify round 1 record
+	if records[1].Round != 1 {
+		t.Errorf("second record should be round 1, got %d", records[1].Round)
+	}
+	if len(records[1].Blocks) > 0 && records[1].Blocks[0].State != "maintained" {
+		t.Errorf("block should be 'maintained' in round 1, got %s", records[1].Blocks[0].State)
+	}
+
+	// Verify participant and other fields survive
+	if records[0].Participant != "reviewer1" {
+		t.Errorf("participant should survive reopen")
+	}
+	if records[1].Participant != "reviewer1" {
+		t.Errorf("participant should be same in both rounds")
+	}
+}
+
+func TestRepairOnceSemantic(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	conn := db.Conn()
+
+	runID := "run-repair"
+	turnID := "turn-repair"
+	setupTestData(t, conn, runID, turnID)
+
+	// Original malformed verdict attempt
+	createTestAttempt(t, conn, turnID, "attempt-1-malformed", "reviewer1")
+
+	// Repair attempt
+	createTestAttempt(t, conn, turnID, "attempt-1-repair", "reviewer1")
+
+	blocks := []journal.ReviewBlock{
+		{
+			BlockID:  "block-1",
+			State:    "opened",
+			Severity: strPtr("medium"),
+		},
+	}
+
+	// Store the repaired record (should be listed with repair_id)
+	err := store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", 0, "attempt-1-repair", "block", blocks, nil, false, nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to store repaired review record: %v", err)
+	}
+
+	// Retrieve and verify only the repair is listed (once)
+	records, _, err := store.GetReviewRecords(turnID, nil, 50)
+	if err != nil {
+		t.Fatalf("failed to get review records: %v", err)
+	}
+
+	// Should have exactly 1 record (the repair, not the malformed original)
+	if len(records) != 1 {
+		t.Errorf("expected 1 record (repair only), got %d", len(records))
+	}
+
+	// Verify it's the repair attempt
+	if records[0].AttemptID != "attempt-1-repair" {
+		t.Errorf("expected repair attempt ID, got %s", records[0].AttemptID)
 	}
 }
 
@@ -308,26 +419,22 @@ func TestOversizedRecordHandling(t *testing.T) {
 	createTestAttempt(t, conn, turnID, "attempt-1", "reviewer1")
 
 	// Create a large record (>65KB when encoded)
-	blocks := make([]map[string]interface{}, 500)
+	blocks := make([]journal.ReviewBlock, 500)
 	for i := 0; i < 500; i++ {
-		blocks[i] = map[string]interface{}{
-			"block_id": fmt.Sprintf("b%d", i),
-			"state":    "maintained",
-			"severity": "low",
+		state := "maintained"
+		blocks[i] = journal.ReviewBlock{
+			BlockID:  fmt.Sprintf("b%d", i),
+			State:    state,
+			Severity: strPtr("low"),
 		}
 	}
 
-	recordJSON := map[string]interface{}{
-		"blocks":     blocks,
-		"commentary": nil,
-	}
-
-	recordJSONBytes, _ := json.Marshal(recordJSON)
-	oversized := len(recordJSONBytes) > 65536
+	// Check if record is oversized
+	oversized := journal.EstimateRecordSize(blocks, nil)
 
 	// Store oversized record
 	err := store.Tx(func(tx *journal.Tx) error {
-		_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", "attempt-1", "block", recordJSONBytes, oversized)
+		_, err := tx.StoreReviewRecord(turnID, 0, "hash-1", "reviewer1", 0, "attempt-1", "block", blocks, nil, oversized, nil)
 		return err
 	})
 	if err != nil {
@@ -345,7 +452,7 @@ func TestOversizedRecordHandling(t *testing.T) {
 	}
 
 	record := records[0]
-	if !record.Oversized && len(recordJSONBytes) > 65536 {
+	if !record.Oversized && oversized {
 		t.Errorf("expected oversized to be true for large record, got false")
 	}
 }

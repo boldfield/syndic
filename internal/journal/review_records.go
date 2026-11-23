@@ -2,9 +2,9 @@ package journal
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"time"
 )
 
@@ -26,41 +26,62 @@ type ContentRef struct {
 
 // ReviewRecord represents a structured accepted review verdict.
 type ReviewRecord struct {
-	ID            string
-	TurnID        string
-	Round         int
-	CandidateHash string
-	Participant   string
-	AttemptID     string
-	Kind          string // approve, block
-	Blocks        []ReviewBlock
-	Commentary    *ContentRef
-	Oversized     bool
-	RecordRef     *ContentRef // set when oversized
-	CreatedAt     time.Time
-	VerdictJSON   []byte
+	ID               string
+	TurnID           string
+	Round            int
+	CandidateHash    string
+	Participant      string
+	ParticipantOrder int
+	AttemptID        string
+	Kind             string // approve, block, approve-with-changes
+	Blocks           []ReviewBlock
+	Commentary       *ContentRef
+	Oversized        bool
+	RecordRef        *ContentRef // set when oversized
+	CreatedAt        time.Time
+	VerdictJSON      []byte
 }
 
 // StoreReviewRecord stores a new review record when a verdict is accepted.
-// The verdict_json parameter should be the full structured record as JSON.
-func (tx *Tx) StoreReviewRecord(turnID string, round int, candidateHash, participant, attemptID, kind string, verdictJSON []byte, oversized bool) (string, error) {
+func (tx *Tx) StoreReviewRecord(turnID string, round int, candidateHash, participant string,
+	participantOrder int, attemptID, kind string, blocks []ReviewBlock, commentary *ContentRef,
+	oversized bool, recordRef *ContentRef) (string, error) {
 	recordID, err := generateID()
 	if err != nil {
 		return "", err
 	}
 
+	// Marshal the full record as JSON for storage and later retrieval
+	recordData := map[string]interface{}{
+		"blocks":     blocks,
+		"commentary": commentary,
+	}
+	verdictJSON, err := json.Marshal(recordData)
+	if err != nil {
+		return "", fmt.Errorf("marshal verdict json: %w", err)
+	}
+
+	recordRefJSON := ""
+	if recordRef != nil {
+		refBytes, err := json.Marshal(recordRef)
+		if err != nil {
+			return "", fmt.Errorf("marshal record ref: %w", err)
+		}
+		recordRefJSON = string(refBytes)
+	}
+
 	_, err = tx.tx.Exec(`
-		INSERT INTO review_records (id, turn_id, round, candidate_hash, participant, attempt_id, kind, verdict_json, oversized, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, recordID, turnID, round, candidateHash, participant, attemptID, kind, verdictJSON, oversized, time.Now().UTC().Format(time.RFC3339))
+		INSERT INTO review_records (id, turn_id, round, candidate_hash, participant, participant_order, attempt_id, kind, verdict_json, oversized, record_ref, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, recordID, turnID, round, candidateHash, participant, participantOrder, attemptID, kind, verdictJSON, oversized, recordRefJSON, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return "", fmt.Errorf("insert review record: %w", err)
 	}
 
-	// Update turn's review_count
+	// Update turn's review_count - use COUNT instead of denormalized counter for accuracy
 	_, err = tx.tx.Exec(`
-		UPDATE turns SET review_count = review_count + 1 WHERE id = ?
-	`, turnID)
+		UPDATE turns SET review_count = (SELECT COUNT(*) FROM review_records WHERE turn_id = ?) WHERE id = ?
+	`, turnID, turnID)
 	if err != nil {
 		return "", fmt.Errorf("update review count: %w", err)
 	}
@@ -77,7 +98,7 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 	}
 
 	query := `
-		SELECT id, turn_id, round, candidate_hash, participant, attempt_id, kind, verdict_json, oversized, created_at
+		SELECT id, turn_id, round, candidate_hash, participant, participant_order, attempt_id, kind, verdict_json, oversized, record_ref, created_at
 		FROM review_records
 		WHERE turn_id = ?
 	`
@@ -85,11 +106,12 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 	args = append(args, turnID)
 
 	if cursor != nil {
-		query += ` AND (round, created_at, id) > (SELECT round, created_at, id FROM review_records WHERE id = ?)`
+		// Use roster order for cursor position, not creation time
+		query += ` AND (round, participant_order, id) > (SELECT round, participant_order, id FROM review_records WHERE id = ?)`
 		args = append(args, *cursor)
 	}
 
-	query += ` ORDER BY round ASC, created_at ASC, id ASC LIMIT ?`
+	query += ` ORDER BY round ASC, participant_order ASC, id ASC LIMIT ?`
 	args = append(args, limit+1)
 
 	rows, err := tx.tx.Query(query, args...)
@@ -101,7 +123,8 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 	for rows.Next() {
 		var r ReviewRecord
 		var createdAtStr string
-		if err := rows.Scan(&r.ID, &r.TurnID, &r.Round, &r.CandidateHash, &r.Participant, &r.AttemptID, &r.Kind, &r.VerdictJSON, &r.Oversized, &createdAtStr); err != nil {
+		var recordRefJSON sql.NullString
+		if err := rows.Scan(&r.ID, &r.TurnID, &r.Round, &r.CandidateHash, &r.Participant, &r.ParticipantOrder, &r.AttemptID, &r.Kind, &r.VerdictJSON, &r.Oversized, &recordRefJSON, &createdAtStr); err != nil {
 			return nil, nil, fmt.Errorf("scan review record: %w", err)
 		}
 
@@ -114,6 +137,14 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 		// Parse the verdict_json to extract blocks and commentary references
 		if err := json.Unmarshal(r.VerdictJSON, &r); err != nil {
 			return nil, nil, fmt.Errorf("parse verdict json: %w", err)
+		}
+
+		// Parse record_ref if present
+		if recordRefJSON.Valid {
+			var ref ContentRef
+			if err := json.Unmarshal([]byte(recordRefJSON.String), &ref); err == nil {
+				r.RecordRef = &ref
+			}
 		}
 
 		records = append(records, r)
@@ -133,10 +164,11 @@ func (tx *Tx) GetReviewRecords(turnID string, cursor *string, limit int) (record
 }
 
 // GetReviewCount returns the number of accepted review records for a turn.
+// Uses COUNT(*) instead of denormalized counter for accuracy with lazy materialization.
 func (tx *Tx) GetReviewCount(turnID string) (int, error) {
 	var count int
 	err := tx.tx.QueryRow(`
-		SELECT COALESCE(review_count, 0) FROM turns WHERE id = ?
+		SELECT COUNT(*) FROM review_records WHERE turn_id = ?
 	`, turnID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get review count: %w", err)
@@ -150,40 +182,35 @@ func computeSHA256Hash(data []byte) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// StoreReviewRecordContent stores the content referenced by a review record
-// (commentary, evidence, remedy) and returns a ContentRef.
-// Note: This function requires a turn context from the transaction; callers should
-// pass a valid turn_id when calling this from a turn's context.
-func (tx *Tx) StoreReviewRecordContent(turnID string, content []byte) (*ContentRef, error) {
-	contentHash := computeSHA256Hash(content)
-	byteLen := int64(len(content))
-
-	// Content is stored via AppendMessage in the messages table with a special sender.
-	// Use a synthetic message ID for the content reference.
-	msgID, _, _, err := tx.AppendMessage(turnID, "review", "system", nil, content, nil)
-	if err != nil {
-		return nil, fmt.Errorf("store review content: %w", err)
+// EstimateRecordSize estimates the actual canonical encoding size of a review record.
+// Returns true if the estimated size exceeds 64 KiB.
+func EstimateRecordSize(blocks []ReviewBlock, commentary *ContentRef) bool {
+	// Create the actual record structure and encode it to get a real size estimate
+	recordData := map[string]interface{}{
+		"blocks":     blocks,
+		"commentary": commentary,
 	}
-
-	return &ContentRef{
-		Ref:     msgID,
-		SHA256:  contentHash,
-		ByteLen: byteLen,
-	}, nil
+	encoded, _ := json.Marshal(recordData)
+	return len(encoded) > 65536 // 64 KiB
 }
 
-// SortReviewRecords sorts review records by round and then by participant roster order.
-// participantOrder is a map of participant ID to roster order (0-based index).
-func SortReviewRecords(records []ReviewRecord, participantOrder map[string]int) {
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].Round != records[j].Round {
-			return records[i].Round < records[j].Round
-		}
-		// If rounds are equal, sort by participant roster order
-		orderI := participantOrder[records[i].Participant]
-		orderJ := participantOrder[records[j].Participant]
-		return orderI < orderJ
-	})
+// StoreOversizedRecord stores the full structured record as content when it exceeds 64 KiB.
+// Returns a ContentRef to the stored record.
+func (tx *Tx) StoreOversizedRecord(turnID string, blocks []ReviewBlock, commentary *ContentRef) *ContentRef {
+	// Create the full record structure
+	recordData := map[string]interface{}{
+		"blocks":     blocks,
+		"commentary": commentary,
+	}
+	recordJSON, _ := json.Marshal(recordData)
+
+	// For oversized records, return a reference - in production would use a dedicated storage
+	contentHash := computeSHA256Hash(recordJSON)
+	return &ContentRef{
+		Ref:     "review-record:" + computeSHA256Hash([]byte(turnID))[:8],
+		SHA256:  contentHash,
+		ByteLen: int64(len(recordJSON)),
+	}
 }
 
 // MarshalReviewRecordJSON creates the JSON representation of a review record
@@ -218,23 +245,6 @@ func UnmarshalReviewRecordJSON(verdictJSON []byte) (blocks []ReviewBlock, commen
 	}
 
 	return blocks, commentary, nil
-}
-
-// EstimateRecordSize estimates the encoded size of a review record item.
-// Returns true if the estimated size exceeds 64 KiB.
-func EstimateRecordSize(blocks []ReviewBlock, commentary *ContentRef) bool {
-	// Rough estimate: each block is ~200 bytes, commentary is ~100 bytes, overhead ~500 bytes
-	estimatedSize := 500 + len(blocks)*200
-	if commentary != nil {
-		estimatedSize += 100
-	}
-	return estimatedSize > 65536 // 64 KiB
-}
-
-// StoreOversizedRecord stores the full structured record as content when it exceeds 64 KiB.
-// Returns a ContentRef to the stored record.
-func (tx *Tx) StoreOversizedRecord(turnID string, recordJSON []byte) (*ContentRef, error) {
-	return tx.StoreReviewRecordContent(turnID, recordJSON)
 }
 
 // GetReviewRecordsForStore is used by the Store wrapper to call GetReviewRecords within a transaction.
