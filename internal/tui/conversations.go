@@ -157,15 +157,23 @@ func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	ids := make([]string, 0, len(msg.conv.Turns))
+	turns := copyMap(a.state.Turns)
 	for _, t := range msg.conv.Turns {
 		ids = append(ids, t.ID)
+		// Populate ReviewCount from ConversationTurnSummary for turns we already know about
+		if ti, ok := turns[t.ID]; ok && ti.ReviewCount == nil {
+			ti.ReviewCount = t.ReviewCount
+			turns[t.ID] = ti
+		}
 	}
+	a.state.Turns = turns
 	a.openConversation(msg.conv.ID, ids)
 	// The chat shows every turn of the conversation, so each turn's record is read.
 	var cmds []tea.Cmd
-	for _, id := range ids {
-		if _, ok := a.state.Turns[id]; !ok {
-			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, id))
+	for _, t := range msg.conv.Turns {
+		if _, ok := a.state.Turns[t.ID]; !ok {
+			// New turn we don't have yet; fetch its full record
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, t.ID))
 		}
 	}
 	a.say(fmt.Sprintf("switched to conversation %s, %d turns", shortID(msg.conv.ID), len(ids)) + a.runningElsewhere())

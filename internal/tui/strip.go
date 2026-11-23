@@ -106,9 +106,6 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		segments = append(segments, strings.Join(reviewerParts, " "))
 	}
 
-	// identity: unknown(name-matched)
-	segments = append(segments, "identity: unknown(name-matched)")
-
 	// Presets, profile names, states and participant ids come from the engine
 	// and the workspace: escape each segment before it is measured.
 	for i, seg := range segments {
@@ -122,14 +119,14 @@ func renderStripFor(s State, width int, now time.Time, compact bool) string {
 		return line
 	}
 
-	// Participant state is worth more than the identity note and the token
-	// estimate: drop those first, keeping the rest in order.
-	kept := segments[:len(segments)-1]
+	// Token estimate and participant state are valuable; drop token estimate first,
+	// then drop segments from the right.
+	kept := segments
 	if estIdx < len(kept) && strings.HasPrefix(kept[estIdx], "[est.") {
 		kept = append(append([]string{}, kept[:estIdx]...), kept[estIdx+1:]...)
-	}
-	if line = strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
-		return line
+		if line = strings.Join(kept, " "); runewidth.StringWidth(line) <= width {
+			return line
+		}
 	}
 	segments = kept
 

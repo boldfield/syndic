@@ -175,7 +175,18 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, outcomeLine("!", incompleteMark, "HUMAN OVERRIDE: "+reason, in.plainMode))
+		// Render override with wrapped reason
+		wrapped := shownPlain("HUMAN OVERRIDE: "+reason, in.width)
+		wrappedLines := strings.Split(wrapped, "\n")
+		if len(wrappedLines) > 0 {
+			first := wrappedLines[0]
+			mark := "!"
+			if !in.plainMode {
+				mark = incompleteMark.Render(mark)
+			}
+			lines = append(lines, mark+" "+strings.TrimLeft(first, " "))
+			lines = append(lines, wrappedLines[1:]...)
+		}
 		candidate()
 
 	case "cancelled":

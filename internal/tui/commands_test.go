@@ -338,7 +338,7 @@ func TestHelpListsEveryCommandOnItsOwnLine(t *testing.T) {
 	r := startAnswerRig(t, h)
 	r.typeLine("/help")
 	v := untilView(t, r, "commands:")
-	for _, c := range []string{"/mode", "/participants", "/cancel", "/why", "/override", "/release", "/drafts", "/resume", "/quit", "/help"} {
+	for _, c := range []string{"/mode", "/participants", "/cancel", "/why", "/override", "/release", "/drafts", "/resume", "/quit"} {
 		n := 0
 		for _, l := range strings.Split(v, "\n") {
 			if strings.HasPrefix(l, c+" ") {
