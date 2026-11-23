@@ -414,3 +414,30 @@ func (s *suite) Status(t *testing.T, c *client.Client) wire.StatusReply {
 	}
 	return reply
 }
+
+// SubmitRequest sends a submission with a full SubmitRequest and returns the reply.
+func (s *suite) SubmitRequest(t *testing.T, c *client.Client, req wire.SubmitRequest) wire.SubmitReply {
+	t.Helper()
+	reply, err := c.Submit(s.ctx(), req)
+	if err != nil {
+		t.Fatalf("submit %s: %v", req.SubmissionID, err)
+	}
+	return reply
+}
+
+// SubmitRequestTurnID sends a submission and returns just the turn ID.
+func (s *suite) SubmitRequestTurnID(t *testing.T, c *client.Client, req wire.SubmitRequest) string {
+	t.Helper()
+	reply := s.SubmitRequest(t, c, req)
+	return reply.TurnID
+}
+
+// Conversations fetches the list of conversations for a workspace.
+func (s *suite) Conversations(t *testing.T, c *client.Client, workspace string) []wire.ConversationSummary {
+	t.Helper()
+	reply, err := c.Conversations(s.ctx(), &workspace, "", 0)
+	if err != nil {
+		t.Fatalf("conversations: %v", err)
+	}
+	return reply.Items
+}
