@@ -374,7 +374,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // update handles one message, then sets the input viewport the layout now
 // gives it: View only reads the model.
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	defer func() { fitInput(&a.input, a.inputRows()) }()
+	w := a.input.Width()
+	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height

@@ -54,11 +54,12 @@ func setInputPrompt(in *textarea.Model, prompt string, width int) {
 // fitInput sets the input's viewport to rows lines. When that changes it, the
 // input is laid out again from its first line and scrolled to its cursor, so
 // the top of the text is not left scrolled out by the old height and the
-// cursor line stays in view however few lines the layout gives it. It runs in
+// cursor line stays in view however few lines the layout gives it. refit
+// does the same when only the width changed, as the text rewraps. It runs in
 // Update, never View.
-func fitInput(in *textarea.Model, rows int) {
+func fitInput(in *textarea.Model, rows int, refit bool) {
 	rows = max(rows, 1)
-	if in.Height() == rows {
+	if in.Height() == rows && !refit {
 		return
 	}
 	row, li := in.Line(), in.LineInfo()

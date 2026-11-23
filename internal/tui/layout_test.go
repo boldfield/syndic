@@ -90,7 +90,7 @@ func crowded(t *testing.T, w, h int) *App {
 	a.state.UnapprovedProfile = &profile
 	a.input.SetValue(strings.Join([]string{"i1", "i2", "i3", "i4", "i5", "i6", "i7", "i8"}, "\n"))
 	a.updateInput(nil) // scroll to the cursor, as typing does
-	fitInput(&a.input, a.inputRows())
+	fitInput(&a.input, a.inputRows(), false)
 	return a
 }
 
@@ -321,5 +321,20 @@ func TestIdentityBannerSurvivesTinyHeights(t *testing.T) {
 		if got := allocate(layoutIn{Height: h, Width: 80, Banners: 3, InputLines: 6}); got.Banners != 1 {
 			t.Errorf("height %d: %+v, want one banner line kept", h, got)
 		}
+	}
+}
+
+// A width-only resize rewraps the text without changing the input's height; the
+// input must not be left scrolled past its content.
+func TestInputWidthOnlyResizeKeepsTheText(t *testing.T) {
+	a := chatApp(t)
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(strings.Repeat("x", 1000))})
+	chatView(a)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	lines := chatView(a)
+	in := strings.Join(lines[len(lines)-1-a.inputRows():len(lines)-1], "\n")
+	if !strings.Contains(in, "xxxx") {
+		t.Fatalf("input blank after a width-only resize:\n%s", in)
 	}
 }
