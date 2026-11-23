@@ -1154,15 +1154,15 @@ func (a *App) statusLine(w int) string {
 	includeReviewsHint := a.tab == tabChat
 
 	// Always reserve space for the hint at the right edge
-	stripWidth := w - hw - 1
+	stripWidth := w - hw
 	if stripWidth < 0 {
 		stripWidth = 0
 	}
 
 	strip := ansi.Truncate(renderStripFor(a.state, stripWidth, a.now(), stripWidth < w-hw-20, includeReviewsHint), stripWidth, "")
 	padding := w - ansi.StringWidth(strip) - hw
-	if padding < 1 {
-		padding = 1
+	if padding < 0 {
+		padding = 0
 	}
 	return strip + strings.Repeat(" ", padding) + keyHint
 }
