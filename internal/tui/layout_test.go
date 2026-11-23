@@ -268,3 +268,38 @@ func TestScrollPositionByTurns(t *testing.T) {
 		})
 	}
 }
+
+// TestBoundsDefinesAllRegions verifies bounds allocation covers all regions.
+func TestBoundsDefinesAllRegions(t *testing.T) {
+	// At 80x24, verify all regions are properly allocated
+	b := calcBounds(24, 80)
+
+	// Verify all regions are non-negative
+	regions := map[string]int{
+		"TabBar":    b.TabBar,
+		"Status":    b.Status,
+		"Content":   b.Content,
+		"Input":     b.Input,
+		"Banners":   b.Banners,
+		"Attached":  b.Attached,
+		"List":      b.List,
+		"ShortHelp": b.ShortHelp,
+		"Drawer":    b.Drawer,
+	}
+
+	for name, height := range regions {
+		if height < 0 {
+			t.Errorf("%s = %d, want >= 0", name, height)
+		}
+	}
+
+	// Drawer and List must be mutually exclusive
+	if b.Drawer > 0 && b.List > 0 {
+		t.Errorf("Drawer and List cannot both be positive: Drawer=%d, List=%d", b.Drawer, b.List)
+	}
+
+	// Content should be at least 5 lines at 80x24
+	if b.Content < 5 {
+		t.Errorf("Content = %d, want at least 5 at 80x24", b.Content)
+	}
+}
