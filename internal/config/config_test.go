@@ -31,6 +31,79 @@ func TestLoadExample(t *testing.T) {
 	if len(roster.Presets) != 2 {
 		t.Errorf("len(Presets) = %d, want 2", len(roster.Presets))
 	}
+
+	// Check deadlines defaults
+	if roster.Deadlines.Attempt == nil || roster.Deadlines.Attempt.Duration != 300*time.Second {
+		t.Errorf("Deadlines.Attempt = %v, want 300s", roster.Deadlines.Attempt)
+	}
+	if roster.Deadlines.Turn == nil || roster.Deadlines.Turn.Duration != 900*time.Second {
+		t.Errorf("Deadlines.Turn = %v, want 900s", roster.Deadlines.Turn)
+	}
+	if roster.Deadlines.Delivery == nil || roster.Deadlines.Delivery.Duration != 60*time.Second {
+		t.Errorf("Deadlines.Delivery = %v, want 60s", roster.Deadlines.Delivery)
+	}
+	if roster.Deadlines.Provisional == nil || !*roster.Deadlines.Provisional {
+		t.Errorf("Deadlines.Provisional = %v, want true", roster.Deadlines.Provisional)
+	}
+
+	// Check budgets defaults
+	if roster.Budgets.CalibrationSafety == nil || *roster.Budgets.CalibrationSafety != 0.75 {
+		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", roster.Budgets.CalibrationSafety)
+	}
+	if roster.Budgets.AuthorMaxOutputTokens == nil || *roster.Budgets.AuthorMaxOutputTokens != 4096 {
+		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", roster.Budgets.AuthorMaxOutputTokens)
+	}
+	if roster.Budgets.ReviewerMaxOutputTokens == nil || *roster.Budgets.ReviewerMaxOutputTokens != 2048 {
+		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", roster.Budgets.ReviewerMaxOutputTokens)
+	}
+	if roster.Budgets.TurnMaxEstimatedTokens == nil || *roster.Budgets.TurnMaxEstimatedTokens != 250000 {
+		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", roster.Budgets.TurnMaxEstimatedTokens)
+	}
+
+	// Check engine defaults
+	if roster.Engine.StopGrace == nil || roster.Engine.StopGrace.Duration != 5*time.Second {
+		t.Errorf("Engine.StopGrace = %v, want 5s", roster.Engine.StopGrace)
+	}
+
+	// Check pool defaults
+	concurrency, uncertainRelease := roster.PoolFor("default")
+	if concurrency != 1 {
+		t.Errorf("PoolFor(default) concurrency = %d, want 1", concurrency)
+	}
+	if uncertainRelease != 0 {
+		t.Errorf("PoolFor(default) uncertainRelease = %v, want 0", uncertainRelease)
+	}
+
+	// Check participant defaults
+	for _, p := range roster.Participants {
+		// Context tokens and bytes per token may be nil, that's OK for defaults
+		if p.ContextTokens != nil && *p.ContextTokens < 1 {
+			t.Errorf("Participant %q ContextTokens = %v, want >= 1", p.ID, p.ContextTokens)
+		}
+		if p.BytesPerToken != nil && *p.BytesPerToken <= 0 {
+			t.Errorf("Participant %q BytesPerToken = %v, want > 0", p.ID, p.BytesPerToken)
+		}
+	}
+
+	// Check tools defaults
+	if roster.Tools == nil {
+		t.Fatal("Tools config is nil")
+	}
+	if roster.Tools.AllowWebWithRead == nil || !*roster.Tools.AllowWebWithRead {
+		t.Errorf("Tools.AllowWebWithRead = %v, want true", roster.Tools.AllowWebWithRead)
+	}
+	if len(roster.Tools.ProtectedPaths) == 0 {
+		t.Error("Tools.ProtectedPaths should have defaults")
+	}
+	if roster.Tools.MaxFetchesPerTurn == nil || *roster.Tools.MaxFetchesPerTurn != 20 {
+		t.Errorf("Tools.MaxFetchesPerTurn = %v, want 20", roster.Tools.MaxFetchesPerTurn)
+	}
+	if roster.Tools.Referee == nil {
+		t.Fatal("Tools.Referee is nil")
+	}
+	if roster.Tools.Referee.MaxOutputTokens == nil || *roster.Tools.Referee.MaxOutputTokens != 64 {
+		t.Errorf("Tools.Referee.MaxOutputTokens = %v, want 64", roster.Tools.Referee.MaxOutputTokens)
+	}
 }
 
 func TestLoadToolsConfig(t *testing.T) {
@@ -976,6 +1049,143 @@ func TestValidateViolations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAllowWebWithReadValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		tools   *ToolsConfig
+		preset  Preset
+		wantErr bool
+	}{
+		{
+			name:   "allow_web_with_read not set (default true, no error)",
+			tools:  &ToolsConfig{},
+			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: false,
+		},
+		{
+			name:   "allow_web_with_read=true (no error)",
+			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(true)},
+			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: false,
+		},
+		{
+			name:   "allow_web_with_read=false with web+read (error)",
+			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: true,
+		},
+		{
+			name:   "allow_web_with_read=false with web+write (error)",
+			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
+			wantErr: true,
+		},
+		{
+			name:   "allow_web_with_read=false with only web (no error)",
+			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := makeBaseRoster()
+			r.Endpoints[0].RefereeModel = "claude-haiku"
+			r.Tools = tt.tools
+			r.Presets["test"] = tt.preset
+			r.ApplyDefaults()
+
+			err := r.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAllowedHostPatternValidation(t *testing.T) {
+	tests := []struct {
+		pattern string
+		valid   bool
+	}{
+		{"example.com", true},
+		{"*.example.com", true},
+		{".example.com", false},  // suffix matching not allowed
+		{"**.example.com", true},
+		{"***.example.com", false}, // too many wildcards
+		{"192.168.1.1", false}, // IP literals not allowed
+		{"::1", false}, // IPv6 not allowed
+		{"", false},
+		{"*.com", false}, // wildcard must have dot after prefix
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			err := validateAllowedHostPattern(tt.pattern)
+			if (err == nil) != tt.valid {
+				t.Errorf("validateAllowedHostPattern(%q) error = %v, want valid = %v", tt.pattern, err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestRefereeModelValidation(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+	r.Presets["test"] = Preset{
+		Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+		Tools: []string{"web"},
+	}
+	r.ApplyDefaults()
+
+	if err := r.Validate(); err != nil {
+		t.Errorf("Validate() with valid referee_model = %v, want nil", err)
+	}
+}
+
+func TestRefereeEndpointValidation(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints = append(r.Endpoints, EndpointProfile{
+		Name: "local-ref", Dialect: "chat_completions_v1", DeclaredLocation: "local",
+		DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none",
+	})
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+	r.Endpoints[0].RefereeEndpoint = "local-ref"
+	r.ApplyDefaults()
+
+	if err := r.Validate(); err != nil {
+		t.Errorf("Validate() with valid referee_endpoint = %v, want nil", err)
+	}
+}
+
+func TestProtectedPathsDefaults(t *testing.T) {
+	r := makeBaseRoster()
+	r.ApplyDefaults()
+
+	if r.Tools == nil || len(r.Tools.ProtectedPaths) == 0 {
+		t.Fatal("ApplyDefaults should set protected_paths defaults")
+	}
+
+	hasGit := false
+	hasSyndic := false
+	for _, p := range r.Tools.ProtectedPaths {
+		if strings.HasPrefix(p, ".git") {
+			hasGit = true
+		}
+		if strings.HasPrefix(p, ".syndic") {
+			hasSyndic = true
+		}
+	}
+	if !hasGit || !hasSyndic {
+		t.Errorf("Protected paths missing .git/ or .syndic/ defaults: %v", r.Tools.ProtectedPaths)
+	}
+}
+
+func ptrBool(b bool) *bool {
+	return &b
 }
 
 func TestSecretRefString(t *testing.T) {
