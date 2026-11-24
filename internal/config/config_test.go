@@ -1143,13 +1143,13 @@ func TestAllowWebWithReadValidation(t *testing.T) {
 
 func TestAllowWebWithReadPerPresetOverride(t *testing.T) {
 	tests := []struct {
-		name             string
-		rosterAllow      *bool
-		presetAllow      *bool
-		presetTools      []string
-		presetRevTools   []string
-		wantErr          bool
-		description      string
+		name           string
+		rosterAllow    *bool
+		presetAllow    *bool
+		presetTools    []string
+		presetRevTools []string
+		wantErr        bool
+		description    string
 	}{
 		{
 			name:           "preset override false when roster is true",
@@ -1227,9 +1227,9 @@ func TestCLIParticipantWithWebToolsRejected(t *testing.T) {
 
 	// Create a preset with CLI author having web tools
 	r.Presets["test"] = Preset{
-		Mode:    "solo",
-		Author:  "cli-author",
-		Tools:   []string{"web"},
+		Mode:   "solo",
+		Author: "cli-author",
+		Tools:  []string{"web"},
 	}
 	r.ApplyDefaults()
 
@@ -1286,9 +1286,9 @@ func TestAllowedHostPatternValidation(t *testing.T) {
 		{"192.168.1.1", false},     // IP literals not allowed
 		{"::1", false},             // IPv6 not allowed
 		{"", false},
-		{"*.com", false}, // wildcard must have dot after prefix
-		{"Example.com", false}, // must be lowercase (canonical)
-		{"*.GitHub.com", false}, // must be lowercase (canonical)
+		{"*.com", false},           // wildcard must have dot after prefix
+		{"Example.com", false},     // must be lowercase (canonical)
+		{"*.GitHub.com", false},    // must be lowercase (canonical)
 		{"example.com:443", false}, // port not allowed
 	}
 
