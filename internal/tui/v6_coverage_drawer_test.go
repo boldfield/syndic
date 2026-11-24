@@ -437,7 +437,7 @@ func TestV6CoverageDrawerSitsBetweenChatAndInputAtItsHeight(t *testing.T) {
 		if chat < 0 || header < 0 || input < 0 {
 			t.Fatalf("%dx%d: chat row %d, drawer row %d, input row %d:\n%s", tc.w, tc.h, chat, header, input, strings.Join(rows, "\n"))
 		}
-		if !(chat < header && header < input) {
+		if chat >= header || header >= input {
 			t.Errorf("%dx%d: chat %d, drawer %d, input %d: want that order", tc.w, tc.h, chat, header, input)
 		}
 		if header != hs.TabBar+hs.Body+hs.Banners {

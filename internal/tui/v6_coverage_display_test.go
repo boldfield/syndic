@@ -29,10 +29,7 @@ func forceColourProfile(t *testing.T, p termenv.Profile) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 }
 
-var (
-	colourCaps = TerminalCapabilities{Color: true, AltScreen: true}
-	dumbCaps   = TerminalCapabilities{}
-)
+var colourCaps = TerminalCapabilities{Color: true, AltScreen: true}
 
 // The transcript tab is unformatted safe text whatever /raw says, while the
 // chat tab renders the same text as Markdown.
