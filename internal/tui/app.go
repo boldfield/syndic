@@ -603,7 +603,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, cmd
 			}
 		case "esc":
-			a.cancelConfirm("release cancelled; nothing sent")
+			a.cancelConfirm(a.confirm.cancelText())
 			return a, nil
 		case "enter":
 			return a, a.confirmEnter()

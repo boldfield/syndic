@@ -288,14 +288,21 @@ func TestOverrideNeedsAReason(t *testing.T) {
 		t.Fatalf("the prompt does not name the turn:\n%s", v)
 	}
 
-	// An empty reason cancels
+	// Empty-Enter shows validation error and keeps form open
 	send(r, tea.KeyMsg{Type: tea.KeyEnter})
-	v = untilView(t, r, "override cancelled; nothing sent")
-	if strings.Contains(v, "reason>") {
-		t.Fatalf("the prompt is still up:\n%s", v)
+	v = untilView(t, r, "reason required", "reason>")
+	if !strings.Contains(v, "reason required") {
+		t.Fatalf("validation error not shown:\n%s", v)
 	}
 	if after := sent(r); after != before {
-		t.Fatalf("commands sent: %d -> %d", before, after)
+		t.Fatalf("commands sent after empty submit: %d -> %d", before, after)
+	}
+
+	// Esc cancels with override-specific message
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	v = untilView(t, r, "override cancelled; nothing sent")
+	if strings.Contains(v, "reason>") {
+		t.Fatalf("the prompt is still up after Esc:\n%s", v)
 	}
 
 	// A reason overrides the turn
@@ -425,15 +432,22 @@ func TestReleaseWarnsAndNeedsAReason(t *testing.T) {
 		t.Fatalf("the prompt does not name the pool:\n%s", v)
 	}
 
-	// An empty reason cancels.
+	// Empty-Enter shows validation error and keeps form open
 	before := sent(r)
 	send(r, tea.KeyMsg{Type: tea.KeyEnter})
-	v = untilView(t, r, "release cancelled; nothing sent")
-	if strings.Contains(v, "may overlap it") || strings.Contains(v, "reason>") {
-		t.Fatalf("the prompt is still up:\n%s", v)
+	v = untilView(t, r, "reason required", "reason>")
+	if !strings.Contains(v, "reason required") {
+		t.Fatalf("validation error not shown:\n%s", v)
 	}
 	if after := sent(r); after != before {
-		t.Fatalf("commands sent: %d -> %d", before, after)
+		t.Fatalf("commands sent after empty submit: %d -> %d", before, after)
+	}
+
+	// Esc cancels with release-specific message
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	v = untilView(t, r, "release cancelled; nothing sent")
+	if strings.Contains(v, "may overlap it") || strings.Contains(v, "reason>") {
+		t.Fatalf("the prompt is still up after Esc:\n%s", v)
 	}
 
 	// A reason releases the hold.
@@ -520,6 +534,56 @@ func TestReleaseUsage(t *testing.T) {
 	r := startAnswerRig(t, h)
 	r.typeLine("/release")
 	untilView(t, r, "usage: /release <pool> [attempt_id]")
+}
+
+func TestOverrideEscSendsNothing(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turnIn(t, r, "incomplete")
+	before := sent(r)
+
+	r.typeLine("/override")
+	untilView(t, r, "reason>")
+	// Type some text then Esc
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("some reason")}, tea.KeyMsg{Type: tea.KeyEsc})
+	v := untilView(t, r, "override cancelled; nothing sent")
+	if strings.Contains(v, "reason>") || strings.Contains(v, "some reason") {
+		t.Fatalf("the prompt or its text is still up:\n%s", v)
+	}
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent after Esc: %d -> %d", before, after)
+	}
+}
+
+func TestOverrideReasonSentExactlyOnce(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turn := turnIn(t, r, "incomplete")
+
+	// Override with inline reason sends directly
+	r.typeLine("/override test reason")
+	untilView(t, r, "overridden: test reason")
+
+	// Verify the turn state changed, confirming the override was sent
+	h.WaitTurnState(turn, engine.StateOverridden)
+}
+
+func TestReleaseWarningVisible(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.typeLine("/release default")
+	v := untilView(t, r, "release held capacity on pool default", "overlap it")
+	// Verify the warning about overlapping requests is visible
+	if !strings.Contains(v, "may still be computing") {
+		t.Fatalf("compute warning not shown:\n%s", v)
+	}
+	if !strings.Contains(v, "may overlap it") {
+		t.Fatalf("overlap warning not shown:\n%s", v)
+	}
+	if !strings.Contains(v, "reason>") {
+		t.Fatalf("reason prompt not shown:\n%s", v)
+	}
 }
 
 func TestFormatRefusalMembers(t *testing.T) {

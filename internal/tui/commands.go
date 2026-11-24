@@ -306,13 +306,13 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 		a.refusal = "no turn to override; nothing sent"
 		return nil
 	}
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
 
 	// If a reason is provided on the command line, send directly
 	if reason != "" {
-		if a.cl == nil {
-			a.refusal = "engine: not connected"
-			return nil
-		}
 		gen, cl := a.gen, a.cl
 		return func() tea.Msg {
 			if err := cl.Override(context.Background(), turn, reason); err != nil {
@@ -323,15 +323,10 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 	}
 
 	// No reason provided; open form
-	if a.cl == nil {
-		a.refusal = "engine: not connected"
-		return nil
-	}
-
 	p := &overridePrompt{turn: turn}
 	openReasonForm(a, []string{
 		"override turn " + turn + "?",
-		"Type a reason for the override and press enter; an empty reason or esc cancels.",
+		"Type a reason for the override and press enter; an empty reason requires esc to cancel.",
 	}, p)
 	return nil
 }
@@ -363,7 +358,7 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 		"release held capacity on " + target + "?",
 		"The server may still be computing the held request, and the next",
 		"dispatch to this pool may overlap it.",
-		"Type a reason and press enter to release; an empty reason or esc cancels.",
+		"Type a reason and press enter to release; an empty reason requires esc to cancel.",
 	}, p)
 	return nil
 }
@@ -385,14 +380,15 @@ func (a *App) confirmEnter() tea.Cmd {
 	case *overridePrompt:
 		reason := strings.TrimSpace(a.input.Value())
 		if reason == "" {
-			a.cancelConfirm("override cancelled; nothing sent")
+			a.refusal = "reason required"
+			a.clearInput()
+			return nil
+		}
+		if a.cl == nil {
+			a.cancelConfirm("engine: not connected")
 			return nil
 		}
 		a.cancelConfirm("")
-		if a.cl == nil {
-			a.refusal = "engine: not connected"
-			return nil
-		}
 		gen, cl := a.gen, a.cl
 		turn := p.turn
 		return func() tea.Msg {
@@ -405,14 +401,15 @@ func (a *App) confirmEnter() tea.Cmd {
 	case *releasePrompt:
 		reason := strings.TrimSpace(a.input.Value())
 		if reason == "" {
-			a.cancelConfirm("release cancelled; nothing sent")
+			a.refusal = "reason required"
+			a.clearInput()
+			return nil
+		}
+		if a.cl == nil {
+			a.cancelConfirm("engine: not connected")
 			return nil
 		}
 		a.cancelConfirm("")
-		if a.cl == nil {
-			a.refusal = "engine: not connected"
-			return nil
-		}
 		req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
 		if p.attemptID != "" {
 			req.AttemptID = &p.attemptID
