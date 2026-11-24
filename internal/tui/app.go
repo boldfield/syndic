@@ -50,6 +50,7 @@ type App struct {
 	refusal       string         // the one-line message under the body: a refusal, or what a command did
 	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
 	panelRow      int            // first visible line of the panel; PgUp and PgDn move it
+	conv          *convChooser   // the open /conversations list, or nil
 	question      *question      // the yes/no question being answered: a quick profile approval or provisional deadlines
 	questions     []*question    // questions waiting behind it, or behind confirm
 	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
@@ -654,6 +655,11 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if a.conv != nil {
+		if m, cmd, ok := a.conversationKey(msg); ok {
+			return m, cmd
+		}
+	}
 	if msg.Paste {
 		// A paste is text, whatever it contains: line breaks stay as typed.
 		a.input.InsertString(normalizePaste(msg.Runes))
@@ -1498,6 +1504,9 @@ func (a *App) View() string {
 		}
 	}
 	lines := strings.Split(tabView, "\n")
+	if a.conv != nil && len(a.panel) == 0 {
+		lines = a.conversationLines(bodyHeight, w)
+	}
 	if len(a.panel) > 0 {
 		lines = a.panelLines()
 		start := min(a.panelRow, a.maxPanelRow())
@@ -1508,7 +1517,7 @@ func (a *App) View() string {
 		}
 	}
 
-	if a.tab == tabChat && len(a.panel) == 0 {
+	if a.tab == tabChat && len(a.panel) == 0 && a.conv == nil {
 		answerHeight := max(bodyHeight-1, 0)
 		start := a.chatStart(len(lines), lastTurn)
 		total := len(lines)

@@ -180,15 +180,18 @@ type conversationsMsg struct {
 	err   error
 }
 
+// cmdConversations opens the list and reads every directory's conversations;
+// those of another directory are shown dimmed and cannot be chosen.
 func cmdConversations(a *App, _ []string) tea.Cmd {
 	if a.cl == nil {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	gen, cl, ctx, ws := a.gen, a.cl, a.ctx, a.workDir
+	a.conv = &convChooser{sel: -1}
+	gen, cl, ctx := a.gen, a.cl, a.ctx
 	return func() tea.Msg {
 		var items []wire.ConversationSummary
-		err := eachConversation(ctx, cl, &ws, func(c wire.ConversationSummary) bool {
+		err := eachConversation(ctx, cl, nil, func(c wire.ConversationSummary) bool {
 			items = append(items, c)
 			return true
 		})
@@ -196,42 +199,14 @@ func cmdConversations(a *App, _ []string) tea.Cmd {
 	}
 }
 
+// onConversations fills the list once. A list closed meanwhile stays closed.
 func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
-	if msg.gen != a.gen || a.question != nil || a.confirm != nil {
-		return a, nil // a question or confirmation owns the panel
-	}
-	if msg.err != nil {
-		a.say("conversations: " + formatRefusal(msg.err))
+	if msg.gen != a.gen || a.conv == nil || a.conv.loaded {
 		return a, nil
 	}
-	a.panel, a.panelRow = conversationLines(msg.items, a.conversationID, a.workDir, a.width), 0
+	a.conv.loaded, a.conv.err, a.conv.items = true, msg.err, msg.items
+	a.resetSel()
 	return a, nil
-}
-
-// conversationLines lists the conversations latest activity first, one line
-// each: id prefix, last activity, turn count and preview, the open one marked.
-func conversationLines(items []wire.ConversationSummary, open, workspace string, width int) []string {
-	workspace = safeLine(workspace)
-	lines := []string{"conversations in " + workspace + ", latest activity first (* is open):"}
-	if open == "" {
-		lines = append(lines, "* new      (created at the next submit)")
-	}
-	if len(items) == 0 {
-		lines = append(lines, "  no other conversations")
-	}
-	for _, c := range items {
-		mark := " "
-		if c.ID == open {
-			mark = "*"
-		}
-		running := ""
-		if c.Running {
-			running = ", running"
-		}
-		line := fmt.Sprintf("%s %-8s  %s  %d turns%s  %s", mark, shortID(c.ID), activity(c.LastSubmittedAt), c.TurnCount, running, safeLine(c.Preview))
-		lines = append(lines, ansi.Truncate(line, max(width, 1), "…"))
-	}
-	return lines
 }
 
 // activity shows a last_submitted_at time in local time, to the minute.
