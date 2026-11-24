@@ -1,0 +1,30 @@
+[chat]  transcript  participants
+conversation: new (created at the first submit) · workspace /work/space             0 earlier · 100%
+› make the retry loop stop on cancel
+  The loop now checks ctx.Done() first.
+✓ approved by codex after 2 revisions against abcdef123456 · 6 reviews
+› drop the second repair attempt?
+  rounds_exhausted
+! INCOMPLETE, not approved · 2 reviews
+no approved answer (incomplete)
+  Yes, it is unreachable.
+› which flag enables the race detector?
+· UNREVIEWED (solo)
+  Pass -race to go test.
+› rewrite the README section
+! HUMAN OVERRIDE: covered by TestRepairOnce · 1 reviews
+  Scheduler starts after recovery.
+› explain why detach never cancels
+× CANCELLED, not approved · 0 reviews
+no approved answer (cancelled)
+  The engine is a separate process.
+
+
+
+
+
+
+
+
+>
+[review] [idle]                                                  ctrl+o: reviews  tab: switch  /help
