@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -173,6 +174,20 @@ func TestDrawerClosesListAndShortHelp(t *testing.T) {
 		id := answerTurn(a.state)
 		return id, id != "" && a.input.Value() == "" && a.state.Turns[id].State != "reviewers_dispatched" && a.state.Turns[id].State != "open"
 	})
+	send(r, runes("/r"))
+	untilView(t, r, "/raw")
+	send(r, kt(tea.KeyCtrlO))
+	r.until(t, "the drawer open and list closed", func(a *App) (string, bool) {
+		return "", a.reviewsDrawer.IsOpen() && !a.commandListOpen()
+	})
+	send(r, kt(tea.KeyEsc))
+	r.until(t, "the drawer closed", func(a *App) (string, bool) { return "", !a.reviewsDrawer.IsOpen() })
+	if a := r.app; a.commandListOpen() {
+		t.Error("the command list came back with the drawer closed")
+	}
+	send(r, kt(tea.KeyBackspace))
+	send(r, kt(tea.KeyBackspace))
+	r.until(t, "input cleared", func(a *App) (string, bool) { return "", a.input.Value() == "" })
 	send(r, runes("?"))
 	untilView(t, r, "? hide")
 	send(r, kt(tea.KeyCtrlO))
@@ -189,4 +204,41 @@ func TestDrawerClosesListAndShortHelp(t *testing.T) {
 	untilView(t, r, "/raw")
 	send(r, kt(tea.KeyEsc))
 	r.until(t, "list closed", func(a *App) (string, bool) { return "", !a.commandListOpen() })
+}
+
+// TestShortHelpHidesOnTyping: typing after ? hides the help, so ? then types.
+func TestShortHelpHidesOnTyping(t *testing.T) {
+	r := newRig(t)
+	r.waitConnected(t)
+	send(r, runes("?"))
+	untilView(t, r, "? hide")
+	send(r, runes("a"))
+	r.until(t, "the help hidden", func(a *App) (string, bool) { return "", !a.showShortHelp && a.input.Value() == "a" })
+	if v := view(t, r); strings.Contains(v, "? hide") {
+		t.Errorf("short help still shown:\n%s", v)
+	}
+	send(r, runes("?"))
+	r.until(t, "a typed question mark", func(a *App) (string, bool) { return "", a.input.Value() == "a?" })
+}
+
+// TestCommandValuesShowDefaults: rows show the value in force, defaults included.
+func TestCommandValuesShowDefaults(t *testing.T) {
+	r := newRig(t)
+	r.waitConnected(t)
+	a := r.app
+	if a.state.Status == nil {
+		t.Fatal("no status")
+	}
+	a.state.Status.Revision.Default = 3
+	if got, want := a.commandValue("rounds"), strconv.Itoa(a.state.Status.Revision.Default); got != want {
+		t.Errorf("rounds = %q, want %q", got, want)
+	}
+	if got := a.commandValue("mode"); got != a.state.Status.DefaultPreset {
+		t.Errorf("mode = %q, want %q", got, a.state.Status.DefaultPreset)
+	}
+	off := "off"
+	a.quickSelection.Override = &off
+	if got := a.commandValue("quick"); got != "off" {
+		t.Errorf("quick = %q", got)
+	}
 }

@@ -823,6 +823,9 @@ func (a *App) updateInput(msg tea.Msg) tea.Cmd {
 		a.input, _ = a.input.Update(nil)
 	}
 	a.inputOverflow = n > maxInputRows
+	if a.input.Value() != "" {
+		a.showShortHelp = false // ? is short help only on an empty input
+	}
 	return cmd
 }
 

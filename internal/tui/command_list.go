@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/mattn/go-runewidth"
+
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 // commandEntry is one row of the command list.
@@ -44,11 +46,24 @@ func (a *App) commandValue(name string) string {
 		if a.roundsIsSet {
 			return strconv.Itoa(a.rounds)
 		}
+		if n := a.state.maxRounds(); n > 0 {
+			return strconv.Itoa(n)
+		}
 	case "mode":
-		return a.state.NextPreset
+		if a.state.NextPreset != "" {
+			return a.state.NextPreset
+		}
+		if a.state.Status != nil {
+			return a.state.Status.DefaultPreset
+		}
 	case "quick":
-		if a.quickSelection != nil && a.quickSelection.Override != nil {
-			return *a.quickSelection.Override
+		if qs := a.quickSelection; qs != nil {
+			if sel := qs.selected(a.quickProfiles()); sel != nil {
+				return *sel
+			}
+			if qs.Override != nil {
+				return *qs.Override
+			}
 		}
 	}
 	return ""
@@ -196,4 +211,12 @@ func padRight(s string, n int) string {
 		return s + strings.Repeat(" ", n-w)
 	}
 	return s + " "
+}
+
+// quickProfiles is the roster's quick profiles, or none before connecting.
+func (a *App) quickProfiles() []wire.QuickProfile {
+	if a.state.Status == nil {
+		return nil
+	}
+	return a.state.Status.QuickProfiles
 }
