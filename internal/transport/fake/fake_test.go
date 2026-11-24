@@ -1931,10 +1931,120 @@ func TestPlainReplyNilToolCalls(t *testing.T) {
 	if result.ToolCalls != nil {
 		t.Errorf("ToolCalls for plain reply: %v, want nil", result.ToolCalls)
 	}
-	if !transport.IsToolStep(result) == true {
-		// IsToolStep should return false for a plain reply
-		if transport.IsToolStep(result) {
-			t.Errorf("IsToolStep returned true for plain reply with nil ToolCalls")
-		}
+	// IsToolStep should return false for a plain reply
+	if transport.IsToolStep(result) {
+		t.Errorf("IsToolStep returned true for plain reply with nil ToolCalls")
+	}
+}
+
+// TestRefereeScriptingAllow verifies referee decision allow is scripted correctly.
+func TestRefereeScriptingAllow(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "allow",
+			RefereeReason:  "URL matches policy",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "allow" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "allow")
+	}
+	if result.Reason != "URL matches policy" {
+		t.Errorf("Reason: %q, want %q", result.Reason, "URL matches policy")
+	}
+}
+
+// TestRefereeScriptingDeny verifies referee decision deny is scripted correctly.
+func TestRefereeScriptingDeny(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "deny",
+			RefereeReason:  "URL contains sensitive data",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "deny" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	}
+	if result.Reason != "URL contains sensitive data" {
+		t.Errorf("Reason: %q, want %q", result.Reason, "URL contains sensitive data")
+	}
+}
+
+// TestRefereeScriptingRefusal verifies referee can deny tool calls on refusal.
+func TestRefereeScriptingRefusal(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "deny",
+			RefereeReason:  "refusal: model declined this action",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "deny" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	}
+	if !strings.HasPrefix(result.Reason, "refusal:") {
+		t.Errorf("Reason: %q, want to start with %q", result.Reason, "refusal:")
+	}
+}
+
+// TestRefereeScriptingTruncation verifies referee can deny truncated results.
+func TestRefereeScriptingTruncation(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "deny",
+			RefereeReason:  "truncation: response was cut off",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "deny" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	}
+	if !strings.HasPrefix(result.Reason, "truncation:") {
+		t.Errorf("Reason: %q, want to start with %q", result.Reason, "truncation:")
 	}
 }

@@ -182,6 +182,12 @@ type CompleteResult struct {
 	TransportStatus string
 }
 
+// RefereeResult is the output of a referee decision on a tool call.
+type RefereeResult struct {
+	Verdict string // "allow" or "deny"
+	Reason  string
+}
+
 // Usage records token usage information.
 type Usage struct {
 	Prompt     int

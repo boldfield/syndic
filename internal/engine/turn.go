@@ -266,8 +266,8 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
 				return err
 			}
-			// Tool step does not end the turn; it stays open for the next author attempt.
-			term = nil
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonToolStepUnsupported)
 		} else if gate == nil {
 			// The solo answer is not a candidate; keep its text so later
 			// turns' history can carry it.

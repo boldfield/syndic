@@ -87,10 +87,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
 				return err
 			}
-			// Tool step does not freeze a candidate; turn stays in review mode.
-			ended = false
-			term = nil
-			return nil
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			ended = true
+			endReason = reasonToolStepUnsupported
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
+			return err
 		}
 		if gate != nil {
 			ended = true
@@ -541,8 +542,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		if isToolStep {
 			// Reviewer tool step accepted but not parsed as a verdict; text is journaled.
-			// The reviewer stays in its current phase for the next attempt.
-			return nil
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			endState, endReason = StateIncomplete, reasonToolStepUnsupported
+			term, err = e.endIn(tx, emit, t, endState, endReason)
+			return err
 		}
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)

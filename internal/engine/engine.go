@@ -75,6 +75,9 @@ const (
 
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
+
+	// Tool step reasons (tool execution not yet supported).
+	reasonToolStepUnsupported = "tool_step:unsupported"
 )
 
 const defaultPool = "default"

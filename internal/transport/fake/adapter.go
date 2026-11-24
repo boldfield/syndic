@@ -18,6 +18,7 @@ const (
 	StepKindEcho
 	StepKindError
 	StepKindNotSent
+	StepKindReferee
 )
 
 // Step represents a single step in a script that determines what Complete returns.
@@ -39,6 +40,9 @@ type Step struct {
 	// reply can carry values that exist only after dispatch (an attempt id
 	// or a candidate hash).
 	Build func(req transport.CompleteRequest) string
+	// Referee fields: for scripting referee decisions
+	RefereeVerdict string // "allow" or "deny"
+	RefereeReason  string // reason for the decision
 }
 
 // CompleteCall records a single Complete call with all its details.
@@ -383,6 +387,39 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 	return transport.CancelStatus{
 		Requested:       true,
 		ServerConfirmed: confirmed,
+	}, nil
+}
+
+// Referee returns a scripted referee decision (allow or deny) for a tool call.
+// This method is not part of the standard Adapter interface yet, but is provided
+// for testing tool-step handling and referee flows.
+func (a *Adapter) Referee(ctx context.Context) (transport.RefereeResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Check if script is exhausted.
+	if a.current >= len(a.script) {
+		return transport.RefereeResult{
+			Verdict: "deny",
+			Reason:  "script exhausted",
+		}, nil
+	}
+
+	step := a.script[a.current]
+
+	// Only process referee steps
+	if step.Kind != StepKindReferee {
+		return transport.RefereeResult{
+			Verdict: "allow",
+			Reason:  "default allow",
+		}, nil
+	}
+
+	a.current++
+
+	return transport.RefereeResult{
+		Verdict: step.RefereeVerdict,
+		Reason:  step.RefereeReason,
 	}, nil
 }
 
