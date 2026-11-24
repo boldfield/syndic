@@ -47,14 +47,15 @@ type App struct {
 	state         State
 	tab           tab
 	input         textarea.Model
-	refusal       string         // the one-line message under the body: a refusal, or what a command did
-	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	panelRow      int            // first visible line of the panel; PgUp and PgDn move it
-	conv          *convChooser   // the open /conversations list, or nil
-	convEpoch     int            // counts openings of the list, to drop late replies
-	question      *question      // the yes/no question being answered: a quick profile approval or provisional deadlines
-	questions     []*question    // questions waiting behind it, or behind confirm
-	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
+	refusal       string        // the one-line message under the body: a refusal, or what a command did
+	panel         []string      // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	panelRow      int           // first visible line of the panel; PgUp and PgDn move it
+	conv          *convChooser  // the open /conversations list, or nil
+	convEpoch     int           // counts openings of the list, to drop late replies
+	question      *question     // the yes/no question being answered: a quick profile approval or provisional deadlines
+	questions     []*question   // questions waiting behind it, or behind confirm
+	confirm       confirmPrompt // a confirmation prompt waiting for its reason; it takes the next line typed
+	reasonForm    *reasonForm   // a form prompting for a required reason (Huh or fallback)
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight
@@ -523,6 +524,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := a.input.Width()
 	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
+
+	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
+		if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
+			switch keyMsg.String() {
+			case "esc":
+				a.cancelConfirm(a.confirm.cancelText())
+				return a, nil
+			case "ctrl+c", "ctrl+d":
+				if a.reasonForm.reasonValue != "" {
+					// Typed text: ctrl+c clears it; ctrl+d stays the field's delete key.
+					if keyMsg.String() == "ctrl+c" {
+						return a, a.reasonForm.reset()
+					}
+				} else {
+					return a, a.quit()
+				}
+			}
+			return a, a.reasonForm.Update(msg)
+		}
+		// Huh advances through internal messages; they reach the form
+		// while every application message still takes its normal path.
+		fcmd := a.reasonForm.Update(msg)
+		if a.reasonForm.IsCompleted() {
+			// The form's own submit command quits the program: drop it.
+			return a, a.confirmEnter()
+		}
+		m, cmd := a.updateApp(msg)
+		return m, tea.Batch(fcmd, cmd)
+	}
+	return a.updateApp(msg)
+}
+
+// updateApp handles an application message.
+func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -603,7 +638,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, cmd
 			}
 		case "esc":
-			a.cancelConfirm("release cancelled; nothing sent")
+			a.cancelConfirm(a.confirm.cancelText())
 			return a, nil
 		case "enter":
 			return a, a.confirmEnter()
@@ -1543,7 +1578,13 @@ func (a *App) View() string {
 	}
 
 	// Clip input lines to width
-	inputLines := renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
+	var inputLines string
+	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
+		// Render Huh form for colour mode
+		inputLines = a.reasonForm.view(w, hs.Input)
+	} else {
+		inputLines = renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
+	}
 	inputLinesList := strings.Split(inputLines, "\n")
 	for i, line := range inputLinesList {
 		inputLinesList[i] = ansi.Truncate(line, w, "")

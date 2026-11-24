@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -278,13 +279,38 @@ func TestOverrideNeedsAReason(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
 	r := startAnswerRig(t, h)
 	r.typeLine("question")
-	turnIn(t, r, "incomplete")
+	turn := turnIn(t, r, "incomplete")
 	before := sent(r)
+
+	// /override without reason opens a form
 	r.typeLine("/override")
-	untilView(t, r, "usage: /override <reason>")
-	if after := sent(r); after != before {
-		t.Fatalf("commands sent: %d -> %d", before, after)
+	v := untilView(t, r, "override turn", "reason>")
+	if !strings.Contains(v, turn) {
+		t.Fatalf("the prompt does not name the turn:\n%s", v)
 	}
+
+	// Empty-Enter shows validation error and keeps form open
+	send(r, tea.KeyMsg{Type: tea.KeyEnter})
+	v = untilView(t, r, "reason required", "reason>")
+	if !strings.Contains(v, "reason required") {
+		t.Fatalf("validation error not shown:\n%s", v)
+	}
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent after empty submit: %d -> %d", before, after)
+	}
+
+	// Esc cancels with override-specific message
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	v = untilView(t, r, "override cancelled; nothing sent")
+	if strings.Contains(v, "reason>") {
+		t.Fatalf("the prompt is still up after Esc:\n%s", v)
+	}
+
+	// A reason overrides the turn
+	r.typeLine("/override")
+	untilView(t, r, "reason>")
+	r.typeLine("reason provided")
+	untilView(t, r, "overridden: reason provided")
 }
 
 func TestOverrideIncompleteTurn(t *testing.T) {
@@ -407,15 +433,22 @@ func TestReleaseWarnsAndNeedsAReason(t *testing.T) {
 		t.Fatalf("the prompt does not name the pool:\n%s", v)
 	}
 
-	// An empty reason cancels.
+	// Empty-Enter shows validation error and keeps form open
 	before := sent(r)
 	send(r, tea.KeyMsg{Type: tea.KeyEnter})
-	v = untilView(t, r, "release cancelled; nothing sent")
-	if strings.Contains(v, "may overlap it") || strings.Contains(v, "reason>") {
-		t.Fatalf("the prompt is still up:\n%s", v)
+	v = untilView(t, r, "reason required", "reason>")
+	if !strings.Contains(v, "reason required") {
+		t.Fatalf("validation error not shown:\n%s", v)
 	}
 	if after := sent(r); after != before {
-		t.Fatalf("commands sent: %d -> %d", before, after)
+		t.Fatalf("commands sent after empty submit: %d -> %d", before, after)
+	}
+
+	// Esc cancels with release-specific message
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	v = untilView(t, r, "release cancelled; nothing sent")
+	if strings.Contains(v, "may overlap it") || strings.Contains(v, "reason>") {
+		t.Fatalf("the prompt is still up after Esc:\n%s", v)
 	}
 
 	// A reason releases the hold.
@@ -502,6 +535,197 @@ func TestReleaseUsage(t *testing.T) {
 	r := startAnswerRig(t, h)
 	r.typeLine("/release")
 	untilView(t, r, "usage: /release <pool> [attempt_id]")
+}
+
+func TestOverrideEscSendsNothing(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	turnIn(t, r, "incomplete")
+	before := sent(r)
+
+	r.typeLine("/override")
+	untilView(t, r, "reason>")
+	// Type some text then Esc
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("some reason")}, tea.KeyMsg{Type: tea.KeyEsc})
+	v := untilView(t, r, "override cancelled; nothing sent")
+	if strings.Contains(v, "reason>") || strings.Contains(v, "some reason") {
+		t.Fatalf("the prompt or its text is still up:\n%s", v)
+	}
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent after Esc: %d -> %d", before, after)
+	}
+}
+
+// overrides are the turn-state events an accepted override journalled.
+func overrides(r *rig) []*wire.EvTurnState {
+	var out []*wire.EvTurnState
+	for _, e := range r.h.Events() {
+		if p, ok := e.Payload.(*wire.EvTurnState); ok && p.State == engine.StateOverridden {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func TestOverrideReasonSentExactlyOnce(t *testing.T) {
+	for _, colour := range []bool{false, true} {
+		t.Run(fmt.Sprintf("colour=%v", colour), func(t *testing.T) {
+			h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+			r := startAnswerRig(t, h)
+			if colour {
+				r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+			}
+			r.typeLine("question")
+			turn := turnIn(t, r, "incomplete")
+			r.typeLine("/override")
+			untilView(t, r, "override turn "+turn)
+			// Empty submit keeps the form open and sends nothing.
+			send(r, tea.KeyMsg{Type: tea.KeyEnter})
+			untilView(t, r, "reason required", "override turn "+turn)
+			r.typeLine("test reason")
+			untilView(t, r, "overridden: test reason")
+			h.WaitTurnState(turn, engine.StateOverridden)
+			ov := overrides(r)
+			if len(ov) != 1 || ov[0].Reason == nil || *ov[0].Reason != "test reason" || ov[0].TurnID != turn {
+				t.Fatalf("override events: %+v", ov)
+			}
+		})
+	}
+}
+
+func TestReasonFormColourEscAndWarning(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	before := sent(r)
+	r.typeLine("/release default")
+	untilView(t, r, "release held capacity on pool default", "may overlap it")
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("half")})
+	untilView(t, r, "half")
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	v := untilView(t, r, "release cancelled; nothing sent")
+	if strings.Contains(v, "may overlap it") {
+		t.Fatalf("the prompt is still up:\n%s", v)
+	}
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent: %d -> %d", before, after)
+	}
+	// A reason now releases exactly once.
+	r.typeLine("/release default")
+	untilView(t, r, "may overlap it")
+	r.typeLine("checked")
+	untilView(t, r, "released on pool default: ")
+	if after := sent(r); after != before+1 {
+		t.Fatalf("sent %d -> %d, want exactly one", before, after)
+	}
+}
+
+func TestReasonFormKeepsAppMessages(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	r.typeLine("question")
+	turn := turnIn(t, r, "incomplete")
+	r.typeLine("/override")
+	untilView(t, r, "override turn")
+	send(r, tea.WindowSizeMsg{Width: 100, Height: 30})
+	// An external override's engine event must still reach the App.
+	if err := dial(t, r.paths).Override(context.Background(), turn, "elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	r.until(t, "the event applied", func(a *App) (string, bool) {
+		return "", a.width == 100 && a.state.Turns[turn].State == engine.StateOverridden
+	})
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	untilView(t, r, "override cancelled; nothing sent")
+}
+
+func TestReasonFormDumbFallback(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	caps := DetectTerminalCapabilities()
+	r.until(t, "caps from env", func(a *App) (string, bool) { a.terminalCapabilities = caps; return "", true })
+	r.typeLine("question")
+	turnIn(t, r, "incomplete")
+	r.typeLine("/override")
+	v := untilView(t, r, "override turn", "reason>")
+	if strings.Contains(v, "\x1b[") {
+		t.Fatalf("escape sequences in the fallback prompt:\n%q", v)
+	}
+	r.typeLine("plain reason")
+	untilView(t, r, "overridden: plain reason")
+}
+
+// keyQuits fails if the key detaches the TUI.
+func keyQuits(t *testing.T, r *rig, k tea.KeyType, name string) {
+	t.Helper()
+	quit := false
+	r.until(t, name, func(a *App) (string, bool) {
+		_, cmd := a.update(tea.KeyMsg{Type: k})
+		if cmd != nil {
+			_, quit = cmd().(tea.QuitMsg)
+		}
+		return "", true
+	})
+	if quit {
+		t.Fatalf("%s detached with a reason typed", name)
+	}
+}
+
+func TestReasonFormColourCtrlKeys(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	before := sent(r)
+	r.typeLine("/release default")
+	untilView(t, r, "may overlap it")
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("partial")})
+	untilView(t, r, "partial")
+	// ctrl+c clears the typed reason instead of detaching.
+	keyQuits(t, r, tea.KeyCtrlC, "ctrl+c")
+	v := untilView(t, r, "may overlap it")
+	if strings.Contains(v, "partial") {
+		t.Fatalf("ctrl+c left the text:\n%s", v)
+	}
+	// ctrl+d with text is the delete key, not a detach.
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ab")})
+	untilView(t, r, "ab")
+	keyQuits(t, r, tea.KeyCtrlD, "ctrl+d")
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent: %d -> %d", before, after)
+	}
+}
+
+func TestReasonFormColourFitsTerminal(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	send(r, tea.WindowSizeMsg{Width: 80, Height: 24})
+	r.typeLine("/release default")
+	v := untilView(t, r, "may overlap it", "reason> ")
+	if n := len(strings.Split(v, "\n")); n > 24 {
+		t.Fatalf("view is %d lines on a 24-row terminal:\n%s", n, v)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyEnter})
+	v = untilView(t, r, "reason required", "may overlap it")
+	if n := len(strings.Split(v, "\n")); n > 24 {
+		t.Fatalf("view with validation error is %d lines:\n%s", n, v)
+	}
+}
+
+func TestReleaseWarningVisible(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.typeLine("/release default")
+	v := untilView(t, r, "release held capacity on pool default", "overlap it")
+	// Verify the warning about overlapping requests is visible
+	if !strings.Contains(v, "may still be computing") {
+		t.Fatalf("compute warning not shown:\n%s", v)
+	}
+	if !strings.Contains(v, "may overlap it") {
+		t.Fatalf("overlap warning not shown:\n%s", v)
+	}
+	if !strings.Contains(v, "reason>") {
+		t.Fatalf("reason prompt not shown:\n%s", v)
+	}
 }
 
 func TestFormatRefusalMembers(t *testing.T) {

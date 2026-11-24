@@ -301,10 +301,6 @@ func cmdCancel(a *App, _ []string) tea.Cmd {
 
 func cmdOverride(a *App, args []string) tea.Cmd {
 	reason := strings.Join(args, " ")
-	if reason == "" {
-		a.refusal = "usage: /override <reason>"
-		return nil
-	}
 	turn := answerTurn(a.state)
 	if turn == "" {
 		a.refusal = "no turn to override; nothing sent"
@@ -314,13 +310,24 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	gen, cl := a.gen, a.cl
-	return func() tea.Msg {
-		if err := cl.Override(context.Background(), turn, reason); err != nil {
-			return commandMsg{gen: gen, err: err}
+
+	// If a reason is provided on the command line, send directly
+	if reason != "" {
+		gen, cl := a.gen, a.cl
+		return func() tea.Msg {
+			if err := cl.Override(context.Background(), turn, reason); err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
 		}
-		return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
 	}
+
+	// No reason provided; open form
+	p := &overridePrompt{turn: turn}
+	return openReasonForm(a, []string{
+		"override turn " + turn + "?",
+		"Type a reason for the override and press enter; an empty reason requires esc to cancel.",
+	}, p)
 }
 
 // approvalPrompt is a quick profile selection waiting for yes or no; the panel shows what it does.
@@ -329,12 +336,6 @@ type approvalPrompt struct {
 	profileName      string
 	fileSHA256       string
 	definitionSHA256 string
-}
-
-// releasePrompt is a /release waiting for its reason.
-type releasePrompt struct {
-	pool      string
-	attemptID string
 }
 
 func cmdRelease(a *App, args []string) tea.Cmd {
@@ -352,22 +353,19 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 		p.attemptID = args[1]
 		target += ", attempt " + p.attemptID
 	}
-	a.confirm = p
-	a.panel = []string{
+	return openReasonForm(a, []string{
 		"release held capacity on " + target + "?",
 		"The server may still be computing the held request, and the next",
 		"dispatch to this pool may overlap it.",
-		"Type a reason and press enter to release; an empty reason or esc cancels.",
-	}
-	a.setPrompt(reasonPrompt)
-	a.refusal = ""
-	return nil
+		"Type a reason and press enter to release; an empty reason requires esc to cancel.",
+	}, p)
 }
 
 // cancelConfirm drops a pending confirmation without sending anything, then
 // opens any question that waited behind it.
 func (a *App) cancelConfirm(why string) {
 	a.confirm = nil
+	a.reasonForm = nil
 	a.panel = nil
 	a.setPrompt(defaultPrompt)
 	a.clearInput()
@@ -375,31 +373,51 @@ func (a *App) cancelConfirm(why string) {
 	a.nextQuestion()
 }
 
-// confirmEnter answers the pending confirmation with the input line.
+// confirmEnter answers the pending confirmation with the entered reason.
 func (a *App) confirmEnter() tea.Cmd {
-	reason := strings.TrimSpace(a.input.Value())
-	p := a.confirm
-	if reason == "" {
-		a.cancelConfirm("release cancelled; nothing sent")
+	// The Huh form validates its own field; the single-line fallback is
+	// checked here.
+	var reason string
+	if a.reasonForm != nil && a.reasonForm.useHuh {
+		reason = a.reasonForm.Reason()
+	} else {
+		reason = strings.TrimSpace(a.input.Value())
+		if reason == "" {
+			a.refusal = "reason required"
+			a.clearInput()
+			return nil
+		}
+	}
+	confirm := a.confirm
+	if a.cl == nil {
+		a.cancelConfirm("engine: not connected")
 		return nil
 	}
 	a.cancelConfirm("")
-	if a.cl == nil {
-		a.refusal = "engine: not connected"
-		return nil
-	}
-	req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
-	if p.attemptID != "" {
-		req.AttemptID = &p.attemptID
-	}
 	gen, cl := a.gen, a.cl
-	return func() tea.Msg {
-		reply, err := cl.Release(context.Background(), req)
-		if err != nil {
-			return commandMsg{gen: gen, err: err}
+
+	switch p := confirm.(type) {
+	case *overridePrompt:
+		return func() tea.Msg {
+			if err := cl.Override(context.Background(), p.turn, reason); err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: "turn " + p.turn + " overridden: " + reason}
 		}
-		return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
+	case *releasePrompt:
+		req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
+		if p.attemptID != "" {
+			req.AttemptID = &p.attemptID
+		}
+		return func() tea.Msg {
+			reply, err := cl.Release(context.Background(), req)
+			if err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
+		}
 	}
+	return nil
 }
 
 // question is a yes/no prompt: its panel shows what is asked, and it owns
