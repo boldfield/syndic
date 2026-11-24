@@ -694,8 +694,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if sel := a.convListSel(); sel >= 0 {
 				return a, a.enterConversationSelection()
 			}
-			// Otherwise let normal enter() handle dispatching the /conversations command
-			// (fall through to main switch which handles enter key)
+			// Otherwise let the main switch handle entering the command
+			return a, a.enter()
 		case "n":
 			a.convListNKey()
 			return a, nil
@@ -885,6 +885,7 @@ func (a *App) enter() tea.Cmd {
 	a.refusal, a.panel, a.panelRow = "", nil, 0
 	if isCommand(line) {
 		a.clearInput()
+		a.closeConversationList()
 		return dispatch(a, line)
 	}
 	if a.cl == nil {
