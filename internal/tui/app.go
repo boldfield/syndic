@@ -47,14 +47,14 @@ type App struct {
 	state         State
 	tab           tab
 	input         textarea.Model
-	refusal       string         // the one-line message under the body: a refusal, or what a command did
-	panel         []string       // lines shown in place of the tab until dismissed: /help, /why, the release warning
-	panelRow      int            // first visible line of the panel; PgUp and PgDn move it
-	conv          *convChooser   // the open /conversations list, or nil
-	convEpoch     int            // counts openings of the list, to drop late replies
-	question      *question      // the yes/no question being answered: a quick profile approval or provisional deadlines
-	questions     []*question    // questions waiting behind it, or behind confirm
-	confirm       *releasePrompt // a /release waiting for its reason; it takes the next line typed
+	refusal       string        // the one-line message under the body: a refusal, or what a command did
+	panel         []string      // lines shown in place of the tab until dismissed: /help, /why, the release warning
+	panelRow      int           // first visible line of the panel; PgUp and PgDn move it
+	conv          *convChooser  // the open /conversations list, or nil
+	convEpoch     int           // counts openings of the list, to drop late replies
+	question      *question     // the yes/no question being answered: a quick profile approval or provisional deadlines
+	questions     []*question   // questions waiting behind it, or behind confirm
+	confirm       confirmPrompt // a confirmation prompt waiting for its reason; it takes the next line typed
 
 	statusRefreshPending bool
 	statusDirty          bool // a trigger arrived while a refresh was in flight

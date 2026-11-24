@@ -278,13 +278,31 @@ func TestOverrideNeedsAReason(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
 	r := startAnswerRig(t, h)
 	r.typeLine("question")
-	turnIn(t, r, "incomplete")
+	turn := turnIn(t, r, "incomplete")
 	before := sent(r)
+
+	// /override without reason opens a form
 	r.typeLine("/override")
-	untilView(t, r, "usage: /override <reason>")
+	v := untilView(t, r, "override turn", "reason>")
+	if !strings.Contains(v, turn) {
+		t.Fatalf("the prompt does not name the turn:\n%s", v)
+	}
+
+	// An empty reason cancels
+	send(r, tea.KeyMsg{Type: tea.KeyEnter})
+	v = untilView(t, r, "override cancelled; nothing sent")
+	if strings.Contains(v, "reason>") {
+		t.Fatalf("the prompt is still up:\n%s", v)
+	}
 	if after := sent(r); after != before {
 		t.Fatalf("commands sent: %d -> %d", before, after)
 	}
+
+	// A reason overrides the turn
+	r.typeLine("/override")
+	untilView(t, r, "reason>")
+	r.typeLine("reason provided")
+	untilView(t, r, "overridden: reason provided")
 }
 
 func TestOverrideIncompleteTurn(t *testing.T) {

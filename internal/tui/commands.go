@@ -301,26 +301,39 @@ func cmdCancel(a *App, _ []string) tea.Cmd {
 
 func cmdOverride(a *App, args []string) tea.Cmd {
 	reason := strings.Join(args, " ")
-	if reason == "" {
-		a.refusal = "usage: /override <reason>"
-		return nil
-	}
 	turn := answerTurn(a.state)
 	if turn == "" {
 		a.refusal = "no turn to override; nothing sent"
 		return nil
 	}
+
+	// If a reason is provided on the command line, send directly
+	if reason != "" {
+		if a.cl == nil {
+			a.refusal = "engine: not connected"
+			return nil
+		}
+		gen, cl := a.gen, a.cl
+		return func() tea.Msg {
+			if err := cl.Override(context.Background(), turn, reason); err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
+		}
+	}
+
+	// No reason provided; open form
 	if a.cl == nil {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	gen, cl := a.gen, a.cl
-	return func() tea.Msg {
-		if err := cl.Override(context.Background(), turn, reason); err != nil {
-			return commandMsg{gen: gen, err: err}
-		}
-		return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
-	}
+
+	p := &overridePrompt{turn: turn}
+	openReasonForm(a, []string{
+		"override turn " + turn + "?",
+		"Type a reason for the override and press enter; an empty reason or esc cancels.",
+	}, p)
+	return nil
 }
 
 // approvalPrompt is a quick profile selection waiting for yes or no; the panel shows what it does.
@@ -329,12 +342,6 @@ type approvalPrompt struct {
 	profileName      string
 	fileSHA256       string
 	definitionSHA256 string
-}
-
-// releasePrompt is a /release waiting for its reason.
-type releasePrompt struct {
-	pool      string
-	attemptID string
 }
 
 func cmdRelease(a *App, args []string) tea.Cmd {
@@ -352,15 +359,12 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 		p.attemptID = args[1]
 		target += ", attempt " + p.attemptID
 	}
-	a.confirm = p
-	a.panel = []string{
+	openReasonForm(a, []string{
 		"release held capacity on " + target + "?",
 		"The server may still be computing the held request, and the next",
 		"dispatch to this pool may overlap it.",
 		"Type a reason and press enter to release; an empty reason or esc cancels.",
-	}
-	a.setPrompt(reasonPrompt)
-	a.refusal = ""
+	}, p)
 	return nil
 }
 
@@ -377,28 +381,54 @@ func (a *App) cancelConfirm(why string) {
 
 // confirmEnter answers the pending confirmation with the input line.
 func (a *App) confirmEnter() tea.Cmd {
-	reason := strings.TrimSpace(a.input.Value())
-	p := a.confirm
-	if reason == "" {
-		a.cancelConfirm("release cancelled; nothing sent")
-		return nil
-	}
-	a.cancelConfirm("")
-	if a.cl == nil {
-		a.refusal = "engine: not connected"
-		return nil
-	}
-	req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
-	if p.attemptID != "" {
-		req.AttemptID = &p.attemptID
-	}
-	gen, cl := a.gen, a.cl
-	return func() tea.Msg {
-		reply, err := cl.Release(context.Background(), req)
-		if err != nil {
-			return commandMsg{gen: gen, err: err}
+	switch p := a.confirm.(type) {
+	case *overridePrompt:
+		reason := strings.TrimSpace(a.input.Value())
+		if reason == "" {
+			a.cancelConfirm("override cancelled; nothing sent")
+			return nil
 		}
-		return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
+		a.cancelConfirm("")
+		if a.cl == nil {
+			a.refusal = "engine: not connected"
+			return nil
+		}
+		gen, cl := a.gen, a.cl
+		turn := p.turn
+		return func() tea.Msg {
+			if err := cl.Override(context.Background(), turn, reason); err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
+		}
+
+	case *releasePrompt:
+		reason := strings.TrimSpace(a.input.Value())
+		if reason == "" {
+			a.cancelConfirm("release cancelled; nothing sent")
+			return nil
+		}
+		a.cancelConfirm("")
+		if a.cl == nil {
+			a.refusal = "engine: not connected"
+			return nil
+		}
+		req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
+		if p.attemptID != "" {
+			req.AttemptID = &p.attemptID
+		}
+		gen, cl := a.gen, a.cl
+		return func() tea.Msg {
+			reply, err := cl.Release(context.Background(), req)
+			if err != nil {
+				return commandMsg{gen: gen, err: err}
+			}
+			return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
+		}
+
+	default:
+		a.cancelConfirm("unknown confirmation type")
+		return nil
 	}
 }
 
