@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -77,8 +76,7 @@ func TestV6NotifyFreshProcessNoNotice(t *testing.T) {
 	}
 }
 
-// TestV6NotifyPlainModeNoBell verifies that notification behavior is correct
-// even under plain terminal mode (TERM=dumb). Bell behavior depends on /notify setting.
+// TestV6NotifyPlainModeNoBell verifies that notification bell count is correct under plain mode.
 func TestV6NotifyPlainModeNoBell(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 
@@ -89,22 +87,25 @@ func TestV6NotifyPlainModeNoBell(t *testing.T) {
 	h.frame(submittedFrame("turn-1", 1))
 	h.frame(terminalEventFrame("turn-1", 2))
 
-	// In plain mode, app should still function and handle notifications
-	// Bell count depends on the /notify setting, not on plain mode
+	// With notify on, one live terminal event should ring exactly once
 	bells := h.bells.Load()
-	if bells < 0 {
-		t.Errorf("plain mode gave invalid bell count: %d", bells)
+	if bells != 1 {
+		t.Errorf("live terminal event rang %d bells, want 1", bells)
 	}
 
-	// Verify app rendered successfully in plain mode
+	// Verify app rendered successfully in plain mode and has no escape sequences
 	view := h.app.View()
 	if view == "" {
 		t.Error("plain mode app should render non-empty view")
 	}
+
+	// Verify plain mode view contains no ANSI escape sequences
+	if strings.Contains(view, "\033") || strings.Contains(view, "\x1b") {
+		t.Error("plain mode view should not contain ANSI escape sequences")
+	}
 }
 
-// TestV6NotifyMousePlainModeDisablesMouse verifies that mouse is suppressed
-// under plain terminal mode (TERM=dumb) even when opted in.
+// TestV6NotifyMousePlainModeDisablesMouse verifies that mouse is suppressed under TERM=dumb.
 func TestV6NotifyMousePlainModeDisablesMouse(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 
@@ -113,78 +114,82 @@ func TestV6NotifyMousePlainModeDisablesMouse(t *testing.T) {
 
 	// Create app with mouse enabled - but it should be disabled in plain mode
 	app := NewApp(ctx, "x", WithMouse(true))
-	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30}) // trigger initialization
+	app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Under TERM=dumb, plainMode() returns true, so mouse updates do nothing
+	// Under TERM=dumb, plainMode() returns true
 	if !app.plainMode() {
 		t.Error("TERM=dumb should put app in plain mode")
 	}
 
-	// Verify that sending a mouse event doesn't crash and is effectively ignored
-	// (plain mode disables mouse in updateMouse)
+	// Under TERM=dumb or colour off, mouseAllowed() should return false even with mouse opted in
+	if app.mouseAllowed() {
+		t.Error("mouse should be disabled under TERM=dumb even when opted in")
+	}
+
+	// Verify mouse events are ignored (don't cause state changes)
 	_, _ = app.Update(tea.MouseMsg{X: 10, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 
-	// The app should render successfully without mouse-specific features
+	// App should render successfully
 	view := app.View()
 	if view == "" {
 		t.Error("app.View() should not be empty")
 	}
 }
 
-// TestV6NotifyMouseOffByDefault verifies that mouse is off by default
-// and only enabled when explicitly opted in on a capable terminal.
+// TestV6NotifyMouseOffByDefault verifies mouse is off by default and can be opted in.
 func TestV6NotifyMouseOffByDefault(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create app WITHOUT mouse flag - should be off by default
+	// Create app WITHOUT mouse flag - should have mouse off by default
 	appNoMouse := NewApp(ctx, "x")
 	appNoMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Create app WITH mouse flag - should be on (if terminal supports it)
+	// Create app WITH mouse flag - should have mouse on (if terminal supports it)
 	appWithMouse := NewApp(ctx, "x", WithMouse(true))
 	appWithMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Both should render, but the difference is in whether mouse input is processed
+	// Verify mouseAllowed reflects terminal capabilities (should be false only under TERM=dumb or no color)
+	// On a capable terminal with mouse opted in, mouseAllowed() should be true
+	if !appWithMouse.plainMode() && !appWithMouse.mouseAllowed() && appWithMouse.terminalCapabilities.Color {
+		// This may be expected if color is off, so only fail if we have a capable terminal
+		t.Error("app with mouse opted in should allow mouse on capable terminal")
+	}
+
+	// Both should render
 	view1 := appNoMouse.View()
 	view2 := appWithMouse.View()
-
 	if view1 == "" {
-		t.Error("app without mouse flag should still render")
+		t.Error("app without mouse flag should render")
 	}
 	if view2 == "" {
 		t.Error("app with mouse flag should render")
 	}
 
-	// Under plain mode, both should disable mouse anyway
+	// Under plain mode, mouse should be disabled even when opted in
 	t.Setenv("TERM", "dumb")
 	appPlainWithMouse := NewApp(ctx, "x", WithMouse(true))
 	appPlainWithMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	if !appPlainWithMouse.plainMode() {
-		t.Error("TERM=dumb should enable plain mode")
+		t.Error("TERM=dumb should put app in plain mode")
 	}
 
-	// Should render successfully
+	// Under plain mode, mouseAllowed should be false
+	if appPlainWithMouse.mouseAllowed() {
+		t.Error("mouse should be disabled in plain mode even when opted in")
+	}
+
+	// Should still render
 	view3 := appPlainWithMouse.View()
 	if view3 == "" {
-		t.Error("plain mode app should still render")
+		t.Error("plain mode app should render")
 	}
 }
 
-// TestV6NotifyOffByDefaultUnderPlain verifies that notification is off by default
-// and plain-mode rendering works correctly.
+// TestV6NotifyOffByDefaultUnderPlain verifies notification is off by default under plain mode.
 func TestV6NotifyOffByDefaultUnderPlain(t *testing.T) {
-	oldTerm := os.Getenv("TERM")
-	defer func() {
-		if oldTerm == "" {
-			_ = os.Unsetenv("TERM")
-		} else {
-			_ = os.Setenv("TERM", oldTerm)
-		}
-	}()
-
-	_ = os.Setenv("TERM", "dumb")
+	t.Setenv("TERM", "dumb")
 
 	h := newNotifyHarness(t, false)
 	h.connect(1)
@@ -192,7 +197,7 @@ func TestV6NotifyOffByDefaultUnderPlain(t *testing.T) {
 	h.frame(terminalEventFrame("turn-1", 2))
 
 	if n := h.bells.Load(); n != 0 {
-		t.Errorf("notify off rang %d bells under plain mode", n)
+		t.Errorf("notify off rang %d bells under plain mode, want 0", n)
 	}
 }
 
