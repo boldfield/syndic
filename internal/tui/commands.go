@@ -62,12 +62,16 @@ var commandHelp = []string{
 // keyHelp is one line per key, in the order /help lists them.
 var keyHelp = []string{
 	"Tab, Shift+Tab            switch tabs",
+	"Tab (command list open)   complete the selected command",
+	"Up, Down (command list)   select a command without editing the input",
+	"?                         on an empty input, show or hide a line of keys",
+	"Ctrl+O                    open or close the reviews drawer on the chat tab",
 	"PgUp, PgDn                scroll the active tab, or this panel",
 	"Enter                     submit the input, or run the command",
 	"Alt+Enter                 insert a newline; a multi-line paste is kept as typed",
 	"Ctrl+C                    clear the input; on an empty input, detach",
 	"Ctrl+D                    on an empty input, detach, exactly as /quit",
-	"Esc                       close this panel",
+	"Esc                       close this panel, the command list or the drawer",
 	"Detaching never cancels a turn; only /cancel does.",
 }
 
