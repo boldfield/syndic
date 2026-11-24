@@ -68,12 +68,18 @@ var keyHelp = []string{
 	"Up, Down (command list)   select a command without editing the input",
 	"?                         on an empty input, show or hide a line of keys",
 	"Ctrl+O                    open or close the reviews drawer on the chat tab",
+	"Up, Down (drawer)         choose the turn; its input line is highlighted",
+	"Left, Right (drawer)      choose the round",
+	"PgUp, PgDn (drawer)       scroll the drawer",
+	"Up, Down                  scroll a tab or this panel; select a participant",
 	"PgUp, PgDn                scroll the active tab, or this panel",
+	"Home, End (transcript)    go to the first or the last line",
 	"Enter                     submit the input, or run the command",
 	"Alt+Enter                 insert a newline; a multi-line paste is kept as typed",
 	"Ctrl+C                    clear the input; on an empty input, detach",
 	"Ctrl+D                    on an empty input, detach, exactly as /quit",
 	"Esc                       close this panel, the command list or the drawer",
+	"y, n                      answer a yes/no question; Esc answers no",
 	"Detaching never cancels a turn; only /cancel does.",
 }
 

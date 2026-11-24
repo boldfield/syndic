@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -158,7 +159,11 @@ func TestHelpListsEveryCommandAndKey(t *testing.T) {
 			t.Errorf("/help lacks %s", e.usage)
 		}
 	}
-	for _, want := range []string{"?  ", "Up, Down (command list)", "Tab (command list open)", "Ctrl+O"} {
+	for _, want := range []string{
+		"?  ", "Up, Down (command list)", "Tab (command list open)", "Ctrl+O",
+		"Up, Down (drawer)         choose the turn", "Left, Right (drawer)      choose the round",
+		"PgUp, PgDn (drawer)", "Home, End (transcript)", "y, n",
+	} {
 		if !strings.Contains(a, want) {
 			t.Errorf("/help lacks %q", want)
 		}
@@ -182,10 +187,9 @@ func TestDrawerClosesListAndShortHelp(t *testing.T) {
 		return "", a.reviewsDrawer.IsOpen() && !a.commandListOpen()
 	})
 	send(r, kt(tea.KeyEsc))
-	r.until(t, "the drawer closed", func(a *App) (string, bool) { return "", !a.reviewsDrawer.IsOpen() })
-	if a := r.app; a.commandListOpen() {
-		t.Error("the command list came back with the drawer closed")
-	}
+	r.until(t, "the drawer closed with the list still dismissed", func(a *App) (string, bool) {
+		return fmt.Sprintf("drawer=%v list=%v", a.reviewsDrawer.IsOpen(), a.commandListOpen()), !a.reviewsDrawer.IsOpen() && !a.commandListOpen()
+	})
 	send(r, kt(tea.KeyBackspace))
 	send(r, kt(tea.KeyBackspace))
 	r.until(t, "input cleared", func(a *App) (string, bool) { return "", a.input.Value() == "" })
