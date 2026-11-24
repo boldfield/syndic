@@ -1993,58 +1993,71 @@ func TestRefereeScriptingDeny(t *testing.T) {
 	}
 }
 
-// TestRefereeScriptingRefusal verifies referee can deny tool calls on refusal.
-func TestRefereeScriptingRefusal(t *testing.T) {
-	identity := transport.NewUnknownIdentity()
-	script := []Step{
-		{
-			Kind:           StepKindReferee,
-			RefereeVerdict: "deny",
-			RefereeReason:  "refusal: model declined this action",
-		},
+// TestRefereeFailsClosed verifies every non-verdict shape yields a deny.
+func TestRefereeFailsClosed(t *testing.T) {
+	reply := func(st transport.CompletionStatus) Step {
+		return Step{Kind: StepKindReply, Text: "allow", Status: st, TransportStatus: transport.TransportStatusOK}
 	}
-	adapter := New(script, Options{
-		DefaultIdentity:      identity,
-		DefaultReportedModel: "test-model",
-	})
-
-	result, err := adapter.Referee(context.Background())
-	if err != nil {
-		t.Fatalf("Referee: %v", err)
+	toolReply := reply(transport.StatusToolCalls)
+	toolReply.ToolCalls = []transport.ToolCall{{ID: "c"}}
+	cases := []struct {
+		name   string
+		step   Step
+		reason string
+	}{
+		{"refusal", reply(transport.StatusRefused), "refusal"},
+		{"truncation", reply(transport.StatusTruncated), "truncation"},
+		{"tool call", toolReply, "tool-call reply"},
+		{"adapter error", Step{Kind: StepKindError, Err: errors.New("boom")}, "adapter error"},
+		{"malformed verdict", Step{Kind: StepKindReferee, RefereeVerdict: "maybe"}, "malformed verdict"},
+		{"plain reply", reply(transport.StatusComplete), "unexpected step"},
+		{"not sent", Step{Kind: StepKindNotSent}, "unexpected step"},
 	}
-
-	if result.Verdict != "deny" {
-		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			adapter := New([]Step{c.step}, Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+			res, err := adapter.Referee(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Verdict != "deny" || res.Reason != c.reason {
+				t.Fatalf("got %+v, want deny %q", res, c.reason)
+			}
+		})
 	}
-	if !strings.HasPrefix(result.Reason, "refusal:") {
-		t.Errorf("Reason: %q, want to start with %q", result.Reason, "refusal:")
+	adapter := New(nil, Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	if res, _ := adapter.Referee(context.Background()); res.Verdict != "deny" {
+		t.Fatalf("exhausted script: %+v", res)
 	}
 }
 
-// TestRefereeScriptingTruncation verifies referee can deny truncated results.
-func TestRefereeScriptingTruncation(t *testing.T) {
-	identity := transport.NewUnknownIdentity()
-	script := []Step{
-		{
-			Kind:           StepKindReferee,
-			RefereeVerdict: "deny",
-			RefereeReason:  "truncation: response was cut off",
-		},
+// TestRequestDeepCopyIsolation verifies recorded requests share no
+// tool-bearing slices or maps with the caller or with Calls results.
+func TestRequestDeepCopyIsolation(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Messages: []transport.Message{{Role: "assistant", ToolCalls: []transport.ToolCall{{ID: "c1"}}}},
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name:       "f",
+			Parameters: map[string]interface{}{"properties": map[string]interface{}{"a": "string"}},
+		}}},
 	}
-	adapter := New(script, Options{
-		DefaultIdentity:      identity,
-		DefaultReportedModel: "test-model",
-	})
-
-	result, err := adapter.Referee(context.Background())
-	if err != nil {
-		t.Fatalf("Referee: %v", err)
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
-
-	if result.Verdict != "deny" {
-		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	req.Messages[0].ToolCalls[0].ID = "mutated"
+	req.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] = "mutated"
+	got := adapter.Calls()
+	if got[0].Request.Messages[0].ToolCalls[0].ID != "c1" ||
+		got[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] != "string" {
+		t.Fatalf("caller mutation leaked into history: %+v", got[0].Request)
 	}
-	if !strings.HasPrefix(result.Reason, "truncation:") {
-		t.Errorf("Reason: %q, want to start with %q", result.Reason, "truncation:")
+	got[0].Request.Messages[0].ToolCalls[0].ID = "mutated2"
+	got[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] = "mutated2"
+	again := adapter.Calls()
+	if again[0].Request.Messages[0].ToolCalls[0].ID != "c1" ||
+		again[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] != "string" {
+		t.Fatalf("Calls result mutation leaked into history: %+v", again[0].Request)
 	}
 }

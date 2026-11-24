@@ -168,11 +168,6 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		e.deliverTerminal(t, StateIncomplete, endReason)
 		return false
 	}
-	if isToolStep {
-		// Tool step does not proceed to reviewers; turn stays open for the next author attempt.
-		e.commitTerminal(t, term)
-		return false
-	}
 	t.candidate = res.Text
 	t.candidateHash = hash
 	t.candidateID = candidateID
@@ -542,6 +537,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		if isToolStep {
 			// Reviewer tool step accepted but not parsed as a verdict; text is journaled.
+			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
+				return err
+			}
 			// Tool step execution is not yet supported; end the turn with an explicit reason.
 			endState, endReason = StateIncomplete, reasonToolStepUnsupported
 			term, err = e.endIn(tx, emit, t, endState, endReason)

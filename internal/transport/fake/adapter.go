@@ -160,9 +160,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	a.mu.Lock()
 
 	// Record the call with a deep copy of the entire request including messages.
-	msgCopy := make([]transport.Message, len(req.Messages))
-	copy(msgCopy, req.Messages)
-	req.Messages = msgCopy
+	req = cloneRequest(req)
 	a.calls = append(a.calls, CompleteCall{
 		Request: req,
 	})
@@ -390,37 +388,84 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 	}, nil
 }
 
-// Referee returns a scripted referee decision (allow or deny) for a tool call.
-// This method is not part of the standard Adapter interface yet, but is provided
-// for testing tool-step handling and referee flows.
+// Referee consumes the next scripted step as a referee decision. It fails
+// closed: a referee step yields its verdict (anything but "allow" is deny);
+// an error, refusal, truncation, tool-call or otherwise malformed reply is a
+// deny, and an exhausted script is a deny.
 func (a *Adapter) Referee(ctx context.Context) (transport.RefereeResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Check if script is exhausted.
 	if a.current >= len(a.script) {
-		return transport.RefereeResult{
-			Verdict: "deny",
-			Reason:  "script exhausted",
-		}, nil
+		return transport.RefereeResult{Verdict: "deny", Reason: "script exhausted"}, nil
 	}
-
 	step := a.script[a.current]
-
-	// Only process referee steps
-	if step.Kind != StepKindReferee {
-		return transport.RefereeResult{
-			Verdict: "allow",
-			Reason:  "default allow",
-		}, nil
-	}
-
 	a.current++
 
-	return transport.RefereeResult{
-		Verdict: step.RefereeVerdict,
-		Reason:  step.RefereeReason,
-	}, nil
+	switch step.Kind {
+	case StepKindReferee:
+		switch step.RefereeVerdict {
+		case "allow", "deny":
+			return transport.RefereeResult{Verdict: step.RefereeVerdict, Reason: step.RefereeReason}, nil
+		}
+		return transport.RefereeResult{Verdict: "deny", Reason: "malformed verdict"}, nil
+	case StepKindError:
+		return transport.RefereeResult{Verdict: "deny", Reason: "adapter error"}, nil
+	case StepKindReply:
+		switch {
+		case len(step.ToolCalls) > 0:
+			return transport.RefereeResult{Verdict: "deny", Reason: "tool-call reply"}, nil
+		case step.Status == transport.StatusRefused:
+			return transport.RefereeResult{Verdict: "deny", Reason: "refusal"}, nil
+		case step.Status == transport.StatusTruncated:
+			return transport.RefereeResult{Verdict: "deny", Reason: "truncation"}, nil
+		}
+	}
+	return transport.RefereeResult{Verdict: "deny", Reason: "unexpected step"}, nil
+}
+
+// cloneRequest deep-copies every slice and map a request carries.
+func cloneRequest(req transport.CompleteRequest) transport.CompleteRequest {
+	req.Messages = append([]transport.Message(nil), req.Messages...)
+	for i, m := range req.Messages {
+		if m.ToolCalls != nil {
+			req.Messages[i].ToolCalls = append([]transport.ToolCall(nil), m.ToolCalls...)
+		}
+	}
+	if req.Tools != nil {
+		tools := make([]transport.Tool, len(req.Tools))
+		for i, t := range req.Tools {
+			t.Function.Parameters = cloneMap(t.Function.Parameters)
+			tools[i] = t
+		}
+		req.Tools = tools
+	}
+	return req
+}
+
+func cloneValue(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		return cloneMap(x)
+	case []interface{}:
+		out := make([]interface{}, len(x))
+		for i, e := range x {
+			out[i] = cloneValue(e)
+		}
+		return out
+	}
+	return v
+}
+
+func cloneMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = cloneValue(v)
+	}
+	return out
 }
 
 // Usage returns usage information if available.
@@ -447,12 +492,8 @@ func (a *Adapter) Calls() []CompleteCall {
 
 	result := make([]CompleteCall, len(a.calls))
 	for i, call := range a.calls {
-		msgCopy := make([]transport.Message, len(call.Request.Messages))
-		copy(msgCopy, call.Request.Messages)
-		requestCopy := call.Request
-		requestCopy.Messages = msgCopy
 		result[i] = CompleteCall{
-			Request: requestCopy,
+			Request: cloneRequest(call.Request),
 		}
 	}
 	return result
