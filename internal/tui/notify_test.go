@@ -127,10 +127,10 @@ func TestBellEmitterInjection(t *testing.T) {
 	bellCount := 0
 	emit := func() { bellCount++ }
 	a := &App{
-		notify:      true,
-		liveFromSeq: 10,
+		notify:           true,
+		liveFromSeq:      10,
 		lastProcessedSeq: 0,
-		emitBell:    emit,
+		emitBell:         emit,
 	}
 
 	frame := terminalEventFrame(1, 15) // live terminal event
@@ -165,6 +165,86 @@ func TestNilBellEmitterReturnsNilCmd(t *testing.T) {
 	cmd := a.bellCmd()
 	if cmd != nil {
 		t.Errorf("expected bellCmd to return nil when emitBell is nil")
+	}
+}
+
+func TestRepeatedReconnectsNoDuplicateNotice(t *testing.T) {
+	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 50}
+	frame := terminalEventFrame(1, 75) // seq 75 is replay and above 50
+
+	// First reconnect: should show notice
+	bell1, notice1, _, _, _ := a.shouldNotify(frame, false)
+	if bell1 || !notice1 {
+		t.Errorf("expected notice on first reconnect")
+	}
+
+	// After processing, lastProcessedSeq should be 75
+	if a.lastProcessedSeq != 75 {
+		t.Errorf("expected lastProcessedSeq=75, got %d", a.lastProcessedSeq)
+	}
+
+	// Second reconnect with same event: should not show notice
+	bell2, notice2, _, _, _ := a.shouldNotify(frame, false)
+	if bell2 || notice2 {
+		t.Errorf("expected no notice on second reconnect for already-processed event")
+	}
+}
+
+func TestNewProcessShowsNoNoticeForPriorTurns(t *testing.T) {
+	// A new process starts and processes replayed events from before it launched.
+	// It should NOT show notices for those turns.
+	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 0}
+
+	// Simulate first connect: lastProcessedSeq is set to liveFromSeq
+	// to prevent showing notices for turns that ended before this process started.
+	firstConnectSeq := a.liveFromSeq
+	a.lastProcessedSeq = firstConnectSeq
+
+	// A replay event from before this process started
+	frame := terminalEventFrame(1, 50)
+
+	bell, notice, _, _, _ := a.shouldNotify(frame, true) // first connect
+	if bell || notice {
+		t.Errorf("new process should not show notice for turns ended while detached")
+	}
+}
+
+func TestBellNotAffectedByNotifyIfAlreadyOn(t *testing.T) {
+	bellCount := 0
+	emit := func() { bellCount++ }
+
+	a := &App{
+		notify:           true,
+		liveFromSeq:      10,
+		lastProcessedSeq: 0,
+		emitBell:         emit,
+	}
+
+	// Live terminal event with notify on
+	frame := terminalEventFrame(1, 15)
+	bell, _, _, _, _ := a.shouldNotify(frame, true)
+	if !bell {
+		t.Errorf("expected bell for live terminal event with notify on")
+	}
+
+	cmd := a.bellCmd()
+	if cmd != nil {
+		cmd() // Execute to trigger bell
+	}
+
+	if bellCount != 1 {
+		t.Errorf("bell should fire when notify is on and event is live and terminal")
+	}
+}
+
+func TestNoticeIndependentOfNotifySetting(t *testing.T) {
+	// Notice should appear even when /notify is off
+	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 50}
+	frame := terminalEventFrame(1, 75) // replay terminal event
+
+	bell, notice, _, _, _ := a.shouldNotify(frame, false) // reconnect
+	if bell || !notice {
+		t.Errorf("notice should appear regardless of notify setting; bell=%v, notice=%v", bell, notice)
 	}
 }
 
