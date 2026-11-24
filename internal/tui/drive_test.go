@@ -26,7 +26,7 @@ func newDriver(t *testing.T, socket string) *driver {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	d := &driver{t: t, app: NewApp(ctx, socket), msgs: make(chan tea.Msg, 1024)}
+	d := &driver{t: t, app: NewApp(ctx, socket, WithTerminalCapabilities(TerminalCapabilities{Color: true, AltScreen: true})), msgs: make(chan tea.Msg, 1024)}
 	d.app.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	d.run(d.app.Init())
 	return d

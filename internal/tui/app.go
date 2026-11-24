@@ -211,6 +211,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		missedTerminalEventsTm: make(map[string]string),
 		isFirstConnect:         true,
 		emitBell:               func() { _, _ = fmt.Fprint(os.Stdout, "\x07") },
+		terminalCapabilities:   DetectTerminalCapabilities(),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -256,13 +257,14 @@ func (a *App) draftsOn(turnID string) bool {
 
 // answerIn gathers what the answer tab needs for the turn.
 func (a *App) answerIn(turnID string) answerInput {
+	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
 	return answerInput{
 		content:        a.content,
 		drafts:         a.draftsOn(turnID),
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
-		plainMode:      !a.terminalCapabilities.Color,
+		plainMode:      plainMode,
 		rawMode:        a.rawMode,
 		now:            a.now(),
 		width:          a.width,
@@ -1496,7 +1498,7 @@ func (a *App) tabBar() string {
 // statusLine is the strip with the hints at its right edge, w cells wide:
 // ctrl+o: reviews while the chat tab is active, then keyHint.
 func (a *App) statusLine(w int) string {
-	plainMode := !a.terminalCapabilities.Color
+	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
 	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat, plainMode)
 }
 
@@ -1610,7 +1612,7 @@ func (a *App) View() string {
 
 	// Add drawer, list, attached, and help lines
 	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	plainMode := !a.terminalCapabilities.Color
+	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
 	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content, plainMode), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {
