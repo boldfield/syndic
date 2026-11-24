@@ -452,3 +452,25 @@ func TestShrinkingIntoPlainModeReleasesTheMouse(t *testing.T) {
 		t.Errorf("mouseEnabled=%v cmd=%v after shrinking", a.mouseEnabled, cmd)
 	}
 }
+
+// TestSmallColourTerminalUsesSingleLineReasonPrompt checks that below 80x24 a
+// colour terminal gets the plain single-line reason prompt, not the Huh form.
+func TestSmallColourTerminalUsesSingleLineReasonPrompt(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		width, height int
+	}{{"narrow", 79, 24}, {"short", 80, 23}} {
+		t.Run(c.name, func(t *testing.T) {
+			a := runningApp(t, TerminalCapabilities{Color: true, AltScreen: true}, c.width, c.height)
+			if cmd := openReasonForm(a, []string{"release?"}, nil); cmd != nil {
+				t.Error("the rich form was started in plain mode")
+			}
+			if a.reasonForm != nil {
+				t.Error("reasonForm set in plain mode")
+			}
+			if view := a.View(); !strings.Contains(view, reasonPrompt) || strings.Contains(view, "\x1b") {
+				t.Errorf("view lacks the single-line prompt:\n%s", view)
+			}
+		})
+	}
+}
