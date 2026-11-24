@@ -293,6 +293,7 @@ func TestV6AdversarialContentInDrawer(t *testing.T) {
 func TestV6Crowded80x24GoldenFrame(t *testing.T) {
 	asciiProfile(t)
 	a := crowded(t, 80, 24)
+	a.workDir = "/work/space"
 	addTurn(a, "t1", 1, "incomplete", "which flag turns on the race detector?", "Pass -race to go test.")
 	approveBy(a, "t1", "alpha")
 	a.reviewCounts["t1"] = ptr(2)
@@ -343,6 +344,7 @@ func TestV6Crowded80x24GoldenFrame(t *testing.T) {
 func TestV6PlainTerminalGoldenFrame(t *testing.T) {
 	asciiProfile(t)
 	a := runningApp(t, TerminalCapabilities{}, 80, 24)
+	a.workDir = "/work/space"
 	a.input.SetValue("next question")
 	v := a.View()
 	if ansi.Strip(v) != v {
@@ -372,6 +374,7 @@ func TestV6PlainTerminalGoldenFrame(t *testing.T) {
 func TestV6OutcomesGoldenFrame(t *testing.T) {
 	asciiProfile(t)
 	a := chatApp(t)
+	a.workDir = "/work/space"
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	specs := []struct {
 		id, state, input, text string

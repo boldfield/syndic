@@ -1,5 +1,5 @@
 [chat]  transcript  participants
-conversation: new (created at the first submit) · workspace /home/agent/.odonian
+conversation: new (created at the first submit) · workspace /work/space
 › which flag turns on the race detector?
 ! INCOMPLETE, not approved · 2 reviews
 no approved answer (incomplete)

@@ -1,5 +1,5 @@
 [chat]  transcript  participants
-conversation: new (created at the first submit) · workspace /home/agent/.odonian/wt-worker-695f9cdd4
+conversation: new (created at the first submit) · workspace /work/space             0 earlier · 100%
 › make the retry loop stop on cancel
   The loop now checks ctx.Done() first.
 ✓ approved by codex after 2 revisions against abcdef123456 · 6 reviews
