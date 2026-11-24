@@ -118,8 +118,9 @@ type Preset struct {
 	Mode              string     `toml:"mode"` // "solo" or "review"
 	Author            string     `toml:"author"`
 	RequiredReviewers []string   `toml:"required_reviewers"`
-	Tools             []string   `toml:"tools"`          // subset of ["read", "web", "write"] for author
-	ReviewerTools     []string   `toml:"reviewer_tools"` // subset of ["read", "web"] for reviewers
+	Tools             []string   `toml:"tools"`               // subset of ["read", "web", "write"] for author
+	ReviewerTools     []string   `toml:"reviewer_tools"`      // subset of ["read", "web"] for reviewers
+	AllowWebWithRead  *bool      `toml:"allow_web_with_read"` // per-preset override for allow_web_with_read
 	Deadlines         *Deadlines `toml:"deadlines"`
 	Budgets           *Budgets   `toml:"budgets"`
 	Revision          *Revision  `toml:"revision"`
@@ -276,8 +277,10 @@ func (r *Roster) ApplyDefaults() {
 			".env*",
 			"**/*.key",
 			"**/*.pem",
-			".syndic/config/**",
-			".syndic/state/**",
+			"**/id_rsa",
+			"**/id_ecdsa",
+			"**/id_ed25519",
+			"syndic.toml",
 		}
 	}
 	if r.Tools.MaxFetchesPerTurn == nil {

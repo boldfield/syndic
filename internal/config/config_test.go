@@ -50,11 +50,23 @@ func TestLoadExample(t *testing.T) {
 	if roster.Budgets.CalibrationSafety == nil || *roster.Budgets.CalibrationSafety != 0.75 {
 		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", roster.Budgets.CalibrationSafety)
 	}
+	if roster.Budgets.MessageOverheadTokens == nil || *roster.Budgets.MessageOverheadTokens != 8 {
+		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", roster.Budgets.MessageOverheadTokens)
+	}
+	if roster.Budgets.RequestOverheadTokens == nil || *roster.Budgets.RequestOverheadTokens != 16 {
+		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", roster.Budgets.RequestOverheadTokens)
+	}
+	if roster.Budgets.ContextMargin == nil || *roster.Budgets.ContextMargin != 0.10 {
+		t.Errorf("Budgets.ContextMargin = %v, want 0.10", roster.Budgets.ContextMargin)
+	}
 	if roster.Budgets.AuthorMaxOutputTokens == nil || *roster.Budgets.AuthorMaxOutputTokens != 4096 {
 		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", roster.Budgets.AuthorMaxOutputTokens)
 	}
 	if roster.Budgets.ReviewerMaxOutputTokens == nil || *roster.Budgets.ReviewerMaxOutputTokens != 2048 {
 		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", roster.Budgets.ReviewerMaxOutputTokens)
+	}
+	if roster.Budgets.DeliveryMaxTokens == nil || *roster.Budgets.DeliveryMaxTokens != 64 {
+		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", roster.Budgets.DeliveryMaxTokens)
 	}
 	if roster.Budgets.TurnMaxEstimatedTokens == nil || *roster.Budgets.TurnMaxEstimatedTokens != 250000 {
 		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", roster.Budgets.TurnMaxEstimatedTokens)
@@ -65,13 +77,18 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("Engine.StopGrace = %v, want 5s", roster.Engine.StopGrace)
 	}
 
-	// Check pool defaults
-	concurrency, uncertainRelease := roster.PoolFor("default")
-	if concurrency != 1 {
-		t.Errorf("PoolFor(default) concurrency = %d, want 1", concurrency)
+	// Check pools
+	if len(roster.Pools) != 1 {
+		t.Errorf("len(Pools) = %d, want 1", len(roster.Pools))
 	}
-	if uncertainRelease != 0 {
-		t.Errorf("PoolFor(default) uncertainRelease = %v, want 0", uncertainRelease)
+	if _, ok := roster.Pools["default"]; !ok {
+		t.Fatal("default pool not found")
+	}
+	if roster.Pools["default"].Concurrency == nil || *roster.Pools["default"].Concurrency != 1 {
+		t.Errorf("Pools[default].Concurrency = %v, want 1", roster.Pools["default"].Concurrency)
+	}
+	if roster.Pools["default"].UncertainReleaseAfter == nil || roster.Pools["default"].UncertainReleaseAfter.Duration != 0 {
+		t.Errorf("Pools[default].UncertainReleaseAfter = %v, want 0s", roster.Pools["default"].UncertainReleaseAfter)
 	}
 
 	// Check participant defaults
@@ -2524,5 +2541,97 @@ allowed_destinations = []
 	}
 	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
 		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4 (roster default)", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestCrossRoleWebWithRead(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Tools = &ToolsConfig{}
+	allowWebWithRead := false
+	roster.Tools.AllowWebWithRead = &allowWebWithRead
+
+	preset := roster.Presets["review"]
+	preset.Tools = []string{"web"}
+	preset.ReviewerTools = []string{"read"}
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for cross-role web+read combination with allow_web_with_read=false, got nil")
+	} else if !strings.Contains(err.Error(), "cannot combine web") {
+		t.Errorf("Expected cross-role validation error, got: %v", err)
+	}
+}
+
+func TestPerPresetAllowWebWithRead(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Tools = &ToolsConfig{}
+	allowWebWithRead := true
+	roster.Tools.AllowWebWithRead = &allowWebWithRead
+
+	preset := roster.Presets["review"]
+	preset.Tools = []string{"web"}
+	preset.ReviewerTools = []string{"read"}
+	allowWebFalse := false
+	preset.AllowWebWithRead = &allowWebFalse
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for preset-level allow_web_with_read=false override, got nil")
+	} else if !strings.Contains(err.Error(), "cannot combine web") {
+		t.Errorf("Expected cross-role validation error with preset override, got: %v", err)
+	}
+}
+
+func TestCLIParticipantWithTools(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Participants = []Participant{
+		{ID: "cli-author", Model: "gpt4", Route: "cli", Binary: "syndic", EligibleRoles: []Role{RoleAuthor}, Pool: "default"},
+		{ID: "reviewer", Model: "gpt4", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}, Pool: "default"},
+	}
+
+	preset := roster.Presets["review"]
+	preset.Author = "cli-author"
+	preset.Tools = []string{"read"}
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for CLI participant with read tools, got nil")
+	} else if !strings.Contains(err.Error(), "CLI participant") {
+		t.Errorf("Expected CLI participant error, got: %v", err)
+	}
+}
+
+func TestAllowlistHostCanonicalization(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+	}{
+		{name: "lowercase exact", pattern: "example.com", wantErr: false},
+		{name: "uppercase exact", pattern: "Example.com", wantErr: true},
+		{name: "lowercase wildcard", pattern: "*.example.com", wantErr: false},
+		{name: "uppercase wildcard", pattern: "*.Example.com", wantErr: true},
+		{name: "port not allowed", pattern: "example.com:443", wantErr: true},
+		{name: "double wildcard lowercase", pattern: "**.example.com", wantErr: false},
+		{name: "double wildcard uppercase", pattern: "**.Example.com", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAllowedHostPattern(tt.pattern)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAllowedHostPattern(%q) error = %v, wantErr %v", tt.pattern, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAllowlistRejectsPortInPattern(t *testing.T) {
+	err := validateAllowedHostPattern("example.com:443")
+	if err == nil {
+		t.Error("Expected validation error for pattern with port, got nil")
+	}
+	if !strings.Contains(err.Error(), "port") {
+		t.Errorf("Expected port-related error message, got: %v", err)
 	}
 }

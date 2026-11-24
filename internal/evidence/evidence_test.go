@@ -621,7 +621,7 @@ func TestConfigFingerprintConsistent(t *testing.T) {
 		Models:            []string{"model-a", "model-b"},
 	}
 
-	const expectedGolden = "f3cad7cebb4a23c9d1d908aa5b8c504153bcc35cd604ec9295f77f843c997ece"
+	const expectedGolden = "5fbd2664926e2c5733fcc14b99f0edbaebd40c367e806e4c2948059fd52ad7d5"
 
 	fp1, err := ConfigFingerprint(profile, "model-a", "1.0.0")
 	if err != nil {

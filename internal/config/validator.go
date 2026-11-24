@@ -14,13 +14,13 @@ func validateAllowedHostPattern(pattern string) error {
 		return errors.New("pattern cannot be empty")
 	}
 
-	// Check for IP literals - not allowed when allowlist is set
-	if net.ParseIP(pattern) != nil {
-		return errors.New("IP literals are not allowed in allowlist")
+	// Check for port - not allowed
+	if strings.Contains(pattern, ":") {
+		return errors.New("pattern must not include port; use just the hostname")
 	}
 
-	// Check if it looks like an IPv6 (has colons)
-	if strings.Contains(pattern, ":") {
+	// Check for IP literals - not allowed when allowlist is set
+	if net.ParseIP(pattern) != nil {
 		return errors.New("IP literals are not allowed in allowlist")
 	}
 
@@ -47,6 +47,10 @@ func validateAllowedHostPattern(pattern string) error {
 		if !strings.Contains(baseDomain, ".") {
 			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
+		// Check for canonicalization (lowercase)
+		if baseDomain != strings.ToLower(baseDomain) {
+			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
+		}
 	case 2:
 		// Double wildcard: must be "**.domain"
 		if !strings.HasPrefix(pattern, "**.") {
@@ -59,11 +63,19 @@ func validateAllowedHostPattern(pattern string) error {
 		if !strings.Contains(baseDomain, ".") {
 			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
+		// Check for canonicalization (lowercase)
+		if baseDomain != strings.ToLower(baseDomain) {
+			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
+		}
 	case 0:
 		// Exact match: no wildcards
 		// No suffix matching allowed, so pattern must not start with a dot
 		if strings.HasPrefix(pattern, ".") {
 			return fmt.Errorf("suffix matching is not allowed: %q", pattern)
+		}
+		// Check for canonicalization (lowercase)
+		if pattern != strings.ToLower(pattern) {
+			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
 		}
 	}
 
@@ -512,20 +524,16 @@ func (r *Roster) Validate() error {
 			for _, pID := range allParticipants {
 				for _, p := range r.Participants {
 					if p.ID == pID {
-						if p.Route == "api" && p.Endpoint != "" {
-							// API participant must either be on a local endpoint or in egress destinations
-							if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
+						switch p.Route {
+						case "api":
+							if p.Endpoint == "" {
+								errs = append(errs, fmt.Errorf("preset %q: api participant %q missing endpoint but has tools requiring file egress", name, pID))
+							} else if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
 								errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
 							}
-						} else if p.Route == "cli" {
-							// CLI participant must have tools only if on a local endpoint or in egress destinations
-							// Since CLI participants don't have an endpoint field in the traditional sense,
-							// they need an explicit endpoint or must be considered local
-							if p.Endpoint != "" {
-								if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
-									errs = append(errs, fmt.Errorf("preset %q: CLI participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
-								}
-							}
+						case "cli":
+							// CLI participants cannot have file content tools - they must be on an endpoint
+							errs = append(errs, fmt.Errorf("preset %q: CLI participant %q cannot have read/write tools; use an api participant with an appropriate endpoint", name, pID))
 						}
 						break
 					}
@@ -538,12 +546,21 @@ func (r *Roster) Validate() error {
 		reviewerHasWeb := slices.Contains(preset.ReviewerTools, "web")
 
 		if authorHasWeb {
-			// Author has web; check author's endpoint
+			// Author has web; must have an api endpoint with referee_model
 			for _, p := range r.Participants {
-				if p.ID == preset.Author && p.Route == "api" && p.Endpoint != "" {
-					ep := endpointMap[p.Endpoint]
-					if ep.RefereeModel == "" {
-						errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by author has no referee_model but web tools are required", name, p.Endpoint))
+				if p.ID == preset.Author {
+					switch p.Route {
+					case "cli":
+						errs = append(errs, fmt.Errorf("preset %q: CLI author %q cannot have web tools", name, preset.Author))
+					case "api":
+						if p.Endpoint == "" {
+							errs = append(errs, fmt.Errorf("preset %q: api author %q missing endpoint but has web tools", name, preset.Author))
+						} else {
+							ep := endpointMap[p.Endpoint]
+							if ep.RefereeModel == "" {
+								errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by author has no referee_model but web tools are required", name, p.Endpoint))
+							}
+						}
 					}
 					break
 				}
@@ -551,13 +568,22 @@ func (r *Roster) Validate() error {
 		}
 
 		if reviewerHasWeb {
-			// Reviewers have web; check each reviewer's endpoint
+			// Reviewers have web; each must have an api endpoint with referee_model
 			for _, reviewerID := range preset.RequiredReviewers {
 				for _, p := range r.Participants {
-					if p.ID == reviewerID && p.Route == "api" && p.Endpoint != "" {
-						ep := endpointMap[p.Endpoint]
-						if ep.RefereeModel == "" {
-							errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by reviewer %q has no referee_model but web tools are required", name, p.Endpoint, reviewerID))
+					if p.ID == reviewerID {
+						switch p.Route {
+						case "cli":
+							errs = append(errs, fmt.Errorf("preset %q: CLI reviewer %q cannot have web tools", name, reviewerID))
+						case "api":
+							if p.Endpoint == "" {
+								errs = append(errs, fmt.Errorf("preset %q: api reviewer %q missing endpoint but has web tools", name, reviewerID))
+							} else {
+								ep := endpointMap[p.Endpoint]
+								if ep.RefereeModel == "" {
+									errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by reviewer %q has no referee_model but web tools are required", name, p.Endpoint, reviewerID))
+								}
+							}
 						}
 						break
 					}
@@ -566,14 +592,26 @@ func (r *Roster) Validate() error {
 		}
 
 		// Check tools.allow_web_with_read constraint
-		if r.Tools != nil && r.Tools.AllowWebWithRead != nil && !*r.Tools.AllowWebWithRead {
-			// If allow_web_with_read is false, preset cannot have both web and (read or write) anywhere
+		// Determine effective allow_web_with_read setting (per-preset overrides roster-wide)
+		effectiveAllowWebWithRead := true // default is to allow
+		if preset.AllowWebWithRead != nil {
+			// Per-preset setting overrides roster-wide
+			effectiveAllowWebWithRead = *preset.AllowWebWithRead
+		} else if r.Tools != nil && r.Tools.AllowWebWithRead != nil {
+			// Use roster-wide setting
+			effectiveAllowWebWithRead = *r.Tools.AllowWebWithRead
+		}
+
+		if !effectiveAllowWebWithRead {
+			// If allow_web_with_read is false, preset cannot have:
+			// - any participant with web AND
+			// - any participant (same or different) with read or write
 			hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
 			hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
 			hasWrite := slices.Contains(preset.Tools, "write")
 
 			if hasWeb && (hasRead || hasWrite) {
-				// Find all participants with web and determine which will receive file-derived content
+				// Find web and file-content participants
 				webParticipants := []string{}
 				fileParticipants := []string{}
 
@@ -584,22 +622,18 @@ func (r *Roster) Validate() error {
 					webParticipants = append(webParticipants, preset.RequiredReviewers...)
 				}
 
-				// File content recipients: author if read or write, reviewers if any tool
+				// File content recipients: anyone with read or write
 				if slices.Contains(preset.Tools, "read") || slices.Contains(preset.Tools, "write") {
 					fileParticipants = append(fileParticipants, preset.Author)
 				}
-				if hasRead || (hasWrite && len(preset.ReviewerTools) > 0) {
+				if hasRead {
 					fileParticipants = append(fileParticipants, preset.RequiredReviewers...)
 				}
 
-				// Check if any web participant also receives file content
-				for _, wp := range webParticipants {
-					for _, fp := range fileParticipants {
-						if wp == fp {
-							errs = append(errs, fmt.Errorf("preset %q: cannot combine web and read/write tools with tools.allow_web_with_read=false (affected participant: %q)", name, wp))
-							break
-						}
-					}
+				// Reject if any web participant and any file participant exist (preset-wide rule)
+				if len(webParticipants) > 0 && len(fileParticipants) > 0 {
+					errs = append(errs, fmt.Errorf("preset %q: cannot combine web (participants: %v) with read/write (participants: %v) when tools.allow_web_with_read=false",
+						name, webParticipants, fileParticipants))
 				}
 			}
 		}

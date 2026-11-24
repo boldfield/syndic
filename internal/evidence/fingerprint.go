@@ -31,7 +31,9 @@ func ConfigFingerprint(profile config.EndpointProfile, model, adapterVersion str
 		"models":              profile.Models,
 		"terms_note":          profile.TermsNote,
 		"tokens_per_byte_max": profile.TokensPerByteMax,
-		"referee_model":       profile.RefereeModel,
+	}
+	if profile.RefereeModel != "" {
+		profileMap["referee_model"] = profile.RefereeModel
 	}
 	if profile.SpendingControl != "" {
 		profileMap["spending_control"] = profile.SpendingControl
