@@ -86,7 +86,8 @@ func (rf *reasonForm) Reason() string {
 // openReasonForm creates a form prompting for a required reason.
 // In colour mode, uses a Huh form with validation.
 // In TERM=dumb or no-colour mode, uses single-line input via panel.
-func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
+// Returns a command that initializes the Huh form (or nil for fallback mode).
+func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd {
 	a.confirm = confirm
 
 	// Determine if we should use Huh form
@@ -118,6 +119,8 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 		a.panel = panelLines
 		a.panelRow = 0
 		a.refusal = ""
+		// Return the form's Init command so Bubble Tea initializes it
+		return form.Init()
 	} else {
 		// Fallback: use simple panel + textarea input
 		a.reasonForm = &reasonForm{
@@ -127,5 +130,6 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 		a.panel = panelLines
 		a.setPrompt(reasonPrompt)
 		a.refusal = ""
+		return nil
 	}
 }
