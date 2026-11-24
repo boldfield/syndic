@@ -110,12 +110,16 @@ type EndpointProfile struct {
 	Models            []string             `toml:"models"`
 	TermsNote         string               `toml:"terms_note"`
 	TokensPerByteMax  *float64             `toml:"tokens_per_byte_max"`
+	RefereeModel      string               `toml:"referee_model"`    // model for web tool referee
+	RefereeEndpoint   string               `toml:"referee_endpoint"` // optional local endpoint for referee
 }
 
 type Preset struct {
 	Mode              string     `toml:"mode"` // "solo" or "review"
 	Author            string     `toml:"author"`
 	RequiredReviewers []string   `toml:"required_reviewers"`
+	Tools             []string   `toml:"tools"`          // subset of ["read", "web", "write"] for author
+	ReviewerTools     []string   `toml:"reviewer_tools"` // subset of ["read", "web"] for reviewers
 	Deadlines         *Deadlines `toml:"deadlines"`
 	Budgets           *Budgets   `toml:"budgets"`
 	Revision          *Revision  `toml:"revision"`
@@ -146,6 +150,26 @@ type RoutingPolicy struct {
 	AllowedDestinations []string `toml:"allowed_destinations"`
 }
 
+type WebConfig struct {
+	AllowedHosts []string `toml:"allowed_hosts"` // allowlist patterns for web fetch
+}
+
+type RefereeConfig struct {
+	MaxOutputTokens *int `toml:"max_output_tokens"` // default 64
+}
+
+type ToolsConfig struct {
+	AllowWebWithRead       *bool          `toml:"allow_web_with_read"`      // default true
+	ProtectedPaths         []string       `toml:"protected_paths"`          // patterns to protect
+	FileEgressDestinations []string       `toml:"file_egress_destinations"` // endpoints where file content can go
+	MaxFetchesPerTurn      *int           `toml:"max_fetches_per_turn"`     // default 20
+	MaxCallsPerTurn        *int           `toml:"max_calls_per_turn"`       // default 20
+	MaxReviewerCalls       *int           `toml:"max_reviewer_calls"`       // default 10
+	MaxResultBytes         *int           `toml:"max_result_bytes"`         // default 65536
+	Web                    *WebConfig     `toml:"web"`
+	Referee                *RefereeConfig `toml:"referee"`
+}
+
 type Roster struct {
 	DefaultPreset string                  `toml:"default_preset"`
 	Participants  []Participant           `toml:"participants"`
@@ -158,6 +182,7 @@ type Roster struct {
 	Engine        EngineSettings          `toml:"engine"`
 	Pools         map[string]Pool         `toml:"pools"`
 	Quick         map[string]QuickProfile `toml:"quick"`
+	Tools         *ToolsConfig            `toml:"tools"`
 }
 
 // String returns a string representation that never contains resolved secret values.
@@ -234,6 +259,38 @@ func (r *Roster) ApplyDefaults() {
 	if r.Revision.MaxRoundsCeiling == nil {
 		mrc := 5
 		r.Revision.MaxRoundsCeiling = &mrc
+	}
+
+	// Tools defaults
+	if r.Tools == nil {
+		r.Tools = &ToolsConfig{}
+	}
+	if r.Tools.AllowWebWithRead == nil {
+		awr := true
+		r.Tools.AllowWebWithRead = &awr
+	}
+	if r.Tools.MaxFetchesPerTurn == nil {
+		mfpt := 20
+		r.Tools.MaxFetchesPerTurn = &mfpt
+	}
+	if r.Tools.MaxCallsPerTurn == nil {
+		mcpt := 20
+		r.Tools.MaxCallsPerTurn = &mcpt
+	}
+	if r.Tools.MaxReviewerCalls == nil {
+		mrc := 10
+		r.Tools.MaxReviewerCalls = &mrc
+	}
+	if r.Tools.MaxResultBytes == nil {
+		mrb := 65536
+		r.Tools.MaxResultBytes = &mrb
+	}
+	if r.Tools.Referee == nil {
+		r.Tools.Referee = &RefereeConfig{}
+	}
+	if r.Tools.Referee.MaxOutputTokens == nil {
+		mot := 64
+		r.Tools.Referee.MaxOutputTokens = &mot
 	}
 }
 

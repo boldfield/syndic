@@ -399,6 +399,171 @@ func (r *Roster) Validate() error {
 		}
 	}
 
+	// Validate tool sets
+	validAuthorTools := map[string]bool{"read": true, "web": true, "write": true}
+	validReviewerTools := map[string]bool{"read": true, "web": true}
+
+	for name, preset := range r.Presets {
+		// Validate author tools
+		for _, tool := range preset.Tools {
+			if !validAuthorTools[tool] {
+				errs = append(errs, fmt.Errorf("preset %q: invalid author tool %q", name, tool))
+			}
+		}
+
+		// Validate reviewer tools
+		for _, tool := range preset.ReviewerTools {
+			if !validReviewerTools[tool] {
+				errs = append(errs, fmt.Errorf("preset %q: invalid reviewer tool %q", name, tool))
+			}
+		}
+
+		// Solo preset cannot have write tools
+		if preset.Mode == "solo" && slices.Contains(preset.Tools, "write") {
+			errs = append(errs, fmt.Errorf("preset %q: solo mode cannot have write tools", name))
+		}
+
+		// Check if preset has file-derived content tools
+		hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
+		hasWrite := slices.Contains(preset.Tools, "write")
+		needsEgressCheck := hasRead || hasWrite
+
+		// If preset has read or write, check file egress destinations
+		if needsEgressCheck {
+			allParticipants := []string{preset.Author}
+			allParticipants = append(allParticipants, preset.RequiredReviewers...)
+
+			localEndpoints := make(map[string]bool)
+			for _, ep := range r.Endpoints {
+				if ep.DeclaredExecution == "local" {
+					localEndpoints[ep.Name] = true
+				}
+			}
+			egressDestinations := make(map[string]bool)
+			if r.Tools != nil {
+				for _, dest := range r.Tools.FileEgressDestinations {
+					egressDestinations[dest] = true
+				}
+			}
+
+			for _, pID := range allParticipants {
+				for _, p := range r.Participants {
+					if p.ID == pID && p.Route == "api" && p.Endpoint != "" {
+						// Participant must either be on a local endpoint or in egress destinations
+						if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
+							errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// If preset has any tools, check web tool requirements
+		hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
+		if hasWeb {
+			// Check that all participants using this preset have endpoint with referee_model
+			allParticipants := []string{preset.Author}
+			allParticipants = append(allParticipants, preset.RequiredReviewers...)
+
+			for _, pID := range allParticipants {
+				for _, p := range r.Participants {
+					if p.ID == pID && p.Route == "api" {
+						if p.Endpoint != "" {
+							ep := endpointMap[p.Endpoint]
+							if ep.RefereeModel == "" {
+								errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by participant %q has no referee_model but web tools are required", name, p.Endpoint, pID))
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// Check tools.allow_web_with_read constraint
+		if r.Tools != nil && r.Tools.AllowWebWithRead != nil && !*r.Tools.AllowWebWithRead {
+			// If allow_web_with_read is false, preset cannot have both web and (read or write) anywhere
+			hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
+			hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
+			hasWrite := slices.Contains(preset.Tools, "write")
+
+			if hasWeb && (hasRead || hasWrite) {
+				allParticipants := []string{preset.Author}
+				allParticipants = append(allParticipants, preset.RequiredReviewers...)
+				participantStr := ""
+				for _, pID := range allParticipants {
+					for _, p := range r.Participants {
+						if p.ID == pID {
+							if p.Route == "api" && p.Endpoint != "" {
+								// Check if this participant has web
+								if (preset.Author == pID && slices.Contains(preset.Tools, "web")) ||
+									(slices.Contains(preset.RequiredReviewers, pID) && slices.Contains(preset.ReviewerTools, "web")) {
+									// This participant has web and receives file content
+									if participantStr == "" {
+										participantStr = pID
+									} else {
+										participantStr += ", " + pID
+									}
+								}
+							}
+							break
+						}
+					}
+				}
+				if participantStr != "" && hasRead {
+					errs = append(errs, fmt.Errorf("preset %q: cannot combine web and read tools with tools.allow_web_with_read=false (affected: %s)", name, participantStr))
+				}
+			}
+		}
+	}
+
+	// Validate endpoint referee configuration
+	for _, ep := range r.Endpoints {
+		// If referee_endpoint is set, it must reference an endpoint with local execution
+		if ep.RefereeEndpoint != "" {
+			found := false
+			for _, otherEp := range r.Endpoints {
+				if otherEp.Name == ep.RefereeEndpoint {
+					if otherEp.DeclaredExecution != "local" {
+						errs = append(errs, fmt.Errorf("endpoint %q: referee_endpoint %q does not have local execution", ep.Name, ep.RefereeEndpoint))
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				errs = append(errs, fmt.Errorf("endpoint %q: referee_endpoint references non-existent endpoint: %q", ep.Name, ep.RefereeEndpoint))
+			}
+		}
+	}
+
+	// Validate tools configuration
+	if r.Tools != nil {
+		if r.Tools.MaxFetchesPerTurn != nil && *r.Tools.MaxFetchesPerTurn < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_fetches_per_turn must be at least 1"))
+		}
+		if r.Tools.MaxCallsPerTurn != nil && *r.Tools.MaxCallsPerTurn < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_calls_per_turn must be at least 1"))
+		}
+		if r.Tools.MaxReviewerCalls != nil && *r.Tools.MaxReviewerCalls < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_reviewer_calls must be at least 1"))
+		}
+		if r.Tools.MaxResultBytes != nil && *r.Tools.MaxResultBytes < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_result_bytes must be at least 1"))
+		}
+		if r.Tools.Referee != nil && r.Tools.Referee.MaxOutputTokens != nil && *r.Tools.Referee.MaxOutputTokens < 1 {
+			errs = append(errs, fmt.Errorf("tools.referee.max_output_tokens must be at least 1"))
+		}
+
+		// Validate file_egress_destinations reference valid endpoints
+		for _, dest := range r.Tools.FileEgressDestinations {
+			if !seenEndpointNames[dest] {
+				errs = append(errs, fmt.Errorf("tools.file_egress_destinations references non-existent endpoint: %q", dest))
+			}
+		}
+	}
+
 	// Validate Preset deadlines, budgets and revision overrides
 	for name, preset := range r.Presets {
 		// Validate revision overrides

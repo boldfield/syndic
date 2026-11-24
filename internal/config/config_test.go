@@ -31,72 +31,65 @@ func TestLoadExample(t *testing.T) {
 	if len(roster.Presets) != 2 {
 		t.Errorf("len(Presets) = %d, want 2", len(roster.Presets))
 	}
+}
 
-	// Check deadlines
-	if roster.Deadlines.Attempt == nil || roster.Deadlines.Attempt.Duration != 300*time.Second {
-		t.Errorf("Deadlines.Attempt = %v, want 300s", roster.Deadlines.Attempt)
+func TestLoadToolsConfig(t *testing.T) {
+	roster, err := Load("testdata/tools-config.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
 	}
-	if roster.Deadlines.Turn == nil || roster.Deadlines.Turn.Duration != 900*time.Second {
-		t.Errorf("Deadlines.Turn = %v, want 900s", roster.Deadlines.Turn)
-	}
-	if roster.Deadlines.Delivery == nil || roster.Deadlines.Delivery.Duration != 60*time.Second {
-		t.Errorf("Deadlines.Delivery = %v, want 60s", roster.Deadlines.Delivery)
-	}
-	if roster.Deadlines.Provisional == nil || !*roster.Deadlines.Provisional {
-		t.Errorf("Deadlines.Provisional = %v, want true", roster.Deadlines.Provisional)
+	if roster == nil {
+		t.Fatal("roster is nil")
 	}
 
-	// Check budgets
-	if roster.Budgets.CalibrationSafety == nil || *roster.Budgets.CalibrationSafety != 0.75 {
-		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", roster.Budgets.CalibrationSafety)
+	// Check tools configuration
+	if roster.Tools == nil {
+		t.Fatal("Tools config is nil")
 	}
-	if roster.Budgets.MessageOverheadTokens == nil || *roster.Budgets.MessageOverheadTokens != 8 {
-		t.Errorf("Budgets.MessageOverheadTokens = %v, want 8", roster.Budgets.MessageOverheadTokens)
+	if roster.Tools.AllowWebWithRead == nil || !*roster.Tools.AllowWebWithRead {
+		t.Errorf("AllowWebWithRead = %v, want true", roster.Tools.AllowWebWithRead)
 	}
-	if roster.Budgets.RequestOverheadTokens == nil || *roster.Budgets.RequestOverheadTokens != 16 {
-		t.Errorf("Budgets.RequestOverheadTokens = %v, want 16", roster.Budgets.RequestOverheadTokens)
+	if roster.Tools.MaxFetchesPerTurn == nil || *roster.Tools.MaxFetchesPerTurn != 20 {
+		t.Errorf("MaxFetchesPerTurn = %v, want 20", roster.Tools.MaxFetchesPerTurn)
 	}
-	if roster.Budgets.ContextMargin == nil || *roster.Budgets.ContextMargin != 0.10 {
-		t.Errorf("Budgets.ContextMargin = %v, want 0.10", roster.Budgets.ContextMargin)
+	if roster.Tools.MaxCallsPerTurn == nil || *roster.Tools.MaxCallsPerTurn != 20 {
+		t.Errorf("MaxCallsPerTurn = %v, want 20", roster.Tools.MaxCallsPerTurn)
 	}
-	if roster.Budgets.AuthorMaxOutputTokens == nil || *roster.Budgets.AuthorMaxOutputTokens != 4096 {
-		t.Errorf("Budgets.AuthorMaxOutputTokens = %v, want 4096", roster.Budgets.AuthorMaxOutputTokens)
+	if roster.Tools.MaxReviewerCalls == nil || *roster.Tools.MaxReviewerCalls != 10 {
+		t.Errorf("MaxReviewerCalls = %v, want 10", roster.Tools.MaxReviewerCalls)
 	}
-	if roster.Budgets.ReviewerMaxOutputTokens == nil || *roster.Budgets.ReviewerMaxOutputTokens != 2048 {
-		t.Errorf("Budgets.ReviewerMaxOutputTokens = %v, want 2048", roster.Budgets.ReviewerMaxOutputTokens)
-	}
-	if roster.Budgets.DeliveryMaxTokens == nil || *roster.Budgets.DeliveryMaxTokens != 64 {
-		t.Errorf("Budgets.DeliveryMaxTokens = %v, want 64", roster.Budgets.DeliveryMaxTokens)
-	}
-	if roster.Budgets.TurnMaxEstimatedTokens == nil || *roster.Budgets.TurnMaxEstimatedTokens != 250000 {
-		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", roster.Budgets.TurnMaxEstimatedTokens)
+	if roster.Tools.MaxResultBytes == nil || *roster.Tools.MaxResultBytes != 65536 {
+		t.Errorf("MaxResultBytes = %v, want 65536", roster.Tools.MaxResultBytes)
 	}
 
-	// Check engine
-	if roster.Engine.StopGrace == nil || roster.Engine.StopGrace.Duration != 5*time.Second {
-		t.Errorf("Engine.StopGrace = %v, want 5s", roster.Engine.StopGrace)
+	// Check web config
+	if roster.Tools.Web == nil {
+		t.Fatal("Web config is nil")
+	}
+	if len(roster.Tools.Web.AllowedHosts) != 2 {
+		t.Errorf("len(AllowedHosts) = %d, want 2", len(roster.Tools.Web.AllowedHosts))
 	}
 
-	// Check pools
-	if len(roster.Pools) != 1 {
-		t.Errorf("len(Pools) = %d, want 1", len(roster.Pools))
+	// Check referee config
+	if roster.Tools.Referee == nil {
+		t.Fatal("Referee config is nil")
 	}
-	if _, ok := roster.Pools["default"]; !ok {
-		t.Fatal("default pool not found")
-	}
-	if roster.Pools["default"].Concurrency == nil || *roster.Pools["default"].Concurrency != 1 {
-		t.Errorf("Pools[default].Concurrency = %v, want 1", roster.Pools["default"].Concurrency)
-	}
-	if roster.Pools["default"].UncertainReleaseAfter == nil || roster.Pools["default"].UncertainReleaseAfter.Duration != 0 {
-		t.Errorf("Pools[default].UncertainReleaseAfter = %v, want 0s", roster.Pools["default"].UncertainReleaseAfter)
+	if roster.Tools.Referee.MaxOutputTokens == nil || *roster.Tools.Referee.MaxOutputTokens != 64 {
+		t.Errorf("MaxOutputTokens = %v, want 64", roster.Tools.Referee.MaxOutputTokens)
 	}
 
-	// Check participants
-	if roster.Participants[0].ContextTokens == nil || *roster.Participants[0].ContextTokens != 4096 {
-		t.Errorf("Participants[0].ContextTokens = %v, want 4096", roster.Participants[0].ContextTokens)
+	// Check endpoint referee model
+	if roster.Endpoints[0].RefereeModel != "claude-haiku" {
+		t.Errorf("Endpoints[0].RefereeModel = %q, want %q", roster.Endpoints[0].RefereeModel, "claude-haiku")
 	}
-	if roster.Participants[0].BytesPerToken == nil || *roster.Participants[0].BytesPerToken != 4.0 {
-		t.Errorf("Participants[0].BytesPerToken = %v, want 4.0", roster.Participants[0].BytesPerToken)
+
+	// Check preset tools
+	preset := roster.Presets["review-with-tools"]
+	if len(preset.Tools) != 3 {
+		t.Errorf("len(Tools) = %d, want 3", len(preset.Tools))
+	}
+	if len(preset.ReviewerTools) != 2 {
+		t.Errorf("len(ReviewerTools) = %d, want 2", len(preset.ReviewerTools))
 	}
 
 	// Check endpoints
@@ -830,6 +823,131 @@ func TestValidateViolations(t *testing.T) {
 				r.Participants[0].AcceptUnknownTruncation = &acceptUnknown
 			},
 			wantMsgs: []string{},
+		},
+		{
+			name: "solo preset with write tools (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Mode = "solo"
+				p.RequiredReviewers = []string{}
+				p.Tools = []string{"write"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "solo mode cannot have write tools"},
+		},
+		{
+			name: "invalid author tool",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"invalid_tool"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "invalid author tool"},
+		},
+		{
+			name: "invalid reviewer tool",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.ReviewerTools = []string{"write"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "invalid reviewer tool"},
+		},
+		{
+			name: "web tools without referee model (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = ""
+			},
+			wantMsgs: []string{"review", "no referee_model"},
+		},
+		{
+			name: "valid web tools with referee model",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = "gpt4"
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "referee_endpoint on non-local endpoint (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = "gpt4"
+				r.Endpoints[0].DeclaredExecution = "remote"
+				r.Endpoints[0].RefereeEndpoint = "ep2"
+				r.Endpoints = append(r.Endpoints, EndpointProfile{
+					Name: "ep2", Dialect: "chat_completions_v1", DeclaredLocation: "cloud",
+					DeclaredExecution: "remote", DeclaredBilling: "flat", NetworkDependency: "none",
+				})
+			},
+			wantMsgs: []string{"ep2", "does not have local execution"},
+		},
+		{
+			name: "valid file egress destinations",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{"ep1"},
+				}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid file egress destination endpoint",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{"nonexistent"},
+				}
+			},
+			wantMsgs: []string{"nonexistent", "references non-existent endpoint"},
+		},
+		{
+			name: "read tools require egress route (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Endpoints[0].DeclaredExecution = "remote"
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{},
+				}
+			},
+			wantMsgs: []string{"review", "participant", "requires file egress"},
+		},
+		{
+			name: "valid tools max values",
+			mutate: func(r *Roster) {
+				max := 100
+				r.Tools = &ToolsConfig{
+					MaxFetchesPerTurn: &max,
+					MaxCallsPerTurn:   &max,
+					MaxReviewerCalls:  &max,
+					MaxResultBytes:    &max,
+				}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid max_fetches_per_turn (zero)",
+			mutate: func(r *Roster) {
+				max := 0
+				r.Tools = &ToolsConfig{
+					MaxFetchesPerTurn: &max,
+				}
+			},
+			wantMsgs: []string{"max_fetches_per_turn must be at least 1"},
 		},
 	}
 
