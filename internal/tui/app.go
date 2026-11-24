@@ -107,6 +107,14 @@ type App struct {
 	roundsIsSet    bool     // a round limit was set, by --rounds or /rounds
 	rounds         int      // round limit for this process
 	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
+
+	// Feature toggles
+	notifyEnabled bool // /notify on|off; default is off
+	mouseEnabled  bool // /mouse on|off; default is off
+
+	// Command list state
+	commandList   commandListState
+	showShortHelp bool
 }
 
 // Option configures an App.
@@ -610,6 +618,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Paste {
 		// A paste is text, whatever it contains: line breaks stay as typed.
 		a.input.InsertString(normalizePaste(msg.Runes))
+		a.updateCommandList()
 		return a, a.updateInput(nil)
 	}
 	switch msg.String() {
@@ -619,8 +628,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		a.panel, a.refusal, a.panelRow = nil, "", 0
+		a.commandList.selected = -1
+		a.commandList.commands = nil
+		a.showShortHelp = false
 		a.reviewsDrawer.Close()
 		a.want.Drawer = false
+		return a, nil
+	case "?":
+		if a.input.Value() == "" {
+			a.showShortHelp = !a.showShortHelp
+		}
 		return a, nil
 	case "ctrl+o":
 		if a.tab == tabChat {
@@ -640,8 +657,35 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return a, nil
+	case "up":
+		if len(a.commandList.commands) > 0 {
+			if a.commandList.selected < 0 {
+				a.commandList.selected = len(a.commandList.commands) - 1
+			} else {
+				a.commandList.selected = max(a.commandList.selected-1, 0)
+			}
+			return a, nil
+		}
+	case "down":
+		if len(a.commandList.commands) > 0 {
+			if a.commandList.selected < 0 {
+				a.commandList.selected = 0
+			} else {
+				a.commandList.selected = min(a.commandList.selected+1, len(a.commandList.commands)-1)
+			}
+			return a, nil
+		}
 	case "tab":
+		if len(a.commandList.commands) > 0 {
+			// If a command is already selected, complete it; otherwise select the first
+			if a.commandList.selected < 0 {
+				a.commandList.selected = 0
+			}
+			a.completeCommand()
+			return a, nil
+		}
 		a.panel = nil
+		a.commandList.selected = -1
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
@@ -652,6 +696,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "shift+tab":
 		a.panel = nil
+		a.commandList.selected = -1
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
@@ -750,6 +795,7 @@ func (a *App) detachKey(k string) (cmd tea.Cmd, ok bool) {
 func (a *App) updateInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	a.input, cmd = a.input.Update(msg)
+	a.updateCommandList()
 	n := inputLines(a.input)
 	if a.inputOverflow && n <= maxInputRows {
 		row, li := a.input.Line(), a.input.LineInfo()
@@ -812,6 +858,7 @@ func (a *App) enter() tea.Cmd {
 		return nil
 	}
 	a.refusal, a.panel, a.panelRow = "", nil, 0
+	a.commandList.selected = -1
 	if isCommand(line) {
 		a.clearInput()
 		return dispatch(a, line)
@@ -848,6 +895,34 @@ func (a *App) enter() tea.Cmd {
 		maxRounds:        maxRounds,
 		contextFromTurn:  contextFrom,
 	})
+}
+
+// updateCommandList builds the command list from the current input.
+func (a *App) updateCommandList() {
+	input := a.input.Value()
+	if strings.Contains(input, " ") || !strings.HasPrefix(input, "/") {
+		a.commandList.commands = nil
+		a.commandList.selected = -1
+		return
+	}
+	a.commandList.commands = buildCommandList(input, a)
+	if len(a.commandList.commands) > 0 && a.commandList.selected >= len(a.commandList.commands) {
+		a.commandList.selected = len(a.commandList.commands) - 1
+	}
+	if len(a.commandList.commands) == 0 {
+		a.commandList.selected = -1
+	}
+}
+
+// completeCommand inserts the selected command into the input.
+func (a *App) completeCommand() {
+	if a.commandList.selected < 0 || a.commandList.selected >= len(a.commandList.commands) {
+		return
+	}
+	cmd := a.commandList.commands[a.commandList.selected]
+	a.input.SetValue("/" + cmd.Name + " ")
+	a.commandList.selected = -1
+	a.commandList.commands = nil
 }
 
 // send submits under a new submission id.
@@ -1296,12 +1371,19 @@ func (a *App) quit() tea.Cmd {
 
 // layout allocates the screen's lines to its regions; see allocate.
 func (a *App) layout() heights {
+	want := a.want
+	// Calculate command list lines if there are commands to show
+	if len(a.commandList.commands) > 0 {
+		want.ListLines = len(commandListLines(a.commandList.commands, a.width))
+	} else if a.showShortHelp {
+		want.ListLines = len(shortHelpLines())
+	}
 	return allocate(layoutIn{
 		Height:     a.height,
 		Width:      a.width,
 		Banners:    len(renderBanners(a.state)),
 		InputLines: inputLines(a.input),
-		Want:       a.want,
+		Want:       want,
 	})
 }
 
@@ -1478,7 +1560,28 @@ func (a *App) View() string {
 			output = append(output, "")
 		}
 	}
-	for range hs.List + hs.Attached + hs.Help {
+	// Render command list or short help
+	var listLines []string
+	if len(a.commandList.commands) > 0 {
+		listLines = commandListLines(a.commandList.commands, w)
+		// Render with highlight on selected command
+		for i := range listLines {
+			if i == a.commandList.selected {
+				// Highlight selected command
+				listLines[i] = "> " + listLines[i]
+			}
+		}
+	} else if a.showShortHelp {
+		listLines = shortHelpLines()
+	}
+	for i := 0; i < hs.List; i++ {
+		if i < len(listLines) {
+			output = append(output, ansi.Truncate(listLines[i], w, ""))
+		} else {
+			output = append(output, "")
+		}
+	}
+	for range hs.Attached + hs.Help {
 		output = append(output, "")
 	}
 

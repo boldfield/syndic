@@ -516,3 +516,112 @@ func TestFormatRefusalMembers(t *testing.T) {
 		t.Errorf("budget: %q", got)
 	}
 }
+
+func TestCommandListAppearsOnSlash(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	// Type "/" without pressing Enter
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	r.until(t, "command list appears", func(a *App) (string, bool) {
+		return "", len(a.commandList.commands) > 0
+	})
+	if len(r.app.commandList.commands) == 0 {
+		t.Fatalf("command list not populated")
+	}
+}
+
+func TestCommandListFilters(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/r")})
+	v := untilView(t, r, "/raw", "/release")
+	if strings.Contains(v, "/new") {
+		t.Fatalf("non-matching commands shown:\n%s", v)
+	}
+}
+
+func TestTabCompletesCommand(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/r")})
+	r.until(t, "command list appears", func(a *App) (string, bool) {
+		return "", len(a.commandList.commands) > 0
+	})
+	selected := r.app.commandList.selected
+	send(r, tea.KeyMsg{Type: tea.KeyTab})
+	input := r.app.input.Value()
+	if !strings.HasPrefix(input, "/") || !strings.Contains(input, " ") {
+		t.Logf("tab completion did not work. Input: %q, Selected before Tab: %d, After: %d", input, selected, r.app.commandList.selected)
+		t.Fatalf("tab completion did not complete")
+	}
+}
+
+func TestArrowSelectsCommand(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/r")})
+	r.until(t, "command list appears", func(a *App) (string, bool) {
+		return "", len(a.commandList.commands) > 0
+	})
+	send(r, tea.KeyMsg{Type: tea.KeyDown})
+	if r.app.commandList.selected != 0 {
+		t.Fatalf("arrow key did not select a command. Selected=%d", r.app.commandList.selected)
+	}
+}
+
+func TestEscClosesCommandList(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/r")})
+	r.until(t, "command list appears", func(a *App) (string, bool) {
+		return "", len(a.commandList.commands) > 0
+	})
+	before := len(r.app.commandList.commands)
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	after := len(r.app.commandList.commands)
+	if after != 0 || before == 0 {
+		t.Fatalf("command list not closed. Before=%d, After=%d", before, after)
+	}
+}
+
+func TestQuestionMarkShowsShortHelp(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	r.until(t, "short help appears", func(a *App) (string, bool) {
+		return "", a.showShortHelp
+	})
+	if !r.app.showShortHelp {
+		t.Fatalf("short help not enabled")
+	}
+}
+
+func TestNotifyCommand(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.typeLine("/notify on")
+	untilView(t, r, "notify on")
+	if !r.app.notifyEnabled {
+		t.Fatalf("notify not enabled")
+	}
+	r.typeLine("/notify off")
+	untilView(t, r, "notify off")
+	if r.app.notifyEnabled {
+		t.Fatalf("notify not disabled")
+	}
+}
+
+func TestMouseCommand(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), approve())
+	r := startAnswerRig(t, h)
+	r.typeLine("/mouse on")
+	untilView(t, r, "mouse on")
+	if !r.app.mouseEnabled {
+		t.Fatalf("mouse not enabled")
+	}
+	r.typeLine("/mouse off")
+	untilView(t, r, "mouse off")
+	if r.app.mouseEnabled {
+		t.Fatalf("mouse not disabled")
+	}
+}
