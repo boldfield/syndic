@@ -95,8 +95,9 @@ type App struct {
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
 
-	list          listState // the command list's selection and dismissal
-	showShortHelp bool      // ? showed the short help line
+	list          listState             // the command list's selection and dismissal
+	convList      conversationListState // the conversation list's selection and dismissal
+	showShortHelp bool                  // ? showed the short help line
 
 	reviewsDrawer    *ReviewsDrawer  // the reviews drawer state
 	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
@@ -493,6 +494,7 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
 	a.forgetStaleList()
+	a.forgetStaleConvList()
 	cmds := []tea.Cmd{cmd, a.syncTranscript()}
 	switch m := msg.(type) {
 	case tea.KeyMsg:
@@ -663,6 +665,24 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "esc":
 			a.closeCommandList()
+			return a, nil
+		}
+	}
+	if a.conversationListOpen() {
+		switch msg.String() {
+		case "up":
+			a.moveConversationSel(-1)
+			return a, nil
+		case "down":
+			a.moveConversationSel(1)
+			return a, nil
+		case "enter":
+			return a, a.enterConversationSelection()
+		case "n":
+			a.convListNKey()
+			return a, nil
+		case "esc":
+			a.closeConversationList()
 			return a, nil
 		}
 	}
@@ -1385,11 +1405,13 @@ func (a *App) layout() heights {
 	})
 }
 
-// regionWant is the want with the command list and short help filled in.
+// regionWant is the want with the command list, conversation list, and short help filled in.
 func (a *App) regionWant() regionWant {
 	w := a.want
 	if a.commandListOpen() {
 		w.ListLines = len(commandListMatches(a.input.Value()))
+	} else if a.conversationListOpen() {
+		w.ListLines = len(a.conversationListMatches())
 	}
 	w.Help = a.showShortHelp
 	return w
@@ -1568,7 +1590,12 @@ func (a *App) View() string {
 			output = append(output, "")
 		}
 	}
-	listLines := a.commandListLines(hs.List)
+	var listLines []string
+	if a.conversationListOpen() {
+		listLines = a.conversationListLines(hs.List)
+	} else {
+		listLines = a.commandListLines(hs.List)
+	}
 	for i := range hs.List {
 		output = append(output, padLine(listLines, i, w))
 	}
