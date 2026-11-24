@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/idna"
 )
@@ -89,9 +90,21 @@ func validateAllowedHostPattern(pattern string) error {
 	}
 
 	// Canonicalize domain: convert to ASCII (punycode if needed) and lowercase
-	canonicalDomain, err := idna.ToASCII(baseDomain)
+	canonicalDomain, err := idna.Lookup.ToASCII(baseDomain)
 	if err != nil {
 		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
+	}
+
+	// Decoding A-labels with the strict profile rejects ones that encode
+	// IDNA-disallowed code points (e.g. emoji).
+	decoded, err := idnaRegistration.ToUnicode(canonicalDomain)
+	if err != nil {
+		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
+	}
+	for _, r := range decoded {
+		if r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r) {
+			return fmt.Errorf("pattern %q contains a code point (%U) not allowed in hostnames", pattern, r)
+		}
 	}
 
 	// Check if the canonicalized version matches (lowercase and punycode)
@@ -117,6 +130,9 @@ func validateAllowedHostPattern(pattern string) error {
 
 	return nil
 }
+
+// idnaRegistration validates A-labels against IDNA2008 registration rules.
+var idnaRegistration = idna.New(idna.ValidateForRegistration(), idna.StrictDomainName(true))
 
 func (r *Roster) Validate() error {
 	var errs []error

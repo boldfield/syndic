@@ -2909,6 +2909,7 @@ func TestAllowlistRejectsNonHostnames(t *testing.T) {
 		"exa mple.com", "user@example.com", "example.com?x", "example..com",
 		"-bad.com", "bad-.com", "a_b.com", "example.com.", "1.2.3.4.5",
 		"bad_host.example", "bücher.de", "*.bücher.de", "example.com/path",
+		"xn--e28h.example", "xn--ls8h.example", "*.xn--e28h.example",
 	}
 	for _, p := range bad {
 		if err := validateAllowedHostPattern(p); err == nil {
