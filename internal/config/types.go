@@ -278,8 +278,11 @@ func (r *Roster) ApplyDefaults() {
 			"**/*.key",
 			"**/*.pem",
 			"**/id_rsa",
+			"**/id_dsa",
 			"**/id_ecdsa",
 			"**/id_ed25519",
+			"**/id_ecdsa_sk",
+			"**/id_ed25519_sk",
 			"syndic.toml",
 		}
 	}

@@ -91,15 +91,15 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("Pools[default].UncertainReleaseAfter = %v, want 0s", roster.Pools["default"].UncertainReleaseAfter)
 	}
 
-	// Check participant defaults
-	for _, p := range roster.Participants {
-		// Context tokens and bytes per token may be nil, that's OK for defaults
-		if p.ContextTokens != nil && *p.ContextTokens < 1 {
-			t.Errorf("Participant %q ContextTokens = %v, want >= 1", p.ID, p.ContextTokens)
-		}
-		if p.BytesPerToken != nil && *p.BytesPerToken <= 0 {
-			t.Errorf("Participant %q BytesPerToken = %v, want > 0", p.ID, p.BytesPerToken)
-		}
+	// Check participant exact values from example.toml
+	if len(roster.Participants) < 1 {
+		t.Fatal("no participants found")
+	}
+	if roster.Participants[0].ContextTokens == nil || *roster.Participants[0].ContextTokens != 4096 {
+		t.Errorf("Participants[0].ContextTokens = %v, want 4096", roster.Participants[0].ContextTokens)
+	}
+	if roster.Participants[0].BytesPerToken == nil || *roster.Participants[0].BytesPerToken != 4.0 {
+		t.Errorf("Participants[0].BytesPerToken = %v, want 4.0", roster.Participants[0].BytesPerToken)
 	}
 
 	// Check tools defaults
@@ -120,6 +120,48 @@ func TestLoadExample(t *testing.T) {
 	}
 	if roster.Tools.Referee.MaxOutputTokens == nil || *roster.Tools.Referee.MaxOutputTokens != 64 {
 		t.Errorf("Tools.Referee.MaxOutputTokens = %v, want 64", roster.Tools.Referee.MaxOutputTokens)
+	}
+
+	// Check endpoints exact values from example.toml
+	if len(roster.Endpoints) < 1 {
+		t.Fatal("no endpoints found")
+	}
+	if roster.Endpoints[0].TokensPerByteMax == nil || *roster.Endpoints[0].TokensPerByteMax != 1.0 {
+		t.Errorf("Endpoints[0].TokensPerByteMax = %v, want 1.0", roster.Endpoints[0].TokensPerByteMax)
+	}
+}
+
+func TestProtectedPathsDefaults(t *testing.T) {
+	roster, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	roster.ApplyDefaults()
+
+	expectedDefaults := map[string]bool{
+		".git/":            true,
+		".syndic/":         true,
+		".env*":            true,
+		"**/*.key":         true,
+		"**/*.pem":         true,
+		"**/id_rsa":        true,
+		"**/id_dsa":        true,
+		"**/id_ecdsa":      true,
+		"**/id_ed25519":    true,
+		"**/id_ecdsa_sk":   true,
+		"**/id_ed25519_sk": true,
+		"syndic.toml":      true,
+	}
+
+	for _, path := range roster.Tools.ProtectedPaths {
+		if !expectedDefaults[path] {
+			t.Errorf("unexpected default protected path: %q", path)
+		}
+		delete(expectedDefaults, path)
+	}
+
+	for missing := range expectedDefaults {
+		t.Errorf("missing expected protected path: %q", missing)
 	}
 }
 
@@ -1331,29 +1373,6 @@ func TestRefereeEndpointValidation(t *testing.T) {
 	}
 }
 
-func TestProtectedPathsDefaults(t *testing.T) {
-	r := makeBaseRoster()
-	r.ApplyDefaults()
-
-	if r.Tools == nil || len(r.Tools.ProtectedPaths) == 0 {
-		t.Fatal("ApplyDefaults should set protected_paths defaults")
-	}
-
-	hasGit := false
-	hasSyndic := false
-	for _, p := range r.Tools.ProtectedPaths {
-		if strings.HasPrefix(p, ".git") {
-			hasGit = true
-		}
-		if strings.HasPrefix(p, ".syndic") {
-			hasSyndic = true
-		}
-	}
-	if !hasGit || !hasSyndic {
-		t.Errorf("Protected paths missing .git/ or .syndic/ defaults: %v", r.Tools.ProtectedPaths)
-	}
-}
-
 func ptrBool(b bool) *bool {
 	return &b
 }
@@ -2074,6 +2093,102 @@ func TestValidateQuickProfilePresetCannotBeEmpty(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "preset") {
 		t.Errorf("error doesn't mention preset: %v", err)
+	}
+}
+
+func TestValidateAllowedHostPatternCanonical(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid exact match lowercase",
+			pattern: "example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid exact match with dot",
+			pattern: "sub.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid single wildcard",
+			pattern: "*.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid double wildcard",
+			pattern: "**.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "uppercase not canonical",
+			pattern: "Example.COM",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "non-ASCII needs punycode",
+			pattern: "bücher.de",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "non-ASCII wildcard",
+			pattern: "*.bücher.de",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "IPv4 not allowed",
+			pattern: "192.168.1.1",
+			wantErr: true,
+			errMsg:  "IP literals",
+		},
+		{
+			name:    "IPv6 not allowed",
+			pattern: "::1",
+			wantErr: true,
+			errMsg:  "IPv6",
+		},
+		{
+			name:    "port not allowed",
+			pattern: "example.com:443",
+			wantErr: true,
+			errMsg:  "port",
+		},
+		{
+			name:    "path not allowed",
+			pattern: "example.com/path",
+			wantErr: true,
+			errMsg:  "hostname",
+		},
+		{
+			name:    "empty pattern",
+			pattern: "",
+			wantErr: true,
+			errMsg:  "empty",
+		},
+		{
+			name:    "suffix matching not allowed",
+			pattern: ".example.com",
+			wantErr: true,
+			errMsg:  "suffix",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAllowedHostPattern(tc.pattern)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
+			}
+			if tc.wantErr && tc.errMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.errMsg)) {
+				t.Errorf("expected error containing %q, got %v", tc.errMsg, err)
+			}
+		})
 	}
 }
 

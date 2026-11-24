@@ -7,6 +7,8 @@ import (
 	"net"
 	"slices"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 func validateAllowedHostPattern(pattern string) error {
@@ -14,58 +16,43 @@ func validateAllowedHostPattern(pattern string) error {
 		return errors.New("pattern cannot be empty")
 	}
 
-	// Check for port - not allowed
-	if strings.Contains(pattern, ":") {
-		return errors.New("pattern must not include port; use just the hostname")
+	// Check for paths - patterns must be hostnames only, no slashes
+	if strings.Contains(pattern, "/") {
+		return fmt.Errorf("pattern %q must be a hostname, not a path", pattern)
 	}
 
-	// Check for IP literals - not allowed when allowlist is set
-	if net.ParseIP(pattern) != nil {
-		return errors.New("IP literals are not allowed in allowlist")
-	}
-
-	// Valid patterns:
-	// - exact host: "example.com"
-	// - subdomains only: "*.example.com" (matches a.example.com but not example.com)
-	// - both: "**.example.com" (matches example.com and a.example.com)
-
+	// Extract the base domain (the part without wildcards) for validation
+	var baseDomain string
 	wildcardCount := strings.Count(pattern, "*")
+
 	if wildcardCount > 2 {
 		return fmt.Errorf("too many wildcards in pattern %q (max 2)", pattern)
 	}
 
 	switch wildcardCount {
-	case 1:
-		// Single wildcard: must be "*.domain"
-		if !strings.HasPrefix(pattern, "*.") {
-			return fmt.Errorf("single wildcard must be at the start: %q", pattern)
-		}
-		baseDomain := strings.TrimPrefix(pattern, "*.")
-		if strings.Contains(baseDomain, "*") {
-			return fmt.Errorf("invalid wildcard placement in %q", pattern)
-		}
-		if !strings.Contains(baseDomain, ".") {
-			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
-		}
-		// Check for canonicalization (lowercase)
-		if baseDomain != strings.ToLower(baseDomain) {
-			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
-		}
 	case 2:
 		// Double wildcard: must be "**.domain"
 		if !strings.HasPrefix(pattern, "**.") {
 			return fmt.Errorf("double wildcard must be at the start: %q", pattern)
 		}
-		baseDomain := strings.TrimPrefix(pattern, "**.")
+		baseDomain = strings.TrimPrefix(pattern, "**.")
 		if strings.Contains(baseDomain, "*") {
 			return fmt.Errorf("invalid wildcard placement in %q", pattern)
 		}
 		if !strings.Contains(baseDomain, ".") {
 			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
-		// Check for canonicalization (lowercase)
-		if baseDomain != strings.ToLower(baseDomain) {
-			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
+	case 1:
+		// Single wildcard: must be "*.domain"
+		if !strings.HasPrefix(pattern, "*.") {
+			return fmt.Errorf("single wildcard must be at the start: %q", pattern)
+		}
+		baseDomain = strings.TrimPrefix(pattern, "*.")
+		if strings.Contains(baseDomain, "*") {
+			return fmt.Errorf("invalid wildcard placement in %q", pattern)
+		}
+		if !strings.Contains(baseDomain, ".") {
+			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
 	case 0:
 		// Exact match: no wildcards
@@ -73,10 +60,50 @@ func validateAllowedHostPattern(pattern string) error {
 		if strings.HasPrefix(pattern, ".") {
 			return fmt.Errorf("suffix matching is not allowed: %q", pattern)
 		}
-		// Check for canonicalization (lowercase)
-		if pattern != strings.ToLower(pattern) {
-			return fmt.Errorf("pattern %q must be lowercase (canonical form)", pattern)
+		baseDomain = pattern
+	}
+
+	// Check for IPv6 addresses (bare or bracketed) - not allowed
+	if strings.Contains(baseDomain, ":") {
+		// Could be IPv6 address or port separator
+		// Check if it's an IPv6 literal
+		if ip := net.ParseIP(baseDomain); ip != nil && ip.To4() == nil {
+			return fmt.Errorf("IPv6 literals are not allowed in allowlist: %q", pattern)
 		}
+		// Not an IPv6 address, but contains colon - likely a port
+		return fmt.Errorf("pattern %q must not include port; use just the hostname", pattern)
+	}
+
+	// Check for IPv4 addresses - not allowed when allowlist is set
+	if net.ParseIP(baseDomain) != nil {
+		return fmt.Errorf("IP literals are not allowed in allowlist: %q", pattern)
+	}
+
+	// Canonicalize domain: convert to ASCII (punycode if needed) and lowercase
+	canonicalDomain, err := idna.ToASCII(baseDomain)
+	if err != nil {
+		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
+	}
+
+	// Check if the canonicalized version matches (lowercase and punycode)
+	canonicalLower := strings.ToLower(canonicalDomain)
+	if canonicalDomain != canonicalLower {
+		return fmt.Errorf("pattern %q must be in canonical form (lowercase): canonical is %q", pattern, canonicalLower)
+	}
+
+	// If domain was converted by IDNA (e.g., non-ASCII to punycode), reject the non-canonical form
+	if canonicalDomain != baseDomain {
+		// Build the canonical pattern
+		var canonicalPattern string
+		switch wildcardCount {
+		case 2:
+			canonicalPattern = "**." + canonicalDomain
+		case 1:
+			canonicalPattern = "*." + canonicalDomain
+		default:
+			canonicalPattern = canonicalDomain
+		}
+		return fmt.Errorf("pattern %q is not in canonical form; use %q instead", pattern, canonicalPattern)
 	}
 
 	return nil

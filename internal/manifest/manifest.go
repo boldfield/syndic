@@ -365,18 +365,6 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		if preset.AllowWebWithRead != nil {
 			pMap["allow_web_with_read"] = *preset.AllowWebWithRead
 		}
-		if preset.Revision != nil {
-			rMap := make(map[string]interface{})
-			if preset.Revision.MaxRounds != nil {
-				rMap["max_rounds"] = *preset.Revision.MaxRounds
-			}
-			if preset.Revision.MaxRoundsCeiling != nil {
-				rMap["max_rounds_ceiling"] = *preset.Revision.MaxRoundsCeiling
-			}
-			if len(rMap) > 0 {
-				pMap["revision"] = rMap
-			}
-		}
 		presets[name] = pMap
 	}
 	roMap["presets"] = presets
