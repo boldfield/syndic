@@ -49,14 +49,16 @@ INSERT INTO attempts_new (
 	cancellation_state, quarantined, raw_output, scrub_count, observed_identity,
 	native_finish, transport_status, repair_of, gate_error, commentary, delimiter,
 	max_output_tokens, estimated_prompt_tokens, usage_prompt, usage_completion,
-	retry_count, journal_seq, text
+	retry_count, journal_seq, text,
+	probe_run_id, probe_endpoint, probe_model, probe_pool, probe_group, probe_step
 )
 SELECT
 	id, turn_id, participant, phase, epoch, dispatched_at, deadline, state, status,
 	cancellation_state, quarantined, raw_output, scrub_count, observed_identity,
 	native_finish, transport_status, repair_of, gate_error, commentary, delimiter,
 	max_output_tokens, estimated_prompt_tokens, usage_prompt, usage_completion,
-	retry_count, journal_seq, text
+	retry_count, journal_seq, text,
+	probe_run_id, probe_endpoint, probe_model, probe_pool, probe_group, probe_step
 FROM attempts;
 
 DROP TABLE attempts;

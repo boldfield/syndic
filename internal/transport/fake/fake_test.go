@@ -2061,3 +2061,34 @@ func TestRequestDeepCopyIsolation(t *testing.T) {
 		t.Fatalf("Calls result mutation leaked into history: %+v", again[0].Request)
 	}
 }
+
+// TestRequestDeepCopyTypedSchemaValues covers typed nested slices and maps in
+// tool parameter schemas, which are common in JSON-schema values.
+func TestRequestDeepCopyTypedSchemaValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name: "f",
+			Parameters: map[string]interface{}{
+				"required": []string{"path"},
+				"raw":      []byte("abc"),
+				"typed":    map[string]string{"k": "v"},
+			},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.Tools[0].Function.Parameters["required"].([]string)[0] = "mutated"
+	req.Tools[0].Function.Parameters["raw"].([]byte)[0] = 'z'
+	req.Tools[0].Function.Parameters["typed"].(map[string]string)["k"] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if got["required"].([]string)[0] != "path" || got["raw"].([]byte)[0] != 'a' || got["typed"].(map[string]string)["k"] != "v" {
+		t.Fatalf("typed value aliased: %+v", got)
+	}
+	got["required"].([]string)[0] = "mutated2"
+	if adapter.Calls()[0].Request.Tools[0].Function.Parameters["required"].([]string)[0] != "path" {
+		t.Fatal("Calls result aliases history")
+	}
+}

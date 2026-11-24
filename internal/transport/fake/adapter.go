@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -444,14 +445,47 @@ func cloneRequest(req transport.CompleteRequest) transport.CompleteRequest {
 }
 
 func cloneValue(v interface{}) interface{} {
-	switch x := v.(type) {
-	case map[string]interface{}:
-		return cloneMap(x)
-	case []interface{}:
-		out := make([]interface{}, len(x))
-		for i, e := range x {
-			out[i] = cloneValue(e)
+	if v == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(v)).Interface()
+}
+
+// cloneReflect deep-copies maps, slices, arrays, pointers and interfaces so
+// typed JSON-schema values ([]string, map[string]string, ...) are not aliased.
+func cloneReflect(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
 		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for _, k := range v.MapKeys() {
+			out.SetMapIndex(k, cloneReflect(v.MapIndex(k)))
+		}
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(cloneReflect(v.Elem()))
+		return out
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(cloneReflect(v.Elem()))
 		return out
 	}
 	return v
