@@ -2922,7 +2922,7 @@ func TestAllowlistRejectsNonHostnames(t *testing.T) {
 			t.Errorf("validateAllowedHostPattern(%q) = %v, want IP literal error", p, err)
 		}
 	}
-	for _, p := range []string{"example.com", "*.example.com", "**.example.com", "xn--bcher-kva.de", "a-b.example.com"} {
+	for _, p := range []string{"example.com", "*.example.com", "**.example.com", "xn--bcher-kva.de", "a-b.example.com", "xn--ll-0ea.cat", "*.xn--ll-0ea.cat"} {
 		if err := validateAllowedHostPattern(p); err != nil {
 			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil", p, err)
 		}

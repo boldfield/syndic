@@ -102,7 +102,7 @@ func validateAllowedHostPattern(pattern string) error {
 		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
 	}
 	for _, r := range decoded {
-		if r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r) {
+		if r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r) && !idnaContextO[r] {
 			return fmt.Errorf("pattern %q contains a code point (%U) not allowed in hostnames", pattern, r)
 		}
 	}
@@ -130,6 +130,10 @@ func validateAllowedHostPattern(pattern string) error {
 
 	return nil
 }
+
+// idnaContextO holds the IDNA2008 CONTEXTO code points (RFC 5892 Appendix A)
+// that are valid hostname characters despite not being letters or digits.
+var idnaContextO = map[rune]bool{0x00B7: true, 0x0375: true, 0x05F3: true, 0x05F4: true, 0x30FB: true}
 
 // idnaRegistration validates A-labels against IDNA2008 registration rules.
 var idnaRegistration = idna.New(idna.ValidateForRegistration(), idna.StrictDomainName(true))
