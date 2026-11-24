@@ -147,9 +147,7 @@ func WithWorkDir(dir string) Option {
 
 // WithTerminalCapabilities sets the terminal rendering capabilities.
 func WithTerminalCapabilities(caps TerminalCapabilities) Option {
-	return func(a *App) {
-		a.terminalCapabilities = caps
-	}
+	return func(a *App) { a.terminalCapabilities = caps }
 }
 
 // WithNotify enables terminal notifications for terminal events.
@@ -209,7 +207,6 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		missedTerminalEventsTm: make(map[string]string),
 		isFirstConnect:         true,
 		emitBell:               func() { _, _ = fmt.Fprint(os.Stdout, "\x07") },
-		terminalCapabilities:   DetectTerminalCapabilities(),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -580,6 +577,7 @@ func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.input.SetWidth(max(a.width, 1))
 		if a.mouseEnabled && a.plainMode() {
 			// Plain mode never has the mouse: release capture on shrinking.
+			// Growing back does not restore it; the user re-enables with /mouse on.
 			a.mouseEnabled = false
 			return a, tea.DisableMouse
 		}
