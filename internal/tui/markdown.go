@@ -4,6 +4,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // RenderMarkdown renders answer text at the given terminal width, with
@@ -59,9 +61,18 @@ func (s mdStyle) sgr() string {
 		codes = append(codes, "4")
 	}
 	if s&styleCode != 0 {
-		codes = append(codes, "36")
+		codes = append(codes, inlineCodeSGR())
 	}
 	return "\x1b[" + strings.Join(codes, ";") + "m"
+}
+
+// inlineCodeSGR is the colour of code spans, declared as a light/dark pair
+// and chosen from the terminal's background like every other TUI colour.
+func inlineCodeSGR() string {
+	if lipgloss.HasDarkBackground() {
+		return "36"
+	}
+	return "34"
 }
 
 const sgrReset = "\x1b[0m"

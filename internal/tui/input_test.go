@@ -61,7 +61,7 @@ func TestAltEnterInsertsNewline(t *testing.T) {
 	if got, want := a.input.Value(), "héllo\nwörld"; got != want {
 		t.Fatalf("input = %q, want %q", got, want)
 	}
-	if got, want := inputRegion(t, a), []string{"> héllo", "  wörld"}; strings.Join(got, "|") != strings.Join(want, "|") {
+	if got, want := inputRegion(t, a), []string{defaultPrompt + "héllo", "  wörld"}; strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("input lines = %q, want %q", got, want)
 	}
 
@@ -97,7 +97,7 @@ func TestMultiLinePasteKeptAsTyped(t *testing.T) {
 	if got, want := a.input.Value(), "see: one\ntwo\nthree\n    four"; got != want {
 		t.Fatalf("input = %q, want %q", got, want)
 	}
-	if got, want := inputRegion(t, a), []string{"> see: one", "  two", "  three", "      four"}; strings.Join(got, "|") != strings.Join(want, "|") {
+	if got, want := inputRegion(t, a), []string{defaultPrompt + "see: one", "  two", "  three", "      four"}; strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("input lines = %q, want %q", got, want)
 	}
 	// A pasted "enter" is text, not a submit.
@@ -131,7 +131,7 @@ func TestTallInputLeavesTheTabItsRoom(t *testing.T) {
 
 	// Cleared, the input is one line again, from its start.
 	press(a, tea.KeyMsg{Type: tea.KeyCtrlC})
-	if got := inputRegion(t, a); len(got) != 1 || got[0] != ">" {
+	if got := inputRegion(t, a); len(got) != 1 || got[0] != strings.TrimRight(defaultPrompt, " ") {
 		t.Errorf("input lines after ctrl+c = %q", got)
 	}
 }
@@ -147,7 +147,7 @@ func TestShrunkInputShowsFromItsFirstLine(t *testing.T) {
 	if got, want := a.input.Value(), "a\nb\nc\nd\ne"; got != want {
 		t.Fatalf("input = %q, want %q", got, want)
 	}
-	if got, want := inputRegion(t, a), []string{"> a", "  b", "  c", "  d", "  e"}; strings.Join(got, "|") != strings.Join(want, "|") {
+	if got, want := inputRegion(t, a), []string{defaultPrompt + "a", "  b", "  c", "  d", "  e"}; strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("input lines = %q, want %q", got, want)
 	}
 	typeRunes(a, "!")
@@ -278,7 +278,7 @@ func TestWordWrappedInputShowsTheCursorRow(t *testing.T) {
 		t.Errorf("input rows = %d, want 3", got)
 	}
 	got := inputRegion(t, a)
-	if want := []string{"> " + word, "  " + word, "  " + word + " END"}; strings.Join(got, "|") != strings.Join(want, "|") {
+	if want := []string{defaultPrompt + word, "  " + word, "  " + word + " END"}; strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("input lines = %q, want %q", got, want)
 	}
 	if view := strings.Split(a.input.View(), "\n"); strings.TrimRight(view[2], " ") != "  "+word+" END" {

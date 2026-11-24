@@ -248,7 +248,7 @@ func TestChatStatusLineIsLastAt80x24(t *testing.T) {
 		if !strings.HasPrefix(last, "[review]") || !strings.HasSuffix(last, keyHint) {
 			t.Errorf("tab %d: last line = %q, want the status line ending %q", tab, last, keyHint)
 		}
-		if !strings.HasPrefix(lines[22], "> ") {
+		if !strings.HasPrefix(lines[22], defaultPrompt) {
 			t.Errorf("tab %d: line above the status line = %q, want the input", tab, lines[22])
 		}
 		if w := len([]rune(last)); w > 80 {

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/boldfield/syndic/internal/tui"
 	"github.com/boldfield/syndic/internal/wire"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // maxRoundsLimit is the most revisions any turn may have (v5 delta section 4).
@@ -77,6 +79,25 @@ func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 		return f, fmt.Errorf("--new and --conversation are mutually exclusive")
 	}
 	return f, nil
+}
+
+// appOptions turns the --notify and --mouse flags into TUI options. Both
+// settings last for this process only.
+func (f startupFlags) appOptions() []tui.Option {
+	var opts []tui.Option
+	if f.notify {
+		opts = append(opts, tui.WithNotify(true))
+	}
+	if f.mouse {
+		opts = append(opts, tui.WithMouse(true))
+	}
+	return opts
+}
+
+// programOptions are the Bubble Tea options for a terminal with caps: --mouse
+// captures the mouse where the terminal has colour.
+func (f startupFlags) programOptions(caps tui.TerminalCapabilities) []tea.ProgramOption {
+	return tui.ProgramOptionsWithMouse(caps, f.mouse)
 }
 
 // openConversation is the conversation a start-up selected.

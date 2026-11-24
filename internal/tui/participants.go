@@ -89,6 +89,11 @@ func renderParticipants(s State, width, height int, selectedID string, now time.
 	if unprobed := countUnprobed(s); unprobed > 0 {
 		head = append(head, fmt.Sprintf("participants: %d unprobed", unprobed))
 	}
+	// The chat's banner strip folds past maxBannerLines into "+<n> more";
+	// this tab lists every banner that applies.
+	if all := renderBanners(s); len(all) > maxBannerLines {
+		head = append(head, all...)
+	}
 	ids := participantIDs(s)
 	selIdx := 0
 	if len(ids) == 0 {

@@ -245,7 +245,7 @@ func TestResizeBelowMinimumAndBack(t *testing.T) {
 	v := view(t, p.rig)
 	assertFits(t, "restored", v, 80, 24)
 	lines := strings.Split(v, "\n")
-	if len(lines) != 24 || lines[0] != "[chat]  transcript  participants" || !strings.HasPrefix(lines[22], "> ") || !strings.HasPrefix(lines[23], "[") {
+	if len(lines) != 24 || lines[0] != "[chat]  transcript  participants" || !strings.HasPrefix(lines[22], defaultPrompt) || !strings.HasPrefix(lines[23], "[") {
 		t.Errorf("layout not restored:\n%s", v)
 	}
 }
