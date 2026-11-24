@@ -437,8 +437,13 @@ func (a *App) applyReviewCounts(conv wire.ConversationReply) {
 	if a.reviewCounts == nil {
 		a.reviewCounts = map[string]*int{}
 	}
+	if a.reviewCountFinal == nil {
+		a.reviewCountFinal = map[string]bool{}
+	}
 	for _, t := range conv.Turns {
 		a.reviewCounts[t.ID] = t.ReviewCount
+		// A count read from a terminal turn no longer changes.
+		a.reviewCountFinal[t.ID] = isTerminalState(t.State)
 	}
 }
 
@@ -448,7 +453,7 @@ func (a *App) refreshReviewCounts(turnID string) tea.Cmd {
 	if a.cl == nil || a.conversationID == "" || !isTerminalState(a.state.Turns[turnID].State) {
 		return nil
 	}
-	if _, known := a.reviewCounts[turnID]; known {
+	if a.reviewCountFinal[turnID] {
 		return nil
 	}
 	gen, cl, ctx, id := a.gen, a.cl, a.ctx, a.conversationID

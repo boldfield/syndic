@@ -139,7 +139,7 @@ func outcomeLines(mark, raw string, in answerInput) []string {
 
 func styledOutcomeLines(mark, raw string, in answerInput, style lipgloss.Style) []string {
 	// Append review count to the outcome message if present
-	if in.reviewCount != nil && *in.reviewCount > 0 {
+	if in.reviewCount != nil {
 		raw = fmt.Sprintf("%s · %d reviews", raw, *in.reviewCount)
 	}
 	var lines []string

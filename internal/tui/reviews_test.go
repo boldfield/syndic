@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/boldfield/syndic/internal/transport/fake"
 	"strings"
 	"testing"
 
@@ -425,8 +426,16 @@ func TestReviewCountRendering(t *testing.T) {
 	}
 }
 
+func TestReviewCountZeroShownForNonSolo(t *testing.T) {
+	ai := answerInput{width: 80, plainMode: true, reviewCount: ptrInt(0)}
+	out := strings.Join(styledOutcomeLines("!", "INCOMPLETE", ai, lipgloss.NewStyle()), "\n")
+	if !strings.Contains(out, "· 0 reviews") {
+		t.Errorf("a non-solo turn with no accepted verdicts must show 0 reviews: %q", out)
+	}
+}
+
 func TestReviewCountNotShownWhenZero(t *testing.T) {
-	// Test that review-count is not rendered when it's 0 or nil
+	// A nil count marks a solo turn: no suffix.
 	ai := answerInput{
 		width:     80,
 		plainMode: false,
@@ -533,10 +542,93 @@ func TestReviewsDrawerEndToEnd(t *testing.T) {
 	r.until(t, "drawer closed", func(a *App) (string, bool) { return "", !a.reviewsDrawer.IsOpen() })
 	// The open block stays in the chat once the drawer is closed, and the
 	// reviewed turn's outcome line carries its review count.
-	closed := untilView(t, r, "b7")
-	if !strings.Contains(closed, "reviews") {
-		t.Fatalf("outcome line lacks the review count:\n%s", closed)
+	closed := untilView(t, r, "b7", "· 1 reviews")
+	if !strings.Contains(closed, "· 1 reviews") {
+		t.Fatalf("outcome line lacks the review count suffix:\n%s", closed)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	r.until(t, "typing works again", func(a *App) (string, bool) { return a.input.Value(), a.input.Value() == "x" })
+}
+
+// TestReviewsDrawerDetachAndResize: Ctrl+D on an empty input detaches through
+// the drawer, a non-empty input is left alone, and shrinking below the
+// minimum size releases the keyboard.
+func TestReviewsDrawerKeysAndResize(t *testing.T) {
+	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
+	r := startAnswerRig(t, h)
+	r.typeLine("question")
+	r.until(t, "a settled turn", func(a *App) (string, bool) {
+		id := answerTurn(a.state)
+		return id, id != "" && a.input.Value() == "" && a.state.Turns[id].State != "reviewers_dispatched" && a.state.Turns[id].State != "open"
+	})
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	untilView(t, r, "b7")
+
+	// Resize below 80x24: the drawer closes and typing reaches the input.
+	send(r, tea.WindowSizeMsg{Width: 79, Height: 24})
+	r.until(t, "drawer released", func(a *App) (string, bool) {
+		return "", !a.reviewsDrawer.IsOpen() && !a.want.Drawer
+	})
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	r.until(t, "typing works", func(a *App) (string, bool) { return a.input.Value(), a.input.Value() == "x" })
+
+	// Back at full size it opens again; Ctrl+C does not clear the input.
+	send(r, tea.WindowSizeMsg{Width: 80, Height: 24}, tea.KeyMsg{Type: tea.KeyCtrlO})
+	r.until(t, "drawer open", func(a *App) (string, bool) { return "", a.reviewsDrawer.IsOpen() })
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlC})
+	r.until(t, "input kept", func(a *App) (string, bool) {
+		return a.input.Value(), a.input.Value() == "x" && a.reviewsDrawer.IsOpen()
+	})
+}
+
+func TestReviewsDrawerSetTurnsKeepsSelection(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"a", "b"})
+	d.Open(0)
+	d.SelectDown()
+	d.SetTurns([]string{"a", "b", "c"})
+	if got := d.selectedTurnID(); got != "b" {
+		t.Errorf("selection moved to %q", got)
+	}
+}
+
+// TestReviewsDrawerTurnSelectionEndToEnd drives two turns through the App:
+// ↑/↓ moves the drawer's turn, the header's turn number changes and the
+// highlighted input in the chat moves with it.
+func TestReviewsDrawerTurnSelectionEndToEnd(t *testing.T) {
+	h := enginetest.New(t, enginetest.RosterTOML, map[string][]fake.Step{
+		"author":   repeatStep(enginetest.Reply(answerText), 12),
+		"reviewer": repeatStep(blockVerdict(), 12),
+	})
+	r := startAnswerRig(t, h)
+	settled := func(a *App) (string, bool) {
+		id := answerTurn(a.state)
+		return id, id != "" && a.input.Value() == "" && isTerminalState(a.state.Turns[id].State)
+	}
+	r.typeLine("first")
+	first := r.until(t, "first settled", settled)
+	r.typeLine("second")
+	r.until(t, "second settled", func(a *App) (string, bool) {
+		id, ok := settled(a)
+		return id, ok && id != first
+	})
+
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	untilView(t, r, "Reviews · Turn 2")
+	if sel := r.until(t, "selection", func(a *App) (string, bool) { return a.reviewsDrawer.selectedTurnID(), true }); sel == first {
+		t.Fatalf("drawer opened on the first turn")
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyUp})
+	untilView(t, r, "Reviews · Turn 1")
+	r.until(t, "first selected", func(a *App) (string, bool) { return "", a.reviewsDrawer.selectedTurnID() == first })
+	send(r, tea.KeyMsg{Type: tea.KeyDown})
+	untilView(t, r, "Reviews · Turn 2")
+}
+
+func repeatStep(s fake.Step, n int) []fake.Step {
+	steps := make([]fake.Step, n)
+	for i := range steps {
+		steps[i] = s
+	}
+	return steps
 }

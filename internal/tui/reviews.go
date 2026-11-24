@@ -38,8 +38,20 @@ func NewReviewsDrawer() *ReviewsDrawer {
 }
 
 // SetTurns updates the drawer's turn list.
+// The selected turn stays selected when it is still listed, and the scroll
+// position is kept then; otherwise the selection is clamped and scroll resets.
 func (d *ReviewsDrawer) SetTurns(turns []string) {
+	prev := d.selectedTurnID()
 	d.turns = turns
+	if prev != "" && d.selectedTurn < len(d.turns) && d.turns[d.selectedTurn] == prev {
+		return
+	}
+	for i, id := range d.turns {
+		if id == prev {
+			d.selectedTurn = i
+			return
+		}
+	}
 	if d.selectedTurn >= len(d.turns) {
 		d.selectedTurn = max(0, len(d.turns)-1)
 	}

@@ -95,9 +95,10 @@ type App struct {
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
 
-	reviewsDrawer  *ReviewsDrawer  // the reviews drawer state
-	reviewCounts   map[string]*int // review_count per turn, from conversation info; a key marks the count as read
-	reviewsLoading map[string]bool // turns whose reviews are being fetched
+	reviewsDrawer    *ReviewsDrawer  // the reviews drawer state
+	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
+	reviewCounts     map[string]*int // review_count per turn, from conversation info; a key marks the count as read
+	reviewsLoading   map[string]bool // turns whose reviews are being fetched
 
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
@@ -481,6 +482,11 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
+		if a.reviewsDrawer.IsOpen() && (a.width < regionMinWidth || a.height < regionMinHeight) {
+			// A drawer too small to draw must not keep the keyboard.
+			a.reviewsDrawer.Close()
+			a.want.Drawer = false
+		}
 		a.input.SetWidth(max(a.width, 1))
 		return a, nil
 	case tea.KeyMsg:
@@ -557,7 +563,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Drawer focus takes priority: it blocks input changes and navigation keys.
 	if a.reviewsDrawer.IsOpen() && a.tab == tabChat {
 		drawerHeight := a.layout().Drawer
+		// Turns that arrived while the drawer is open become selectable.
+		a.updateDrawerTurns()
 		switch msg.String() {
+		case "ctrl+c", "ctrl+d":
+			// Only the empty-input detach passes through; the input is
+			// not the drawer's to clear.
+			if a.input.Value() == "" {
+				return a, a.quit()
+			}
+			return a, nil
 		case "up":
 			a.reviewsDrawer.SelectUp()
 			if turnID := a.reviewsDrawer.selectedTurnID(); turnID != "" {
