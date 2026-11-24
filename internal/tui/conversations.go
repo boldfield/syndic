@@ -207,13 +207,8 @@ func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
 	// Store the fetched items for use by the conversation list
 	a.convList.items = msg.items
 	a.convList.currentWS = a.workDir
-	// If there's a filter, show the interactive list; otherwise show the full panel
-	if a.convListActive() {
-		a.closeCommandList()
-		a.showShortHelp = false
-		a.panel = nil
-		return a, nil
-	}
+	a.forgetStaleConvList()
+	// Show the conversation list in the panel
 	a.panel, a.panelRow = conversationLines(msg.items, a.conversationID, a.workDir, a.width), 0
 	return a, nil
 }
