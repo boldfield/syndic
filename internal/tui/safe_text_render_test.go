@@ -229,18 +229,18 @@ func TestStatusLineEscapesRecordValues(t *testing.T) {
 	a := hostileRecordApp(t)
 	for _, w := range []int{40, 80, 400} {
 		for _, reviews := range []bool{false, true} {
-			line := renderStatusLine(a.state, w, chatNow, reviews)
+			line := renderStatusLine(a.state, w, chatNow, reviews, false)
 			assertSafeRunes(t, "strip", line)
 			if strings.Contains(line, "\n") {
 				t.Errorf("w=%d: strip broke onto two lines: %q", w, line)
 			}
 		}
 	}
-	if line := renderStrip(a.state, 4000, chatNow); !strings.Contains(line, `[quick:h\x1b]8;;http://x\x1b\L\x1b[2J\x0d\xc2\x9b\u202e\u2066\xff\x0a2]`) {
+	if line := renderStrip(a.state, 4000, chatNow, false); !strings.Contains(line, `[quick:h\x1b]8;;http://x\x1b\L\x1b[2J\x0d\xc2\x9b\u202e\u2066\xff\x0a2]`) {
 		t.Errorf("quick profile not shown with visible escapes: %q", line)
 	}
 	a.state.CurrentTurn = ""
-	assertSafeRunes(t, "idle strip", renderStrip(a.state, 400, chatNow))
+	assertSafeRunes(t, "idle strip", renderStrip(a.state, 400, chatNow, false))
 	assertSafeLines(t, "view", strings.Split(a.View(), "\n"))
 }
 

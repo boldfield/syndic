@@ -105,14 +105,14 @@ func (rf *reasonForm) Reason() string {
 
 // openReasonForm prompts for a required reason. With colour it is a Huh form
 // whose validation blocks an empty submit; under TERM=dumb or without colour
-// it is the single-line reason prompt. The panel carries the context and any
+// it (or below 80x24) is the single-line reason prompt. The panel carries the context and any
 // warning in both. The returned command starts the Huh form.
 func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd {
 	a.confirm = confirm
 	a.panel = panelLines
 	a.panelRow = 0
 	a.refusal = ""
-	if !a.terminalCapabilities.Color {
+	if a.plainMode() {
 		a.reasonForm = nil
 		a.setPrompt(reasonPrompt)
 		return nil

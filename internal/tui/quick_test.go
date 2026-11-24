@@ -293,7 +293,7 @@ func stripOf(t *testing.T, r *rig, turn string) string {
 	return r.until(t, "the strip", func(a *App) (string, bool) {
 		s := a.state
 		s.CurrentTurn = turn
-		return renderStrip(s, 120, time.Now()), true
+		return renderStrip(s, 120, time.Now(), false), true
 	})
 }
 

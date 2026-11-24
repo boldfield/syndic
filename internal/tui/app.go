@@ -250,15 +250,23 @@ func (a *App) draftsOn(turnID string) bool {
 	return false
 }
 
+// plainMode reports whether the screen is drawn plain: colour off, TERM=dumb,
+// or smaller than the minimum size. Plain mode has no spinner, pips, meter,
+// Markdown, animation or mouse.
+func (a *App) plainMode() bool {
+	return !a.terminalCapabilities.Color || a.width < regionMinWidth || a.height < regionMinHeight
+}
+
 // answerIn gathers what the answer tab needs for the turn.
 func (a *App) answerIn(turnID string) answerInput {
+	plainMode := a.plainMode()
 	return answerInput{
 		content:        a.content,
 		drafts:         a.draftsOn(turnID),
 		candidateID:    a.candidateIDByTurn[turnID],
 		openBlocks:     a.openBlocksByTurn[turnID],
 		overrideReason: a.overrideReasons[turnID],
-		plainMode:      !a.terminalCapabilities.Color,
+		plainMode:      plainMode,
 		rawMode:        a.rawMode,
 		now:            a.now(),
 		width:          a.width,
@@ -567,6 +575,12 @@ func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.want.Drawer = false
 		}
 		a.input.SetWidth(max(a.width, 1))
+		if a.mouseEnabled && a.plainMode() {
+			// Plain mode never has the mouse: release capture on shrinking.
+			// Growing back does not restore it; the user re-enables with /mouse on.
+			a.mouseEnabled = false
+			return a, tea.DisableMouse
+		}
 		return a, nil
 	case tea.KeyMsg:
 		return a.updateKey(msg)
@@ -1492,7 +1506,8 @@ func (a *App) tabBar() string {
 // statusLine is the strip with the hints at its right edge, w cells wide:
 // ctrl+o: reviews while the chat tab is active, then keyHint.
 func (a *App) statusLine(w int) string {
-	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat)
+	plainMode := a.plainMode()
+	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat, plainMode)
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.
@@ -1605,7 +1620,7 @@ func (a *App) View() string {
 
 	// Add drawer, list, attached, and help lines
 	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	plainMode := !a.terminalCapabilities.Color
+	plainMode := a.plainMode()
 	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content, plainMode), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {
