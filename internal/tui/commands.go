@@ -373,51 +373,42 @@ func (a *App) cancelConfirm(why string) {
 	a.nextQuestion()
 }
 
-// confirmEnter answers the pending confirmation with the input line.
+// confirmEnter answers the pending confirmation with the entered reason.
 func (a *App) confirmEnter() tea.Cmd {
+	// The Huh form validates its own field; the single-line fallback is
+	// checked here.
 	var reason string
-
-	// Extract reason from either Huh form or input textarea
 	if a.reasonForm != nil && a.reasonForm.useHuh {
-		reason = strings.TrimSpace(a.reasonForm.reasonValue)
+		reason = a.reasonForm.Reason()
 	} else {
 		reason = strings.TrimSpace(a.input.Value())
+		if reason == "" {
+			a.refusal = "reason required"
+			a.clearInput()
+			return nil
+		}
 	}
-
-	// Validate reason when not using Huh (Huh validates in the form itself)
-	if (a.reasonForm == nil || !a.reasonForm.useHuh) && reason == "" {
-		a.refusal = "reason required"
-		a.clearInput()
-		return nil
-	}
-
+	confirm := a.confirm
 	if a.cl == nil {
 		a.cancelConfirm("engine: not connected")
-		defer func() { a.reasonForm = nil }()
 		return nil
 	}
+	a.cancelConfirm("")
+	gen, cl := a.gen, a.cl
 
-	switch p := a.confirm.(type) {
+	switch p := confirm.(type) {
 	case *overridePrompt:
-		a.cancelConfirm("")
-		gen, cl := a.gen, a.cl
-		turn := p.turn
-		defer func() { a.reasonForm = nil }()
 		return func() tea.Msg {
-			if err := cl.Override(context.Background(), turn, reason); err != nil {
+			if err := cl.Override(context.Background(), p.turn, reason); err != nil {
 				return commandMsg{gen: gen, err: err}
 			}
-			return commandMsg{gen: gen, text: "turn " + turn + " overridden: " + reason}
+			return commandMsg{gen: gen, text: "turn " + p.turn + " overridden: " + reason}
 		}
-
 	case *releasePrompt:
-		a.cancelConfirm("")
 		req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
 		if p.attemptID != "" {
 			req.AttemptID = &p.attemptID
 		}
-		gen, cl := a.gen, a.cl
-		defer func() { a.reasonForm = nil }()
 		return func() tea.Msg {
 			reply, err := cl.Release(context.Background(), req)
 			if err != nil {
@@ -425,12 +416,8 @@ func (a *App) confirmEnter() tea.Cmd {
 			}
 			return commandMsg{gen: gen, text: fmt.Sprintf("released on pool %s: %s", req.Pool, strings.Join(reply.Released, ", "))}
 		}
-
-	default:
-		a.cancelConfirm("unknown confirmation type")
-		defer func() { a.reasonForm = nil }()
-		return nil
 	}
+	return nil
 }
 
 // question is a yes/no prompt: its panel shows what is asked, and it owns

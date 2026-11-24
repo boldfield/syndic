@@ -44,22 +44,16 @@ type reasonForm struct {
 	huhForm     *huh.Form // the Huh form model, or nil for fallback mode
 	useHuh      bool      // true if using huh form
 	reasonValue string    // the reason entered by the user
-	panelLines  []string  // the panel lines (prompt/warning)
-}
-
-// Init satisfies tea.Model but doesn't do anything since the form is managed by the app.
-func (rf *reasonForm) Init() tea.Cmd {
-	return nil
 }
 
 // Update handles messages (Huh only; fallback mode is handled by the app's input).
-func (rf *reasonForm) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (rf *reasonForm) Update(msg tea.Msg) tea.Cmd {
 	if !rf.useHuh || rf.huhForm == nil {
-		return rf, nil
+		return nil
 	}
 	updatedForm, cmd := rf.huhForm.Update(msg)
 	rf.huhForm = updatedForm.(*huh.Form)
-	return rf, cmd
+	return cmd
 }
 
 // View renders the form (Huh only).
@@ -96,8 +90,7 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd 
 	if useHuh {
 		// Create reasonForm with Huh
 		rf := &reasonForm{
-			useHuh:     true,
-			panelLines: panelLines,
+			useHuh: true,
 		}
 		// Create a Huh form with one required text field
 		form := huh.NewForm(
@@ -124,8 +117,7 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd 
 	} else {
 		// Fallback: use simple panel + textarea input
 		a.reasonForm = &reasonForm{
-			useHuh:     false,
-			panelLines: panelLines,
+			useHuh: false,
 		}
 		a.panel = panelLines
 		a.setPrompt(reasonPrompt)

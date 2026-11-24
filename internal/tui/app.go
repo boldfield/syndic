@@ -525,9 +525,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := a.input.Width()
 	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
 
-	// If a Huh form is active in Huh mode, route all messages to it
 	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
-		// Handle Esc and detach keys specially to cancel the form
 		if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
 			switch keyMsg.String() {
 			case "esc":
@@ -538,16 +536,23 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, cmd
 				}
 			}
+			return a, a.reasonForm.Update(msg)
 		}
-		// Route all other messages to the form
-		_, cmd := a.reasonForm.Update(msg)
-		// Check if form is complete
+		// Huh advances through internal messages; they reach the form
+		// while every application message still takes its normal path.
+		fcmd := a.reasonForm.Update(msg)
 		if a.reasonForm.IsCompleted() {
+			// The form's own submit command quits the program: drop it.
 			return a, a.confirmEnter()
 		}
-		return a, cmd
+		m, cmd := a.updateApp(msg)
+		return m, tea.Batch(fcmd, cmd)
 	}
+	return a.updateApp(msg)
+}
 
+// updateApp handles an application message.
+func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
