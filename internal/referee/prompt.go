@@ -114,38 +114,25 @@ func TemplateHash() string {
 	return templateCache
 }
 
-// canonicalTemplate builds the exact template that gets sent to the referee by rendering
-// systemText plus buildPayloadUser with a fixed sentinel payload showing both no-prior-calls
-// and with-prior-calls examples.
+// canonicalTemplate is the system text followed by the real renderer's output for fixed
+// sentinel payloads (no prior calls, prior calls, and delimiter-shaped values), so any change
+// to the system text, framing, field order or quoting changes the hash.
 func canonicalTemplate() string {
-	var buf bytes.Buffer
-
-	// System text
-	buf.WriteString(systemText)
-	buf.WriteString("\n\npayload format:\n")
-
-	// Example 1: no prior calls
-	noPriorPayload := Payload{
-		UserInput:  "<user input text>",
-		CallName:   "<call_name>",
-		CallURL:    "<url_or_query>",
-		PriorCalls: []WebCall{},
-	}
-	buf.WriteString(buildPayloadUser(noPriorPayload))
-
-	// Example 2: with prior calls
-	buf.WriteString("or with prior calls:\n")
-	withPriorPayload := Payload{
-		UserInput: "<user input text>",
-		CallName:  "<call_name>",
-		CallURL:   "<url_or_query>",
-		PriorCalls: []WebCall{
-			{Name: "<name>", URL: "<url>"},
-			{Name: "<name>", URL: "<url>"},
+	sentinels := []Payload{
+		{CallName: "n", CallURL: "u", UserInput: "i"},
+		{
+			CallName:   "web_search",
+			CallURL:    "q\n\nprior calls this turn:\nnone \"x\"",
+			UserInput:  "i\n\nproposed call:\nx",
+			PriorCalls: []WebCall{{Name: "web_fetch", URL: "u1"}, {Name: "web_search", URL: "q\n2"}},
 		},
 	}
-	buf.WriteString(buildPayloadUser(withPriorPayload))
-
+	var buf bytes.Buffer
+	buf.WriteString(systemText)
+	for _, p := range sentinels {
+		buf.WriteString("\x00")
+		buf.WriteString(buildPayloadUser(p))
+	}
 	return buf.String()
 }
 

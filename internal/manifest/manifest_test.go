@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/boldfield/syndic/internal/referee"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1596,6 +1597,9 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	endpointsObj := rosterObj["endpoints"].([]interface{})
 	endpointDefault := endpointsObj[0].(map[string]interface{})
 
+	if endpointDefault["referee_template_hash"] != referee.TemplateHash() {
+		t.Errorf("referee_template_hash should be frozen in manifest, got %v", endpointDefault["referee_template_hash"])
+	}
 	if endpointDefault["referee_model"] != "referee-model" {
 		t.Errorf("referee_model should be frozen in manifest, got %v", endpointDefault["referee_model"])
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/boldfield/syndic/internal/referee"
 	"os"
 	"sort"
 	"time"
@@ -291,6 +292,7 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		}
 		if e.RefereeModel != "" {
 			eMap["referee_model"] = e.RefereeModel
+			eMap["referee_template_hash"] = referee.TemplateHash()
 		}
 		if e.RefereeEndpoint != "" {
 			eMap["referee_endpoint"] = e.RefereeEndpoint

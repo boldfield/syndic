@@ -205,7 +205,7 @@ func TestTemplateHashPinned(t *testing.T) {
 	// This is the pinned hash of the canonical template. Any change to systemText,
 	// the framing constants, or the structure of buildPayloadUser will change this hash.
 	// If constants are modified, update this pinned value only after verifying the change is intentional.
-	const pinnedHash = "78b58b9ed01773781e1eaa747dc46936cd05cd6d85652a550e901c4b1f636048"
+	const pinnedHash = "630cf8c677cd507d56e4fd888f01028ac7ca39d69d27cd32c586c1a44eda0683"
 
 	hash1 := TemplateHash()
 	hash2 := TemplateHash()

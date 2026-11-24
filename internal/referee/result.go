@@ -58,7 +58,7 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 
 	// Check for control characters (any rune where unicode.IsControl is true, or U+2028/U+2029).
 	for _, r := range text {
-		if unicode.IsControl(r) || r == ' ' || r == ' ' {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return ParsedResult{Decision: DecisionDeny}, &ParseError{
 				detail: "response contains control characters",
 			}
@@ -67,7 +67,7 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 
 	// Split on both \r\n and \n to be strict about line breaks.
 	lines := strings.FieldsFunc(text, func(r rune) bool {
-		return r == '\n' || r == '\r'
+		return r == '\u2028' || r == '\u2029'
 	})
 
 	if len(lines) == 0 {
