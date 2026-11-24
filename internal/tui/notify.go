@@ -9,53 +9,30 @@ import (
 
 type bellMsg struct{}
 
-// shouldNotify reports whether a frame should trigger a bell and/or notice.
-// It returns: shouldBell, notice, turnID, outcome, timestamp.
-// A frame triggers a bell if notify is on, it's a terminal turn state event,
-// its seq is live (at or above live_from_seq), and it hasn't been processed before.
-// A frame triggers a notice if this is a within-process reconnect and it's a
-// replay of a terminal event that is above the retained seq.
-// Always updates lastProcessedSeq for every processed frame.
-func (a *App) shouldNotify(frame wire.Frame, isFirstConnect bool) (bell bool, notice bool, turnID, outcome, at string) {
-	if frame.Kind != wire.EventKindTurnState {
-		// Still track this frame even if it's not terminal
-		a.lastProcessedSeq = max(a.lastProcessedSeq, frame.Seq)
+// shouldNotify classifies a frame and advances the retained seq, the highest
+// seq this process has processed, for every frame whatever the notify setting.
+// A terminal turn_state frame above the retained seq is either live, at or
+// above live_from_seq, which rings when /notify is on, or replay, which
+// produces a reconnect notice. The first connection's replay lies below
+// live_from_seq and is covered by the retained seq set in onConnected, so a
+// new process never claims turns that ended while it was detached. The
+// notice does not depend on /notify.
+func (a *App) shouldNotify(frame wire.Frame) (bell, notice bool, turnID, outcome, at string) {
+	fresh := frame.Seq > a.lastProcessedSeq
+	a.lastProcessedSeq = max(a.lastProcessedSeq, frame.Seq)
+	if !fresh || frame.Kind != wire.EventKindTurnState {
 		return
 	}
-
 	var body wire.EvTurnState
-	if json.Unmarshal(frame.Body, &body) != nil || body.TurnID == "" {
-		// Still track this frame even if it fails to parse
-		a.lastProcessedSeq = max(a.lastProcessedSeq, frame.Seq)
+	if json.Unmarshal(frame.Body, &body) != nil || body.TurnID == "" || !isTerminalState(body.State) {
 		return
 	}
-
-	if !isTerminalState(body.State) {
-		// Still track this frame even if it's not terminal state
-		a.lastProcessedSeq = max(a.lastProcessedSeq, frame.Seq)
-		return
-	}
-
-	turnID = body.TurnID
-	outcome = body.State
-	at = frame.At
-
-	// Determine if this is replay or live
-	isLive := frame.Seq >= a.liveFromSeq
-
-	// Bell: only if notify is on and it's a live terminal event not seen before
-	if a.notify && isLive && frame.Seq > a.lastProcessedSeq {
-		bell = true
-	}
-
-	// Notice: only on within-process reconnect (not first connect), for replay terminal events above retained seq
-	if !isFirstConnect && !isLive && frame.Seq > a.lastProcessedSeq {
+	turnID, outcome, at = body.TurnID, body.State, frame.At
+	if frame.Seq >= a.liveFromSeq {
+		bell = a.notify
+	} else {
 		notice = true
 	}
-
-	// Always update lastProcessedSeq for this terminal event
-	a.lastProcessedSeq = max(a.lastProcessedSeq, frame.Seq)
-
 	return
 }
 

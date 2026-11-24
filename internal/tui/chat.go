@@ -174,7 +174,7 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 		// Add reconnect notice if this turn has a missed terminal event
 		if outcome, ok := in.missedTerminalEvents[id]; ok {
 			if at, okTime := in.missedTerminalTimes[id]; okTime {
-				noticeLine := fmt.Sprintf("· %s at %s (reconnect)", outcome, at)
+				noticeLine := fmt.Sprintf("reconnected: turn ended while detached: %s at %s", outcome, at)
 				if !ai.plainMode {
 					noticeLine = dimmed.Render(noticeLine)
 				}

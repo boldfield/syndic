@@ -1,263 +1,289 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/wire"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
-func TestShouldNotifyOffByDefault(t *testing.T) {
-	a := &App{notify: false, liveFromSeq: 10, lastProcessedSeq: 0}
-	frame := terminalEventFrame(1, 15)
+const noticeText = "reconnected: turn ended while detached"
 
-	bell, notice, _, _, _ := a.shouldNotify(frame, true)
-	if bell || notice {
-		t.Errorf("expected no bell/notice when notify is off")
-	}
+// fakeEngine answers hello, status and subscribe on a unix socket; the tests
+// feed the event frames to the App themselves. liveFrom is the live_from_seq
+// the next subscribe reports.
+type fakeEngine struct {
+	socket   string
+	liveFrom atomic.Int64
 }
 
-func TestShouldNotifyIgnoresNonTerminalEvents(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
-	frame := wire.Frame{
-		Kind: wire.EventKindTurnSubmitted,
-		Seq:  15,
+func newFakeEngine(t *testing.T) *fakeEngine {
+	t.Helper()
+	l, err := net.Listen("unix", filepath.Join(t.TempDir(), "e.sock"))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	bell, notice, _, _, _ := a.shouldNotify(frame, true)
-	if bell || notice {
-		t.Errorf("expected no bell/notice for non-terminal events")
-	}
+	t.Cleanup(func() { _ = l.Close() })
+	e := &fakeEngine{socket: l.Addr().String()}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				r, w := wire.NewReader(c), wire.NewWriter(c)
+				for {
+					f, err := r.Read()
+					if err != nil {
+						return
+					}
+					var body any
+					switch f.Type {
+					case wire.RequestHello:
+						body = wire.HelloReply{Protocol: 1, RunID: "run-1"}
+					case wire.RequestStatus:
+						body = wire.StatusReply{}
+					case wire.RequestSubscribe:
+						body = wire.SubscribeReply{OK: true, LiveFromSeq: e.liveFrom.Load()}
+					default:
+						return
+					}
+					reply, _ := wire.NewReply(f.ID, body)
+					_ = w.Write(reply)
+				}
+			}()
+		}
+	}()
+	return e
 }
 
-func TestShouldNotifyBellForLiveTerminalEvent(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
-	frame := terminalEventFrame(1, 15) // seq 15 >= liveFromSeq 10
-
-	bell, notice, turnID, outcome, _ := a.shouldNotify(frame, true)
-	if !bell || notice {
-		t.Errorf("expected bell but no notice for live terminal event")
-	}
-	if turnID != "turn-1" {
-		t.Errorf("expected turnID=turn-1, got %q", turnID)
-	}
-	if outcome != "approved" {
-		t.Errorf("expected outcome=approved, got %q", outcome)
-	}
-	if a.lastProcessedSeq != 15 {
-		t.Errorf("expected lastProcessedSeq=15, got %d", a.lastProcessedSeq)
-	}
+// notifyHarness drives an App through connect, frames and connection loss.
+type notifyHarness struct {
+	t     *testing.T
+	eng   *fakeEngine
+	app   *App
+	bells atomic.Int32
 }
 
-func TestShouldNotifyNoticeOnlyOnReconnect(t *testing.T) {
-	a := &App{notify: false, liveFromSeq: 20, lastProcessedSeq: 0}
-	frame := terminalEventFrame(1, 15) // seq 15 < liveFromSeq 20
-
-	// On first connect, no notice
-	bell, notice, _, _, _ := a.shouldNotify(frame, true)
-	if bell || notice {
-		t.Errorf("expected no bell/notice on first connect for replay event")
-	}
-
-	// Reset for reconnect test
-	a.lastProcessedSeq = 0
-	bell, notice, _, _, _ = a.shouldNotify(frame, false)
-	if bell || !notice {
-		t.Errorf("expected no bell but notice on reconnect for replay event")
-	}
+func newNotifyHarness(t *testing.T, notify bool) *notifyHarness {
+	t.Helper()
+	h := &notifyHarness{t: t, eng: newFakeEngine(t)}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.app = NewApp(ctx, h.eng.socket, WithNotify(notify), WithBellEmitter(func() { h.bells.Add(1) }))
+	h.app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	return h
 }
 
-func TestShouldNotifyDeduplicatesBells(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 15}
-	frame := terminalEventFrame(1, 15) // same seq, already processed
-
-	bell, notice, _, _, _ := a.shouldNotify(frame, true)
-	if bell || notice {
-		t.Errorf("expected no bell/notice for already-processed event")
+// connect runs the App's own connect command for its current generation, with
+// the engine reporting liveFrom, and hands the result to Update.
+func (h *notifyHarness) connect(liveFrom int64) {
+	h.t.Helper()
+	h.eng.liveFrom.Store(liveFrom)
+	msg := connectCmd(h.app.ctx, h.app.gen, h.eng.socket, h.app.state.LastSeq)()
+	cm, ok := msg.(connectedMsg)
+	if !ok {
+		h.t.Fatalf("connect returned %T", msg)
 	}
+	h.app.Update(cm)
+	// Frames are fed by hand: close the stream so the armed reads end at once.
+	_ = cm.cl.Close()
 }
 
-func TestShouldNotifyDeduplicatesNotices(t *testing.T) {
-	a := &App{notify: false, liveFromSeq: 20, lastProcessedSeq: 15}
-	frame := terminalEventFrame(1, 15) // same seq, already processed
-
-	bell, notice, _, _, _ := a.shouldNotify(frame, false)
-	if bell || notice {
-		t.Errorf("expected no bell/notice for already-processed event")
-	}
-}
-
-func TestRecordMissedTerminalEvent(t *testing.T) {
-	a := &App{missedTerminalEvents: make(map[string]string), missedTerminalEventsTm: make(map[string]string)}
-	a.recordMissedTerminalEvent("turn-1", "approved", "2024-01-01T00:00:00Z")
-
-	if a.missedTerminalEvents["turn-1"] != "approved" {
-		t.Errorf("expected outcome=approved, got %q", a.missedTerminalEvents["turn-1"])
-	}
-	if a.missedTerminalEventsTm["turn-1"] != "2024-01-01T00:00:00Z" {
-		t.Errorf("expected timestamp, got %q", a.missedTerminalEventsTm["turn-1"])
-	}
-}
-
-func TestBoundaryEventBell(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
-	frame := terminalEventFrame(1, 10) // seq exactly at liveFromSeq boundary
-
-	bell, _, _, _, _ := a.shouldNotify(frame, true)
-	if !bell {
-		t.Errorf("expected bell for event at live_from_seq boundary")
-	}
-}
-
-func TestShouldNotifyTracksEveryFrame(t *testing.T) {
-	a := &App{notify: false, liveFromSeq: 10, lastProcessedSeq: 0}
-
-	// A non-terminal event should still update lastProcessedSeq
-	frame := wire.Frame{
-		Kind: wire.EventKindTurnSubmitted,
-		Seq:  5,
-	}
-	a.shouldNotify(frame, true)
-	if a.lastProcessedSeq != 5 {
-		t.Errorf("expected lastProcessedSeq=5 after non-terminal event, got %d", a.lastProcessedSeq)
-	}
-}
-
-func TestBellEmitterInjection(t *testing.T) {
-	bellCount := 0
-	emit := func() { bellCount++ }
-	a := &App{
-		notify:           true,
-		liveFromSeq:      10,
-		lastProcessedSeq: 0,
-		emitBell:         emit,
-	}
-
-	frame := terminalEventFrame(1, 15) // live terminal event
-	bell, _, _, _, _ := a.shouldNotify(frame, true)
-	if !bell {
-		t.Errorf("expected bell")
-	}
-
-	cmd := a.bellCmd()
+// lose ends the connection as a stream error does, and reconnects after the
+// last seq seen.
+func (h *notifyHarness) lose(liveFrom int64) {
+	h.t.Helper()
+	_, cmd := h.app.Update(eventMsg{gen: h.app.gen, err: errors.New("connection lost")})
 	if cmd == nil {
-		t.Errorf("expected bellCmd to return a command")
+		h.t.Fatal("no reconnect command")
 	}
+	h.eng.liveFrom.Store(liveFrom)
+	cm, ok := cmd().(connectedMsg)
+	if !ok {
+		h.t.Fatal("reconnect did not connect")
+	}
+	h.app.Update(cm)
+	_ = cm.cl.Close()
+}
 
-	// Execute the command
-	msg := cmd()
-	if msg == nil {
-		t.Errorf("expected bellCmd to execute and return a message")
+// frame feeds one event and runs the commands it returns, so a bell command
+// reaches the emitter.
+func (h *notifyHarness) frame(f wire.Frame) {
+	h.t.Helper()
+	_, cmd := h.app.Update(eventMsg{gen: h.app.gen, frame: f})
+	var wg sync.WaitGroup
+	var run func(tea.Cmd)
+	run = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if b, ok := c().(tea.BatchMsg); ok {
+				for _, sub := range b {
+					run(sub)
+				}
+			}
+		}()
 	}
-	if bellCount != 1 {
-		t.Errorf("expected bell emitter to be called once, got %d", bellCount)
+	run(cmd)
+	wg.Wait()
+}
+
+func (h *notifyHarness) notices() int {
+	return strings.Count(h.app.View(), noticeText)
+}
+
+func submittedFrame(turnID string, seq int64) wire.Frame {
+	b, _ := json.Marshal(wire.EvTurnSubmitted{TurnID: turnID, SubmissionID: "sub-" + turnID, Preset: "solo"})
+	return wire.Frame{Seq: seq, Kind: wire.EventKindTurnSubmitted, At: "2024-01-01T00:00:00Z", Body: b}
+}
+
+func terminalEventFrame(turnID string, seq int64) wire.Frame {
+	b, _ := json.Marshal(wire.EvTurnState{TurnID: turnID, State: "approved"})
+	return wire.Frame{Seq: seq, Kind: wire.EventKindTurnState, At: fmt.Sprintf("2024-01-01T00:00:%02dZ", seq%60), Body: b}
+}
+
+func TestNotifyOffByDefault(t *testing.T) {
+	a := NewApp(context.Background(), "x")
+	if a.notify {
+		t.Fatal("notify must default to off")
 	}
 }
 
-func TestNilBellEmitterReturnsNilCmd(t *testing.T) {
-	a := &App{
-		notify:           true,
-		liveFromSeq:      10,
-		lastProcessedSeq: 0,
-		emitBell:         nil,
+func TestNewProcessWithHistoryShowsNoNoticeAndNoBell(t *testing.T) {
+	h := newNotifyHarness(t, true)
+	h.connect(11)
+	h.frame(submittedFrame("turn-1", 3))
+	h.frame(terminalEventFrame("turn-1", 4))
+	if n := h.bells.Load(); n != 0 {
+		t.Errorf("replay rang %d bells", n)
 	}
-
-	cmd := a.bellCmd()
-	if cmd != nil {
-		t.Errorf("expected bellCmd to return nil when emitBell is nil")
-	}
-}
-
-func TestRepeatedReconnectsNoDuplicateNotice(t *testing.T) {
-	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 50}
-	frame := terminalEventFrame(1, 75) // seq 75 is replay and above 50
-
-	// First reconnect: should show notice
-	bell1, notice1, _, _, _ := a.shouldNotify(frame, false)
-	if bell1 || !notice1 {
-		t.Errorf("expected notice on first reconnect")
-	}
-
-	// After processing, lastProcessedSeq should be 75
-	if a.lastProcessedSeq != 75 {
-		t.Errorf("expected lastProcessedSeq=75, got %d", a.lastProcessedSeq)
-	}
-
-	// Second reconnect with same event: should not show notice
-	bell2, notice2, _, _, _ := a.shouldNotify(frame, false)
-	if bell2 || notice2 {
-		t.Errorf("expected no notice on second reconnect for already-processed event")
+	if n := h.notices(); n != 0 {
+		t.Errorf("a new process showed %d notices", n)
 	}
 }
 
-func TestNewProcessShowsNoNoticeForPriorTurns(t *testing.T) {
-	// A new process starts and processes replayed events from before it launched.
-	// It should NOT show notices for those turns.
-	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 0}
-
-	// Simulate first connect: lastProcessedSeq is set to liveFromSeq
-	// to prevent showing notices for turns that ended before this process started.
-	firstConnectSeq := a.liveFromSeq
-	a.lastProcessedSeq = firstConnectSeq
-
-	// A replay event from before this process started
-	frame := terminalEventFrame(1, 50)
-
-	bell, notice, _, _, _ := a.shouldNotify(frame, true) // first connect
-	if bell || notice {
-		t.Errorf("new process should not show notice for turns ended while detached")
+func TestBoundaryEventRingsOnce(t *testing.T) {
+	h := newNotifyHarness(t, true)
+	h.connect(10)
+	h.frame(submittedFrame("turn-1", 9))
+	h.frame(terminalEventFrame("turn-1", 10))
+	if n := h.bells.Load(); n != 1 {
+		t.Errorf("boundary terminal rang %d bells, want 1", n)
+	}
+	h.frame(terminalEventFrame("turn-1", 10))
+	if n := h.bells.Load(); n != 1 {
+		t.Errorf("a repeated frame rang again: %d bells", n)
+	}
+	if n := h.notices(); n != 0 {
+		t.Errorf("a live event showed %d notices", n)
 	}
 }
 
-func TestBellNotAffectedByNotifyIfAlreadyOn(t *testing.T) {
-	bellCount := 0
-	emit := func() { bellCount++ }
-
-	a := &App{
-		notify:           true,
-		liveFromSeq:      10,
-		lastProcessedSeq: 0,
-		emitBell:         emit,
+func TestEmptyReplayThenLiveTerminalRingsOnce(t *testing.T) {
+	h := newNotifyHarness(t, true)
+	h.connect(1)
+	h.frame(submittedFrame("turn-1", 1))
+	if n := h.bells.Load(); n != 0 {
+		t.Fatalf("non-terminal rang %d bells", n)
 	}
-
-	// Live terminal event with notify on
-	frame := terminalEventFrame(1, 15)
-	bell, _, _, _, _ := a.shouldNotify(frame, true)
-	if !bell {
-		t.Errorf("expected bell for live terminal event with notify on")
-	}
-
-	cmd := a.bellCmd()
-	if cmd != nil {
-		cmd() // Execute to trigger bell
-	}
-
-	if bellCount != 1 {
-		t.Errorf("bell should fire when notify is on and event is live and terminal")
+	h.frame(terminalEventFrame("turn-1", 2))
+	if n := h.bells.Load(); n != 1 {
+		t.Errorf("live terminal rang %d bells, want 1", n)
 	}
 }
 
-func TestNoticeIndependentOfNotifySetting(t *testing.T) {
-	// Notice should appear even when /notify is off
-	a := &App{notify: false, liveFromSeq: 100, lastProcessedSeq: 50}
-	frame := terminalEventFrame(1, 75) // replay terminal event
-
-	bell, notice, _, _, _ := a.shouldNotify(frame, false) // reconnect
-	if bell || !notice {
-		t.Errorf("notice should appear regardless of notify setting; bell=%v, notice=%v", bell, notice)
+func TestNotifyOffNeverRings(t *testing.T) {
+	h := newNotifyHarness(t, false)
+	h.connect(1)
+	h.frame(submittedFrame("turn-1", 1))
+	h.frame(terminalEventFrame("turn-1", 2))
+	if n := h.bells.Load(); n != 0 {
+		t.Errorf("notify off rang %d bells", n)
 	}
 }
 
-func terminalEventFrame(turnNum, seq int64) wire.Frame {
-	body := wire.EvTurnState{
-		TurnID: "turn-1",
-		State:  "approved",
+func TestMissedTerminalWhileDetachedShowsOneNoticeAndNoBell(t *testing.T) {
+	for _, notify := range []bool{true, false} {
+		t.Run(fmt.Sprintf("notify=%v", notify), func(t *testing.T) {
+			h := newNotifyHarness(t, notify)
+			h.connect(5)
+			h.frame(submittedFrame("turn-1", 5))
+			if n := h.notices(); n != 0 {
+				t.Fatalf("notice before any reconnect: %d", n)
+			}
+			// The turn ends while detached; the replay after reconnect carries it.
+			h.lose(8)
+			h.frame(terminalEventFrame("turn-1", 6))
+			view := h.app.View()
+			if n := strings.Count(view, noticeText); n != 1 {
+				t.Fatalf("got %d notice lines, want 1; view:\n%s", n, view)
+			}
+			if !strings.Contains(view, "approved at 2024-01-01T00:00:06Z") {
+				t.Errorf("notice names no outcome and time; view:\n%s", view)
+			}
+			if n := h.bells.Load(); n != 0 {
+				t.Errorf("replayed terminal rang %d bells", n)
+			}
+
+			// Later reconnects, even re-delivering the frame, add nothing.
+			for i := 0; i < 2; i++ {
+				h.lose(8)
+				h.frame(terminalEventFrame("turn-1", 6))
+				if n := h.notices(); n != 1 {
+					t.Errorf("reconnect %d: %d notice lines, want 1", i+2, n)
+				}
+				if n := h.bells.Load(); n != 0 {
+					t.Errorf("reconnect %d rang %d bells", i+2, n)
+				}
+			}
+		})
 	}
-	bodyBytes, _ := json.Marshal(body)
-	return wire.Frame{
-		Kind: wire.EventKindTurnState,
-		Seq:  seq,
-		At:   "2024-01-01T00:00:00Z",
-		Body: bodyBytes,
+}
+
+func TestLiveTerminalAfterReconnectRingsOnce(t *testing.T) {
+	h := newNotifyHarness(t, true)
+	h.connect(5)
+	h.frame(submittedFrame("turn-1", 5))
+	h.lose(7)
+	h.frame(submittedFrame("turn-2", 7))
+	h.frame(terminalEventFrame("turn-2", 8))
+	if n := h.bells.Load(); n != 1 {
+		t.Errorf("got %d bells, want 1", n)
+	}
+	h.lose(9)
+	h.frame(terminalEventFrame("turn-2", 8))
+	if n := h.bells.Load(); n != 1 {
+		t.Errorf("a re-delivered live terminal rang again: %d bells", n)
+	}
+}
+
+func TestRetainedSeqAdvancesWhileNotifyIsOff(t *testing.T) {
+	h := newNotifyHarness(t, false)
+	h.connect(1)
+	h.frame(submittedFrame("turn-1", 1))
+	h.frame(terminalEventFrame("turn-1", 2))
+	h.app.notify = true // as /notify on does
+	h.lose(3)
+	h.frame(terminalEventFrame("turn-1", 2))
+	if n := h.bells.Load(); n != 0 {
+		t.Errorf("an event processed before /notify on rang %d bells", n)
+	}
+	if n := h.notices(); n != 0 {
+		t.Errorf("an event processed before the reconnect gave %d notices", n)
 	}
 }

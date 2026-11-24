@@ -973,10 +973,11 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	a.liveFromSeq = msg.liveFromSeq
-	// On first connect, initialize lastProcessedSeq to liveFromSeq so we don't
-	// show notices for turns that ended before this process started.
+	// The first connection's replay is history this process never saw live:
+	// count it as processed so no notice or bell claims it. live_from_seq is
+	// the first live seq, so the boundary event itself is not covered.
 	if a.isFirstConnect {
-		a.lastProcessedSeq = a.liveFromSeq
+		a.lastProcessedSeq = max(a.lastProcessedSeq, a.liveFromSeq-1)
 		a.isFirstConnect = false
 	}
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
@@ -1143,7 +1144,7 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Handle notifications for terminal events
-	bell, notice, turnID, outcome, at := a.shouldNotify(msg.frame, a.isFirstConnect)
+	bell, notice, turnID, outcome, at := a.shouldNotify(msg.frame)
 	if notice {
 		a.recordMissedTerminalEvent(turnID, outcome, at)
 	}
