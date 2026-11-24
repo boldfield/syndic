@@ -269,6 +269,17 @@ func (r *Roster) ApplyDefaults() {
 		awr := true
 		r.Tools.AllowWebWithRead = &awr
 	}
+	if len(r.Tools.ProtectedPaths) == 0 {
+		r.Tools.ProtectedPaths = []string{
+			".git/",
+			".syndic/",
+			".env*",
+			"**/*.key",
+			"**/*.pem",
+			".syndic/config/**",
+			".syndic/state/**",
+		}
+	}
 	if r.Tools.MaxFetchesPerTurn == nil {
 		mfpt := 20
 		r.Tools.MaxFetchesPerTurn = &mfpt

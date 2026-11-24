@@ -289,6 +289,12 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		if e.SpendingControl != "" {
 			eMap["spending_control"] = e.SpendingControl
 		}
+		if e.RefereeModel != "" {
+			eMap["referee_model"] = e.RefereeModel
+		}
+		if e.RefereeEndpoint != "" {
+			eMap["referee_endpoint"] = e.RefereeEndpoint
+		}
 		endpoints[i] = eMap
 	}
 	roMap["endpoints"] = endpoints
@@ -301,6 +307,12 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		}
 		if len(preset.RequiredReviewers) > 0 {
 			pMap["required_reviewers"] = preset.RequiredReviewers
+		}
+		if len(preset.Tools) > 0 {
+			pMap["tools"] = preset.Tools
+		}
+		if len(preset.ReviewerTools) > 0 {
+			pMap["reviewer_tools"] = preset.ReviewerTools
 		}
 		if preset.Deadlines != nil {
 			dMap := make(map[string]interface{})
@@ -474,6 +486,52 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		quick[name] = qMap
 	}
 	roMap["quick"] = quick
+
+	if roster.Tools != nil {
+		toolsMap := make(map[string]interface{})
+		if roster.Tools.AllowWebWithRead != nil {
+			toolsMap["allow_web_with_read"] = *roster.Tools.AllowWebWithRead
+		}
+		if len(roster.Tools.ProtectedPaths) > 0 {
+			toolsMap["protected_paths"] = roster.Tools.ProtectedPaths
+		}
+		if len(roster.Tools.FileEgressDestinations) > 0 {
+			toolsMap["file_egress_destinations"] = roster.Tools.FileEgressDestinations
+		}
+		if roster.Tools.MaxFetchesPerTurn != nil {
+			toolsMap["max_fetches_per_turn"] = *roster.Tools.MaxFetchesPerTurn
+		}
+		if roster.Tools.MaxCallsPerTurn != nil {
+			toolsMap["max_calls_per_turn"] = *roster.Tools.MaxCallsPerTurn
+		}
+		if roster.Tools.MaxReviewerCalls != nil {
+			toolsMap["max_reviewer_calls"] = *roster.Tools.MaxReviewerCalls
+		}
+		if roster.Tools.MaxResultBytes != nil {
+			toolsMap["max_result_bytes"] = *roster.Tools.MaxResultBytes
+		}
+		if roster.Tools.Web != nil {
+			webMap := make(map[string]interface{})
+			if len(roster.Tools.Web.AllowedHosts) > 0 {
+				webMap["allowed_hosts"] = roster.Tools.Web.AllowedHosts
+			}
+			if len(webMap) > 0 {
+				toolsMap["web"] = webMap
+			}
+		}
+		if roster.Tools.Referee != nil {
+			refereeMap := make(map[string]interface{})
+			if roster.Tools.Referee.MaxOutputTokens != nil {
+				refereeMap["max_output_tokens"] = *roster.Tools.Referee.MaxOutputTokens
+			}
+			if len(refereeMap) > 0 {
+				toolsMap["referee"] = refereeMap
+			}
+		}
+		if len(toolsMap) > 0 {
+			roMap["tools"] = toolsMap
+		}
+	}
 
 	roMap["default_preset"] = roster.DefaultPreset
 

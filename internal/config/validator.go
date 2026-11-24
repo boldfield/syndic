@@ -4,8 +4,70 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"slices"
+	"strings"
 )
+
+func validateAllowedHostPattern(pattern string) error {
+	if pattern == "" {
+		return errors.New("pattern cannot be empty")
+	}
+
+	// Check for IP literals - not allowed when allowlist is set
+	if net.ParseIP(pattern) != nil {
+		return errors.New("IP literals are not allowed in allowlist")
+	}
+
+	// Check if it looks like an IPv6 (has colons)
+	if strings.Contains(pattern, ":") {
+		return errors.New("IP literals are not allowed in allowlist")
+	}
+
+	// Valid patterns:
+	// - exact host: "example.com"
+	// - subdomains only: "*.example.com" (matches a.example.com but not example.com)
+	// - both: "**.example.com" (matches example.com and a.example.com)
+
+	wildcardCount := strings.Count(pattern, "*")
+	if wildcardCount > 2 {
+		return fmt.Errorf("too many wildcards in pattern %q (max 2)", pattern)
+	}
+
+	if wildcardCount == 1 {
+		// Single wildcard: must be "*.domain"
+		if !strings.HasPrefix(pattern, "*.") {
+			return fmt.Errorf("single wildcard must be at the start: %q", pattern)
+		}
+		baseDomain := strings.TrimPrefix(pattern, "*.")
+		if strings.Contains(baseDomain, "*") {
+			return fmt.Errorf("invalid wildcard placement in %q", pattern)
+		}
+		if strings.Contains(baseDomain, ".") == false {
+			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
+		}
+	} else if wildcardCount == 2 {
+		// Double wildcard: must be "**.domain"
+		if !strings.HasPrefix(pattern, "**.") {
+			return fmt.Errorf("double wildcard must be at the start: %q", pattern)
+		}
+		baseDomain := strings.TrimPrefix(pattern, "**.")
+		if strings.Contains(baseDomain, "*") {
+			return fmt.Errorf("invalid wildcard placement in %q", pattern)
+		}
+		if strings.Contains(baseDomain, ".") == false {
+			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
+		}
+	} else if wildcardCount == 0 {
+		// Exact match: no wildcards
+		// No suffix matching allowed, so pattern must not start with a dot
+		if strings.HasPrefix(pattern, ".") {
+			return fmt.Errorf("suffix matching is not allowed: %q", pattern)
+		}
+	}
+
+	return nil
+}
 
 func (r *Roster) Validate() error {
 	var errs []error
@@ -428,7 +490,7 @@ func (r *Roster) Validate() error {
 		hasWrite := slices.Contains(preset.Tools, "write")
 		needsEgressCheck := hasRead || hasWrite
 
-		// If preset has read or write, check file egress destinations
+		// If preset has read or write, check file egress destinations for all participants
 		if needsEgressCheck {
 			allParticipants := []string{preset.Author}
 			allParticipants = append(allParticipants, preset.RequiredReviewers...)
@@ -448,10 +510,21 @@ func (r *Roster) Validate() error {
 
 			for _, pID := range allParticipants {
 				for _, p := range r.Participants {
-					if p.ID == pID && p.Route == "api" && p.Endpoint != "" {
-						// Participant must either be on a local endpoint or in egress destinations
-						if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
-							errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
+					if p.ID == pID {
+						if p.Route == "api" && p.Endpoint != "" {
+							// API participant must either be on a local endpoint or in egress destinations
+							if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
+								errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
+							}
+						} else if p.Route == "cli" {
+							// CLI participant must have tools only if on a local endpoint or in egress destinations
+							// Since CLI participants don't have an endpoint field in the traditional sense,
+							// they need an explicit endpoint or must be considered local
+							if p.Endpoint != "" {
+								if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
+									errs = append(errs, fmt.Errorf("preset %q: CLI participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
+								}
+							}
 						}
 						break
 					}
@@ -459,21 +532,31 @@ func (r *Roster) Validate() error {
 			}
 		}
 
-		// If preset has any tools, check web tool requirements
-		hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
-		if hasWeb {
-			// Check that all participants using this preset have endpoint with referee_model
-			allParticipants := []string{preset.Author}
-			allParticipants = append(allParticipants, preset.RequiredReviewers...)
+		// If preset has web tools, check that each endpoint used by a web participant has referee_model
+		authorHasWeb := slices.Contains(preset.Tools, "web")
+		reviewerHasWeb := slices.Contains(preset.ReviewerTools, "web")
 
-			for _, pID := range allParticipants {
+		if authorHasWeb {
+			// Author has web; check author's endpoint
+			for _, p := range r.Participants {
+				if p.ID == preset.Author && p.Route == "api" && p.Endpoint != "" {
+					ep := endpointMap[p.Endpoint]
+					if ep.RefereeModel == "" {
+						errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by author has no referee_model but web tools are required", name, p.Endpoint))
+					}
+					break
+				}
+			}
+		}
+
+		if reviewerHasWeb {
+			// Reviewers have web; check each reviewer's endpoint
+			for _, reviewerID := range preset.RequiredReviewers {
 				for _, p := range r.Participants {
-					if p.ID == pID && p.Route == "api" {
-						if p.Endpoint != "" {
-							ep := endpointMap[p.Endpoint]
-							if ep.RefereeModel == "" {
-								errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by participant %q has no referee_model but web tools are required", name, p.Endpoint, pID))
-							}
+					if p.ID == reviewerID && p.Route == "api" && p.Endpoint != "" {
+						ep := endpointMap[p.Endpoint]
+						if ep.RefereeModel == "" {
+							errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by reviewer %q has no referee_model but web tools are required", name, p.Endpoint, reviewerID))
 						}
 						break
 					}
@@ -489,30 +572,33 @@ func (r *Roster) Validate() error {
 			hasWrite := slices.Contains(preset.Tools, "write")
 
 			if hasWeb && (hasRead || hasWrite) {
-				allParticipants := []string{preset.Author}
-				allParticipants = append(allParticipants, preset.RequiredReviewers...)
-				participantStr := ""
-				for _, pID := range allParticipants {
-					for _, p := range r.Participants {
-						if p.ID == pID {
-							if p.Route == "api" && p.Endpoint != "" {
-								// Check if this participant has web
-								if (preset.Author == pID && slices.Contains(preset.Tools, "web")) ||
-									(slices.Contains(preset.RequiredReviewers, pID) && slices.Contains(preset.ReviewerTools, "web")) {
-									// This participant has web and receives file content
-									if participantStr == "" {
-										participantStr = pID
-									} else {
-										participantStr += ", " + pID
-									}
-								}
-							}
+				// Find all participants with web and determine which will receive file-derived content
+				webParticipants := []string{}
+				fileParticipants := []string{}
+
+				if slices.Contains(preset.Tools, "web") {
+					webParticipants = append(webParticipants, preset.Author)
+				}
+				if slices.Contains(preset.ReviewerTools, "web") {
+					webParticipants = append(webParticipants, preset.RequiredReviewers...)
+				}
+
+				// File content recipients: author if read or write, reviewers if any tool
+				if slices.Contains(preset.Tools, "read") || slices.Contains(preset.Tools, "write") {
+					fileParticipants = append(fileParticipants, preset.Author)
+				}
+				if hasRead || (hasWrite && len(preset.ReviewerTools) > 0) {
+					fileParticipants = append(fileParticipants, preset.RequiredReviewers...)
+				}
+
+				// Check if any web participant also receives file content
+				for _, wp := range webParticipants {
+					for _, fp := range fileParticipants {
+						if wp == fp {
+							errs = append(errs, fmt.Errorf("preset %q: cannot combine web and read/write tools with tools.allow_web_with_read=false (affected participant: %q)", name, wp))
 							break
 						}
 					}
-				}
-				if participantStr != "" && hasRead {
-					errs = append(errs, fmt.Errorf("preset %q: cannot combine web and read tools with tools.allow_web_with_read=false (affected: %s)", name, participantStr))
 				}
 			}
 		}
@@ -560,6 +646,16 @@ func (r *Roster) Validate() error {
 		for _, dest := range r.Tools.FileEgressDestinations {
 			if !seenEndpointNames[dest] {
 				errs = append(errs, fmt.Errorf("tools.file_egress_destinations references non-existent endpoint: %q", dest))
+			}
+		}
+
+		// Validate web allowed_hosts patterns
+		if r.Tools.Web != nil {
+			for _, pattern := range r.Tools.Web.AllowedHosts {
+				// Check for invalid patterns
+				if err := validateAllowedHostPattern(pattern); err != nil {
+					errs = append(errs, fmt.Errorf("tools.web.allowed_hosts: %w", err))
+				}
 			}
 		}
 	}
