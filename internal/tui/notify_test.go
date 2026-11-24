@@ -98,7 +98,7 @@ func TestBoundaryEventBell(t *testing.T) {
 	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
 	frame := terminalEventFrame(1, 10) // seq exactly at liveFromSeq boundary
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, _, _, _, _ := a.shouldNotify(frame)
 	if !bell {
 		t.Errorf("expected bell for event at live_from_seq boundary")
 	}
@@ -111,7 +111,7 @@ func TestReplayAfterEmptyReplay(t *testing.T) {
 	// Then a live event arrives
 	frame := terminalEventFrame(1, 10)
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, _, _, _, _ := a.shouldNotify(frame)
 	if !bell {
 		t.Errorf("expected bell after empty replay for first live terminal event")
 	}
