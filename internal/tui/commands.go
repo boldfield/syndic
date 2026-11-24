@@ -28,8 +28,6 @@ var commands = map[string]commandHandler{
 	"release":       cmdRelease,
 	"drafts":        cmdDrafts,
 	"raw":           cmdRaw,
-	"notify":        cmdNotify,
-	"mouse":         cmdMouse,
 	"help":          cmdHelp,
 	"new":           cmdNew,
 	"conversations": cmdConversations,
@@ -56,8 +54,6 @@ var commandHelp = []string{
 	"/release <pool> [attempt] release held capacity, after a confirmation",
 	"/drafts on|off            show or hide the author's unreviewed draft",
 	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
-	"/notify on|off            turn on|off the terminal bell for completed turns",
-	"/mouse on|off             turn on|off mouse capture in the TUI",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -65,13 +61,16 @@ var commandHelp = []string{
 
 // keyHelp is one line per key, in the order /help lists them.
 var keyHelp = []string{
-	"Tab, Shift+Tab            switch tabs",
+	"Tab, Shift+Tab            switch tabs; complete a command while list is open",
+	"↑, ↓                      select a command from the list",
+	"?                         show/hide short help on empty input",
+	"Ctrl+O                    open the reviews drawer (chat tab)",
 	"PgUp, PgDn                scroll the active tab, or this panel",
 	"Enter                     submit the input, or run the command",
 	"Alt+Enter                 insert a newline; a multi-line paste is kept as typed",
 	"Ctrl+C                    clear the input; on an empty input, detach",
 	"Ctrl+D                    on an empty input, detach, exactly as /quit",
-	"Esc                       close this panel",
+	"Esc                       close lists, short help, the drawer, or this panel",
 	"Detaching never cancels a turn; only /cancel does.",
 }
 
@@ -191,26 +190,6 @@ func cmdRaw(a *App, args []string) tea.Cmd {
 	}
 	a.rawMode = args[0] == "on"
 	a.refusal = "raw " + args[0]
-	return nil
-}
-
-func cmdNotify(a *App, args []string) tea.Cmd {
-	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
-		a.refusal = "usage: /notify on|off"
-		return nil
-	}
-	a.notifyEnabled = args[0] == "on"
-	a.refusal = "notify " + args[0]
-	return nil
-}
-
-func cmdMouse(a *App, args []string) tea.Cmd {
-	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
-		a.refusal = "usage: /mouse on|off"
-		return nil
-	}
-	a.mouseEnabled = args[0] == "on"
-	a.refusal = "mouse " + args[0]
 	return nil
 }
 

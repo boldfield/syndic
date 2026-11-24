@@ -595,33 +595,3 @@ func TestQuestionMarkShowsShortHelp(t *testing.T) {
 		t.Fatalf("short help not enabled")
 	}
 }
-
-func TestNotifyCommand(t *testing.T) {
-	h := scripted(t, enginetest.Reply(answerText), approve())
-	r := startAnswerRig(t, h)
-	r.typeLine("/notify on")
-	untilView(t, r, "notify on")
-	if !r.app.notifyEnabled {
-		t.Fatalf("notify not enabled")
-	}
-	r.typeLine("/notify off")
-	untilView(t, r, "notify off")
-	if r.app.notifyEnabled {
-		t.Fatalf("notify not disabled")
-	}
-}
-
-func TestMouseCommand(t *testing.T) {
-	h := scripted(t, enginetest.Reply(answerText), approve())
-	r := startAnswerRig(t, h)
-	r.typeLine("/mouse on")
-	untilView(t, r, "mouse on")
-	if !r.app.mouseEnabled {
-		t.Fatalf("mouse not enabled")
-	}
-	r.typeLine("/mouse off")
-	untilView(t, r, "mouse off")
-	if r.app.mouseEnabled {
-		t.Fatalf("mouse not disabled")
-	}
-}

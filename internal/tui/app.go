@@ -108,10 +108,6 @@ type App struct {
 	rounds         int      // round limit for this process
 	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
 
-	// Feature toggles
-	notifyEnabled bool // /notify on|off; default is off
-	mouseEnabled  bool // /mouse on|off; default is off
-
 	// Command list state
 	commandList   commandListState
 	showShortHelp bool
@@ -630,6 +626,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.panel, a.refusal, a.panelRow = nil, "", 0
 		a.commandList.selected = -1
 		a.commandList.commands = nil
+		a.commandList.scroll = 0
 		a.showShortHelp = false
 		a.reviewsDrawer.Close()
 		a.want.Drawer = false
@@ -637,8 +634,10 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		if a.input.Value() == "" {
 			a.showShortHelp = !a.showShortHelp
+			return a, nil
 		}
-		return a, nil
+		// Pass through to textarea for non-empty input
+		return a, a.updateInput(msg)
 	case "ctrl+o":
 		if a.tab == tabChat {
 			if a.reviewsDrawer.IsOpen() {
@@ -647,6 +646,10 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if a.width >= regionMinWidth && a.height >= regionMinHeight {
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
+					// Close lists and hide short help when drawer opens
+					a.commandList.selected = -1
+					a.commandList.commands = nil
+					a.showShortHelp = false
 					a.updateDrawerTurns()
 					hs := a.layout()
 					a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
@@ -664,6 +667,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				a.commandList.selected = max(a.commandList.selected-1, 0)
 			}
+			a.updateCommandListScroll()
 			return a, nil
 		}
 	case "down":
@@ -673,6 +677,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				a.commandList.selected = min(a.commandList.selected+1, len(a.commandList.commands)-1)
 			}
+			a.updateCommandListScroll()
 			return a, nil
 		}
 	case "tab":
@@ -903,6 +908,7 @@ func (a *App) updateCommandList() {
 	if strings.Contains(input, " ") || !strings.HasPrefix(input, "/") {
 		a.commandList.commands = nil
 		a.commandList.selected = -1
+		a.commandList.scroll = 0
 		return
 	}
 	a.commandList.commands = buildCommandList(input, a)
@@ -911,7 +917,26 @@ func (a *App) updateCommandList() {
 	}
 	if len(a.commandList.commands) == 0 {
 		a.commandList.selected = -1
+		a.commandList.scroll = 0
 	}
+	a.updateCommandListScroll()
+}
+
+// updateCommandListScroll adjusts the scroll position to keep the selected
+// command visible within the max visible commands window.
+func (a *App) updateCommandListScroll() {
+	const maxVis = 5
+	if a.commandList.selected < 0 {
+		a.commandList.scroll = 0
+		return
+	}
+	if a.commandList.selected < a.commandList.scroll {
+		a.commandList.scroll = a.commandList.selected
+	} else if a.commandList.selected >= a.commandList.scroll+maxVis {
+		a.commandList.scroll = a.commandList.selected - maxVis + 1
+	}
+	maxScroll := max(len(a.commandList.commands)-maxVis, 0)
+	a.commandList.scroll = min(a.commandList.scroll, maxScroll)
 }
 
 // completeCommand inserts the selected command into the input.
@@ -1374,9 +1399,11 @@ func (a *App) layout() heights {
 	want := a.want
 	// Calculate command list lines if there are commands to show
 	if len(a.commandList.commands) > 0 {
-		want.ListLines = len(commandListLines(a.commandList.commands, a.width))
-	} else if a.showShortHelp {
-		want.ListLines = len(shortHelpLines())
+		want.ListLines = len(commandListLines(a.commandList.commands, a.width, a.commandList.scroll))
+	}
+	// Request help region if short help is shown and drawer is not open
+	if a.showShortHelp && !a.reviewsDrawer.IsOpen() {
+		want.Help = true
 	}
 	return allocate(layoutIn{
 		Height:     a.height,
@@ -1560,19 +1587,17 @@ func (a *App) View() string {
 			output = append(output, "")
 		}
 	}
-	// Render command list or short help
+	// Render command list or short help in List region
 	var listLines []string
 	if len(a.commandList.commands) > 0 {
-		listLines = commandListLines(a.commandList.commands, w)
+		listLines = commandListLines(a.commandList.commands, w, a.commandList.scroll)
 		// Render with highlight on selected command
 		for i := range listLines {
-			if i == a.commandList.selected {
-				// Highlight selected command
+			if a.commandList.selected >= 0 && i == (a.commandList.selected-a.commandList.scroll) {
+				// Highlight selected command (adjusted for scroll offset)
 				listLines[i] = "> " + listLines[i]
 			}
 		}
-	} else if a.showShortHelp {
-		listLines = shortHelpLines()
 	}
 	for i := 0; i < hs.List; i++ {
 		if i < len(listLines) {
@@ -1581,8 +1606,29 @@ func (a *App) View() string {
 			output = append(output, "")
 		}
 	}
-	for range hs.Attached + hs.Help {
+
+	// Attached line and Help region
+	for i := 0; i < hs.Attached; i++ {
 		output = append(output, "")
+	}
+	// Render short help in Help region if drawer is not open and showShortHelp is true
+	if a.showShortHelp && !a.reviewsDrawer.IsOpen() {
+		for i := 0; i < hs.Help; i++ {
+			if i == 0 {
+				helpLines := shortHelpLines()
+				if len(helpLines) > 0 {
+					output = append(output, ansi.Truncate(helpLines[0], w, ""))
+				} else {
+					output = append(output, "")
+				}
+			} else {
+				output = append(output, "")
+			}
+		}
+	} else {
+		for i := 0; i < hs.Help; i++ {
+			output = append(output, "")
+		}
 	}
 
 	output = append(output, inputLines)

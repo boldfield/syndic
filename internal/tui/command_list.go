@@ -17,10 +17,14 @@ type Command struct {
 type commandListState struct {
 	commands []Command
 	selected int // index into commands; -1 if none selected
+	scroll   int // first visible command index
 }
 
+const maxVisibleCommands = 5
+
 // buildCommandList returns the commands matching prefix, sorted alphabetically,
-// with their current values where applicable.
+// with their current values where applicable. It derives the list from the
+// registered commands and their help text to avoid duplication.
 func buildCommandList(prefix string, a *App) []Command {
 	prefix = strings.ToLower(prefix)
 	if !strings.HasPrefix(prefix, "/") {
@@ -30,28 +34,14 @@ func buildCommandList(prefix string, a *App) []Command {
 
 	var out []Command
 
-	// All available commands with their descriptions
-	allCmds := map[string]string{
-		"new":           "start a new conversation",
-		"conversations": "list this directory's conversations",
-		"switch":        "open the conversation with this id or prefix",
-		"trim":          "leave the turns before this one out of later history",
-		"rounds":        "show, or set for this process, the revisions per turn",
-		"budget":        "tokens reserved, charged and the limit of the turn",
-		"mode":          "use the preset for the next submit only",
-		"quick":         "select or deselect a quick profile for this process",
-		"participants":  "show the participants tab",
-		"cancel":        "cancel the open turn",
-		"why":           "why the current or last turn ended, with the detail",
-		"override":      "accept an incomplete turn's candidate, with a reason",
-		"release":       "release held capacity, after a confirmation",
-		"drafts":        "show or hide the author's unreviewed draft",
-		"raw":           "show answers unrendered (on) or as Markdown (off)",
-		"notify":        "turn on|off the terminal bell for completed turns",
-		"mouse":         "turn on|off mouse capture in the TUI",
-		"resume":        "reconnect to the engine",
-		"quit":          "leave; an open turn keeps running",
-		"help":          "show this list of commands and keys",
+	// Build help map from commandHelp
+	helpMap := make(map[string]string)
+	for _, line := range commandHelp {
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) >= 2 {
+			name := strings.TrimPrefix(parts[0], "/")
+			helpMap[name] = line
+		}
 	}
 
 	// Get current values for toggle commands
@@ -73,9 +63,13 @@ func buildCommandList(prefix string, a *App) []Command {
 		}(),
 	}
 
-	// Match commands
-	for name, help := range allCmds {
+	// Match commands from the registered commands map
+	for name := range commands {
 		if strings.HasPrefix(name, prefix) {
+			help := ""
+			if line, ok := helpMap[name]; ok {
+				help = line
+			}
 			cmd := Command{Name: name, Help: help}
 			if val, ok := values[name]; ok && val != "" {
 				cmd.Value = val
@@ -92,15 +86,17 @@ func buildCommandList(prefix string, a *App) []Command {
 	return out
 }
 
-// commandListLines renders the command list as strings, each with name, help,
-// and optional value.
-func commandListLines(commands []Command, width int) []string {
+// commandListLines renders the visible command list as strings, each with name, help,
+// and optional value. Only shows up to maxVisibleCommands starting from scroll position.
+func commandListLines(commands []Command, width int, scroll int) []string {
 	if len(commands) == 0 {
 		return nil
 	}
 
 	var out []string
-	for _, cmd := range commands {
+	end := min(scroll+maxVisibleCommands, len(commands))
+	for i := scroll; i < end; i++ {
+		cmd := commands[i]
 		line := "/" + cmd.Name
 		if cmd.Value != "" {
 			line += " (" + cmd.Value + ")"
