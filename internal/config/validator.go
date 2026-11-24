@@ -95,15 +95,15 @@ func validateAllowedHostPattern(pattern string) error {
 		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
 	}
 
-	// Decoding A-labels with the strict profile rejects ones that encode
-	// IDNA-disallowed code points (e.g. emoji).
+	// Decode A-labels with the registration profile, then apply the IDNA2008
+	// derived properties and contextual rules that UTS #46 alone does not.
 	decoded, err := idnaRegistration.ToUnicode(canonicalDomain)
 	if err != nil {
 		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
 	}
-	for _, r := range decoded {
-		if r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r) && !idnaContextO[r] {
-			return fmt.Errorf("pattern %q contains a code point (%U) not allowed in hostnames", pattern, r)
+	for _, label := range strings.Split(decoded, ".") {
+		if err := checkIDNA2008Label(label); err != nil {
+			return fmt.Errorf("pattern %q is not a valid IDNA2008 hostname: %w", pattern, err)
 		}
 	}
 
@@ -131,9 +131,107 @@ func validateAllowedHostPattern(pattern string) error {
 	return nil
 }
 
-// idnaContextO holds the IDNA2008 CONTEXTO code points (RFC 5892 Appendix A)
-// that are valid hostname characters despite not being letters or digits.
-var idnaContextO = map[rune]bool{0x00B7: true, 0x0375: true, 0x05F3: true, 0x05F4: true, 0x30FB: true}
+// checkIDNA2008Label applies the RFC 5892 derived-property algorithm (§3)
+// and the CONTEXTO rules (Appendix A) to one decoded U-label. ContextJ
+// (U+200C/U+200D) and the Bidi rule are enforced by idnaRegistration.
+func checkIDNA2008Label(label string) error {
+	runes := []rune(label)
+	for i, r := range runes {
+		switch idna2008Property(r) {
+		case idnaPValid:
+		case idnaContextJ:
+			// Validated by the CheckJoiners option of idnaRegistration.
+		case idnaContextO:
+			if !contextORuleHolds(runes, i) {
+				return fmt.Errorf("code point %U fails its IDNA2008 contextual rule", r)
+			}
+		default:
+			return fmt.Errorf("code point %U is not allowed in hostnames", r)
+		}
+	}
+	return nil
+}
+
+type idnaProperty int
+
+const (
+	idnaDisallowed idnaProperty = iota
+	idnaPValid
+	idnaContextJ
+	idnaContextO
+)
+
+// idnaExceptions is the RFC 5892 §2.6 Exceptions table.
+var idnaExceptions = map[rune]idnaProperty{
+	0x00DF: idnaPValid, 0x03C2: idnaPValid, 0x06FD: idnaPValid,
+	0x06FE: idnaPValid, 0x0F0B: idnaPValid, 0x3007: idnaPValid,
+	0x00B7: idnaContextO, 0x0375: idnaContextO, 0x05F3: idnaContextO,
+	0x05F4: idnaContextO, 0x30FB: idnaContextO,
+	0x0640: idnaDisallowed, 0x07FA: idnaDisallowed, 0x302E: idnaDisallowed,
+	0x302F: idnaDisallowed, 0x3031: idnaDisallowed, 0x3032: idnaDisallowed,
+	0x3033: idnaDisallowed, 0x3034: idnaDisallowed, 0x3035: idnaDisallowed,
+	0x303B: idnaDisallowed,
+}
+
+// idna2008Property derives a code point's IDNA2008 property in the order
+// given by RFC 5892 §3. Unstable code points are excluded beforehand by the
+// UTS #46 registration mapping, which rejects anything NFKC_Casefold changes;
+// unassigned code points have no general category and fall through to
+// DISALLOWED.
+func idna2008Property(r rune) idnaProperty {
+	if p, ok := idnaExceptions[r]; ok {
+		return p
+	}
+	if (r >= 0x0660 && r <= 0x0669) || (r >= 0x06F0 && r <= 0x06F9) {
+		return idnaContextO
+	}
+	if r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+		return idnaPValid
+	}
+	if r == 0x200C || r == 0x200D {
+		return idnaContextJ
+	}
+	if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) ||
+		unicode.Is(unicode.Noncharacter_Code_Point, r) || unicode.Is(unicode.White_Space, r) {
+		return idnaDisallowed
+	}
+	if (r >= 0x20D0 && r <= 0x20FF) || (r >= 0x1D100 && r <= 0x1D24F) {
+		return idnaDisallowed // IgnorableBlocks
+	}
+	if (r >= 0x1100 && r <= 0x11FF) || (r >= 0xA960 && r <= 0xA97F) || (r >= 0xD7B0 && r <= 0xD7FF) {
+		return idnaDisallowed // OldHangulJamo
+	}
+	if unicode.In(r, unicode.Ll, unicode.Lu, unicode.Lo, unicode.Nd, unicode.Lm, unicode.Mn, unicode.Mc) {
+		return idnaPValid
+	}
+	return idnaDisallowed
+}
+
+// contextORuleHolds evaluates the RFC 5892 Appendix A rule for the CONTEXTO
+// code point at runes[i].
+func contextORuleHolds(runes []rune, i int) bool {
+	r := runes[i]
+	switch {
+	case r == 0x00B7: // MIDDLE DOT: between two 'l'
+		return i > 0 && i+1 < len(runes) && runes[i-1] == 'l' && runes[i+1] == 'l'
+	case r == 0x0375: // GREEK LOWER NUMERAL SIGN: followed by Greek
+		return i+1 < len(runes) && unicode.Is(unicode.Greek, runes[i+1])
+	case r == 0x05F3 || r == 0x05F4: // HEBREW GERESH/GERSHAYIM: preceded by Hebrew
+		return i > 0 && unicode.Is(unicode.Hebrew, runes[i-1])
+	case r == 0x30FB: // KATAKANA MIDDLE DOT: label has Hiragana, Katakana or Han
+		for _, o := range runes {
+			if o != 0x30FB && unicode.In(o, unicode.Hiragana, unicode.Katakana, unicode.Han) {
+				return true
+			}
+		}
+		return false
+	case r >= 0x0660 && r <= 0x0669: // ARABIC-INDIC DIGITS: no extended digits
+		return !slices.ContainsFunc(runes, func(o rune) bool { return o >= 0x06F0 && o <= 0x06F9 })
+	case r >= 0x06F0 && r <= 0x06F9: // EXTENDED ARABIC-INDIC DIGITS: no Arabic-Indic digits
+		return !slices.ContainsFunc(runes, func(o rune) bool { return o >= 0x0660 && o <= 0x0669 })
+	}
+	return false
+}
 
 // idnaRegistration validates A-labels against IDNA2008 registration rules.
 var idnaRegistration = idna.New(idna.ValidateForRegistration(), idna.StrictDomainName(true))

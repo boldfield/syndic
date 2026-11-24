@@ -2904,6 +2904,71 @@ func TestAllowlistRejectsPortInPattern(t *testing.T) {
 	}
 }
 
+func TestAllowlistIDNA2008ContextualRules(t *testing.T) {
+	invalid := map[string]string{
+		"xn--ab-0ea.cat":      "middle dot not between two l",
+		"xn--uba.cat":         "lone middle dot",
+		"xn--a-kib.example":   "Greek keraia not followed by Greek",
+		"xn--ab-3n4a.example": "katakana middle dot without Hiragana/Katakana/Han",
+		"xn--e28h.example":    "emoji",
+		"xn--ls8h.example":    "emoji",
+	}
+	for p, why := range invalid {
+		if err := validateAllowedHostPattern(p); err == nil {
+			t.Errorf("validateAllowedHostPattern(%q) = nil, want error (%s)", p, why)
+		}
+	}
+	valid := map[string]string{
+		"xn--ll-0ea.cat":     "middle dot between two l",
+		"*.xn--ll-0ea.cat":   "wildcard over middle dot label",
+		"xn--ccka0y.example": "katakana middle dot with Katakana",
+		"xn--4db4e.example":  "Hebrew geresh after Hebrew letter",
+		"xn--w6j.example":    "U+3007 PVALID exception",
+		"xn--nbd9hb.example": "U+0F0B PVALID exception",
+		"xn--zca.example":    "U+00DF PVALID exception",
+		"xn--bcher-kva.de":   "ordinary IDN",
+	}
+	for p, why := range valid {
+		if err := validateAllowedHostPattern(p); err != nil {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil (%s)", p, err, why)
+		}
+	}
+}
+
+func TestIDNA2008LabelRules(t *testing.T) {
+	tests := []struct {
+		label string
+		ok    bool
+	}{
+		{"l\u00b7l", true},
+		{"a\u00b7b", false},
+		{"\u00b7", false},
+		{"\u0375\u03b1", true},
+		{"a\u0375", false},
+		{"\u05d0\u05f4", true},
+		{"a\u05f3", false},
+		{"\u4e00\u30fb", true},
+		{"a\u30fbb", false},
+		{"\u0628\u0660\u0661", true},
+		{"\u0628\u06f0\u06f1", true},
+		{"\u0628\u0660\u06f1", false},
+		{"\u0628\u0640", false}, // ARABIC TATWEEL is a DISALLOWED exception
+		{"a\u01c5", false},      // Lt is not LetterDigits
+		{"a\u20dd", false},      // Me is not LetterDigits
+		{"a\u2160", false},      // Nl outside the exceptions is DISALLOWED
+		{"a\ufe0f", false},      // variation selector
+		{"\u1100\u1161", false}, // old Hangul jamo
+		{"\u3007", true},
+		{"\u0f40\u0f0b\u0f40", true},
+		{"a\u0378", false}, // unassigned
+	}
+	for _, tt := range tests {
+		if got := checkIDNA2008Label(tt.label); (got == nil) != tt.ok {
+			t.Errorf("checkIDNA2008Label(%+q) = %v, want ok=%v", tt.label, got, tt.ok)
+		}
+	}
+}
+
 func TestAllowlistRejectsNonHostnames(t *testing.T) {
 	bad := []string{
 		"exa mple.com", "user@example.com", "example.com?x", "example..com",
