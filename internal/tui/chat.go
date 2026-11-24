@@ -10,10 +10,11 @@ import (
 
 // chatInput is everything the chat tab needs beyond the State.
 type chatInput struct {
-	answer  func(turnID string) answerInput // what the answer part of one turn needs
-	inputs  map[string]string               // what the user typed, for the turns this process submitted
-	content *ContentCache                   // bodies of the inputs of the other turns
-	width   int                             // terminal width; user text is wrapped and indented to it when positive
+	answer               func(turnID string) answerInput // what the answer part of one turn needs
+	inputs               map[string]string               // what the user typed, for the turns this process submitted
+	content              *ContentCache                   // bodies of the inputs of the other turns
+	width                int                             // terminal width; user text is wrapped and indented to it when positive
+	selectedDrawerTurnID string                          // ID of the selected turn in the drawer, or empty if drawer not open
 }
 
 // userMark begins a user input in column 0.
@@ -23,6 +24,22 @@ const userMark = "› "
 const notInContext = "not in context"
 
 var dimmed = lipgloss.NewStyle().Faint(true)
+
+// selectedMark takes the place of userMark on the drawer's selected input in
+// a plain terminal. It is as wide as userMark, so the chat is not reflowed.
+const selectedMark = "» "
+
+// markSelected shows an input's first line, which begins with userMark, as the
+// drawer's selected input: styled when color is available, otherwise with
+// selectedMark in place of userMark.
+func markSelected(l string, plain bool) string {
+	if plain {
+		return selectedMark + strings.TrimPrefix(l, userMark)
+	}
+	return selectedInput.Render(l)
+}
+
+var selectedInput = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "33", Dark: "75"})
 
 // chatTurns lists the turns of the chat, oldest first.
 func chatTurns(s State) []string {
@@ -114,6 +131,7 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 		lastTurn = len(lines)
 		starts = append(starts, lastTurn)
 		ai := in.answer(id)
+		isSelected := id == in.selectedDrawerTurnID
 		var turn []string
 		text, ok := in.inputs[id]
 		if !ok && s.Turns[id].InputRef != "" && in.content != nil {
@@ -127,15 +145,27 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 					if i == 0 {
 						l = userMark + strings.TrimPrefix(l, contentPrefix)
 					}
+					if isSelected && i == 0 {
+						l = markSelected(l, ai.plainMode)
+					} else if isSelected && !ai.plainMode {
+						l = selectedInput.Render(l)
+					}
 					turn = append(turn, l)
 				}
 			} else {
 				lines := strings.Split(ToSafeText([]byte(text)), "\n")
 				lines[0] = userMark + lines[0]
+				if isSelected {
+					lines[0] = markSelected(lines[0], ai.plainMode)
+				}
 				turn = append(turn, strings.Join(lines, "\n"+contentPrefix))
 			}
 		} else {
-			turn = append(turn, userMark+"(input not loaded)")
+			l := userMark + "(input not loaded)"
+			if isSelected {
+				l = markSelected(l, ai.plainMode)
+			}
+			turn = append(turn, l)
 		}
 		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
 		if trimmed[id] {

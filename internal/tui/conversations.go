@@ -163,9 +163,10 @@ func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
 	a.openConversation(msg.conv.ID, ids)
 	// The chat shows every turn of the conversation, so each turn's record is read.
 	var cmds []tea.Cmd
-	for _, id := range ids {
-		if _, ok := a.state.Turns[id]; !ok {
-			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, id))
+	a.applyReviewCounts(msg.conv)
+	for _, t := range msg.conv.Turns {
+		if _, ok := a.state.Turns[t.ID]; !ok {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, t.ID))
 		}
 	}
 	a.say(fmt.Sprintf("switched to conversation %s, %d turns", shortID(msg.conv.ID), len(ids)) + a.runningElsewhere())
@@ -422,4 +423,50 @@ func cmdBudget(a *App, _ []string) tea.Cmd {
 // the record does not carry shows as "-".
 func budgetLine(id string, b wire.BudgetRecord) string {
 	return fmt.Sprintf("budget of turn %s: reserved %s, charged %s, limit %s tokens", shortID(id), figure(b.Reserved), figure(b.Charged), figure(b.Limit))
+}
+
+// reviewCountsMsg carries the conversation a review_count refresh read.
+type reviewCountsMsg struct {
+	gen  int
+	conv wire.ConversationReply
+	err  error
+}
+
+// applyReviewCounts records each turn's review_count from the conversation.
+func (a *App) applyReviewCounts(conv wire.ConversationReply) {
+	if a.reviewCounts == nil {
+		a.reviewCounts = map[string]*int{}
+	}
+	if a.reviewCountFinal == nil {
+		a.reviewCountFinal = map[string]bool{}
+	}
+	for _, t := range conv.Turns {
+		a.reviewCounts[t.ID] = t.ReviewCount
+		// A count read from a terminal turn no longer changes.
+		a.reviewCountFinal[t.ID] = isTerminalState(t.State)
+	}
+}
+
+// refreshReviewCounts reads the open conversation again when a turn has
+// reached a terminal state and its review_count is not known yet.
+func (a *App) refreshReviewCounts(turnID string) tea.Cmd {
+	if a.cl == nil || a.conversationID == "" || !isTerminalState(a.state.Turns[turnID].State) {
+		return nil
+	}
+	if a.reviewCountFinal[turnID] {
+		return nil
+	}
+	gen, cl, ctx, id := a.gen, a.cl, a.ctx, a.conversationID
+	return func() tea.Msg {
+		conv, err := cl.Conversation(ctx, id)
+		return reviewCountsMsg{gen: gen, conv: conv, err: err}
+	}
+}
+
+func (a *App) onReviewCounts(msg reviewCountsMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen || msg.err != nil || msg.conv.ID != a.conversationID {
+		return a, nil
+	}
+	a.applyReviewCounts(msg.conv)
+	return a, nil
 }

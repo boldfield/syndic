@@ -21,6 +21,7 @@ type answerInput struct {
 	rawMode        bool   // true when Markdown rendering is disabled
 	width          int    // terminal width; content is wrapped and indented to it when positive
 	now            time.Time
+	reviewCount    *int // number of accepted verdicts for this turn, from conversation info
 }
 
 // answerTurn picks the turn the answer tab is about: the open turn, else the
@@ -137,6 +138,10 @@ func outcomeLines(mark, raw string, in answerInput) []string {
 }
 
 func styledOutcomeLines(mark, raw string, in answerInput, style lipgloss.Style) []string {
+	// Append review count to the outcome message if present
+	if in.reviewCount != nil {
+		raw = fmt.Sprintf("%s · %d reviews", raw, *in.reviewCount)
+	}
 	var lines []string
 	if in.width > 0 {
 		lines = SafeTextWithPrefix(raw, in.width)
