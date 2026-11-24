@@ -324,11 +324,10 @@ func cmdOverride(a *App, args []string) tea.Cmd {
 
 	// No reason provided; open form
 	p := &overridePrompt{turn: turn}
-	openReasonForm(a, []string{
+	return openReasonForm(a, []string{
 		"override turn " + turn + "?",
 		"Type a reason for the override and press enter; an empty reason requires esc to cancel.",
 	}, p)
-	return nil
 }
 
 // approvalPrompt is a quick profile selection waiting for yes or no; the panel shows what it does.
@@ -354,13 +353,12 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 		p.attemptID = args[1]
 		target += ", attempt " + p.attemptID
 	}
-	openReasonForm(a, []string{
+	return openReasonForm(a, []string{
 		"release held capacity on " + target + "?",
 		"The server may still be computing the held request, and the next",
 		"dispatch to this pool may overlap it.",
 		"Type a reason and press enter to release; an empty reason requires esc to cancel.",
 	}, p)
-	return nil
 }
 
 // cancelConfirm drops a pending confirmation without sending anything, then

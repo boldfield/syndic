@@ -38,31 +38,76 @@ func (p *releasePrompt) cancelText() string {
 	return "release cancelled; nothing sent"
 }
 
-// reasonForm holds the state of a reason-entry form.
-// It wraps either a Huh form (for colour mode) or falls back to panel-based input (for dumb mode).
+// reasonForm wraps either a Huh form (for colour mode) or panel-based input (for dumb mode).
+// It acts as a Bubble Tea model when in Huh mode.
 type reasonForm struct {
-	huhForm     tea.Model // the Huh form model, or nil for fallback mode
-	useHuh      bool      // true if huh form should be used
-	reasonValue string    // the reason entered by the user (source of truth for Huh mode)
-	panelLines  []string  // used for fallback display in dumb mode
+	huhForm     *huh.Form // the Huh form model, or nil for fallback mode
+	useHuh      bool      // true if using huh form
+	reasonValue string    // the reason entered by the user
+	panelLines  []string  // the panel lines (prompt/warning)
+	initialized bool      // true after Init() has been called
+}
+
+// Init initializes the form (Huh only).
+func (rf *reasonForm) Init() tea.Cmd {
+	if !rf.useHuh || rf.initialized {
+		return nil
+	}
+	rf.initialized = true
+	if rf.huhForm != nil {
+		return rf.huhForm.Init()
+	}
+	return nil
+}
+
+// Update handles messages (Huh only; fallback mode is handled by the app's input).
+func (rf *reasonForm) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if !rf.useHuh || rf.huhForm == nil {
+		return rf, nil
+	}
+	updatedForm, cmd := rf.huhForm.Update(msg)
+	rf.huhForm = updatedForm.(*huh.Form)
+	return rf, cmd
+}
+
+// View renders the form (Huh only).
+func (rf *reasonForm) View() string {
+	if !rf.useHuh || rf.huhForm == nil {
+		return ""
+	}
+	return rf.huhForm.View()
+}
+
+// IsCompleted returns true if the form has completed successfully.
+func (rf *reasonForm) IsCompleted() bool {
+	if !rf.useHuh || rf.huhForm == nil {
+		return false
+	}
+	return rf.huhForm.State == huh.StateCompleted
+}
+
+// Reason returns the entered reason value.
+func (rf *reasonForm) Reason() string {
+	return strings.TrimSpace(rf.reasonValue)
 }
 
 // openReasonForm creates a form prompting for a required reason.
 // In colour mode, uses a Huh form with validation.
 // In TERM=dumb or no-colour mode, uses single-line input via panel.
-func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
+// Returns a command that initializes the form (or nil for fallback mode).
+func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd {
 	a.confirm = confirm
 
 	// Determine if we should use Huh form
 	useHuh := a.terminalCapabilities.Color
 
 	if useHuh {
-		// Create reasonForm first with an empty reasonValue
+		// Create reasonForm with Huh
 		rf := &reasonForm{
 			useHuh:     true,
 			panelLines: panelLines,
 		}
-		// Create a Huh form with one required text field, using the reasonForm's reasonValue field
+		// Create a Huh form with one required text field
 		form := huh.NewForm(
 			huh.NewGroup(
 				huh.NewText().
@@ -78,6 +123,11 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 		)
 		rf.huhForm = form
 		a.reasonForm = rf
+		// Set panel to show the warning/context
+		a.panel = panelLines
+		a.panelRow = 0
+		// Return the form's Init command
+		return rf.Init()
 	} else {
 		// Fallback: use simple panel + textarea input
 		a.reasonForm = &reasonForm{
@@ -86,7 +136,7 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 		}
 		a.panel = panelLines
 		a.setPrompt(reasonPrompt)
+		a.refusal = ""
+		return nil
 	}
-
-	a.refusal = ""
 }

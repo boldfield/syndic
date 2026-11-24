@@ -13,7 +13,6 @@ import (
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 )
@@ -525,6 +524,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := a.input.Width()
 	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
+
+	// If a Huh form is active in Huh mode, route all messages to it
+	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
+		// Handle Esc and detach keys specially to cancel the form
+		if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
+			switch keyMsg.String() {
+			case "esc":
+				a.cancelConfirm(a.confirm.cancelText())
+				return a, nil
+			case "ctrl+c", "ctrl+d":
+				if cmd, ok := a.detachKey(keyMsg.String()); ok {
+					return a, cmd
+				}
+			}
+		}
+		// Route all other messages to the form
+		_, cmd := a.reasonForm.Update(msg)
+		// Check if form is complete
+		if a.reasonForm.IsCompleted() {
+			return a, a.confirmEnter()
+		}
+		return a, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
@@ -599,24 +622,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
-		if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
-			// Let the Huh form handle the input, but check for Esc to cancel
-			switch msg.String() {
-			case "esc":
-				a.cancelConfirm(a.confirm.cancelText())
-				return a, nil
-			}
-			// Pass input to the Huh form
-			updatedModel, cmd := a.reasonForm.huhForm.Update(msg)
-			a.reasonForm.huhForm = updatedModel
-			// Check if form is complete
-			if f, ok := updatedModel.(*huh.Form); ok && f.State == huh.StateCompleted {
-				// Extract the reason value from the form (updated by reference)
-				return a, a.confirmEnter()
-			}
-			return a, cmd
-		}
-
+		// (Huh form handling is now in the update() method before we get here)
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			if cmd, ok := a.detachKey(msg.String()); ok {
@@ -1566,11 +1572,7 @@ func (a *App) View() string {
 	var inputLines string
 	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
 		// Render Huh form for colour mode
-		if f, ok := a.reasonForm.huhForm.(*huh.Form); ok {
-			inputLines = f.View()
-		} else {
-			inputLines = renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
-		}
+		inputLines = a.reasonForm.View()
 	} else {
 		inputLines = renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
 	}
