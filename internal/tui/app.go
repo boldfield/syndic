@@ -815,7 +815,8 @@ func (a *App) handleMouseClick(x, y int) tea.Cmd {
 
 	// Check for drawer round header clicks
 	if a.reviewsDrawer.IsOpen() {
-		drawerStart := a.height - a.reviewsDrawer.drawerHeight - 1
+		hs := a.layout()
+		drawerStart := tabBarHeight + hs.Body + hs.Banners
 		if y >= drawerStart && y < drawerStart+1 {
 			return a.handleDrawerRoundClick(x)
 		}
@@ -857,14 +858,17 @@ func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
 	}
 
 	hs := a.layout()
+	lines, lastTurn := chatLines(a.state, a.chatIn())
+	total := len(lines)
 
-	// Map screen y coordinate to chat view line
+	// Map screen y coordinate to chat view line using the actual starting position
 	chatStartY := tabBarHeight + hs.Banners
 	if y < chatStartY || y >= chatStartY+hs.Body {
 		return nil
 	}
 
-	viewLine := y - chatStartY + a.answerScrollRow
+	scrollStart := a.chatStart(total, lastTurn)
+	viewLine := y - chatStartY + scrollStart
 
 	// Find which turn this line belongs to
 	turnID, ok := a.lineToTurnID[viewLine]
@@ -878,6 +882,10 @@ func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
 		return nil
 	}
 
+	// Update drawer with current turns and open on this turn
+	a.updateDrawerTurns()
+	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
+
 	// Find the turn index in the drawer's turn list
 	ids := chatTurns(a.state)
 	var turnIdx int
@@ -889,9 +897,8 @@ func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
 	}
 
 	a.reviewsDrawer.Open(turnIdx)
-	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	a.ensureTick()
-	return nil
+	a.want.Drawer = true
+	return tea.Batch(a.fetchReviewsForTurn(turnID), a.ensureTick())
 }
 
 // handleDrawerRoundClick processes a click in the drawer header for round selection.

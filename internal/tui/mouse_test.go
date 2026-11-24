@@ -252,8 +252,8 @@ func TestMouseWithDrawerAnimation(t *testing.T) {
 		t.Error("opening drawer should start animation")
 	}
 
-	// Animation should progress
-	if a.reviewsDrawer.animProgress != 0 {
-		t.Error("animation should start at 0")
+	// Animation should start near 0 (allow small timing error)
+	if a.reviewsDrawer.AnimProgress() > 0.01 {
+		t.Error("animation should start near 0")
 	}
 }
