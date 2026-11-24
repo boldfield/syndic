@@ -164,7 +164,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 	d.SetTurns([]string{"turn1", "turn2"})
 
 	// Test rendering when closed
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 	if output != "" {
 		t.Errorf("closed drawer should render empty, got %q", output)
 	}
@@ -177,7 +177,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output = d.render(80, NewContentCache())
+	output = d.render(80, NewContentCache(), false)
 	if output == "" {
 		t.Error("open drawer should not render empty")
 	}
@@ -205,7 +205,7 @@ func TestReviewsDrawerSafeText(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 	// The block ID should have escaped control sequence, not raw ANSI
 	if strings.Contains(output, "\x1b") {
 		t.Error("drawer should not contain raw ANSI codes")
@@ -239,7 +239,7 @@ func TestReviewsDrawerCommentaryRendering(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, cc)
+	output := d.render(80, cc, false)
 	if !strings.Contains(output, "commentary") {
 		t.Error("drawer should show commentary label")
 	}
@@ -262,7 +262,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 
 	// Check that p3 appears before p1, which appears before p2
 	pos3 := strings.Index(output, "p3")
@@ -389,7 +389,7 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 
 	// Each round shows the block in the state that round's verdict gave it.
 	for i, want := range []string{"b1: opened", "b1: maintained", "b1: withdrawn"} {
-		out := d.render(80, NewContentCache())
+		out := d.render(80, NewContentCache(), false)
 		if !strings.Contains(out, want) {
 			t.Errorf("round %d does not show %q:\n%s", i+1, want, out)
 		}
@@ -406,7 +406,7 @@ func TestReviewsDrawerHeaderWithoutReviews(t *testing.T) {
 	d.UpdateReviews("t2", nil)
 	d.SetReviewsError("t3", fmt.Errorf("refused"))
 	for i, want := range []string{"loading…", "no reviews", "reviews unavailable: refused"} {
-		out := d.render(80, NewContentCache())
+		out := d.render(80, NewContentCache(), false)
 		if !strings.Contains(out, fmt.Sprintf("Reviews · Turn %d", i+1)) || !strings.Contains(out, want) {
 			t.Errorf("turn %d: want the header and %q:\n%s", i+1, want, out)
 		}
@@ -859,12 +859,12 @@ func TestDrawerAnimationRender(t *testing.T) {
 
 	// Let animation progress most of the way to see full content
 	d.animProgress = 0.95
-	fullRender := d.render(80, NewContentCache())
+	fullRender := d.render(80, NewContentCache(), false)
 	fullLines := strings.Split(fullRender, "\n")
 
 	// During earlier animation, fewer lines should be rendered
 	d.animProgress = 0.3
-	partialRender := d.render(80, NewContentCache())
+	partialRender := d.render(80, NewContentCache(), false)
 	partialLines := strings.Split(partialRender, "\n")
 
 	if len(partialLines) >= len(fullLines) {
@@ -904,7 +904,7 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	})
 
 	// Render when closed and not animating should be empty
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 	if output != "" {
 		t.Errorf("closed drawer should render empty, got %q", output)
 	}
@@ -912,7 +912,7 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	// But when closed and animating (close animation), it should render
 	d.animating = true
 	d.animProgress = 0.5
-	output = d.render(80, NewContentCache())
+	output = d.render(80, NewContentCache(), false)
 	if output == "" {
 		t.Error("closed drawer should render during close animation")
 	}
@@ -920,7 +920,7 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	// Once animation completes (progress == 0), it should not render
 	d.animProgress = 0
 	d.animating = false
-	output = d.render(80, NewContentCache())
+	output = d.render(80, NewContentCache(), false)
 	if output != "" {
 		t.Errorf("fully closed drawer should not render, got %q", output)
 	}

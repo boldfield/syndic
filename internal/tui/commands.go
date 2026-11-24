@@ -63,6 +63,15 @@ var commandHelp = []string{
 	"/help                     this list",
 }
 
+// flagHelp is one line per flag, in the order /help lists them.
+var flagHelp = []string{
+	"--new                     start with an empty conversation",
+	"--conversation <id>       open the conversation with this id or unique prefix",
+	"--rounds [n]              revisions allowed per turn, 0 to 5",
+	"--notify                  ring the terminal on a live terminal event",
+	"--mouse                   enable mouse input for tabs and drawer",
+}
+
 // keyHelp is one line per key, in the order /help lists them.
 var keyHelp = []string{
 	"Tab, Shift+Tab            switch tabs",
@@ -101,6 +110,7 @@ func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
 	a.panel = append([]string{"commands:"}, commandHelp...)
+	a.panel = append(append(a.panel, "", "flags:"), flagHelp...)
 	a.panel = append(append(a.panel, "", "keys:"), keyHelp...)
 	return nil
 }
@@ -209,9 +219,20 @@ func cmdMouse(a *App, args []string) tea.Cmd {
 		a.refusal = "usage: /mouse on|off"
 		return nil
 	}
-	a.mouseEnabled = args[0] == "on"
+	on := args[0] == "on"
+	a.mouseEnabled = on
 	a.refusal = "mouse " + args[0]
-	return nil
+
+	if on && !a.terminalCapabilities.Color {
+		a.refusal = "mouse: not available in plain mode"
+		a.mouseEnabled = false
+		return nil
+	}
+
+	if on {
+		return func() tea.Msg { return tea.EnableMouseCellMotion() }
+	}
+	return func() tea.Msg { return tea.DisableMouse() }
 }
 
 // commandMsg is the outcome of a command that sent a request: the line to

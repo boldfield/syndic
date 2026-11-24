@@ -105,8 +105,8 @@ func (d *ReviewsDrawer) AnimationTick() bool {
 	if !d.animating {
 		return false
 	}
-	// Advance progress
-	const animSpeed = 0.15
+	// Advance progress: 0.5 per tick makes animation complete in 2 ticks (~2 seconds)
+	const animSpeed = 0.5
 	if d.open {
 		d.animProgress = min(d.animProgress+animSpeed, 1.0)
 		if d.animProgress >= 1.0 {
@@ -212,6 +212,54 @@ func (d *ReviewsDrawer) SelectRoundRight() {
 	}
 }
 
+// RoundClickX returns the x positions where each round's number starts in the header,
+// for use in click handling. Returns a map from round index to x position.
+func (d *ReviewsDrawer) RoundClickPositions(headerLine string) map[int]int {
+	rounds := d.getRounds()
+	if len(rounds) <= 1 {
+		return nil
+	}
+
+	positions := make(map[int]int)
+	pos := strings.Index(headerLine, "[")
+	if pos < 0 {
+		return positions
+	}
+	pos++ // Move past the opening bracket
+
+	for i, r := range rounds {
+		roundStr := fmt.Sprintf("%d", r+1)
+		idx := strings.Index(headerLine[pos:], roundStr)
+		if idx >= 0 {
+			positions[i] = pos + idx
+		}
+	}
+	return positions
+}
+
+// SelectRoundByClick selects the round at the given x coordinate, using the provided header line.
+func (d *ReviewsDrawer) SelectRoundByClick(headerLine string, x int) {
+	positions := d.RoundClickPositions(headerLine)
+	if len(positions) == 0 {
+		return
+	}
+
+	var selectedIdx int
+	closestDist := 999
+	for idx, xPos := range positions {
+		dist := x - xPos
+		if dist >= 0 && dist < closestDist {
+			selectedIdx = idx
+			closestDist = dist
+		}
+	}
+
+	if closestDist < 999 {
+		d.selectedRound = selectedIdx
+		d.scrollOffset = 0
+	}
+}
+
 // ScrollUp scrolls the drawer content up by one line.
 func (d *ReviewsDrawer) ScrollUp(lines int) {
 	d.scrollOffset = max(d.scrollOffset-lines, 0)
@@ -238,8 +286,8 @@ func (d *ReviewsDrawer) SelectedTurnIndex() int {
 }
 
 // render renders the drawer at width w from its scroll position, using
-// content from the cache, with animation effects.
-func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
+// content from the cache, with animation effects (unless in plain mode).
+func (d *ReviewsDrawer) render(w int, cc *ContentCache, plainMode bool) string {
 	// Don't render if fully closed and not animating
 	if !d.open && d.animProgress <= 0 {
 		return ""
@@ -252,8 +300,8 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
 		lines = nil
 	}
 
-	// Apply animation: show only a portion of lines during animation
-	if d.animating && d.drawerHeight > 0 {
+	// Apply animation: show only a portion of lines during animation (skip in plain mode)
+	if !plainMode && d.animating && d.drawerHeight > 0 {
 		progress := easeOutCubic(d.animProgress)
 		visibleLines := int(float64(d.drawerHeight) * progress)
 		if visibleLines < len(lines) {

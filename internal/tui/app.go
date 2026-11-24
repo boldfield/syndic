@@ -100,6 +100,7 @@ type App struct {
 	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
 	reviewCounts     map[string]*int // review_count per turn, from conversation info; a key marks the count as read
 	reviewsLoading   map[string]bool // turns whose reviews are being fetched
+	lineToTurnID     map[int]string  // map from chat view line to turn ID for click handling
 
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
@@ -196,6 +197,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		reviewsDrawer:          NewReviewsDrawer(),
 		reviewCounts:           map[string]*int{},
 		reviewsLoading:         make(map[string]bool),
+		lineToTurnID:           make(map[int]string),
 		missedTerminalEvents:   make(map[string]string),
 		missedTerminalEventsTm: make(map[string]string),
 		isFirstConnect:         true,
@@ -822,32 +824,73 @@ func (a *App) handleMouseClick(x, y int) tea.Cmd {
 	return nil
 }
 
-// handleTabClick processes a click in the tab bar.
+// handleTabClick processes a click in the tab bar by calculating actual tab positions.
 func (a *App) handleTabClick(x int) tea.Cmd {
-	// Tab positions depend on rendering, approximate positions:
-	// Chat starts at 0, Transcript at ~20, Participants at ~35
-	switch {
-	case x < 20:
-		if a.tab != tabChat {
-			a.tab = tabChat
+	names := []string{"chat", "transcript", "participants"}
+
+	pos := 0
+	for i, name := range names {
+		selected := tab(i) == a.tab
+		if selected {
+			name = "[" + name + "]"
 		}
-	case x < 35:
-		if a.tab != tabTranscript {
-			a.tab = tabTranscript
+		tabStart := pos
+		tabEnd := pos + len(name)
+
+		if x >= tabStart && x < tabEnd {
+			if tab(i) != a.tab {
+				a.tab = tab(i)
+			}
+			return nil
 		}
-	default:
-		if a.tab != tabParticipants {
-			a.tab = tabParticipants
-		}
+
+		pos = tabEnd + 2
 	}
+
 	return nil
 }
 
 // handleReviewCountClick processes a click on a review count in the chat.
 func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
-	// Find which turn was clicked by checking the rendered chat
-	// For now, this is a placeholder; actual implementation would
-	// correlate screen position with turn data
+	if a.tab != tabChat {
+		return nil
+	}
+
+	hs := a.layout()
+
+	// Map screen y coordinate to chat view line
+	chatStartY := tabBarHeight + hs.Banners
+	if y < chatStartY || y >= chatStartY+hs.Body {
+		return nil
+	}
+
+	viewLine := y - chatStartY + a.answerScrollRow
+
+	// Find which turn this line belongs to
+	turnID, ok := a.lineToTurnID[viewLine]
+	if !ok || turnID == "" {
+		return nil
+	}
+
+	// Check if this turn has reviews
+	count, hasCount := a.reviewCounts[turnID]
+	if !hasCount || count == nil || *count == 0 {
+		return nil
+	}
+
+	// Find the turn index in the drawer's turn list
+	ids := chatTurns(a.state)
+	var turnIdx int
+	for i, id := range ids {
+		if id == turnID {
+			turnIdx = i
+			break
+		}
+	}
+
+	a.reviewsDrawer.Open(turnIdx)
+	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
+	a.ensureTick()
 	return nil
 }
 
@@ -857,13 +900,16 @@ func (a *App) handleDrawerRoundClick(x int) tea.Cmd {
 	if len(rounds) <= 1 {
 		return nil
 	}
-	// Simple left/right detection: left half moves left, right half moves right
-	drawerWidth := a.width - 4
-	if x < drawerWidth/2 {
-		a.reviewsDrawer.SelectRoundLeft()
-	} else {
-		a.reviewsDrawer.SelectRoundRight()
+
+	plainMode := !a.terminalCapabilities.Color
+	drawerOutput := a.reviewsDrawer.render(a.width, a.content, plainMode)
+	lines := strings.Split(drawerOutput, "\n")
+	if len(lines) == 0 {
+		return nil
 	}
+
+	headerLine := lines[0]
+	a.reviewsDrawer.SelectRoundByClick(headerLine, x)
 	return nil
 }
 
@@ -1546,6 +1592,21 @@ func (a *App) View() string {
 		var chat []string
 		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
 		tabView = strings.Join(chat, "\n")
+
+		a.lineToTurnID = make(map[int]string)
+		turnIDs := chatTurns(a.state)
+		for i, turnID := range turnIDs {
+			if i < len(turnStarts) {
+				startLine := turnStarts[i]
+				endLine := len(chat)
+				if i+1 < len(turnStarts) {
+					endLine = turnStarts[i+1]
+				}
+				for line := startLine; line < endLine; line++ {
+					a.lineToTurnID[line] = turnID
+				}
+			}
+		}
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
@@ -1615,7 +1676,8 @@ func (a *App) View() string {
 
 	// Add drawer, list, attached, and help lines
 	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content), "\n")
+	plainMode := !a.terminalCapabilities.Color
+	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content, plainMode), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {
 			output = append(output, ansi.Truncate(drawerLines[i], w, ""))

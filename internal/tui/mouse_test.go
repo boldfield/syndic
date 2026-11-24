@@ -52,14 +52,14 @@ func TestMouseClickOnTabBar(t *testing.T) {
 	a.width, a.height = 80, 24
 	a.tab = tabChat
 
-	// Click on transcript tab area (around x=25)
-	_ = a.handleTabClick(25)
+	// Click on transcript tab area (x=10 is in "transcript")
+	_ = a.handleTabClick(10)
 	if a.tab != tabTranscript {
 		t.Errorf("clicking transcript area should switch tab to tabTranscript, got %v", a.tab)
 	}
 
-	// Click on participants tab area (around x=40)
-	_ = a.handleTabClick(40)
+	// Click on participants tab area (x=23 is in "participants")
+	_ = a.handleTabClick(23)
 	if a.tab != tabParticipants {
 		t.Errorf("clicking participants area should switch tab to tabParticipants, got %v", a.tab)
 	}
@@ -118,7 +118,7 @@ func TestMouseClickIgnoredWhenMouseDisabled(t *testing.T) {
 func TestCmdMouseCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	a := NewApp(ctx, "")
+	a := NewApp(ctx, "", WithTerminalCapabilities(TerminalCapabilities{Color: true}))
 	a.mouseEnabled = false
 
 	// /mouse on should enable
