@@ -2,6 +2,12 @@ package transport
 
 import "errors"
 
+// IsToolStep returns true if the result is a valid tool step that should not carry a parsed verdict.
+// A tool step is a result with StatusToolCalls that has one or more ToolCalls.
+func IsToolStep(res CompleteResult) bool {
+	return res.Status == StatusToolCalls && len(res.ToolCalls) > 0
+}
+
 // CheckResult is the single gate a result must pass before it can carry a verdict that counts.
 // It returns a joined error containing all applicable errors, or nil if the result is valid.
 // Tool steps (finish status tool_calls with one or more ToolCalls) are accepted as valid.
@@ -29,11 +35,11 @@ func CheckResult(req CompleteRequest, res CompleteResult, expected Expected) err
 
 	if res.Status == StatusToolCalls {
 		if !hasToolCalls {
-			errs = append(errs, errors.New("tool_calls status without tool calls"))
+			errs = append(errs, ErrToolCallsWithoutStatus)
 		}
 	} else if hasToolCalls {
 		// Calls under non-tool_calls finish status is malformed
-		errs = append(errs, errors.New("tool calls under non-tool_calls finish status"))
+		errs = append(errs, ErrToolCallsUnderOtherStatus)
 	} else if res.Status != StatusComplete {
 		errs = append(errs, ErrStatusNotComplete)
 	}

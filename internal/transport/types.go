@@ -107,8 +107,10 @@ func NewRevisionIdentity(value, requestedModel string) (ModelIdentity, error) {
 
 // Message represents a single message in the conversation.
 type Message struct {
-	Role    string // "system", "user", "assistant", or "tool"
-	Content string
+	Role       string // "system", "user", "assistant", or "tool"
+	Content    string
+	ToolCalls  []ToolCall // Set on assistant messages carrying tool calls
+	ToolCallID string     // Set on tool messages to reference the tool_call_id being answered
 }
 
 // Tool represents a tool definition sent in a request.

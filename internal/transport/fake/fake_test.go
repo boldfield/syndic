@@ -1729,3 +1729,90 @@ func TestCompleteWithToolCalls(t *testing.T) {
 		t.Errorf("native finish: %q, want tool_calls", result.NativeFinish)
 	}
 }
+
+// TestCompleteWithToolCallsSecretScrubbing verifies tool call arguments are scrubbed.
+func TestCompleteWithToolCallsSecretScrubbing(t *testing.T) {
+	secret := "my-secret-api-key"
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd","key":"` + secret + `"}`,
+			},
+		},
+		{
+			ID:   "call_2",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "web_fetch",
+				Arguments: `{"url":"https://example.com","auth":"` + secret + `"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+		ResolvedSecrets:      []string{secret},
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read file contents",
+					Parameters:  map[string]interface{}{"path": "string"},
+				},
+			},
+		},
+		Deadline: time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	if result.ScrubCount != 2 {
+		t.Errorf("scrub count: %d, want 2 (one per tool call argument)", result.ScrubCount)
+	}
+
+	for i, call := range result.ToolCalls {
+		if strings.Contains(call.Function.Arguments, secret) {
+			t.Errorf("tool call %d arguments contain secret: %q", i, call.Function.Arguments)
+		}
+		if !strings.Contains(call.Function.Arguments, transport.ScrubMarker) {
+			t.Errorf("tool call %d arguments missing scrub marker: %q", i, call.Function.Arguments)
+		}
+	}
+}

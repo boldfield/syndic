@@ -230,9 +230,20 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			text, _ = transport.Scrub(text, a.resolvedSecrets)
 		}
 
-		// Copy tool calls from step, if any
+		// Copy and scrub tool calls from step, if any
 		toolCalls := make([]transport.ToolCall, len(step.ToolCalls))
-		copy(toolCalls, step.ToolCalls)
+		for i, call := range step.ToolCalls {
+			scrubbedArgs, argScrubCount := transport.Scrub(call.Function.Arguments, a.resolvedSecrets)
+			toolCalls[i] = transport.ToolCall{
+				ID:   call.ID,
+				Type: call.Type,
+				Function: transport.ToolCallFunction{
+					Name:      call.Function.Name,
+					Arguments: scrubbedArgs,
+				},
+			}
+			count += argScrubCount
+		}
 
 		return transport.CompleteResult{
 			Envelope:        req.Envelope,
