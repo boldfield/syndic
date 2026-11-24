@@ -1,10 +1,11 @@
 package tui
 
 import (
-	"github.com/charmbracelet/lipgloss"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // RenderMarkdown renders answer text at the given terminal width, with

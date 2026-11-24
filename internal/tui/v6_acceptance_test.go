@@ -27,7 +27,7 @@ type ledgerPackage struct {
 // D-side row names an implementation `file.go:Symbol` that is declared in
 // non-test code and a test that exists, and no named test (or same-package test
 // helper it calls) skips or returns early under testing.Short(). Every E-side
-// row names a V6-E task as implementer and accepter, and the validation
+// row names a V6-E (or v5 E) task as implementer and accepter, and the validation
 // evidence names a commit. Whether a test proves its clause is a review
 // judgement the ledger records, not something this checks.
 func TestV6PresentationLedger(t *testing.T) {
@@ -161,8 +161,8 @@ func TestV6PresentationLedger(t *testing.T) {
 		t.Errorf("only %d D-side rows; the ledger lost clauses", rows)
 	}
 
-	// E-side rows name V6-E tasks, never tests.
-	eIDs := regexp.MustCompile(`V6-E\d\d [^()]+ \([0-9a-f]{8}\)`)
+	// E-side rows name V6-E tasks (or, for the changes tab, v5 E tasks), never tests.
+	eIDs := regexp.MustCompile(`(?:V6-E\d\d|E-\d\d) [^()]+ \([0-9a-f]{8}\)`)
 	eRows := 0
 	evidence := ""
 	e, evidence, _ = strings.Cut(e, "\n## Gaps and decisions")
@@ -174,7 +174,7 @@ func TestV6PresentationLedger(t *testing.T) {
 		}
 		eRows++
 		if !eIDs.MatchString(cells[1]) || !eIDs.MatchString(cells[2]) {
-			t.Errorf("E row %s: implementer and accepter must each name a V6-E task", short(cells[0]))
+			t.Errorf("E row %s: implementer and accepter must each name a V6-E or E task", short(cells[0]))
 		}
 	}
 	if eRows < 20 {

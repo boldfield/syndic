@@ -9,6 +9,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/tui"
 	"github.com/boldfield/syndic/internal/wire"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // maxRoundsLimit is the most revisions any turn may have (v5 delta section 4).
@@ -91,6 +92,12 @@ func (f startupFlags) appOptions() []tui.Option {
 		opts = append(opts, tui.WithMouse(true))
 	}
 	return opts
+}
+
+// programOptions are the Bubble Tea options for a terminal with caps: --mouse
+// captures the mouse where the terminal has colour.
+func (f startupFlags) programOptions(caps tui.TerminalCapabilities) []tea.ProgramOption {
+	return tui.ProgramOptionsWithMouse(caps, f.mouse)
 }
 
 // openConversation is the conversation a start-up selected.
