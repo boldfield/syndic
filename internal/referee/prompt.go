@@ -16,9 +16,9 @@ type WebCall struct {
 }
 
 type Payload struct {
-	UserInput  string
 	CallName   string
 	CallURL    string
+	UserInput  string
 	PriorCalls []WebCall
 }
 
@@ -38,32 +38,50 @@ or:
 
 The reason is a single line of text explaining your decision. It is required and must follow the decision word with one space. Do not include anything else in your response.`
 
+// Framing constants for the payload - these are the exact bytes hashed and rendered.
+const (
+	hdrUserInput    = "user input["
+	hdrProposedCall = "proposed call:\n"
+	hdrPriorCalls   = "prior calls this turn:\n"
+	noneMarker      = "none"
+	hdrCloseBracket = "]:\n"
+	hdrSectionSep   = "\n\n"
+	hdrCallSep      = " "
+	hdrLineSep      = "\n"
+)
+
 func buildPayloadUser(input Payload) string {
 	var buf bytes.Buffer
 
-	buf.WriteString("user input[")
-	userLen := len(input.UserInput)
-	buf.WriteString(strconv.Itoa(userLen))
-	buf.WriteString("]:\n")
+	// user input[<length>]:\n<text>\n\n
+	buf.WriteString(hdrUserInput)
+	buf.WriteString(strconv.Itoa(len(input.UserInput)))
+	buf.WriteString(hdrCloseBracket)
 	buf.WriteString(input.UserInput)
-	buf.WriteString("\n\n")
+	buf.WriteString(hdrSectionSep)
 
-	buf.WriteString("proposed call:\n")
-	buf.WriteString(input.CallName)
-	buf.WriteString(" ")
-	buf.WriteString(input.CallURL)
-	buf.WriteString("\n\n")
+	// proposed call:\n<name> <url>\n\n
+	buf.WriteString(hdrProposedCall)
+	buf.WriteString(strconv.Quote(input.CallName))
+	buf.WriteString(hdrCallSep)
+	buf.WriteString(strconv.Quote(input.CallURL))
+	buf.WriteString(hdrSectionSep)
 
-	buf.WriteString("prior calls this turn:\n")
+	// prior calls this turn:\n<name> <url>\n...\n
+	buf.WriteString(hdrPriorCalls)
 	if len(input.PriorCalls) > 0 {
-		for _, call := range input.PriorCalls {
-			buf.WriteString(call.Name)
-			buf.WriteString(" ")
-			buf.WriteString(call.URL)
-			buf.WriteString("\n")
+		for i, call := range input.PriorCalls {
+			if i > 0 {
+				buf.WriteString(hdrLineSep)
+			}
+			buf.WriteString(strconv.Quote(call.Name))
+			buf.WriteString(hdrCallSep)
+			buf.WriteString(strconv.Quote(call.URL))
 		}
+		buf.WriteString(hdrLineSep)
 	} else {
-		buf.WriteString("none\n")
+		buf.WriteString(noneMarker)
+		buf.WriteString(hdrLineSep)
 	}
 
 	return buf.String()
@@ -96,11 +114,33 @@ func TemplateHash() string {
 	return templateCache
 }
 
-func computeTemplateHash() string {
+// canonicalTemplate builds the template representation using the same framing constants
+// that buildPayloadUser uses, so changes to framing automatically change the hash.
+func canonicalTemplate() string {
 	var buf bytes.Buffer
 	buf.WriteString(systemText)
-	buf.WriteString("\n\npayload format:\nuser input[<length>]:\n<user input text>\n\nproposed call:\n<call_name> <url_or_query>\n\nprior calls this turn:\n<name> <url>, one per line, or \"none\"\n")
-	templateBytes := buf.Bytes()
-	h := sha256.Sum256(templateBytes)
+	buf.WriteString("\n\npayload format:\n")
+	buf.WriteString(hdrUserInput)
+	buf.WriteString("<length>")
+	buf.WriteString(hdrCloseBracket)
+	buf.WriteString("<user input text>")
+	buf.WriteString(hdrSectionSep)
+	buf.WriteString(hdrProposedCall)
+	buf.WriteString("\"<call_name>\" \"<url_or_query>\"")
+	buf.WriteString(hdrSectionSep)
+	buf.WriteString(hdrPriorCalls)
+	buf.WriteString("\"<name>\" \"<url>\"")
+	buf.WriteString(hdrLineSep)
+	buf.WriteString("\"<name>\" \"<url>\"")
+	buf.WriteString(hdrLineSep)
+	buf.WriteString("or ")
+	buf.WriteString(noneMarker)
+	buf.WriteString(hdrLineSep)
+	return buf.String()
+}
+
+func computeTemplateHash() string {
+	template := canonicalTemplate()
+	h := sha256.Sum256([]byte(template))
 	return hex.EncodeToString(h[:])
 }

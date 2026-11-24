@@ -20,7 +20,6 @@ type ParsedResult struct {
 }
 
 type ParseError struct {
-	text   string
 	detail string
 }
 
@@ -31,25 +30,19 @@ func (e *ParseError) Error() string {
 // Parse parses a referee response text. It returns ParsedResult with Decision set
 // to either DecisionAllow or DecisionDeny, depending on the response text.
 // In case of any error, the result decision is DecisionDeny and an error is returned.
+// finishStatus must be StatusComplete; any other status causes a deny.
+// hasToolCalls indicates if the response contains tool calls, which also causes a deny.
 func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bool) (ParsedResult, error) {
-	// Reject if truncated, refused, or contains tool calls.
-	if finishStatus == transport.StatusTruncated {
+	// Only StatusComplete is acceptable; deny all other statuses.
+	if finishStatus != transport.StatusComplete {
 		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			text:   text,
-			detail: "truncated response",
+			detail: fmt.Sprintf("non-complete finish status: %v", finishStatus),
 		}
 	}
 
-	if finishStatus == transport.StatusRefused {
-		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			text:   text,
-			detail: "refused response",
-		}
-	}
-
+	// Reject if contains tool calls.
 	if hasToolCalls {
 		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			text:   text,
 			detail: "response contains tool calls",
 		}
 	}
@@ -58,27 +51,35 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 
 	if text == "" {
 		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			text:   "",
 			detail: "empty response",
 		}
 	}
 
-	lines := strings.Split(text, "\n")
-	if len(lines) == 0 || len(lines[0]) == 0 {
+	// Check for control characters (CR, etc) which indicate malformed input.
+	if strings.ContainsAny(text, "\r\t") {
 		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			text:   text,
+			detail: "response contains control characters",
+		}
+	}
+
+	// Split on both \r\n and \n to be strict about line breaks.
+	lines := strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+
+	if len(lines) == 0 {
+		return ParsedResult{Decision: DecisionDeny}, &ParseError{
 			detail: "no content",
 		}
 	}
 
-	firstLine := strings.TrimSpace(lines[0])
+	firstLine := lines[0]
 
-	// Strict: only allow exactly one line.
+	// Strict: only allow exactly one non-empty line.
 	if len(lines) > 1 {
 		for i := 1; i < len(lines); i++ {
-			if strings.TrimSpace(lines[i]) != "" {
+			if lines[i] != "" {
 				return ParsedResult{Decision: DecisionDeny}, &ParseError{
-					text:   text,
 					detail: "response must be exactly one line",
 				}
 			}
@@ -89,7 +90,6 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 		reason := strings.TrimPrefix(firstLine, "allow ")
 		if reason == "" {
 			return ParsedResult{Decision: DecisionDeny}, &ParseError{
-				text:   text,
 				detail: "allow without reason",
 			}
 		}
@@ -103,7 +103,6 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 		reason := strings.TrimPrefix(firstLine, "deny ")
 		if reason == "" {
 			return ParsedResult{Decision: DecisionDeny}, &ParseError{
-				text:   text,
 				detail: "deny without reason",
 			}
 		}
@@ -114,7 +113,6 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 	}
 
 	return ParsedResult{Decision: DecisionDeny}, &ParseError{
-		text:   text,
 		detail: "first line must start with 'allow ' or 'deny '",
 	}
 }

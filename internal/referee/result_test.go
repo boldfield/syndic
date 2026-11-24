@@ -179,6 +179,44 @@ func TestParse(t *testing.T) {
 			wantReason:   "Good reason",
 			wantErr:      false,
 		},
+		// New tests for finish status strictness
+		{
+			name:         "interrupted status deny",
+			text:         "allow This matches",
+			finish:       transport.StatusInterrupted,
+			toolCalls:    false,
+			wantDecision: DecisionDeny,
+			wantReason:   "",
+			wantErr:      true,
+		},
+		{
+			name:         "error status deny",
+			text:         "allow This matches",
+			finish:       transport.StatusError,
+			toolCalls:    false,
+			wantDecision: DecisionDeny,
+			wantReason:   "",
+			wantErr:      true,
+		},
+		// New tests for control character rejection
+		{
+			name:         "carriage return deny",
+			text:         "allow ok\rdeny",
+			finish:       transport.StatusComplete,
+			toolCalls:    false,
+			wantDecision: DecisionDeny,
+			wantReason:   "",
+			wantErr:      true,
+		},
+		{
+			name:         "tab character deny",
+			text:         "allow\tgood",
+			finish:       transport.StatusComplete,
+			toolCalls:    false,
+			wantDecision: DecisionDeny,
+			wantReason:   "",
+			wantErr:      true,
+		},
 	}
 
 	for _, tt := range tests {
