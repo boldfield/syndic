@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -15,6 +16,8 @@ type chatInput struct {
 	content              *ContentCache                   // bodies of the inputs of the other turns
 	width                int                             // terminal width; user text is wrapped and indented to it when positive
 	selectedDrawerTurnID string                          // ID of the selected turn in the drawer, or empty if drawer not open
+	missedTerminalEvents map[string]string               // turn ids -> outcome, for reconnect notices
+	missedTerminalTimes  map[string]string               // turn ids -> timestamp, for reconnect notices
 }
 
 // userMark begins a user input in column 0.
@@ -168,6 +171,16 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 			turn = append(turn, l)
 		}
 		turn = append(turn, strings.Split(renderAnswer(s, id, ai), "\n")...)
+		// Add reconnect notice if this turn has a missed terminal event
+		if outcome, ok := in.missedTerminalEvents[id]; ok {
+			if at, okTime := in.missedTerminalTimes[id]; okTime {
+				noticeLine := fmt.Sprintf("reconnected: turn ended while detached: %s at %s", outcome, at)
+				if !ai.plainMode {
+					noticeLine = dimmed.Render(noticeLine)
+				}
+				turn = append(turn, noticeLine)
+			}
+		}
 		if trimmed[id] {
 			turn = append(turn, notInContext)
 			if !ai.plainMode {

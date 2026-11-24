@@ -65,6 +65,9 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	if flags.rounds.set {
 		opts = append(opts, tui.WithRounds(flags.rounds.value))
 	}
+	if flags.notify {
+		opts = append(opts, tui.WithNotify(true))
+	}
 
 	// Detect terminal capabilities
 	caps := tui.DetectTerminalCapabilities()

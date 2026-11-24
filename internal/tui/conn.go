@@ -21,9 +21,10 @@ const (
 // connectedMsg reports a finished connect, hello, status and subscribe. gen
 // says which connection attempt it belongs to; Update drops stale ones.
 type connectedMsg struct {
-	gen    int
-	cl     *client.Client
-	status wire.StatusReply
+	gen         int
+	cl          *client.Client
+	status      wire.StatusReply
+	liveFromSeq int64
 }
 
 // eventMsg carries the next frame of a connection's event stream, or the
@@ -53,8 +54,8 @@ func connectCmd(ctx context.Context, gen int, socket string, sinceSeq int64) tea
 	return func() tea.Msg {
 		backoff := minBackoff
 		for {
-			if cl, status, err := connectOnce(ctx, socket, sinceSeq); err == nil {
-				return connectedMsg{gen: gen, cl: cl, status: status}
+			if cl, status, liveFromSeq, err := connectOnce(ctx, socket, sinceSeq); err == nil {
+				return connectedMsg{gen: gen, cl: cl, status: status, liveFromSeq: liveFromSeq}
 			}
 			select {
 			case <-ctx.Done():
@@ -66,20 +67,21 @@ func connectCmd(ctx context.Context, gen int, socket string, sinceSeq int64) tea
 	}
 }
 
-func connectOnce(ctx context.Context, socket string, sinceSeq int64) (*client.Client, wire.StatusReply, error) {
+func connectOnce(ctx context.Context, socket string, sinceSeq int64) (*client.Client, wire.StatusReply, int64, error) {
 	cl, err := client.Dial(ctx, socket, "syndic-tui", "0")
 	if err != nil {
-		return nil, wire.StatusReply{}, err
+		return nil, wire.StatusReply{}, 0, err
 	}
 	status, err := cl.Status(ctx)
+	var liveFromSeq int64
 	if err == nil {
-		_, err = cl.Subscribe(ctx, sinceSeq)
+		liveFromSeq, err = cl.Subscribe(ctx, sinceSeq)
 	}
 	if err != nil {
 		_ = cl.Close()
-		return nil, wire.StatusReply{}, err
+		return nil, wire.StatusReply{}, 0, err
 	}
-	return cl, status, nil
+	return cl, status, liveFromSeq, nil
 }
 
 // readCmd waits for the connection's next event.
