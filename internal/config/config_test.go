@@ -1105,6 +1105,24 @@ func TestAllowWebWithReadValidation(t *testing.T) {
 			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}},
 			wantErr: false,
 		},
+		{
+			name:    "allow_web_with_read=false with author web + reviewer read (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}, ReviewerTools: []string{"read"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with reviewer web + author read (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"read"}, ReviewerTools: []string{"web"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with author web + reviewer write (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1123,6 +1141,138 @@ func TestAllowWebWithReadValidation(t *testing.T) {
 	}
 }
 
+func TestAllowWebWithReadPerPresetOverride(t *testing.T) {
+	tests := []struct {
+		name             string
+		rosterAllow      *bool
+		presetAllow      *bool
+		presetTools      []string
+		presetRevTools   []string
+		wantErr          bool
+		description      string
+	}{
+		{
+			name:           "preset override false when roster is true",
+			rosterAllow:    ptrBool(true),
+			presetAllow:    ptrBool(false),
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        true,
+			description:    "per-preset override should take precedence",
+		},
+		{
+			name:           "preset override true when roster is false",
+			rosterAllow:    ptrBool(false),
+			presetAllow:    ptrBool(true),
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        false,
+			description:    "per-preset override should take precedence",
+		},
+		{
+			name:           "preset no override uses roster false",
+			rosterAllow:    ptrBool(false),
+			presetAllow:    nil,
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        true,
+			description:    "should use roster-wide setting when preset has no override",
+		},
+		{
+			name:           "preset no override uses roster true",
+			rosterAllow:    ptrBool(true),
+			presetAllow:    nil,
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        false,
+			description:    "should use roster-wide setting when preset has no override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := makeBaseRoster()
+			r.Endpoints[0].RefereeModel = "claude-haiku"
+			r.Tools = &ToolsConfig{AllowWebWithRead: tt.rosterAllow}
+			r.Presets["test"] = Preset{
+				Mode:              "review",
+				Author:            "author",
+				RequiredReviewers: []string{"reviewer"},
+				Tools:             tt.presetTools,
+				ReviewerTools:     tt.presetRevTools,
+				AllowWebWithRead:  tt.presetAllow,
+			}
+			r.ApplyDefaults()
+
+			err := r.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("%s: Validate() error = %v, wantErr %v", tt.description, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCLIParticipantWithWebToolsRejected(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+
+	// Add a CLI participant to the roster
+	r.Participants = append(r.Participants, Participant{
+		ID:            "cli-author",
+		Model:         "gpt4",
+		Route:         "cli",
+		Binary:        "/bin/app",
+		EligibleRoles: []Role{RoleAuthor},
+	})
+
+	// Create a preset with CLI author having web tools
+	r.Presets["test"] = Preset{
+		Mode:    "solo",
+		Author:  "cli-author",
+		Tools:   []string{"web"},
+	}
+	r.ApplyDefaults()
+
+	err := r.Validate()
+	if err == nil {
+		t.Errorf("Validate() should reject CLI participant with web tools, but got nil error")
+	}
+	if err != nil && !strings.Contains(err.Error(), "CLI") {
+		t.Errorf("Validate() error should mention CLI, got: %v", err)
+	}
+}
+
+func TestCLIParticipantWithReadToolsRejected(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+
+	// Add a CLI participant
+	r.Participants = append(r.Participants, Participant{
+		ID:            "cli-reviewer",
+		Model:         "gpt4",
+		Route:         "cli",
+		Binary:        "/bin/app",
+		EligibleRoles: []Role{RoleReviewer},
+	})
+
+	// Create a preset with CLI reviewer having read tools
+	r.Presets["test"] = Preset{
+		Mode:              "review",
+		Author:            "author",
+		RequiredReviewers: []string{"cli-reviewer"},
+		ReviewerTools:     []string{"read"},
+	}
+	r.ApplyDefaults()
+
+	err := r.Validate()
+	if err == nil {
+		t.Errorf("Validate() should reject CLI participant with read tools, but got nil error")
+	}
+	if err != nil && !strings.Contains(err.Error(), "CLI") {
+		t.Errorf("Validate() error should mention CLI, got: %v", err)
+	}
+}
+
 func TestAllowedHostPatternValidation(t *testing.T) {
 	tests := []struct {
 		pattern string
@@ -1137,6 +1287,9 @@ func TestAllowedHostPatternValidation(t *testing.T) {
 		{"::1", false},             // IPv6 not allowed
 		{"", false},
 		{"*.com", false}, // wildcard must have dot after prefix
+		{"Example.com", false}, // must be lowercase (canonical)
+		{"*.GitHub.com", false}, // must be lowercase (canonical)
+		{"example.com:443", false}, // port not allowed
 	}
 
 	for _, tt := range tests {
