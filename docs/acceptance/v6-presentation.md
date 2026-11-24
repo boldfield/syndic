@@ -1,232 +1,292 @@
 # V6 presentation acceptance ledger
 
-This ledger maps normative D-side clauses of `docs/design/v6-delta-tui-presentation.md`
-(ratified revision 4, commit `67f43eb6a1e2d988e0675ce9e467ec2721ea9954`, SHA-256
-`1cd2b40adfe726b58d91e837215599c7245d6d09976b5d1fbe7aa3ca56cb1dd7`) to the
-implementation file and executing tests that prove it. D-side clauses (sections 1–3,
-5–6) map to implementation with executed tests. E-side clauses (file attachment,
-apply dispatch, file listing, attachment processing) are explicitly assigned to V6-E
-tasks (pending task creation; this design task does not cover them). Both D and E
-accept against the fake adapter with `httptest`, temporary files and sockets; no test
+This ledger records, for the ratified v6 delta `docs/design/v6-delta-tui-presentation.md`
+(revision 4, commit `67f43eb6a1e2d988e0675ce9e467ec2721ea9954`, SHA-256
+`1cd2b40adfe726b58d91e837215599c7245d6d09976b5d1fbe7aa3ca56cb1dd7`), where each D-side
+normative clause is implemented and which executed test proves it. D-side means the
+parts of sections 1, 2, 3, 5 and 6 and the section 8 bullets that change only the TUI
+and the read-only `reviews` request. Everything in section 4 (attachments), the `files`
+request, attachment tokens, the attached line and `/apply` is E-side: it is assigned to
+the named V6-E board tasks in the last table and is not claimed here.
+
+How to read it. In the D tables each row is one clause; **Implementation** is
+`file.go:Symbol` in non-test code and **Tests** is `package.TestName`. Both columns are
+machine-checked by `internal/tui.TestV6PresentationLedger`: every file and symbol must
+exist, every test must exist, and no reached test body or same-package helper may call
+`Skip`, `SkipNow`, `Skipf` or return early under `testing.Short()`. Under `-short` the
+scenarios run at a smaller size; they are not skipped. The checker also verifies the
+design file's SHA-256 against the value above. Whether a test really proves its clause
+was decided by reading the test body; the checker cannot judge that.
+
+All scenarios use fake adapters, temporary workspaces, sockets and `httptest`; no test
 contacts a real endpoint or credential.
 
-## Dependency inventory and visual reference provenance
+## Dependency inventory and visual-reference provenance
 
-**Dependency inventory decision:** Operator accepted all six TUI modules (Lip Gloss,
-Bubbles, Glamour, Huh, Harmonica, bubblezone) and their transitive modules on
-2026-11-22, documented in `docs/dependencies/v6-tui.md`. Implementation: `go mod tidy`
-committed the pinned versions in `go.mod` and `go.sum`; test coverage is implicit
-(builds succeed, no test-time module resolution).
+**Dependency inventory (design section 7).** The operator accepted the six presentation
+modules (Lip Gloss, Bubbles, Glamour, Huh, Harmonica, bubblezone) and each one's
+transitive modules; the inventory, pinned versions, licences and the transitive
+additions and upgrades are in `docs/dependencies/v6-tui.md` (obtained 2026-11-23,
+accepted 2026-11-22 per the operator decision recorded in the handoff). The pins are
+in `go.mod`/`go.sum` and kept by `internal/tui/v6_modules.go` and the TUI imports in
+`internal/tui/reviews.go` and `internal/tui/reason_form.go`. Section 7 says none is used
+by the engine; that is executed by `cmd/syndicd.TestSyndicdNotDependsOnTUIModules`.
 
-**Visual reference provenance:** Operator chose the visual direction from mock-ups on
-a private design canvas on 2026-11-21 (Ledger layout with reviews drawer and nine
-additions). Reference frames (`internal/tui/testdata/v6/*.txt`) are illustrations;
-where they disagree with the ratified text, the text governs. Twelve disagreements
-recorded in `internal/tui/testdata/v6/README.md`; design governs each. Verification:
-mock-ups inform test fixtures and golden frames; `internal/tui.TestV6PlainTerminalGoldenFrame`,
-`internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestV6OutcomesGoldenFrame`
-validate that the actual rendering matches the frames where the design governs.
+**Visual references (design section 0).** The operator chose the "Ledger" direction on
+2026-11-21 from mock-ups on a private design canvas (decisions D1, D2 and D4 are
+D-side; D3, `@path` attaches content, is E-side and assigned below). The supplied
+frames and style table are kept in `internal/tui/testdata/v6/` with their SHA-256
+hashes and twelve recorded disagreements in `internal/tui/testdata/v6/README.md`.
+They are illustrations: where a frame and the design text differ, the text governs,
+and the golden frames in `internal/tui/testdata/v6/golden/` follow the text
+(`TestV6Crowded80x24GoldenFrame`, `TestV6PlainTerminalGoldenFrame`,
+`TestV6OutcomesGoldenFrame`).
 
 ## Validation evidence
 
-Run the entire ledger:
+Command run on the tree below, with the observed result:
 
-    go test -short -count=1 ./internal/acceptance ./internal/tui
+    make check
+    make test
+    go test -short -count=1 ./internal/acceptance ./internal/tui ./internal/server ./internal/journal ./internal/client ./cmd/syndic
 
-**Tree and commit verified:** The rework was verified on tree at commit `a7147ab7eddfa6cd4326ab8d581ba451dc0a35ff` 
-(2026-11-24 15:08:14 UTC, with `make check && make test`).
+Tree: `0000000000000000000000000000000000000000`
+make check: pass
+make test: pass
 
-**Expected result:** All tests pass, no skipped tests in this ledger. The mirror test
-`internal/tui.TestV6PresentationLedgerNamesRealTests` in `internal/tui/v6_acceptance_test.go`
-verifies that every table row names at least one test, that each named test exists, and
-that none calls `Skip` or `Skipf` directly, and it confirms validation evidence format.
+## D-side clauses
 
-## Safe text and content display
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| Every C0 control except LF and tab, DEL, every C1 control and every Unicode bidi/isolate character is replaced by a visible escape | `ToSafeText` (safe_text.go) | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6AdversarialContentInDrawer`, `internal/tui.TestV6AdversarialContentInTranscript` |
-| A byte not valid UTF-8 is shown as `\xNN` | `ToSafeText` (safe_text.go) | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6AdversarialContentInTranscript` |
-| Tab is shown as spaces | `ToSafeText` (safe_text.go) | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6AdversarialContentInTranscript` |
-| Every displayed content line is prefixed with two spaces after wrapping; no content reaches column 0 or 1 | `SafeTextWithPrefix` (safe_text.go) adds prefix; `chatLines` renders content lines (chat.go) | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| An answer whose text is an outcome line, and one using CR or cursor movement to reach column 0, are shown indented and unmarked | `outcomeLines` applies formatting (answer.go) | `internal/tui.TestV6AdversarialContentThroughChat` |
-| A user input begins `› ` in column 0, continuation lines are content lines | `renderChat` with user mark (chat.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| An outcome line begins with a one-character mark and a space: `✓` approved, `!` incomplete/overridden, `×` cancelled, `·` solo | `outcomeLines` formats marks (answer.go) | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount` |
-| `approved by <ids> after 1 revision` for n=1; unchanged for n≥2 | `renderAnswer` with revision count formatting (answer.go) | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount` |
-| Every v4 and v5 banner string appears verbatim after its mark | `renderAnswer` preserves banner strings (answer.go) | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount` |
-| `/raw on` shows answer safe text with no Markdown; `transcript` content returns journal bytes unchanged | `RenderMarkdown` with raw flag (markdown.go); `renderAnswer` respects raw mode (answer.go) | `internal/tui.TestV6RawAndMarkdownThroughCommands` |
-| Answer text is rendered as Markdown (inline code, lists, emphasis, fenced code with language label) from safe text | `RenderMarkdown` (markdown.go) | `internal/tui.TestV6RawAndMarkdownThroughCommands` |
-
-## Status line
+### §1 Layout and style
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| Status line is last at every size and ends with `tab: switch  /help` | `statusLine` and `renderStatusLine` (strip.go) | `internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
-| Status line elements (meter, reviews hint, round text, state) are hidden in order when width is insufficient; `tab: switch  /help` is always kept | `statusFieldsOf` rebuilds elements based on available width (strip.go) | `internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
-| Status line shows: preset; `quick:<name>` when one governs; turn state or `idle`; `elapsed/turn_deadline` while turn runs | `statusFieldsOf` builds state string (strip.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Status line shows: budget meter and `tokens/limit`; `round n/m` during revision | `statusFieldsOf` includes meter and round (strip.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Status line ends with `ctrl+o: reviews` when chat tab is active, then `tab: switch  /help` | `renderStatusLine` builds right edge (strip.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
+| v5 layout stands: tab bar, active tab, banners, input, status line last | `internal/tui/app.go:App.View`, `internal/tui/app.go:App.tabBar`, `internal/tui/app.go:App.statusLine` | `internal/tui.TestFourBannersCollapseAt80x24`, `internal/tui.TestChatStatusLineIsLastAt80x24`, `internal/tui.TestCrowdedChatAt80x24`, `internal/tui.TestV6StatusLineLastAtEverySizeAndTab` |
+| Safe text: every C0 control except LF and tab, DEL, every C1 control and every bidi override or isolate is replaced by a visible escape such as `\x1b`; a byte not valid UTF-8 by `\xNN`; tab is shown as spaces | `internal/tui/safe_text.go:safeTokens`, `internal/tui/safe_text.go:ToSafeText`, `internal/tui/safe_text.go:safeLine` | `internal/tui.TestToSafeText_C0Controls`, `internal/tui.TestToSafeText_DELAndC1`, `internal/tui.TestToSafeText_InvalidUTF8`, `internal/tui.TestToSafeText_BidiCharacters`, `internal/tui.TestToSafeText_TabExpansion`, `internal/tui.TestToSafeText_NoRawControls` |
+| No content byte reaches the terminal as a control, in every tab, the drawer, every list and prompt, rendered or not | `internal/tui/safe_text.go:SafeTextWithPrefix`, `internal/tui/answer.go:shownAnswer`, `internal/tui/transcript.go:transcriptLines`, `internal/tui/reviews.go:ReviewsDrawer.render`, `internal/tui/command_list.go:App.commandListLines`, `internal/tui/strip.go:renderBanners` | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6AdversarialContentInTranscript`, `internal/tui.TestV6AdversarialContentInDrawer`, `internal/tui.TestAppViewHostileSourcesAreSafeAndIndented`, `internal/tui.TestPanelsAndBannersEscapeHostileText`, `internal/tui.TestPanelsAndPromptsEscapeEveryLine`, `internal/tui.TestCommandValuesAreSafeText`, `internal/tui.TestReviewsDrawerSafeText`, `internal/tui.TestStatusLineEscapesRecordValues`, `internal/tui.TestParticipantsTabEscapesRecordValues`, `internal/tui.TestChatEchoesUserTextSafely`, `internal/tui.TestFormatRefusalEscapesDetail`, `internal/tui.TestOneLineFieldsEscapeLineFeeds`, `internal/tui.TestV6DumbEveryScreenHasNoEscape` |
+| The journal and the content store keep the original bytes; the `transcript` content references return them unchanged | `internal/tui/content.go:ContentCache.Get` | `internal/tui.TestV6RawAnswerSafeTextAndTranscriptRefKeepsBytes` |
+| Content lines: every displayed content line is prefixed with two spaces after wrapping, applied last, so no content reaches column 0 or 1 | `internal/tui/safe_text.go:SafeTextWithPrefix`, `internal/tui/answer.go:shownAnswer`, `internal/tui/transcript.go:wrapText` | `internal/tui.TestSafeTextWithPrefix_AllLinesHavePrefix`, `internal/tui.TestSafeTextWithPrefix_HostileProperty`, `internal/tui.TestSafeTextWithPrefix_WidthCompliance`, `internal/tui.TestSafeTextWithPrefix_EscapesAtomic`, `internal/tui.TestTranscriptContentLineRendering`, `internal/tui.TestV6ForgedOutcomeLinesAreIndentedAndUnmarked` |
+| Chat lines: a user input begins `› ` in column 0 and its continuation lines are content lines | `internal/tui/chat.go:chatLinesWithStarts` | `internal/tui.TestChatShowsEachTurnsInputThenOutcome`, `internal/tui.TestContinuationAndAnswerCannotForgeOutcomes`, `internal/tui.TestV6ForgedOutcomeLinesAreIndentedAndUnmarked` |
+| An outcome line begins in column 0 with a one-character mark and a space: `✓` approved, `!` incomplete or overridden, `×` cancelled, `·` solo; the v4 and v5 banner strings follow the mark word for word | `internal/tui/answer.go:renderAnswer`, `internal/tui/answer.go:outcomeLines`, `internal/tui/answer.go:styledOutcomeLines` | `internal/tui.TestOutcomeMarksPlain`, `internal/tui.TestV6OutcomeWordsMarksAndReviewCount`, `internal/tui.TestV6OutcomesGoldenFrame`, `internal/tui.TestDraftKeepsItsWordsAndMark`, `internal/tui.TestV6UnreviewedDraftBanner` |
+| `approved by <ids> after <n> revisions against <hash prefix>` reads `after 1 revision` when n is 1; unchanged for n of 2 or more | `internal/tui/answer.go:renderAnswer` | `internal/tui.TestApprovedRevisionWording`, `internal/tui.TestV6OutcomeWordsMarksAndReviewCount`, `internal/tui.TestChatApprovedByRevisionShowsTheCount` |
+| Rendered answers: answer text in the chat tab is rendered as Markdown (inline code, lists, emphasis, fenced code blocks with a language label) from its safe text | `internal/tui/markdown.go:renderAnswerMarkdown`, `internal/tui/markdown.go:renderMarkdownTokens`, `internal/tui/answer.go:shownAnswer` | `internal/tui.TestGoldenMarkdown`, `internal/tui.TestMarkdownEscapesAndDelimiterRuns`, `internal/tui.TestMarkdownFenceLabelKeepsSafeTokens`, `internal/tui.TestV6RenderedAnswerShowsLinkFenceAndLists` |
+| `/raw on\|off` turns Markdown rendering off and on for the chat tab; raw means unformatted safe text, not terminal-raw bytes | `internal/tui/commands.go:cmdRaw`, `internal/tui/markdown.go:renderAnswerMarkdown` | `internal/tui.TestV6RawAndMarkdownThroughCommands`, `internal/tui.TestRawCommandChangesView`, `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6RawAnswerSafeTextAndTranscriptRefKeepsBytes` |
+| The transcript tab is always unformatted safe text | `internal/tui/transcript.go:transcriptLines` | `internal/tui.TestV6TranscriptTabIsAlwaysUnformatted` |
+| Links are shown as text with the URL visible; no hyperlink escape sequence is emitted | `internal/tui/markdown.go:matchLink`, `internal/tui/markdown.go:renderInlineDepth` | `internal/tui.TestGoldenMarkdown`, `internal/tui.TestV6RenderedAnswerShowsLinkFenceAndLists` |
+| Status line, left to right: preset; `quick:<name>` when one governs; turn state, or `idle`; `elapsed/turn_deadline` while a turn runs; a budget meter and `tokens/limit`; `round n/m` during a revision | `internal/tui/strip.go:statusFieldsOf`, `internal/tui/strip.go:statusFields.segments`, `internal/tui/strip.go:budgetMeter` | `internal/tui.TestStatusLineNoLimitShedsNothingForTheMeter`, `internal/tui.TestStatusLineOverflowOrder`, `internal/tui.TestStatusLineIdle`, `internal/tui.TestV6StatusLineFieldsInOrderWithoutParticipantStates` |
+| At the right edge of the status line, `ctrl+o: reviews` when the chat tab is active, then `tab: switch  /help` unchanged | `internal/tui/strip.go:renderStatusLine`, `internal/tui/app.go:App.statusLine` | `internal/tui.TestAppStatusLineHintsByTab`, `internal/tui.TestStatusLineKeepsTokensAndHint`, `internal/tui.TestStatusLineConnectingKeepsBothHints` |
+| Per-participant states are on the progress line and in the participants tab, not in the status line | `internal/tui/strip.go:statusFieldsOf`, `internal/tui/progress.go:progressLine`, `internal/tui/participants.go:renderParticipants` | `internal/tui.TestV6StatusLineFieldsInOrderWithoutParticipantStates`, `internal/tui.TestChatViewShowsProgressMarks`, `internal/tui.TestPlainViewStates` |
+| When the status line does not fit, elements are shed in order and `tokens/limit` and the hint are kept | `internal/tui/strip.go:statusFields.fit` | `internal/tui.TestStatusLineOverflowOrder`, `internal/tui.TestStatusLineKeepsTokensAndHint`, `internal/tui.TestStatusLineShortensWideStatesByCell` |
+| Identity warning `identity: unknown(name-matched)` is a banner naming each participant it applies to, sorts first among banners, is never folded into a count, and remains in the participants tab | `internal/tui/strip.go:identityBanner`, `internal/tui/strip.go:renderBanners`, `internal/tui/layout.go:foldBanners`, `internal/tui/participants.go:participantDetail` | `internal/tui.TestIdentityBannerFirstSortedAndEscaped`, `internal/tui.TestIdentityBannerSurvivesHeightPressure`, `internal/tui.TestIdentityBannerSurvivesTinyHeights`, `internal/tui.TestCrowdedChatAt80x24`, `internal/tui.TestV6IdentityWarningBannerAndParticipantsTab` |
+| Progress line: one line with a spinner, the phase, `round n/m` with one pip per allowed round (filled for rounds started), each participant with `✓` done, a spinner working or `○` queued, and the elapsed time | `internal/tui/progress.go:progressLine`, `internal/tui/progress.go:participantMark`, `internal/tui/progress.go:spinnerAt` | `internal/tui.TestProgressLineMarks`, `internal/tui.TestChatViewShowsProgressMarks`, `internal/tui.TestChatViewMarksFirstRoundReviewDone`, `internal/tui.TestProgressSpinnerTurns` |
+| Colour: colours are declared as light and dark pairs and chosen from the terminal's background (outcome, draft banner and selected-input styles) | `internal/tui/answer.go:outcomeStyles`, `internal/tui/answer.go:draftBanner`, `internal/tui/chat.go:selectedInput` | `internal/tui.TestOutcomeStylesAreLightDarkPairs`, `internal/tui.TestV6OutcomeColourFollowsBackground` |
+| No meaning is carried by colour alone: every outcome has its mark and its words | `internal/tui/answer.go:styledOutcomeLines` | `internal/tui.TestOutcomeColouredKeepsMarkAndWords`, `internal/tui.TestV6OutcomeColourFollowsBackground`, `internal/tui.TestV6UnreviewedDraftBanner` |
+| Input: a multi-line text area with the prompt `┃ `; v5's keys for it stand | `internal/tui/input.go:setInputPrompt`, `internal/tui/input.go:newInput` | `internal/tui.TestV6InputPromptIsABarAndTheAreaIsMultiLine`, `internal/tui.TestAltEnterInsertsNewline`, `internal/tui.TestTypedInputGrowsAndShrinksWithItsTop` |
+| Scroll position: the conversation line shows at its right how many earlier turns are above the view and the scroll position as a percentage; the transcript tab shows the percentage | `internal/tui/app.go:withScrollInfo`, `internal/tui/app.go:turnsAbove`, `internal/tui/layout.go:scrollPercent` | `internal/tui.TestChatHeaderCountsEarlierTurnsNotLines`, `internal/tui.TestChatHeaderKeepsTheWorkspaceWhenScrollInfoDoesNotFit`, `internal/tui.TestTranscriptTabShowsAPercentage` |
+| Heights: each region has a bounded viewport at any size of at least 80×24 | `internal/tui/layout.go:allocate` | `internal/tui.TestAllocateDrawerHeights`, `internal/tui.TestAllocateShrinkOrder`, `internal/tui.TestV6StatusLineLastAtEverySizeAndTab` |
+| Heights: the tab bar and the status line are one line each and always shown | `internal/tui/layout.go:allocate`, `internal/tui/app.go:App.tabBar` | `internal/tui.TestAllocateDrawerHeights`, `internal/tui.TestV6StatusLineLastAtEverySizeAndTab` |
+| Heights: the input shows 1 to 6 lines and scrolls inside itself beyond that | `internal/tui/layout.go:allocate`, `internal/tui/input.go:fitInput` | `internal/tui.TestInputScrollsBeyondSixLines`, `internal/tui.TestAllocateShrinkOrder`, `internal/tui.TestCrowdedChatAt80x24`, `internal/tui.TestTypedInputGrowsAndShrinksWithItsTop` |
+| Heights: banners take at most 2 lines; when more apply the last shown line ends `+<n> more`, the participants tab lists them all, and the identity warning is always among those shown | `internal/tui/layout.go:foldBanners`, `internal/tui/strip.go:renderBanners`, `internal/tui/participants.go:renderParticipants` | `internal/tui.TestCrowdedChatAt80x24`, `internal/tui.TestFourBannersCollapseAt80x24`, `internal/tui.TestIdentityBannerSurvivesHeightPressure`, `internal/tui.TestIdentityBannerSurvivesTinyHeights`, `internal/tui.TestV6ParticipantsTabListsEveryFoldedBanner` |
+| Heights: a command list takes at most 5 lines and closes when the drawer opens | `internal/tui/layout.go:allocate`, `internal/tui/command_list.go:App.commandListLines` | `internal/tui.TestAllocateDrawerAndListAreExclusive`, `internal/tui.TestDrawerClosesListAndShortHelp`, `internal/tui.TestV6CommandListTakesFiveLinesAndClosesWithDrawer` |
+| Heights: the short help line is one line and is hidden while the drawer is open | `internal/tui/command_list.go:App.shortHelpLine`, `internal/tui/layout.go:allocate` | `internal/tui.TestAllocateDrawerAndListAreExclusive`, `internal/tui.TestDrawerClosesListAndShortHelp`, `internal/tui.TestV6ShortHelpIsOneLineAndHiddenWithDrawer` |
+| Heights: the drawer takes 7 lines, or 9 above 30 rows | `internal/tui/layout.go:allocate` | `internal/tui.TestAllocateDrawerHeights`, `internal/tui.TestCrowdedChatWithDrawerAt80x24And80x31`, `internal/tui.TestV6DrawerHeightInFrame` |
+| Heights: the active tab's content gets what remains and never fewer than 5 lines; when opening the drawer would leave fewer, the input viewport shrinks to 1 line and banners to 1 line first | `internal/tui/layout.go:allocate` | `internal/tui.TestAllocateShrinkOrder`, `internal/tui.TestIdentityBannerSurvivesTinyHeights`, `internal/tui.TestCrowdedChatWithDrawerAt80x24And80x31`, `internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestV6DrawerHeightInFrame` |
+| Below 80×24 the drawer and the lists do not open and v4's plain-terminal rule governs | `internal/tui/layout.go:allocate`, `internal/tui/app.go:App.plainMode` | `internal/tui.TestNoDrawerOrListBelow80x24`, `internal/tui.TestPlainViewStates`, `internal/tui.TestResizeBelowMinimumAndBack` |
 
-## Progress line and scroll position
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| Progress line shows spinner, phase, round pips (filled for started, empty for future), each participant with status, elapsed time | `progressLine` (progress.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Conversation line shows earlier turns above view and scroll percentage | `chatLinesWithStarts` with scroll calculation (chat.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Transcript and changes tabs show scroll percentage | `renderChat` with scroll percentage (chat.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Round pips are shown in the progress line, one per allowed round; filled for started, empty for future | `progressLine` renders pips (progress.go) | `internal/tui.TestV6PlainTerminalGoldenFrame`, `internal/tui.TestV6Crowded80x24GoldenFrame` |
-
-## Heights and viewport management
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| Tab bar and status line are one line each and always shown | `allocate` enforces fixed heights (layout.go) | `internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
-| Input shows 1 to 6 lines and scrolls beyond that | `input.View()` bounds height to 6 lines (input.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Banners take at most 2 lines; excess ends `+<n> more` | `chatLines` truncates banners (chat.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Attached line is one line with paths until width runs out, then `+<n> more` | Integrated in `app.View()` (app.go) using layout heights | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Command or file list takes at most 5 lines and closes when drawer opens | `commandList` bounds height; `app.Update()` closes list when drawer opens (command_list.go, app.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
-| Short help line is one line, hidden while drawer is open | `chatLines` renders short help; `app.Update()` hides it when drawer opens (chat.go, app.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
-| Active tab content gets what remains and never fewer than 5 lines | `allocate` enforces minimum 5 lines (layout.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| When opening drawer would leave fewer than 5 lines for tab, input viewport shrinks to 1 line and banners to 1 line first | `allocate` recalculates heights on drawer open (layout.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-
-## Rendering and style
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| No meaning is carried by colour alone; every outcome has its mark and words | `outcomeLines` formats outcome marks (answer.go) | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount` |
-| Input prompt is `┃ ` | `input.View()` renders prompt (input.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| Identity warning is a banner, never folded into count, sort first among banners | `chatLines` handles identity warning as banner (chat.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-
-## Command list and short help
+### §6 Plain terminal
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| When input begins with `/` and contains no space, matching commands list appears above input | `commandList` triggers and filters (command_list.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
-| Command list shows each command with one-line description and current value where applicable | `commandList.View()` renders descriptions and values (command_list.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
-| `↑` `↓` select in list; `Tab` completes; `Esc` closes; while list open, `Tab` completes instead of switching tabs | `commandList` and `app.Update()` handle keys (command_list.go, app.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
-| `?` on empty input shows one line of applicable keys above status line | `chatLines` renders short help on `?` (chat.go) | `internal/tui.TestV6CommandCompletionAndShortHelp` |
+| `TERM=dumb` degrades to no colour and no alternate screen and does not fail | `internal/tui/term.go:DetectTerminalCapabilities`, `internal/tui/term.go:ProgramOptions`, `internal/tui/term.go:ApplyTerminalCapabilities` | `internal/tui.TestDetectTerminalCapabilities`, `internal/tui.TestProgramOptions`, `internal/tui.TestDumbTerminalSoloTurn`, `internal/tui.TestPlainDraftBannerInView` |
+| Whenever colour is off the spinner is the word for the state | `internal/tui/progress.go:progressLine`, `internal/tui/progress.go:participantMark` | `internal/tui.TestPlainModeProgressLineNoSpinner`, `internal/tui.TestPlainViewStates`, `internal/tui.TestV6ColourOffDegradesLikeDumb` |
+| Whenever colour is off the meter is omitted and `tokens/limit` stays | `internal/tui/strip.go:statusFieldsOf` | `internal/tui.TestPlainModeStatusLineNoMeter`, `internal/tui.TestPlainViewStates`, `internal/tui.TestV6ColourOffDegradesLikeDumb` |
+| Whenever colour is off pips are omitted and `round n/m` stays | `internal/tui/progress.go:progressLine` | `internal/tui.TestPlainModeProgressLineNoSpinner`, `internal/tui.TestPlainViewStates`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
+| Whenever colour is off Markdown is off | `internal/tui/markdown.go:renderAnswerMarkdown`, `internal/tui/app.go:App.plainMode` | `internal/tui.TestMarkdownPlainModeIsRaw`, `internal/tui.TestV6ColourOffDegradesLikeDumb` |
+| Whenever colour is off there is no animation and no mouse | `internal/tui/reviews.go:ReviewsDrawer.Open`, `internal/tui/reviews.go:ReviewsDrawer.Close`, `internal/tui/commands.go:cmdMouse`, `internal/tui/mouse.go:App.mouseAllowed`, `internal/tui/term.go:ProgramOptionsWithMouse` | `internal/tui.TestDrawerPlainModeDoesNotAnimate`, `internal/tui.TestPlainViewStates`, `internal/tui.TestShrinkingIntoPlainModeReleasesTheMouse`, `internal/tui.TestV6ColourOffDegradesLikeDumb` |
+| Whenever colour is off prompts are single-line questions as in v4 | `internal/tui/reason_form.go:openReasonForm` | `internal/tui.TestSmallColourTerminalUsesSingleLineReasonPrompt`, `internal/tui.TestV6ColourOffDegradesLikeDumb`, `internal/tui.TestV6ReasonPromptInPlainTerminal` |
+| `NO_COLOR` is colour off but keeps the alternate screen | `internal/tui/term.go:DetectTerminalCapabilities` | `internal/tui.TestNoColorKeepsAltScreen`, `internal/tui.TestV6ColourOffDegradesLikeDumb` |
+| Safe text applies in every mode | `internal/tui/safe_text.go:ToSafeText` | `internal/tui.TestV6DumbEveryScreenHasNoEscape`, `internal/tui.TestV6AdversarialContentThroughChat` |
 
-## Conversations list
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| `/conversations` is a selectable list; `/` filters it, `↑` `↓` select, `Enter` switches, `n` starts new, `Esc` closes | `conversationList` and `app.Update()` (conversation_list.go, app.go) | `internal/tui.TestV6ChooserThroughUpdateAndView` |
-
-## Prompts (D-side)
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| `/override` and `/release` without a reason open a form with one required field | `reasonForm` (reason_form.go) | `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestV6ReleaseReasonForm` |
-| Submitting a prompt sends the command with the reason; an empty reason cannot be submitted | `reasonForm` enforces non-empty reason (reason_form.go) | `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestV6ReleaseReasonForm` |
-| Prompts in a plain terminal are single-line questions | `reasonForm` renders single-line in plain mode (reason_form.go) | `internal/tui.TestV6ReasonPromptInPlainTerminal` |
-
-## Drawer wire contract and behavior (D-side)
+### §2 Reviews drawer: wire contract
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| New read-only request `reviews{turn_id, cursor?, limit?}` returns `{items: […], next_cursor?}` | `reviews` request handler (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce` |
-| One item per accepted verdict, ordered by round then roster order | Verdict ordering (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce` |
-| `kind` is the verdict's kind; `state` is the block's state in that verdict | Verdict field population (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce` |
-| `commentary`, `evidence` and `remedy` are content references never inline text | Content reference marshaling (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
-| An item exceeding 64 KiB is returned in short form with `oversized: true` and `record` reference | 64 KiB enforcement (server-side, internal/engine) | `internal/tui.TestV6DrawerOversizedShortForm`, `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
-| `limit` is at most 50; at least one and at most `limit` items per reply, as many as fit in one frame | Limit and frame bound enforcement (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
-| `next_cursor` is returned while items remain; no cursor when none remain | Cursor generation (server-side, internal/engine) | `internal/tui.TestV6DrawerLongListPages`, `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
-| A verdict accepted on repair is listed once with the repair attempt's id; malformed and unsuccessful repair attempts are not listed | Repair verdict selection (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce` |
-| A block opened in round 1, maintained in round 2 and withdrawn in round 3 shows all three states in those rounds | Block state preservation (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_HistoricalBlockTransitions` |
-| Replacing stored commentary does not change block states; content hashes and byte lengths match the returned bytes | No-reparse hashing (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_MutationNoReparse` |
-| A verdict accepted before the record existed is served like a current one | Record backfilling (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_OldRecords` |
-| A solo turn and a turn whose reviewers all failed list nothing and give no cursor | Empty verdict list handling (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_EmptyPages` |
-| Ctrl+O opens the drawer; Esc or Ctrl+O closes it; default closed, state not persisted | `app.Update()` and `ReviewsDrawer` state (app.go, reviews.go) | `internal/tui.TestV6DrawerKeysThroughUpdateAndView` |
-| Drawer shows turn number, rounds, each reviewer with verdict kind, blocks with state, commentary and remedy | `ReviewsDrawer.render()` (reviews.go) | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| `↑` `↓` choose turn; `←` `→` choose round; `PgUp` `PgDn` scroll drawer | `ReviewsDrawer.Update()` navigation (reviews.go) | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestV6DrawerHoldsTheKeyboard` |
-| Input cannot be edited while drawer has keyboard | `app.Update()` gates input.Update() when drawer has focus (app.go) | `internal/tui.TestV6DrawerHoldsTheKeyboard` |
-| Reviewers are named by participant id | `ReviewsDrawer.render()` participant naming (reviews.go) | `internal/tui.TestV6Crowded80x24GoldenFrame` |
-| `review_count` field equals the number of items `reviews` lists | `reviews` request; `renderAnswer` uses it (server-side and TUI) | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce`, `internal/tui.TestV6DrawerLongListPages` |
-| Every outcome line ends with `· <n> reviews` from `review_count` | `renderAnswer` formats review count (answer.go) | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount` |
-| A turn with five reviewers, six rounds, evidence and remedy of 600 KiB on each block retrieves completely paging `reviews` and fetching references | `reviews` paging and reference fetching (server-side and TUI) | `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
-| Fetching oversized record returns every block id and state with matching hashes and byte lengths | `record` reference retrieval (server-side and TUI) | `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata` |
+| New read-only request `reviews{turn_id, cursor?, limit?}` returns `{items, next_cursor?}` | `internal/wire/reviews.go:ReviewsRequest`, `internal/wire/reviews.go:ReviewsReply`, `internal/server/server.go:connection.handleRequest`, `internal/server/reviews.go:buildReviews` | `internal/server.TestReviewsRequest`, `internal/acceptance.TestV6Reviews_AcceptedRepairOnce`, `internal/client.TestVerifiedReviewsPage` |
+| One item per accepted verdict, ordered by round and then by roster order | `internal/engine/review.go:recordAcceptedReview`, `internal/journal/review_records.go:Tx.RecordAcceptedReview`, `internal/journal/review_records.go:Tx.ReviewsPage`, `internal/server/reviews.go:turnRoster` | `internal/server.TestReviewsPagingOrderAndContinuation`, `internal/acceptance.TestV6Reviews_HistoricalBlockTransitions`, `internal/acceptance.TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks` |
+| A verdict accepted on repair is listed once with the repair attempt's id; the malformed original and any unsuccessful repair are not listed | `internal/engine/review.go:recordAcceptedReview`, `internal/journal/review_records.go:Tx.ReviewsPage` | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce`, `internal/acceptance.TestClientReviews_CountMatchesAllReviews`, `internal/acceptance.TestV6Reviews_EmptyPages` |
+| `kind` is the verdict's kind as the engine classified it; `state` is the block's state in that verdict: `opened`, `maintained` or `withdrawn` | `internal/journal/review_records.go:ReviewBlockOpened`, `internal/journal/review_records.go:ReviewBlockMaintained`, `internal/journal/review_records.go:ReviewBlockWithdrawn`, `internal/engine/review.go:recordAcceptedReview` | `internal/acceptance.TestV6Reviews_HistoricalBlockTransitions`, `internal/acceptance.TestV6WireCoverage_ApproveWithChangesKindListed`, `internal/journal.TestReviewRecordsMaterializedFromAcceptanceRows` |
+| `commentary`, `evidence` and `remedy` are content references `{ref, sha256, byte_len}`, never inline text, fetched in as many frames as that retrieval needs | `internal/wire/reviews.go:ContentReference`, `internal/journal/review_records.go:textRef`, `internal/client/reviews.go:Client.FetchReviewContent`, `internal/server/queries.go:getContent` | `internal/acceptance.TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks`, `internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata`, `internal/acceptance.TestV6Reviews_MutationNoReparse` |
+| An item whose encoding exceeds 64 KiB is returned in short form (`oversized: true` and `record` in place of `blocks` and `commentary`); the record is written at acceptance, or on first request for an earlier verdict, never by parsing model output | `internal/journal/review_records.go:ReviewOversizedBytes`, `internal/journal/review_records.go:ReviewItem.MarshalJSON`, `internal/journal/review_records.go:Tx.MaterializeReviewRecords`, `internal/client/reviews.go:Client.FetchOversizedRecord` | `internal/acceptance.TestV6WireCoverage_OversizedRecordIdsStatesAndHashes`, `internal/acceptance.TestV6Reviews_OldRecords`, `internal/server.TestReviewsOversizedShortFormRecord`, `internal/journal.TestReviewRecordsOversizedShortForm`, `internal/journal.TestReviewRecordsWrittenAtAcceptance` |
+| `limit` is at most 50; at least one and at most `limit` items per reply, as many as fit in one encoded frame, and a `next_cursor` while more remain; a short-form item always fits | `internal/journal/review_records.go:ReviewMaxLimit`, `internal/server/reviews.go:buildReviews`, `internal/server/reviews.go:fitReviewsPage` | `internal/server.TestReviewsPagingOrderAndContinuation`, `internal/server.TestReviewsPageTrimmedToFrame`, `internal/acceptance.TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks`, `internal/server.TestReviewsLimitExceeded` |
+| A turn with no accepted verdict returns an empty list and no cursor | `internal/server/reviews.go:buildReviews` | `internal/acceptance.TestV6Reviews_EmptyPages`, `internal/acceptance.TestClientReviews_SoloZero`, `internal/acceptance.TestClientReviews_AllFailedZero`, `internal/server.TestReviewsEmptyForSoloTurn`, `internal/server.TestReviewsAllReviewersFailed` |
+| The client pages until no cursor is returned | `internal/tui/app.go:App.fetchReviewsForTurn`, `internal/client/reviews.go:Client.AllReviewsPaged` | `internal/tui.TestV6CoverageDrawerFetchPagesAndFetchesOversizedRecord`, `internal/client.TestAllReviewsMultiPage` |
+| Every field is taken from the records the engine wrote at acceptance; the engine does not reparse stored text and the TUI never parses verdict text | `internal/journal/review_records.go:Tx.RecordAcceptedReview`, `internal/tui/app.go:App.fetchReviewsForTurn` | `internal/acceptance.TestV6Reviews_MutationNoReparse`, `internal/tui.TestV6CoverageDrawerFetchPagesAndFetchesOversizedRecord` |
+| The turn entries of `conversation{id}` gain `review_count`, the number of items `reviews` would list in all | `internal/server/queries.go:getConversation`, `internal/journal/review_records.go:Store.ReviewCount` | `internal/acceptance.TestClientReviews_CountMatchesAllReviews`, `internal/server.TestConversationIncludesReviewCount`, `internal/server.TestConversationSoloTurnNoReviewCount` |
 
-## Notify (terminal bell and notice)
+### §2 Reviews drawer: behaviour
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| By default no BEL is written | `notify` does not write BEL by default (notify.go) | `internal/tui.TestV6NotifyPlainModeOffByDefaultNoBell` |
-| With `/notify on` a BEL is written for a terminal event at or above `live_from_seq` | `notify` writes BEL for live events (notify.go) | `internal/tui.TestV6NotifyPlainModeBellAndNoEscape` |
-| No BEL is written for an event below `live_from_seq` | `notify` filters by `live_from_seq` (notify.go) | `internal/tui.TestV6NotifyPlainModeBellAndNoEscape` |
-| With an empty replay the next live event rings once | `notify` deduplicates by retained seq (notify.go) | `internal/tui.TestV6NotifyPlainModeBellAndNoEscape` |
-| After a connection loss with a running turn that then ends, the reattached TUI shows one notice line | `chatLines` renders notice for ended turns (chat.go) | `internal/acceptance.TestV6Reviews_ReplayLiveBoundary` |
-| A second reconnect replaying the same event shows no further line and writes no BEL | `notify` deduplicates; `chatLines` does not reshow notice (notify.go, chat.go) | `internal/acceptance.TestV6Reviews_RepeatedReconnect` |
-| A newly started TUI shows no notice line | `notify` has no retained seq at start (notify.go) | `internal/acceptance.TestV6Reviews_FreshProcess` |
+| Every outcome line ends with `· <n> reviews` from `review_count`; solo turns have none | `internal/tui/answer.go:styledOutcomeLines`, `internal/tui/conversations.go:App.refreshReviewCounts`, `internal/tui/conversations.go:App.onReviewCounts` | `internal/tui.TestV6OutcomeWordsMarksAndReviewCount`, `internal/tui.TestReviewsDrawerEndToEnd`, `internal/tui.TestReviewCountNotShownWhenZero`, `internal/tui.TestReviewCountZeroShownForNonSolo` |
+| `Ctrl+O` on the chat tab opens the drawer and gives it the keyboard; it is closed by default and its state is not persisted | `internal/tui/app.go:App.updateKey`, `internal/tui/mouse.go:App.openDrawer`, `internal/tui/mouse.go:App.closeDrawer`, `internal/tui/reviews.go:ReviewsDrawer` | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestV6DrawerHoldsTheKeyboard`, `internal/tui.TestV6CoverageDrawerClosedAtStartAndNotPersisted` |
+| The drawer sits between the chat and the input at the height section 1 gives it; the chat keeps scrolling behind it and is not reflowed | `internal/tui/layout.go:allocate`, `internal/tui/app.go:App.View` | `internal/tui.TestAllocateDrawerHeights`, `internal/tui.TestCrowdedChatWithDrawerAt80x24And80x31`, `internal/tui.TestV6CoverageDrawerSitsBetweenChatAndInputAtItsHeight`, `internal/tui.TestV6CoverageChatKeepsScrollingBehindTheDrawerWithoutReflow` |
+| The drawer shows one turn and one round: a header with the turn number and the rounds, each reviewer in roster order with its verdict kind, each block with its state, and its commentary and remedy as content lines; longer text scrolls inside the drawer | `internal/tui/reviews.go:ReviewsDrawer.lines`, `internal/tui/reviews.go:ReviewsDrawer.render` | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestReviewsDrawerRosterOrder`, `internal/tui.TestReviewsDrawerCommentaryRendering`, `internal/tui.TestReviewsDrawerRoundsAndScrollEndToEnd`, `internal/tui.TestReviewsDrawerHistoricalStates` |
+| Keys while the drawer has the keyboard: `↑` `↓` choose the turn (its input line is highlighted in the chat), `←` `→` choose the round, `PgUp` `PgDn` scroll the drawer, `Esc` or `Ctrl+O` closes it; the input cannot be edited while the drawer has the keyboard | `internal/tui/app.go:App.updateKey`, `internal/tui/reviews.go:ReviewsDrawer.SelectUp`, `internal/tui/reviews.go:ReviewsDrawer.SelectDown`, `internal/tui/reviews.go:ReviewsDrawer.SelectRoundLeft`, `internal/tui/reviews.go:ReviewsDrawer.SelectRoundRight`, `internal/tui/reviews.go:ReviewsDrawer.ScrollUp`, `internal/tui/reviews.go:ReviewsDrawer.ScrollDown` | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestReviewsDrawerTurnSelectionEndToEnd`, `internal/tui.TestV6DrawerHoldsTheKeyboard`, `internal/tui.TestV6CoverageOpeningDrawerNeverCancelsOrSubmits` |
+| Open blocks on an `incomplete` or `cancelled` turn stay in the chat whether or not the drawer is open | `internal/tui/answer.go:renderAnswer`, `internal/tui/answer.go:blockLines` | `internal/tui.TestV6CoverageOpenBlocksOfIncompleteAndCancelledTurnsStayInChat`, `internal/tui.TestReviewsDrawerEndToEnd` |
+| Reviewers are named by participant id | `internal/tui/reviews.go:ReviewsDrawer.lines` | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestReviewsDrawerRosterOrder` |
 
-## Mouse
-
-| Clause | Implementation | Tests |
-| --- | --- | --- |
-| `/mouse on` refuses capture and shows a refusal on `TERM=dumb` | `commands` package refuses on TERM=dumb (commands.go) | `internal/tui.TestV6NotifyMouseOptIn` |
-| Shrinking the terminal to plain mode releases the mouse capture | `app.Update()` releases mouse on resize (app.go) | `internal/tui.TestV6NotifyMouseReleasedWhenScreenShrinks` |
-
-## Plain terminal and degradation
+### §3 Lists and prompts (D-side)
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| `TERM=dumb` mode: no colour, no alternate screen, spinner is state word, meter omitted, pips omitted, Markdown off, no animation, no mouse | `plainMode()` and `app` gate features (app.go) | `internal/tui.TestV6PlainTerminalGoldenFrame` |
-| Prompts in plain mode are single-line questions | `reasonForm` renders single-line (reason_form.go) | `internal/tui.TestV6ReasonPromptInPlainTerminal` |
-| Every screen in plain mode renders with no escape sequence | Plain mode escape sequence avoidance (all files) | `internal/tui.TestV6PlainTerminalGoldenFrame` |
+| When the input begins with `/` and contains no space, a list of matching commands appears above the input, each with a one-line description and its current value where it has one | `internal/tui/command_list.go:commandListMatches`, `internal/tui/command_list.go:App.commandValue`, `internal/tui/command_list.go:App.commandListLines`, `internal/tui/app.go:App.View` | `internal/tui.TestCommandCatalogueMatchesRegistry`, `internal/tui.TestCommandListMatches`, `internal/tui.TestCommandListShowsDescriptionAndValue`, `internal/tui.TestCommandValuesShowDefaults`, `internal/tui.TestV6CoverageListAndShortHelpSitAboveTheInput` |
+| `↑` `↓` select, `Tab` completes, `Esc` closes | `internal/tui/app.go:App.updateKey`, `internal/tui/command_list.go:App.moveCommandSel`, `internal/tui/command_list.go:App.completeCommand`, `internal/tui/command_list.go:App.closeCommandList` | `internal/tui.TestArrowSelectionLeavesInputUntilTab`, `internal/tui.TestArrowSelectionScrollsPastTheWindow`, `internal/tui.TestEscClosesCommandListAndEditReopens`, `internal/tui.TestV6CommandCompletionAndShortHelp` |
+| While the list is open `Tab` completes; otherwise it switches tabs | `internal/tui/app.go:App.updateKey`, `internal/tui/mouse.go:App.setTab` | `internal/tui.TestTabSwitchesTabsWithoutAList`, `internal/tui.TestArrowSelectionLeavesInputUntilTab` |
+| `/conversations` is a selectable list: `/` filters it, `↑` `↓` select, `Enter` switches, `n` starts a new conversation, `Esc` closes | `internal/tui/conversation_list.go:convChooser`, `internal/tui/conversation_list.go:App.conversationKey`, `internal/tui/conversation_list.go:App.conversationLines` | `internal/tui.TestChooserViewMarksSelection`, `internal/tui.TestChooserFilter`, `internal/tui.TestChooserEnterSwitchesAndKeepsRunningTurn`, `internal/tui.TestChooserNStartsNewConversationAndKeepsTurn`, `internal/tui.TestChooserEscCloses`, `internal/tui.TestV6ChooserThroughUpdateAndView` |
+| A conversation from another workspace is listed dimmed and cannot be chosen | `internal/tui/conversation_list.go:App.conversationLines` | `internal/tui.TestChooserDimsOtherWorkspaceRows`, `internal/tui.TestChooserSkipsOtherWorkspaceRows` |
+| `?` on an empty input shows one line of the keys that apply now, above the status line; `?` again hides it | `internal/tui/app.go:App.updateKey`, `internal/tui/command_list.go:App.shortHelpLine` | `internal/tui.TestQuestionMarkOnlyOnEmptyInput`, `internal/tui.TestShortHelpHidesOnTyping`, `internal/tui.TestDrawerClosesListAndShortHelp`, `internal/tui.TestV6CoverageListAndShortHelpSitAboveTheInput` |
+| `/help` is unchanged and lists every command, flag and key, including those added here | `internal/tui/commands.go:cmdHelp`, `internal/tui/commands.go:commandHelp`, `internal/tui/commands.go:flagHelp`, `internal/tui/commands.go:keyHelp` | `internal/tui.TestHelpListsEveryCommandAndKey`, `internal/tui.TestHelpListsCommandsAndKeys`, `internal/tui.TestHelpListsEveryCommandOnItsOwnLine`, `internal/tui.TestHelpListsMouseAndNotify`, `internal/tui.TestV6CoverageHelpListsEveryFlag` |
+| `/override` and `/release` typed without a reason open a form with one required field | `internal/tui/commands.go:cmdOverride`, `internal/tui/commands.go:cmdRelease`, `internal/tui/reason_form.go:openReasonForm` | `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestV6ReleaseReasonForm` |
+| `/release` keeps v4's statement of the overlap risk | `internal/tui/commands.go:cmdRelease` | `internal/tui.TestReleaseWarnsAndNeedsAReason`, `internal/tui.TestV6ReleaseReasonForm` |
+| Submitting sends the command with the entered reason; an empty reason cannot be submitted | `internal/tui/commands.go:App.confirmEnter`, `internal/tui/reason_form.go:openReasonForm` | `internal/tui.TestOverrideNeedsAReason`, `internal/tui.TestOverrideReasonSentExactlyOnce`, `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestV6ReasonPromptInPlainTerminal` |
+| `Esc` sends nothing | `internal/tui/commands.go:App.cancelConfirm` | `internal/tui.TestOverrideEscSendsNothing`, `internal/tui.TestReleaseEscCancels`, `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestV6ReleaseReasonForm` |
+| A command typed with its reason sends as before | `internal/tui/commands.go:cmdOverride` | `internal/tui.TestOverrideIncompleteTurn`, `internal/tui.TestOverrideApprovedTurnIsRefused` |
 
-## Replay and boundaries
+### §5 Additions: mouse, animation, notify, commands and flags
 
 | Clause | Implementation | Tests |
 | --- | --- | --- |
-| Replay frames precede `live_from_seq` and live frames follow it with no gap | `conn` processes frame stream (conn.go) | `internal/acceptance.TestV6Reviews_ReplayLiveBoundary` |
-| An empty replay is followed by live frames starting exactly at `live_from_seq` | `conn` handles empty replay (conn.go) | `internal/acceptance.TestV6Reviews_EmptyReplay` |
-| Repeated reconnects deliver each frame once | `conn` deduplicates by seq (conn.go) | `internal/acceptance.TestV6Reviews_RepeatedReconnect` |
-| A restarted engine replays the same frames to a fresh client | Frame replay (server-side, internal/engine) | `internal/acceptance.TestV6Reviews_FreshProcess` |
+| Mouse: with `/mouse on`, or `--mouse`, tabs can be clicked | `internal/tui/mouse.go:App.updateMouse`, `internal/tui/mouse.go:App.click`, `internal/tui/mouse.go:App.tabSpans`, `internal/tui/commands.go:cmdMouse`, `internal/tui/app.go:WithMouse` | `internal/tui.TestMouseTabClickSwitchesToTheNamedTab`, `internal/tui.TestMouseTabClickClosesTheDrawerLikeTab`, `internal/tui.TestMouseCommandTogglesCapture`, `internal/tui.TestMouseIgnoresOtherButtonsAndReleases` |
+| Mouse: a `reviews` count opens the drawer on that turn | `internal/tui/mouse.go:App.reviewCountAt`, `internal/tui/mouse.go:App.openDrawer` | `internal/tui.TestMouseReviewCountClickOpensThatTurn`, `internal/tui.TestMouseOnlyTheReviewCountOpensTheDrawer`, `internal/tui.TestMouseReviewCountClickFollowsScroll`, `internal/tui.TestMouseZeroReviewCountClickOpensThatTurn` |
+| Mouse: a round in the drawer header selects it | `internal/tui/reviews.go:ReviewsDrawer.RoundAt`, `internal/tui/reviews.go:ReviewsDrawer.SelectRound`, `internal/tui/mouse.go:App.click` | `internal/tui.TestMouseRoundHeaderClickSelectsThatRound`, `internal/tui.TestMouseRoundHeaderClickWithTwoDigitRounds`, `internal/tui.TestMouseRoundClickNeedsAnOpenDrawer` |
+| Mouse is off by default | `internal/tui/app.go:NewApp`, `internal/tui/mouse.go:App.mouseAllowed` | `internal/tui.TestMouseOffByDefault`, `internal/tui.TestV6NotifyMouseOptIn` |
+| The mouse setting lasts for the TUI process and is not persisted | `internal/tui/commands.go:cmdMouse`, `internal/tui/commands.go:cmdNotify` | `internal/tui.TestV6CoverageMouseAndNotifyAreNotPersisted` |
+| The mouse is never captured under `TERM=dumb` | `internal/tui/mouse.go:App.mouseAllowed`, `internal/tui/term.go:DetectTerminalCapabilities`, `internal/tui/term.go:ProgramOptionsWithMouse` | `internal/tui.TestDumbTerminalNeverCapturesTheMouse`, `internal/tui.TestV6NotifyMouseOptIn`, `internal/tui.TestPlainModeIgnoresTheMouse`, `internal/tui.TestProgramOptionsWithMouse` |
+| The mouse is never captured with colour off | `internal/tui/mouse.go:App.mouseAllowed`, `internal/tui/term.go:DetectTerminalCapabilities` | `internal/tui.TestV6CoverageMouseNotCapturedWithColourOff` |
+| The drawer opens and closes with a short animation | `internal/tui/reviews.go:ReviewsDrawer.Open`, `internal/tui/reviews.go:ReviewsDrawer.Close`, `internal/tui/reviews.go:ReviewsDrawer.Step`, `internal/tui/mouse.go:App.animateDrawer` | `internal/tui.TestDrawerAnimation`, `internal/tui.TestDrawerCloseAnimation`, `internal/tui.TestMouseOpenSlidesInFrameByFrame`, `internal/tui.TestMouseCloseKeepsItsLinesWhileSliding`, `internal/tui.TestAnimationNeverSubmitsOrCancels`, `internal/tui.TestPlainModeDrawerIsWholeAtOnce` |
+| With `/notify on`, or `--notify`, the TUI writes one BEL when it receives, live, the event that takes a turn to a terminal state; off by default and process-scoped, not persisted | `internal/tui/notify.go:App.shouldNotify`, `internal/tui/notify.go:App.bellCmd`, `internal/tui/commands.go:cmdNotify`, `internal/tui/app.go:WithNotify`, `cmd/syndic/conversation_select.go:parseStartupFlags` | `internal/tui.TestNotifyOffByDefault`, `internal/tui.TestNotifyOffNeverRings`, `internal/tui.TestV6NotifyPlainModeBellAndNoEscape`, `internal/tui.TestV6CoverageBellIsOneBELByte`, `internal/tui.TestV6CoverageMouseAndNotifyAreNotPersisted`, `cmd/syndic.TestV6CoverageNotifyAndMouseFlags` |
+| An event with `seq` at or above `live_from_seq` is live (rings), including one exactly at it; one below it is replay (does not) | `internal/tui/notify.go:App.shouldNotify` | `internal/tui.TestBoundaryEventRingsOnce`, `internal/tui.TestNewProcessWithHistoryShowsNoNoticeAndNoBell` |
+| The TUI keeps the highest `seq` it has processed for the life of the process and across reconnects; a replayed event never rings, an empty replay changes nothing, and no terminal event rings or is noticed twice | `internal/tui/notify.go:App.shouldNotify`, `internal/tui/app.go:App.onConnected` | `internal/tui.TestEmptyReplayThenLiveTerminalRingsOnce`, `internal/tui.TestLiveTerminalAfterReconnectRingsOnce`, `internal/tui.TestRetainedSeqAdvancesWhileNotifyIsOff` |
+| On reattach within one process (connection loss or `/resume`) the chat shows one line for each turn whose terminal event is replay and above the retained `seq`, naming its outcome and time | `internal/tui/notify.go:App.recordMissedTerminalEvent`, `internal/tui/chat.go:chatLinesWithStarts`, `internal/tui/commands.go:cmdResume` | `internal/tui.TestMissedTerminalWhileDetachedShowsOneNoticeAndNoBell`, `internal/tui.TestV6CoverageResumeShowsOneNoticeAndNoBell` |
+| A newly started TUI has no retained `seq` and shows no such line | `internal/tui/app.go:App.onConnected` | `internal/tui.TestNewProcessWithHistoryShowsNoNoticeAndNoBell` |
+| Commands added: `/raw on\|off`, `/notify on\|off`, `/mouse on\|off`; flags added: `--notify`, `--mouse` | `internal/tui/commands.go:cmdRaw`, `internal/tui/commands.go:cmdNotify`, `internal/tui/commands.go:cmdMouse`, `cmd/syndic/conversation_select.go:parseStartupFlags` | `internal/tui.TestCommandCatalogueMatchesRegistry`, `internal/tui.TestHelpListsMouseAndNotify`, `cmd/syndic.TestV6CoverageNotifyAndMouseFlags` |
 
-## E-side clauses (file attachment, apply, files request)
+### §8 Acceptance bullets (D-side), by bullet
 
-E-side clauses are explicitly assigned to V6-E tasks on the board. This design task does not 
-implement the following, which are listed here for completeness and traceability:
+| Clause | Implementation | Tests |
+| --- | --- | --- |
+| Every v4 and v5 banner string appears verbatim after its mark, except `after 1 revision` at n of 1 | `internal/tui/answer.go:renderAnswer` | `internal/tui.TestOutcomeMarksPlain`, `internal/tui.TestV6OutcomeWordsMarksAndReviewCount`, `internal/tui.TestApprovedRevisionWording`, `internal/tui.TestV6OutcomesGoldenFrame`, `internal/tui.TestV5EveryV4BannerStringIsVerbatim` |
+| An answer, a reviewer commentary and a user input each containing an escape sequence, a carriage return and a bidirectional override are shown with visible escapes in the chat, the transcript and the drawer, with `/raw` on and off, and no such byte is written to the terminal | `internal/tui/safe_text.go:SafeTextWithPrefix`, `internal/tui/answer.go:shownAnswer`, `internal/tui/reviews.go:ReviewsDrawer.render`, `internal/tui/transcript.go:transcriptLines` | `internal/tui.TestV6AdversarialContentThroughChat`, `internal/tui.TestV6AdversarialContentInTranscript`, `internal/tui.TestV6AdversarialContentInDrawer`, `internal/tui.TestV6RawAnswerSafeTextAndTranscriptRefKeepsBytes` |
+| Every displayed content line begins with two spaces after wrapping | `internal/tui/safe_text.go:SafeTextWithPrefix` | `internal/tui.TestSafeTextWithPrefix_HostileProperty`, `internal/tui.TestAppViewHostileSourcesAreSafeAndIndented`, `internal/tui.TestV6AdversarialContentThroughChat` |
+| An answer whose text is an outcome line, and one that uses carriage returns or cursor movement to reach column 0, are shown indented and unmarked | `internal/tui/safe_text.go:safeTokens`, `internal/tui/chat.go:chatLinesWithStarts`, `internal/tui/answer.go:shownAnswer` | `internal/tui.TestContinuationAndAnswerCannotForgeOutcomes`, `internal/tui.TestV6ForgedOutcomeLinesAreIndentedAndUnmarked` |
+| `/raw on` shows the answer's safe text with no Markdown rendering; the `transcript` content reference for the same answer returns the journal's bytes unchanged | `internal/tui/commands.go:cmdRaw`, `internal/tui/markdown.go:renderAnswerMarkdown`, `internal/tui/content.go:ContentCache.Get` | `internal/tui.TestV6RawAndMarkdownThroughCommands`, `internal/tui.TestRawCommandChangesView`, `internal/tui.TestV6RawAnswerSafeTextAndTranscriptRefKeepsBytes` |
+| The status line is the last line at every size and ends with `tab: switch  /help` | `internal/tui/app.go:App.View`, `internal/tui/strip.go:statusFields.fit` | `internal/tui.TestChatStatusLineIsLastAt80x24`, `internal/tui.TestV6StatusLineLastAtEverySizeAndTab`, `internal/tui.TestStatusLineKeepsTokensAndHint`, `internal/tui.TestV5StatusLineIsLastAtEverySize` |
+| At 80×24 with the drawer open, three banners including the identity warning and a six-line input, the tab bar, at least five chat lines, the drawer, the identity warning, at least one input line and the status line are all shown (the eight-attachments and attached-line parts are E-side, see below) | `internal/tui/layout.go:allocate`, `internal/tui/app.go:App.View` | `internal/tui.TestCrowdedChatWithDrawerAt80x24And80x31`, `internal/tui.TestV6Crowded80x24GoldenFrame`, `internal/tui.TestAllocateShrinkOrder` |
+| The drawer is closed at start; `Ctrl+O` opens it; `Esc` closes it; the input does not change while it is open; opening it never cancels or submits anything | `internal/tui/app.go:App.updateKey`, `internal/tui/mouse.go:App.openDrawer` | `internal/tui.TestV6DrawerKeysThroughUpdateAndView`, `internal/tui.TestReviewsDrawerEndToEnd`, `internal/tui.TestV6CoverageOpeningDrawerNeverCancelsOrSubmits` |
+| `reviews` lists each accepted verdict once under its round with its kind and each block's state; a block opened in round 1, maintained in round 2 and withdrawn in round 3 shows those states in those rounds; a malformed attempt and an unsuccessful repair are not listed; a verdict accepted on repair is listed once with the repair attempt's id | `internal/server/reviews.go:buildReviews`, `internal/journal/review_records.go:Tx.ReviewsPage` | `internal/acceptance.TestV6Reviews_AcceptedRepairOnce`, `internal/acceptance.TestV6Reviews_HistoricalBlockTransitions` |
+| After the stored commentary text of a verdict is replaced, `reviews` returns the same kinds and block states; each content reference's `sha256` and `byte_len` match the bytes its retrieval returns | `internal/journal/review_records.go:Tx.RecordAcceptedReview` | `internal/acceptance.TestV6Reviews_MutationNoReparse` |
+| A turn with five reviewers, six rounds and an evidence and a remedy of 600 KiB on every block is retrieved completely by paging `reviews` and fetching each reference; no reply exceeds one frame and nothing is truncated | `internal/server/reviews.go:fitReviewsPage` | `internal/acceptance.TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks`, `internal/server.TestReviewsLargeEvidenceAndRemedy` |
+| A verdict that maintains 3,000 blocks whose ids are 1 KiB each is returned in short form with `oversized: true`; fetching `record` returns every block id and state, its `sha256` and `byte_len` match, and no reply exceeds one frame; the same holds for a verdict accepted before the record existed | `internal/journal/review_records.go:Tx.MaterializeReviewRecords`, `internal/server/reviews.go:fitReviewsPage` | `internal/acceptance.TestV6WireCoverage_OversizedRecordIdsStatesAndHashes`, `internal/server.TestReviewsOversizedShortFormRecord` |
+| `reviews` for a solo turn, and for a turn whose reviewers all failed, returns an empty list and no cursor | `internal/server/reviews.go:buildReviews` | `internal/acceptance.TestV6Reviews_EmptyPages`, `internal/acceptance.TestClientReviews_SoloZero`, `internal/acceptance.TestClientReviews_AllFailedZero` |
+| `review_count` equals the number of verdicts `reviews` lists | `internal/server/queries.go:getConversation` | `internal/acceptance.TestClientReviews_CountMatchesAllReviews` |
+| A turn with a maintained block shows it in the chat with the drawer closed | `internal/tui/answer.go:blockLines` | `internal/tui.TestV6CoverageMaintainedBlockShownInChatWithDrawerClosed` |
+| `Tab` switches tabs with no list open and completes with one open | `internal/tui/app.go:App.updateKey` | `internal/tui.TestTabSwitchesTabsWithoutAList`, `internal/tui.TestArrowSelectionLeavesInputUntilTab` |
+| `/override` with an empty form field sends nothing | `internal/tui/commands.go:App.confirmEnter` | `internal/tui.TestV6OverrideReasonForm`, `internal/tui.TestOverrideNeedsAReason` |
+| No BEL is written by default; with `/notify on` one BEL is written for a terminal event whose `seq` is at or above `live_from_seq`, including one exactly at it, and none for an event below it | `internal/tui/notify.go:App.shouldNotify` | `internal/tui.TestBoundaryEventRingsOnce`, `internal/tui.TestNotifyOffNeverRings`, `internal/tui.TestNewProcessWithHistoryShowsNoNoticeAndNoBell`, `internal/tui.TestV6CoverageBellIsOneBELByte` |
+| With an empty replay, the next live terminal event rings once | `internal/tui/notify.go:App.shouldNotify` | `internal/tui.TestEmptyReplayThenLiveTerminalRingsOnce` |
+| After a connection loss during a running turn that then ends, the reattached TUI shows one notice line and writes no BEL; a second and a third reconnect that replay the same event show no further line and write no BEL | `internal/tui/notify.go:App.recordMissedTerminalEvent`, `internal/tui/chat.go:chatLinesWithStarts` | `internal/tui.TestMissedTerminalWhileDetachedShowsOneNoticeAndNoBell`, `internal/tui.TestV6CoverageResumeShowsOneNoticeAndNoBell` |
+| A newly started TUI attached to a conversation whose last turn is terminal shows no notice line | `internal/tui/app.go:App.onConnected` | `internal/tui.TestNewProcessWithHistoryShowsNoNoticeAndNoBell` |
+| The mouse is not captured by default, nor under `TERM=dumb` with `--mouse` | `internal/tui/mouse.go:App.mouseAllowed`, `internal/tui/term.go:ProgramOptionsWithMouse` | `internal/tui.TestV6NotifyMouseOptIn`, `internal/tui.TestDumbTerminalNeverCapturesTheMouse` |
+| With `TERM=dumb` every screen renders with no escape sequence | `internal/tui/term.go:ApplyTerminalCapabilities`, `internal/tui/app.go:App.plainMode` | `internal/tui.TestV6DumbEveryScreenHasNoEscape`, `internal/tui.TestV6CoverageDumbTerminalEveryScreenHasNoEscape`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
+| `/help` lists every command, flag and key of this delta | `internal/tui/commands.go:cmdHelp` | `internal/tui.TestHelpListsEveryCommandAndKey`, `internal/tui.TestHelpListsMouseAndNotify`, `internal/tui.TestV6CoverageHelpListsEveryFlag` |
 
-| Clause | Assignment |
-| --- | --- |
-| File list (files request with workspace-relative paths, case-insensitive substring match, no symlink following, protected pattern filtering) | V6-E: 09 Enumerate confined selectable files |
-| File list does not follow symlinks, descends restricted patterns, returns no invalid UTF-8 paths | V6-E: 09 Enumerate confined selectable files |
-| File list paging with `cursor` and `limit` (at most 200), `truncated` flag on 20,000 entry bound | V6-E: 10 Expose files protocol and verified attachment display data |
-| Attachment tokens: `@path` for simple paths, `@"…"` with escaping for complex paths | V6-E: 11 Model atomic attachment tokens |
-| Choosing a file adds token and path to attachment set; deleting last token removes from set | V6-E: 12 Integrate file completion and attachment submission |
-| Typed `@` word attaches nothing; paths with space are sent in quoted form | V6-E: 11 Model atomic attachment tokens |
-| Attached line equals the `attachments` the submit sends | V6-E: 13 Render admitted attachments and E progress in Ledger |
-| `/apply` shows each path with its operation and the workspace | V6-E: 14 Add explicit apply/discard choice form |
-| `/apply` sends `apply`, `Discard` sends `discard`, `Not now` and `Esc` send nothing | V6-E: 14 Add explicit apply/discard choice form |
-| File-related prompts for attachment management | V6-E: 12 Integrate file completion and attachment submission |
-| Attachment bytes in submit; deduplication, path form, policy, reading, admission, budget | V6-E: 03 Read bounded attachments through confinement |
-| Attachment records, candidate format with `syndic-candidate/v3` and `attachments_hash` | V6-E: 01 Pin attachment manifest and candidate v3 bytes |
-| Snapshot overlay, read_file staging, unstage, attached base | V6-E: 02 Persist attachment records and admitted snapshot bases |
-| Participants receive attachments fenced, labelled, in manifest order | V6-E: 07 Retain sorted attachment blocks in every model request |
-| Taint, egress, file-derived content, web+file combination, canary seeding | V6-E: 04 Enforce attachment egress and canary seeding |
-| Attachment history (not carried forward), display (path, size, hash, web+file flag) | V6-E: 13 Render admitted attachments and E progress in Ledger |
-| Retried `submission_id` handling; refused submit leaves no turn, conversation, taint, observation | V6-E: 06 Admit attachment submits atomically and idempotently |
-| A solo turn is allowed under the same order, rules and binding | V6-E: 08 Freeze candidate v3 and solo attachment identity |
+### Subscription boundary (wire level, supports the notify rows)
 
-## Identified coverage gaps in D-side clauses
+These engine-side frame tests prove only the wire ordering that the TUI notice and bell
+rows above rely on. They do not build a TUI and are not cited as proof of any notice
+line or BEL.
 
-The following D-side clauses from the design lack test execution and should be considered 
-for future test development:
+| Clause | Implementation | Tests |
+| --- | --- | --- |
+| Replay frames precede `live_from_seq`, live frames follow it with no gap | `internal/server/server.go:connection.handleRequest` | `internal/acceptance.TestV6Reviews_ReplayLiveBoundary` |
+| An empty replay is followed by live frames starting at `live_from_seq` | `internal/server/server.go:connection.handleRequest` | `internal/acceptance.TestV6Reviews_EmptyReplay` |
+| Repeated reconnects replay the same frames; an engine restart replays them to a fresh client | `internal/server/server.go:connection.handleRequest` | `internal/acceptance.TestV6Reviews_RepeatedReconnect`, `internal/acceptance.TestV6Reviews_FreshProcess` |
 
-1. **Second `?` to hide short help:** Design requires pressing `?` again to hide; test types `x` instead.
-2. **`/help` command:** Design requires `/help` to list every command, flag and key added in this delta; no test invokes it.
-3. **`/override` with empty form:** Design forbids empty reason submission; test does not verify refusal or `Esc` sends nothing.
-4. **`/release` overlap risk:** Design requires `/release` to include overlap risk statement; test does not verify this text.
-5. **Opening drawer never cancels or submits:** Design forbids side effects on drawer open; test does not verify this invariant.
-6. **Open blocks on incomplete/cancelled:** Design requires blocks to remain visible in chat; test does not verify this.
-7. **Maintained block in closed drawer:** Design requires maintained blocks to remain in closed chat; test does not verify this.
-8. **Drawer animation rendering:** Design requires animation with short effect; test disables animation.
-9. **Mouse and notify non-persistence:** Design requires settings to be process-scoped; tests do not verify non-persistence.
-10. **Mouse clicks on UI elements:** Design covers tabs, review count, drawer rounds clickable; tests do not send mouse events.
-11. **Colour-pair selection from terminal background:** Design requires colours chosen from terminal background; test uses ASCII golden frame.
-12. **Drawer height >80x24:** Design requires 7 lines at 80x24, 9 lines above 30 rows; test uses fixed 24-row frame.
-13. **Drawer and lists below 80x24:** Design forbids opening below 80x24; test does not verify screen-size constraint.
-14. **Colour-off degradation:** Design covers colour-off flag; test only checks TERM=dumb.
-15. **Full Markdown rendering:** Design covers fenced code blocks with language labels and lists; test uses bold and inline-code only.
-16. **Link display without hyperlink escape:** Design forbids hyperlink escapes; test does not contain link input.
-17. **Transcript tab unformatted:** Design requires transcript always unformatted; test does not inspect transcript tab.
+## E-side clauses and their owners
+
+Each row is assigned to the V6-E board tasks named (implementation) and the acceptance
+or closure task that must prove it. None of these is claimed as covered by the D-side
+tables. Until those tasks land there is no executed D-side test for them;
+`internal/tui.TestV6NoEOnlyControls` and `internal/tui.TestV6ApplyIsNotACommand` pin
+that the TUI has no attachment, file or apply control yet.
+
+| Clause | Implementing task | Accepting task |
+| --- | --- | --- |
+| §1 Heights: the attached line is one line, paths in order until the width runs out, then `+<n> more` | V6-E12 Integrate file completion and attachment submission (b89f9e96); V6-E13 Render admitted attachments and E progress in Ledger (317c0388) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §1 Safe text and §8 Display: an attachment, a file name and the attached line containing an escape sequence, a carriage return and a bidirectional override are shown with visible escapes in the file list and the attached line | V6-E10 Expose files protocol and verified attachment display data (7f1d2813); V6-E13 Render admitted attachments and E progress in Ledger (317c0388) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §1 Heights: a file list takes at most 5 lines and closes when the drawer opens; `Tab` completes while the file list is open | V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 File list: typing `@` and characters with no space opens a list of workspace files; it is filled by `files{workspace, query, cursor?, limit?}` → `{entries: [{path, size}], next_cursor?, truncated}` | V6-E09 Enumerate confined selectable files (41e43ec5); V6-E10 Expose files protocol and verified attachment display data (7f1d2813); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 File list: `path` is workspace-relative with `/` separators, only regular files, `query` is a case-insensitive substring of the path | V6-E09 Enumerate confined selectable files (41e43ec5) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §3 File list: confined walk; no symbolic link followed or returned; no descent into or return of a protected pattern; no path with a control character or invalid UTF-8 | V6-E09 Enumerate confined selectable files (41e43ec5) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §3 File list: `limit` at most 200, reply fits one frame, at most 20,000 directory entries examined, `truncated` and the partial-results notice; names and sizes only, no content read, no snapshot observation | V6-E09 Enumerate confined selectable files (41e43ec5); V6-E10 Expose files protocol and verified attachment display data (7f1d2813) | V6-E15 Accept attachment admission and retention (1b52c4e3); V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 The TUI reads no workspace file or directory itself | V6-E10 Expose files protocol and verified attachment display data (7f1d2813); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651); V6-E18 Close v6 attachment and full-TUI coverage (f2b7696b) |
+| §3 Attachment tokens: choosing an entry inserts one atomic token (cursor steps over it, not editable inside, deleted whole) and adds the path to the pending set; the set, not the input text, decides what is attached | V6-E11 Model atomic attachment tokens (41471130); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 Token text is `@path` for letters, digits and `. _ - /`, otherwise `@"…"` with `"` and `\` escaped; that text is what `input` carries | V6-E11 Model atomic attachment tokens (41471130) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 Choosing a path already in the set inserts another token for the same attachment; one entry per path; an attachment leaves the set when its last token is deleted | V6-E11 Model atomic attachment tokens (41471130); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 A typed or pasted `@` word not chosen from the list is ordinary text and attaches nothing | V6-E11 Model atomic attachment tokens (41471130); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 The attached line lists exactly the set the next submit will send, with sizes, and nothing else; it equals the `attachments` the submit sends | V6-E12 Integrate file completion and attachment submission (b89f9e96); V6-E13 Render admitted attachments and E progress in Ledger (317c0388) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §3 `/apply` shows each path with its operation and what will happen to it, and the workspace; Apply sends `apply{turn_id}`, Discard sends `discard{turn_id}`, Not now and `Esc` send nothing (today `/apply` is unknown and sends nothing: `TestV6ApplyIsNotACommand`) | V6-E14 Add explicit apply/discard choice form (8af5f290) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §4 Protocol: `submit` gains `attachments?`, at most 8 workspace-relative paths; the request hash stored beside `submission_id` covers the list; the TUI sends paths, never content | V6-E06 Admit attachment submits atomically and idempotently (ea6157e7); V6-E12 Integrate file completion and attachment submission (b89f9e96) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Order at submit step 1: deduplication by `submission_id` before anything else; a matching request replays the stored reply and opens no file; a differing request is `submission_conflict` | V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Step 2: path form (relative, no empty, `.` or `..` component, no trailing separator, no control character; duplicates refused) with `error{code: "attachment", path, reason}`, reasons `form` and `duplicate` | V6-E03 Read bounded attachments through confinement (8b5dcbb8); V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Step 3: every v4 and v5 `submit` refusal in order, except admission and budget | V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Step 4: policy (egress and web rules) before any file is opened; a submit refused at the policy step opens no file | V6-E04 Enforce attachment egress and canary seeding (08f26582); V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 Step 5: reading through the confined walk with the protected-path check on the resolved path; regular file only; at most 256 KiB plus one byte read through the descriptor; valid UTF-8; 1 MiB total; reasons `not_found`, `not_regular`, `protected`, `outside`, `too_large`, `total_too_large`, `not_text` | V6-E03 Read bounded attachments through confinement (8b5dcbb8) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Step 6: admission and budget count the attachment bytes in every request that carries them; nothing dropped or truncated | V6-E05 Count attachment request framing in admission (e587f03f); V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Step 7: one transaction commits the turn, the attachment records `{path, sha256, byte_len, content ref}`, the snapshot observations as bases, `file_tainted` and the stored reply; dispatch starts after it commits | V6-E02 Persist attachment records and admitted snapshot bases (2b11a3e8); V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 A refused submit creates no turn and no conversation, sets no taint, records no observation, keeps no content (`..`, absolute, duplicate, symlink, protected, directory, non-UTF-8, 256 KiB plus one, growth between stat and read, over 1 MiB, ninth attachment) | V6-E03 Read bounded attachments through confinement (8b5dcbb8); V6-E06 Admit attachment submits atomically and idempotently (ea6157e7) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Retention: every dispatch of the turn in every round is built from the stored content; the live file is not read again | V6-E02 Persist attachment records and admitted snapshot bases (2b11a3e8); V6-E07 Retain sorted attachment blocks in every model request (1d032955) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Candidate format `syndic-candidate/v3` with the `attachments:<attachments_hash or "none">` line; manifest `syndic-attachments/v1` in ascending byte order of path; every candidate of the turn carries the same line; a solo turn's record carries `attachments_hash`; v2 candidates stay valid | V6-E01 Pin attachment manifest and candidate v3 bytes (c760935a); V6-E08 Freeze candidate v3 and solo attachment identity (036c62da) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 Changing only an attachment's content, or only its path, changes the candidate hash with no tools, with no change set and in round 2; submits identical except for list order produce the same manifest hash and the same request order | V6-E01 Pin attachment manifest and candidate v3 bytes (c760935a); V6-E08 Freeze candidate v3 and solo attachment identity (036c62da) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 Snapshot: each attachment is the turn's observation of that path (immutable base with `base_sha256`); `read_file` returns the attached base, the staged content after a staged edit, and the base again after `unstage` | V6-E02 Persist attachment records and admitted snapshot bases (2b11a3e8) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 What participants receive: the author's and every reviewer's, revision and re-review request carries each attachment after the input, fenced by random delimiters, labelled with its path, marked as data, in manifest order, verbatim after the live file changed, also with no tools | V6-E07 Retain sorted attachment blocks in every model request (1d032955) | V6-E15 Accept attachment admission and retention (1b52c4e3) |
+| §4 Taint and egress: attachment content is file-derived; the turn is file-tainted when admitted with an attachment; destinations rule refuses `error{code: "egress", route: "attachment", participant}`; web-with-file rule refuses likewise even in an untainted conversation | V6-E04 Enforce attachment egress and canary seeding (08f26582) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 With the combination allowed, the attachment bytes are in the canary set from commit, before any web call; a `web_fetch` containing 16 bytes of an attachment is refused on the first web call; the turn record states that web and file content were combined | V6-E04 Enforce attachment egress and canary seeding (08f26582) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 After an attachment turn is admitted the conversation is tainted and `route: "history"` refusals apply to later submits | V6-E04 Enforce attachment egress and canary seeding (08f26582) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 History: attachment content is not carried into a later turn's history; a later turn's requests contain no attachment block for an earlier turn's attachment | V6-E07 Retain sorted attachment blocks in every model request (1d032955) | V6-E15 Accept attachment admission and retention (1b52c4e3); V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §4 Display: in the chat a turn's input is followed by one line per attachment (path, size, hash prefix, `web + file content` when combined); the transcript shows the attached content as safe text | V6-E13 Render admitted attachments and E progress in Ledger (317c0388) | V6-E17 Accept file chooser tokens and attachment screens (d99ee651) |
+| §4 Solo: allowed under the same order, rules and binding | V6-E08 Freeze candidate v3 and solo attachment identity (036c62da) | V6-E16 Accept attachment identity and egress boundaries (56457cd9) |
+| §5 item 9 and §8 whole-feature closure: file list and attachments end to end across engine and TUI | V6-E18 Close v6 attachment and full-TUI coverage (f2b7696b) | V6-E18 Close v6 attachment and full-TUI coverage (f2b7696b) |
+
+## Gaps and decisions
+
+Production gaps found while building this ledger and **fixed in this change**:
+
+1. The input prompt was `> ` where section 1 requires `┃ `. `internal/tui/input.go:defaultPrompt`
+   is now `┃ ` in every mode (section 6 does not override it; README disagreements 2 and 3
+   record that the design governs). Covered by `TestV6InputPromptIsABarAndTheAreaIsMultiLine`.
+2. Banners folded into `+<n> more` were not listed anywhere; section 1 requires the
+   participants tab to list them all. `participants.go:renderParticipants` now lists
+   every banner when more apply than the strip shows. Covered by
+   `TestV6ParticipantsTabListsEveryFoldedBanner`.
+
+Residual items that are **not** closed, reported rather than hidden:
+
+1. Markdown inline-code styling in `markdown.go` uses a fixed ANSI colour (SGR 36 plus
+   bold, italic and underline) rather than a declared light and dark pair. Section 1 says
+   colours are declared as light/dark pairs; the outcome, draft-banner and selected-input
+   styles are (`TestOutcomeStylesAreLightDarkPairs`, `TestV6OutcomeColourFollowsBackground`)
+   but the Markdown palette is the terminal theme's own ANSI colour. No test asserts a pair
+   for it. This is a deviation to be ruled on by the operator or fixed by a follow-up task.
+2. `cmd/syndic/tui.go` hooks `--notify` and `--mouse` into `WithNotify` and
+   `WithMouse` inside `cmdTUI`, which needs a live engine; flag parsing
+   (`TestV6CoverageNotifyAndMouseFlags`) and the App options are tested separately, the
+   hookup itself is not.
+3. Some older tests (`internal/acceptance.TestV6Reviews_OversizedFieldsAndMetadata`,
+   `internal/server.TestReviewsLargeEvidenceAndRemedy`, `TestReviewsOversizedShortFormRecord`)
+   shrink to 300 blocks, 100 KiB and two reviewers under `-short`. The design-sized
+   cases (5 reviewers × 6 rounds × 600 KiB; 3,000 blocks × 1 KiB ids, also pre-record)
+   always run at full size in `TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks` and
+   `TestV6WireCoverage_OversizedRecordIdsStatesAndHashes`.
+4. With the drawer open at 80×24 or larger the "shrink input and banners to 1 line first"
+   rule cannot be reached by size alone; `TestAllocateShrinkOrder` exercises the rule on
+   `allocate` directly.

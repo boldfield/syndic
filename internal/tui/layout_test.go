@@ -297,7 +297,7 @@ func TestTypedInputGrowsAndShrinksWithItsTop(t *testing.T) {
 		if !strings.Contains(in, fmt.Sprintf("l%d", i)) {
 			t.Fatalf("line %d: cursor line not in view:\n%s", i, in)
 		}
-		if i <= maxInputViewport && !strings.Contains(in, "> l1") {
+		if i <= maxInputViewport && !strings.Contains(in, defaultPrompt+"l1") {
 			t.Fatalf("line %d: the first line is scrolled out:\n%s", i, in)
 		}
 	}
@@ -311,7 +311,7 @@ func TestTypedInputGrowsAndShrinksWithItsTop(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	lines = chatView(a)
 	in := strings.Join(lines[len(lines)-1-a.inputRows():len(lines)-1], "\n")
-	if a.inputRows() != maxInputViewport || !strings.Contains(in, "l8") || strings.Contains(in, "> ") && !strings.Contains(in, "l3") {
+	if a.inputRows() != maxInputViewport || !strings.Contains(in, "l8") || strings.Contains(in, defaultPrompt) && !strings.Contains(in, "l3") {
 		t.Errorf("after growing back:\n%s", in)
 	}
 }

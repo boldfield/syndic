@@ -26,5 +26,5 @@ no approved answer (cancelled)
 
 
 
->
+┃
 [review] [idle]                                                  ctrl+o: reviews  tab: switch  /help

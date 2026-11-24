@@ -286,7 +286,7 @@ func TestRegionsAndTabs(t *testing.T) {
 	if !strings.Contains(lines[1], "no turn yet") {
 		t.Errorf("tab region = %q", lines[1])
 	}
-	if !strings.HasPrefix(lines[22], "> ") {
+	if !strings.HasPrefix(lines[22], defaultPrompt) {
 		t.Errorf("input region = %q", lines[22])
 	}
 	last := lines[23]
