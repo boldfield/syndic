@@ -682,7 +682,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, a.enterConversationSelection()
 			}
 			// Otherwise let normal enter() handle dispatching the /conversations command
-			break
+			// (fall through to main switch which handles enter key)
 		case "n":
 			a.convListNKey()
 			return a, nil
@@ -747,10 +747,6 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if len(a.panel) > 0 {
 		// A panel stands in for the tab, so the scroll keys move it.
-		// But Enter should still dispatch commands from the input.
-		if msg.String() == "enter" {
-			return a, a.enter()
-		}
 		if !a.scrollPanel(msg.String()) {
 			return a, a.updateInput(msg)
 		}
