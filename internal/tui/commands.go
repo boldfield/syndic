@@ -29,6 +29,7 @@ var commands = map[string]commandHandler{
 	"drafts":        cmdDrafts,
 	"raw":           cmdRaw,
 	"notify":        cmdNotify,
+	"mouse":         cmdMouse,
 	"help":          cmdHelp,
 	"new":           cmdNew,
 	"conversations": cmdConversations,
@@ -56,9 +57,19 @@ var commandHelp = []string{
 	"/drafts on|off            show or hide the author's unreviewed draft",
 	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
 	"/notify on|off            ring the terminal on a live terminal event",
+	"/mouse on|off             enable or disable mouse input for tabs and drawer",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
+}
+
+// flagHelp is one line per flag, in the order /help lists them.
+var flagHelp = []string{
+	"--new                     start with an empty conversation",
+	"--conversation <id>       open the conversation with this id or unique prefix",
+	"--rounds [n]              revisions allowed per turn, 0 to 5",
+	"--notify                  ring the terminal on a live terminal event",
+	"--mouse                   enable mouse input for tabs and drawer",
 }
 
 // keyHelp is one line per key, in the order /help lists them.
@@ -109,6 +120,7 @@ func cmdResume(a *App, _ []string) tea.Cmd { return a.reconnect() }
 
 func cmdHelp(a *App, _ []string) tea.Cmd {
 	a.panel = append([]string{"commands:"}, commandHelp...)
+	a.panel = append(append(a.panel, "", "flags:"), flagHelp...)
 	a.panel = append(append(a.panel, "", "keys:"), keyHelp...)
 	return nil
 }
@@ -210,6 +222,26 @@ func cmdNotify(a *App, args []string) tea.Cmd {
 	a.notify = args[0] == "on"
 	a.refusal = "notify " + args[0]
 	return nil
+}
+
+func cmdMouse(a *App, args []string) tea.Cmd {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		a.refusal = "usage: /mouse on|off"
+		return nil
+	}
+	if args[0] == "on" {
+		if !a.mouseAllowed() {
+			a.mouseEnabled = false
+			a.refusal = "mouse: not available in plain mode"
+			return nil
+		}
+		a.mouseEnabled = true
+		a.refusal = "mouse on"
+		return tea.EnableMouseCellMotion
+	}
+	a.mouseEnabled = false
+	a.refusal = "mouse off"
+	return tea.DisableMouse
 }
 
 // commandMsg is the outcome of a command that sent a request: the line to

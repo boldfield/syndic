@@ -76,6 +76,7 @@ type App struct {
 	want                 regionWant                  // optional regions the layout reserves lines for; none in milestone D
 	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
 	rawMode              bool                        // /raw on|off; true disables Markdown rendering
+	mouseEnabled         bool                        // /mouse on|off; default false
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -102,6 +103,7 @@ type App struct {
 	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
 	reviewCounts     map[string]*int // review_count per turn, from conversation info; a key marks the count as read
 	reviewsLoading   map[string]bool // turns whose reviews are being fetched
+	drawerAnimating  bool            // a drawerFrameMsg is on its way
 
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
@@ -148,6 +150,11 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 // WithNotify enables terminal notifications for terminal events.
 func WithNotify(notify bool) Option {
 	return func(a *App) { a.notify = notify }
+}
+
+// WithMouse enables mouse input for tabs and drawer interaction.
+func WithMouse(mouse bool) Option {
+	return func(a *App) { a.mouseEnabled = mouse }
 }
 
 // WithBellEmitter sets a custom bell emitter function; used for testing.
@@ -202,6 +209,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	for _, o := range opts {
 		o(a)
 	}
+	a.mouseEnabled = a.mouseEnabled && a.mouseAllowed()
 	var errs []error
 	if a.workDir == "" {
 		wd, err := os.Getwd()
@@ -497,7 +505,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		a.tStale = a.tStale || m.String() == "tab" || m.String() == "shift+tab"
-	case tickMsg:
+	case tickMsg, drawerFrameMsg:
 	default:
 		a.tStale = true
 	}
@@ -518,13 +526,15 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 		if a.reviewsDrawer.IsOpen() && (a.width < regionMinWidth || a.height < regionMinHeight) {
 			// A drawer too small to draw must not keep the keyboard.
-			a.reviewsDrawer.Close()
+			a.reviewsDrawer.ForceClose()
 			a.want.Drawer = false
 		}
 		a.input.SetWidth(max(a.width, 1))
 		return a, nil
 	case tea.KeyMsg:
 		return a.updateKey(msg)
+	case tea.MouseMsg:
+		return a.updateMouse(msg)
 	case connectedMsg:
 		return a.onConnected(msg)
 	case eventMsg:
@@ -555,6 +565,11 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
 		return a, a.ensureTick()
+	case drawerFrameMsg:
+		a.drawerAnimating = false
+		a.reviewsDrawer.Step()
+		a.syncDrawerWant()
+		return a, a.animateDrawer()
 	}
 	return a, a.updateInput(msg)
 }
@@ -632,9 +647,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines(a.width, a.content))
 			return a, nil
 		case "esc", "ctrl+o":
-			a.reviewsDrawer.Close()
-			a.want.Drawer = false
-			return a, nil
+			return a, a.closeDrawer()
 		default:
 			// Input cannot change while drawer is focused; ignore other keys
 			return a, nil
@@ -673,49 +686,23 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		a.panel, a.refusal, a.panelRow = nil, "", 0
-		a.reviewsDrawer.Close()
-		a.want.Drawer = false
-		return a, nil
+		return a, a.closeDrawer()
 	case "ctrl+o":
 		if a.tab == tabChat {
 			if a.reviewsDrawer.IsOpen() {
-				a.reviewsDrawer.Close()
-				a.want.Drawer = false
+				return a, a.closeDrawer()
 			} else if a.width >= regionMinWidth && a.height >= regionMinHeight {
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
-					a.updateDrawerTurns()
-					hs := a.layout()
-					a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-					a.closeCommandList()
-					a.showShortHelp = false
-					a.reviewsDrawer.Open(len(turns) - 1)
-					a.want.Drawer = true
-					return a, a.fetchReviewsForTurn(turns[len(turns)-1])
+					return a, a.openDrawer(len(turns) - 1)
 				}
 			}
 		}
 		return a, nil
 	case "tab":
-		a.panel = nil
-		a.tab = (a.tab + 1) % numTabs
-		a.answerScrollRow, a.answerFollow = 0, true
-		if a.tab != tabChat {
-			a.reviewsDrawer.Close()
-			a.want.Drawer = false
-		}
-		a.updateDrawerTurns()
-		return a, nil
+		return a, a.setTab((a.tab + 1) % numTabs)
 	case "shift+tab":
-		a.panel = nil
-		a.tab = (a.tab + numTabs - 1) % numTabs
-		a.answerScrollRow, a.answerFollow = 0, true
-		if a.tab != tabChat {
-			a.reviewsDrawer.Close()
-			a.want.Drawer = false
-		}
-		a.updateDrawerTurns()
-		return a, nil
+		return a, a.setTab((a.tab + numTabs - 1) % numTabs)
 	case "enter":
 		return a, a.enter()
 	}
@@ -1441,9 +1428,15 @@ func (a *App) scrollAnswer(delta int) {
 	a.answerFollow = row == min(lastTurn, maxStart)
 }
 
+// tabGap separates the tab names in the tab bar.
+const tabGap = "  "
+
+// tabNames are the tabs' names, in tab order.
+func tabNames() []string { return []string{"chat", "transcript", "participants"} }
+
 // tabBar names the tabs, the active one in brackets.
 func (a *App) tabBar() string {
-	names := []string{"chat", "transcript", "participants"}
+	names := tabNames()
 	parts := make([]string, len(names))
 	for i, n := range names {
 		if tab(i) == a.tab {
@@ -1451,7 +1444,7 @@ func (a *App) tabBar() string {
 		}
 		parts[i] = n
 	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, tabGap)
 }
 
 // statusLine is the strip with the hints at its right edge, w cells wide:
@@ -1491,6 +1484,7 @@ func (a *App) View() string {
 		var chat []string
 		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
 		tabView = strings.Join(chat, "\n")
+
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:
@@ -1560,7 +1554,8 @@ func (a *App) View() string {
 
 	// Add drawer, list, attached, and help lines
 	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content), "\n")
+	plainMode := !a.terminalCapabilities.Color
+	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content, plainMode), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {
 			output = append(output, ansi.Truncate(drawerLines[i], w, ""))

@@ -68,6 +68,9 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 	if flags.notify {
 		opts = append(opts, tui.WithNotify(true))
 	}
+	if flags.mouse {
+		opts = append(opts, tui.WithMouse(true))
+	}
 
 	// Detect terminal capabilities
 	caps := tui.DetectTerminalCapabilities()
@@ -82,8 +85,8 @@ func cmdTUI(fs *flag.FlagSet, args []string) int {
 
 	tui.ApplyTerminalCapabilities(caps)
 
-	// Run Bubble Tea
-	p := tea.NewProgram(app, tui.ProgramOptions(caps)...)
+	// Run Bubble Tea with mouse support if enabled
+	p := tea.NewProgram(app, tui.ProgramOptionsWithMouse(caps, flags.mouse)...)
 	finalModel, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: TUI error: %v\n", err)

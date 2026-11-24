@@ -55,9 +55,10 @@ type startupFlags struct {
 	conversation    string
 	rounds          roundsFlag
 	notify          bool
+	mouse           bool
 }
 
-// parseStartupFlags parses --new, --conversation, --rounds and --notify. A returned
+// parseStartupFlags parses --new, --conversation, --rounds, --notify and --mouse. A returned
 // error is a usage error: the command exits 2 before it connects to anything.
 func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 	var f startupFlags
@@ -65,6 +66,7 @@ func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 	fs.StringVar(&f.conversation, "conversation", "", "open the conversation with this id, or any unique prefix of it")
 	fs.Var(&f.rounds, "rounds", "revisions allowed per turn in this process, 0 to 5")
 	fs.BoolVar(&f.notify, "notify", false, "ring the terminal on a live terminal event")
+	fs.BoolVar(&f.mouse, "mouse", false, "enable mouse input for tabs and drawer")
 	if err := fs.Parse(args); err != nil {
 		return f, err
 	}
