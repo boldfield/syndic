@@ -202,6 +202,11 @@ func TestGoldenPayload(t *testing.T) {
 }
 
 func TestTemplateHashPinned(t *testing.T) {
+	// This is the pinned hash of the canonical template. Any change to systemText,
+	// the framing constants, or the structure of buildPayloadUser will change this hash.
+	// If constants are modified, update this pinned value only after verifying the change is intentional.
+	const pinnedHash = "78b58b9ed01773781e1eaa747dc46936cd05cd6d85652a550e901c4b1f636048"
+
 	hash1 := TemplateHash()
 	hash2 := TemplateHash()
 
@@ -218,7 +223,7 @@ func TestTemplateHashPinned(t *testing.T) {
 		t.Errorf("hash length = %d, want %d (SHA-256 hex)", len(hash1), expectedLen)
 	}
 
-	// Verify the hash is computed from the canonical template using the same constants.
+	// Verify the hash is derived from the actual rendered template.
 	template := canonicalTemplate()
 	expectedHash := sha256.Sum256([]byte(template))
 	expectedHashStr := hex.EncodeToString(expectedHash[:])
@@ -227,12 +232,10 @@ func TestTemplateHashPinned(t *testing.T) {
 		t.Errorf("TemplateHash = %q, want %q (computed from canonical template)", hash1, expectedHashStr)
 	}
 
-	// Pin the expected hash as a literal so any change to framing fails the test.
-	// This hash is derived from systemText and the framing constants.
-	// Compute it once to verify:
-	hash := TemplateHash()
-	t.Logf("Current template hash: %q", hash)
-	// If this test runs, the hash is stable. Update the pinned value below if constants change.
+	// Verify against the pinned literal. This fails if any change to framing or systemText occurs.
+	if hash1 != pinnedHash {
+		t.Errorf("TemplateHash = %q, want pinned %q; update pinned value if change is intentional", hash1, pinnedHash)
+	}
 }
 
 func TestSystemMessageContent(t *testing.T) {

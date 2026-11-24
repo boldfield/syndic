@@ -3,6 +3,7 @@ package referee
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/boldfield/syndic/internal/transport"
 )
@@ -55,10 +56,12 @@ func Parse(text string, finishStatus transport.CompletionStatus, hasToolCalls bo
 		}
 	}
 
-	// Check for control characters (CR, etc) which indicate malformed input.
-	if strings.ContainsAny(text, "\r\t") {
-		return ParsedResult{Decision: DecisionDeny}, &ParseError{
-			detail: "response contains control characters",
+	// Check for control characters (any rune where unicode.IsControl is true, or U+2028/U+2029).
+	for _, r := range text {
+		if unicode.IsControl(r) || r == ' ' || r == ' ' {
+			return ParsedResult{Decision: DecisionDeny}, &ParseError{
+				detail: "response contains control characters",
+			}
 		}
 	}
 
