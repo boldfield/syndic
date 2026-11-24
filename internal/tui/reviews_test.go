@@ -22,7 +22,7 @@ func TestReviewsDrawerOpen(t *testing.T) {
 		t.Error("drawer should start closed")
 	}
 	d.SetTurns([]string{"turn1", "turn2"})
-	d.Open(0)
+	d.Open(0, false)
 	if !d.IsOpen() {
 		t.Error("drawer should be open after Open()")
 	}
@@ -34,8 +34,8 @@ func TestReviewsDrawerOpen(t *testing.T) {
 func TestReviewsDrawerClose(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1", "turn2"})
-	d.Open(0)
-	d.Close()
+	d.Open(0, false)
+	d.Close(false)
 	if d.IsOpen() {
 		t.Error("drawer should be closed after Close()")
 	}
@@ -45,7 +45,7 @@ func TestReviewsDrawerNavigation(t *testing.T) {
 	d := NewReviewsDrawer()
 	turns := []string{"turn1", "turn2", "turn3"}
 	d.SetTurns(turns)
-	d.Open(0)
+	d.Open(0, false)
 
 	// Test down navigation
 	d.SelectDown()
@@ -81,7 +81,7 @@ func TestReviewsDrawerNavigation(t *testing.T) {
 func TestReviewsDrawerRoundNavigation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Add reviews with multiple rounds
 	items := []wire.ReviewItem{
@@ -141,7 +141,7 @@ func TestReviewsDrawerUpdateReviews(t *testing.T) {
 func TestReviewsDrawerScroll(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	d.ScrollDown(2, 20)
 	if d.scrollOffset != 2 {
@@ -169,7 +169,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 		t.Errorf("closed drawer should render empty, got %q", output)
 	}
 
-	d.Open(0)
+	d.Open(0, false)
 	items := []wire.ReviewItem{
 		{Round: 1, Participant: "p1", Kind: "approve", Blocks: []wire.ReviewBlock{
 			{BlockID: "b1", State: "withdrawn"},
@@ -190,7 +190,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 func TestReviewsDrawerSafeText(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Test that control characters in block IDs are escaped
 	items := []wire.ReviewItem{
@@ -218,7 +218,7 @@ func TestReviewsDrawerSafeText(t *testing.T) {
 func TestReviewsDrawerCommentaryRendering(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	cc := NewContentCache()
 	commentRef := "ref:comment:123"
@@ -252,7 +252,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetRoster([]string{"p3", "p1", "p2"})
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Add reviews in non-roster order
 	items := []wire.ReviewItem{
@@ -280,7 +280,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 func TestReviewsDrawerPaging(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Create many items to test paging
 	var items []wire.ReviewItem
@@ -327,7 +327,7 @@ func TestReviewsDrawerInputBlocking(t *testing.T) {
 	}
 
 	// Open drawer
-	d.Open(0)
+	d.Open(0, false)
 	if !d.IsOpen() {
 		t.Error("drawer should be open after Open()")
 	}
@@ -345,7 +345,7 @@ func TestReviewsDrawerInputBlocking(t *testing.T) {
 	}
 
 	// Close drawer
-	d.Close()
+	d.Close(false)
 	if d.IsOpen() {
 		t.Error("drawer should be closed after Close()")
 	}
@@ -385,7 +385,7 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 		},
 	}
 	d.UpdateReviews("turn1", items)
-	d.Open(0)
+	d.Open(0, false)
 
 	// Each round shows the block in the state that round's verdict gave it.
 	for i, want := range []string{"b1: opened", "b1: maintained", "b1: withdrawn"} {
@@ -402,7 +402,7 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 func TestReviewsDrawerHeaderWithoutReviews(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"t1", "t2", "t3"})
-	d.Open(0)
+	d.Open(0, false)
 	d.UpdateReviews("t2", nil)
 	d.SetReviewsError("t3", fmt.Errorf("refused"))
 	for i, want := range []string{"loading…", "no reviews", "reviews unavailable: refused"} {
@@ -631,7 +631,7 @@ func TestReviewsDrawerKeysAndResize(t *testing.T) {
 func TestReviewsDrawerSetTurnsKeepsSelection(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"a", "b"})
-	d.Open(0)
+	d.Open(0, false)
 	d.SelectDown()
 	d.SetTurns([]string{"a", "b", "c"})
 	if got := d.selectedTurnID(); got != "b" {
@@ -761,7 +761,7 @@ func TestDrawerAnimation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
 	d.SetDrawerHeight(7)
-	d.Open(0)
+	d.Open(0, false)
 
 	// When opened, animation should start
 	if !d.IsAnimating() {
@@ -792,7 +792,7 @@ func TestDrawerAnimation(t *testing.T) {
 func TestDrawerCloseAnimation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Skip to end of open animation
 	d.setAnimProgressForTest(1.0)
@@ -802,7 +802,7 @@ func TestDrawerCloseAnimation(t *testing.T) {
 	}
 
 	// Close the drawer
-	d.Close()
+	d.Close(false)
 	if !d.IsAnimating() {
 		t.Error("drawer should be animating after Close()")
 	}
@@ -847,7 +847,7 @@ func TestDrawerAnimationRender(t *testing.T) {
 		}
 	}
 	d.UpdateReviews("turn1", items)
-	d.Open(0)
+	d.Open(0, false)
 
 	// Let animation progress most of the way to see full content
 	d.setAnimProgressForTest(0.95)
@@ -868,12 +868,12 @@ func TestDrawerAnimationRender(t *testing.T) {
 func TestDrawerAnimationCompleteBeforeReopen(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1", "turn2"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Interrupt open animation with close
 	d.setAnimProgressForTest(0.3)
 	startProgress := d.AnimProgress()
-	d.Close()
+	d.Close(false)
 
 	// When Close() is called mid-animation, it starts a new close animation
 	// The behavior depends on whether we're in the middle of an open animation
@@ -905,7 +905,7 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	}
 
 	// But when closed and animating (close animation), it should render
-	d.Close()
+	d.Close(false)
 	output = d.render(80, NewContentCache(), false)
 	if output == "" {
 		t.Error("closed drawer should render during close animation")

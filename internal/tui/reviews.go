@@ -12,18 +12,18 @@ import (
 
 // ReviewsDrawer holds the state of the reviews drawer.
 type ReviewsDrawer struct {
-	open          bool           // whether the drawer is open
-	selectedTurn  int            // index in turns list (not turn ID)
-	selectedRound int            // index in rounds list
-	turns         []string       // turn IDs to display, oldest first
+	open          bool     // whether the drawer is open
+	selectedTurn  int      // index in turns list (not turn ID)
+	selectedRound int      // index in rounds list
+	turns         []string // turn IDs to display, oldest first
 	reviewsByTurn map[string]*drawerReviews
-	scrollOffset  int            // scroll position within the drawer content
-	roster        []string       // participant IDs in roster order
-	drawerHeight  int            // allocated height for rendering
-	animStart     time.Time      // when animation started
-	animDuration  time.Duration  // how long animation should take
-	animating     bool           // whether animation is in progress
-	closing       bool           // whether we're animating a close
+	scrollOffset  int           // scroll position within the drawer content
+	roster        []string      // participant IDs in roster order
+	drawerHeight  int           // allocated height for rendering
+	animStart     time.Time     // when animation started
+	animDuration  time.Duration // how long animation should take
+	animating     bool          // whether animation is in progress
+	closing       bool          // whether we're animating a close
 }
 
 // drawerReviews holds the reviews for one turn, grouped by round.
@@ -72,8 +72,8 @@ func (d *ReviewsDrawer) SetDrawerHeight(height int) {
 	d.drawerHeight = height
 }
 
-// Open opens the drawer on the given turn index with animation.
-func (d *ReviewsDrawer) Open(turnIdx int) {
+// Open opens the drawer on the given turn index with animation (unless in plain mode).
+func (d *ReviewsDrawer) Open(turnIdx int, plainMode bool) {
 	if turnIdx < 0 || turnIdx >= len(d.turns) {
 		return
 	}
@@ -81,24 +81,28 @@ func (d *ReviewsDrawer) Open(turnIdx int) {
 	d.selectedTurn = turnIdx
 	d.selectedRound = 0
 	d.scrollOffset = 0
-	d.animating = true
-	d.animStart = time.Now()
-	d.animDuration = 250 * time.Millisecond
+	if !plainMode {
+		d.animating = true
+		d.animStart = time.Now()
+		d.animDuration = 250 * time.Millisecond
+	}
 	d.closing = false
 }
 
-// Close closes the drawer with animation.
-func (d *ReviewsDrawer) Close() {
+// Close closes the drawer with animation (unless in plain mode).
+func (d *ReviewsDrawer) Close(plainMode bool) {
 	d.open = false
 	d.scrollOffset = 0
-	if !d.animating {
-		d.animating = true
-		d.animStart = time.Now()
-		d.animDuration = 150 * time.Millisecond
-		d.closing = true
-	} else {
-		// If already animating (open), continue and mark as closing
-		d.closing = true
+	if !plainMode {
+		if !d.animating {
+			d.animating = true
+			d.animStart = time.Now()
+			d.animDuration = 150 * time.Millisecond
+			d.closing = true
+		} else {
+			// If already animating (open), continue and mark as closing
+			d.closing = true
+		}
 	}
 }
 

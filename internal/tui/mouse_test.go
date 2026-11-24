@@ -72,7 +72,7 @@ func TestMouseClickOnDrawerRound(t *testing.T) {
 	a := NewApp(ctx, "", WithMouse(true), WithTerminalCapabilities(TerminalCapabilities{Color: true}))
 	a.width, a.height = 80, 24
 	a.reviewsDrawer.SetTurns([]string{"t1"})
-	a.reviewsDrawer.Open(0)
+	a.reviewsDrawer.Open(0, false)
 	a.reviewsDrawer.UpdateReviews("t1", []wire.ReviewItem{
 		{Round: 0, Participant: "p1", Kind: "approve"},
 		{Round: 1, Participant: "p1", Kind: "block"},
@@ -228,7 +228,7 @@ func TestReviewCountClickOpensDrawer(t *testing.T) {
 	}
 
 	// Simulate a click on the second turn's review count
-	a.reviewsDrawer.Open(1)
+	a.reviewsDrawer.Open(1, false)
 	if !a.reviewsDrawer.IsOpen() {
 		t.Error("drawer should open")
 	}
@@ -247,7 +247,7 @@ func TestMouseWithDrawerAnimation(t *testing.T) {
 	a.reviewsDrawer.SetDrawerHeight(7)
 
 	// Mouse click opens drawer and starts animation
-	a.reviewsDrawer.Open(0)
+	a.reviewsDrawer.Open(0, false)
 	if !a.reviewsDrawer.IsAnimating() {
 		t.Error("opening drawer should start animation")
 	}

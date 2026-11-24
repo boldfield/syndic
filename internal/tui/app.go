@@ -522,7 +522,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 		if a.reviewsDrawer.IsOpen() && (a.width < regionMinWidth || a.height < regionMinHeight) {
 			// A drawer too small to draw must not keep the keyboard.
-			a.reviewsDrawer.Close()
+			plainMode := !a.terminalCapabilities.Color
+			a.reviewsDrawer.Close(plainMode)
 			a.want.Drawer = false
 		}
 		a.input.SetWidth(max(a.width, 1))
@@ -639,9 +640,10 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines(a.width, a.content))
 			return a, nil
 		case "esc", "ctrl+o":
-			a.reviewsDrawer.Close()
+			plainMode := !a.terminalCapabilities.Color
+			a.reviewsDrawer.Close(plainMode)
 			a.want.Drawer = false
-			return a, nil
+			return a, a.ensureTick()
 		default:
 			// Input cannot change while drawer is focused; ignore other keys
 			return a, nil
@@ -660,23 +662,26 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		a.panel, a.refusal, a.panelRow = nil, "", 0
-		a.reviewsDrawer.Close()
+		plainMode := !a.terminalCapabilities.Color
+		a.reviewsDrawer.Close(plainMode)
 		a.want.Drawer = false
-		return a, nil
+		return a, a.ensureTick()
 	case "ctrl+o":
 		if a.tab == tabChat {
+			plainMode := !a.terminalCapabilities.Color
 			if a.reviewsDrawer.IsOpen() {
-				a.reviewsDrawer.Close()
+				a.reviewsDrawer.Close(plainMode)
 				a.want.Drawer = false
+				return a, a.ensureTick()
 			} else if a.width >= regionMinWidth && a.height >= regionMinHeight {
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
 					a.updateDrawerTurns()
 					hs := a.layout()
 					a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-					a.reviewsDrawer.Open(len(turns) - 1)
+					a.reviewsDrawer.Open(len(turns)-1, plainMode)
 					a.want.Drawer = true
-					return a, a.fetchReviewsForTurn(turns[len(turns)-1])
+					return a, tea.Batch(a.fetchReviewsForTurn(turns[len(turns)-1]), a.ensureTick())
 				}
 			}
 		}
@@ -686,7 +691,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.tab = (a.tab + 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
-			a.reviewsDrawer.Close()
+			plainMode := !a.terminalCapabilities.Color
+			a.reviewsDrawer.Close(plainMode)
 			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
@@ -696,7 +702,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.tab = (a.tab + numTabs - 1) % numTabs
 		a.answerScrollRow, a.answerFollow = 0, true
 		if a.tab != tabChat {
-			a.reviewsDrawer.Close()
+			plainMode := !a.terminalCapabilities.Color
+			a.reviewsDrawer.Close(plainMode)
 			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
@@ -896,7 +903,8 @@ func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
 		}
 	}
 
-	a.reviewsDrawer.Open(turnIdx)
+	plainMode := !a.terminalCapabilities.Color
+	a.reviewsDrawer.Open(turnIdx, plainMode)
 	a.want.Drawer = true
 	return tea.Batch(a.fetchReviewsForTurn(turnID), a.ensureTick())
 }
