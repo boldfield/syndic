@@ -473,6 +473,12 @@ func cloneReflect(v reflect.Value) reflect.Value {
 			out.Index(i).Set(cloneReflect(v.Index(i)))
 		}
 		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return out
 	case reflect.Interface:
 		if v.IsNil() {
 			return v

@@ -2092,3 +2092,27 @@ func TestRequestDeepCopyTypedSchemaValues(t *testing.T) {
 		t.Fatal("Calls result aliases history")
 	}
 }
+
+// TestRequestDeepCopyArrayValues covers arrays holding reference values.
+func TestRequestDeepCopyArrayValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name:       "f",
+			Parameters: map[string]interface{}{"arr": [1][]string{{"a"}}},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.Tools[0].Function.Parameters["arr"].([1][]string)[0][0] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if got["arr"].([1][]string)[0][0] != "a" {
+		t.Fatalf("array aliased: %+v", got)
+	}
+	got["arr"].([1][]string)[0][0] = "mutated2"
+	if adapter.Calls()[0].Request.Tools[0].Function.Parameters["arr"].([1][]string)[0][0] != "a" {
+		t.Fatal("Calls result aliases history")
+	}
+}
