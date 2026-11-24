@@ -19,7 +19,8 @@ func chatApp(t *testing.T) *App {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	a := NewApp(ctx, "")
+	// Set full terminal capabilities so progress line renders with spinner and pips
+	a := NewApp(ctx, "", WithTerminalCapabilities(TerminalCapabilities{Color: true, AltScreen: true}))
 	a.now = func() time.Time { return chatNow }
 	a.width, a.height = 80, 24
 	a.state.ConnState = ConnStateConnected

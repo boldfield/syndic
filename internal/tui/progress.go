@@ -65,7 +65,8 @@ func progressLine(s State, turnID string, now time.Time, plainMode bool) string 
 
 // participantMark is the spinner while the participant works, ✓ once it has
 // done its part for the current candidate, and ○ while it is queued or its
-// part has not begun. In plainMode, running/cancelling states show a text marker instead of spinner.
+// part has not begun. In plainMode, running/cancelling states show a text marker instead of spinner,
+// and queued/inactive states show a dash instead of ○.
 // The engine returns a participant to idle both before and after its work, so done comes from the turn's phase and attempts.
 func participantMark(s State, turnID, id string, author bool, spin string, plainMode bool) string {
 	ti := s.Turns[turnID]
@@ -80,10 +81,16 @@ func participantMark(s State, turnID, id string, author bool, spin string, plain
 		}
 		return spin
 	case "queued":
+		if plainMode {
+			return "-" // text marker for queued in plain mode (not a circle that conflicts with pips)
+		}
 		return markQueued
 	}
 	if author && authorDone(s, turnID, id) || !author && reviewerDone(s, turnID, id) {
 		return markDone
+	}
+	if plainMode {
+		return "-" // text marker for inactive in plain mode
 	}
 	return markQueued
 }

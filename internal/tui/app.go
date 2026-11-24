@@ -117,13 +117,14 @@ type App struct {
 	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
 
 	// Notification state: process-scoped, not persisted
-	notify                 bool              // /notify on|off; default false
-	liveFromSeq            int64             // boundary seq between replay and live events
-	lastProcessedSeq       int64             // highest seq processed, used to deduplicate bells
-	missedTerminalEvents   map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
-	missedTerminalEventsTm map[string]string // turn ids -> timestamp for missed terminal events
-	isFirstConnect         bool              // true until first successful connection
-	emitBell               func()            // injectable bell emitter; if nil, bells are not emitted
+	notify                  bool              // /notify on|off; default false
+	liveFromSeq             int64             // boundary seq between replay and live events
+	lastProcessedSeq        int64             // highest seq processed, used to deduplicate bells
+	missedTerminalEvents    map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
+	missedTerminalEventsTm  map[string]string // turn ids -> timestamp for missed terminal events
+	isFirstConnect          bool              // true until first successful connection
+	emitBell                func()            // injectable bell emitter; if nil, bells are not emitted
+	terminalCapabilitiesSet bool              // tracks if terminalCapabilities was explicitly set via an Option
 }
 
 // Option configures an App.
@@ -147,7 +148,10 @@ func WithWorkDir(dir string) Option {
 
 // WithTerminalCapabilities sets the terminal rendering capabilities.
 func WithTerminalCapabilities(caps TerminalCapabilities) Option {
-	return func(a *App) { a.terminalCapabilities = caps }
+	return func(a *App) {
+		a.terminalCapabilities = caps
+		a.terminalCapabilitiesSet = true
+	}
 }
 
 // WithNotify enables terminal notifications for terminal events.
