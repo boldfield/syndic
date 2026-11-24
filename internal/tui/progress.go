@@ -77,7 +77,7 @@ func participantMark(s State, turnID, id string, author bool, spin string, plain
 	switch state {
 	case "running", "cancelling", "unknown":
 		if plainMode {
-			return "⋯" // text marker for working in plain mode (not a spinner animation)
+			return state // the word replaces the spinner
 		}
 		return spin
 	case "queued":

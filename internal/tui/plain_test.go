@@ -286,9 +286,6 @@ func TestProgramOptions(t *testing.T) {
 // TestPlainModeProgressLineNoSpinner verifies that in plain mode, the progress line
 // contains no spinner animation, pips are omitted, and state words are used instead.
 func TestPlainModeProgressLineNoSpinner(t *testing.T) {
-	t.Setenv("TERM", "dumb")
-	t.Setenv("NO_COLOR", "")
-
 	now := stripT0.Add(42 * time.Second)
 	spin := spinnerAt(now)
 
@@ -359,16 +356,99 @@ func TestPlainModeStatusLineNoMeter(t *testing.T) {
 		t.Errorf("plain mode strip missing 'est. 100 / 1000': %q", plainStrip)
 	}
 
-	// Color mode should have meter (█░)
-	if !strings.Contains(colorStrip, "█") && !strings.Contains(colorStrip, "░") {
-		// Meter might be entirely filled or empty, so just check for the character
-		if !strings.Contains(colorStrip, "est. 100 / 1000") {
-			t.Errorf("color mode strip should have meter or tokens: %q", colorStrip)
-		}
+	if strings.ContainsAny(plainStrip, "█░") {
+		t.Errorf("plain mode strip has a meter: %q", plainStrip)
+	}
+	if !strings.ContainsAny(colorStrip, "█░") {
+		t.Errorf("color mode strip has no meter: %q", colorStrip)
 	}
 
 	// Plain mode should not have escape sequences
 	if strings.ContainsRune(plainStrip, '\x1b') {
 		t.Errorf("plain mode strip contains escape sequence: %q", plainStrip)
+	}
+}
+
+// runningApp is an App with a revision turn in flight, at the given size.
+func runningApp(t *testing.T, caps TerminalCapabilities, width, height int) *App {
+	t.Helper()
+	a := chatApp(t)
+	a.terminalCapabilities = caps
+	a.width, a.height = width, height
+	a.input.SetWidth(width)
+	addTurn(a, "t1", 1, "reviewers_dispatched", "question", "")
+	ti := a.state.Turns["t1"]
+	ti.Round, ti.MaxRounds = 1, 3
+	ti.Author, ti.AuthorState = "w", "idle"
+	ti.Reviewers = []string{"r1", "r2"}
+	ti.ReviewerStates = map[string]string{"r1": "idle", "r2": "running"}
+	ti.EstimatedTokens, ti.LimitTokens = 100, 1000
+	a.state.Turns["t1"] = ti
+	a.state.CurrentTurn = "t1"
+	return a
+}
+
+// TestPlainViewStates drives the App itself through colour-off, dumb and
+// below-80x24 states and checks what View draws and what the mouse does.
+func TestPlainViewStates(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		caps          TerminalCapabilities
+		width, height int
+	}{
+		{"colour off", TerminalCapabilities{}, 80, 24},
+		{"narrow", TerminalCapabilities{Color: true, AltScreen: true}, 79, 24},
+		{"short", TerminalCapabilities{Color: true, AltScreen: true}, 80, 23},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := runningApp(t, c.caps, c.width, c.height)
+			view := a.View()
+			for _, bad := range []string{"\x1b", "●", "○", "█", "░", "⋯", markQueued} {
+				if strings.Contains(view, bad) {
+					t.Errorf("view holds %q:\n%s", bad, view)
+				}
+			}
+			for _, want := range []string{"reviewers_dispatched turn in progress", "round 1/3", "running r2", "100 / 1000"} {
+				if !strings.Contains(view, want) {
+					t.Errorf("view lacks %q:\n%s", want, view)
+				}
+			}
+			assertFits(t, c.name, view, c.width, c.height)
+
+			a.mouseEnabled = true
+			x, y := where(t, a, "transcript")
+			click(a, x, y)
+			if a.tab != tabChat {
+				t.Error("the mouse acted in plain mode")
+			}
+			if cmd := cmdMouse(a, []string{"on"}); cmd != nil || a.mouseEnabled {
+				t.Error("/mouse on captured the mouse in plain mode")
+			}
+			a.input.SetValue("hello")
+			if !strings.Contains(a.View(), "hello") {
+				t.Error("input is not usable")
+			}
+		})
+	}
+}
+
+// TestColourViewKeepsDecoration guards the other side: at 80x24 with colour
+// the spinner and pips are drawn.
+func TestColourViewKeepsDecoration(t *testing.T) {
+	a := runningApp(t, TerminalCapabilities{Color: true, AltScreen: true}, 80, 24)
+	view := a.View()
+	if !strings.Contains(view, "●") || !strings.Contains(view, "○") {
+		t.Errorf("colour view lacks pips:\n%s", view)
+	}
+}
+
+// TestShrinkingIntoPlainModeReleasesTheMouse: a resize below 80x24 turns the
+// mouse off and asks the program to stop capturing.
+func TestShrinkingIntoPlainModeReleasesTheMouse(t *testing.T) {
+	a := runningApp(t, TerminalCapabilities{Color: true, AltScreen: true}, 80, 24)
+	a.mouseEnabled = true
+	_, cmd := a.Update(tea.WindowSizeMsg{Width: 79, Height: 24})
+	if a.mouseEnabled || cmd == nil {
+		t.Errorf("mouseEnabled=%v cmd=%v after shrinking", a.mouseEnabled, cmd)
 	}
 }

@@ -117,14 +117,13 @@ type App struct {
 	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
 
 	// Notification state: process-scoped, not persisted
-	notify                  bool              // /notify on|off; default false
-	liveFromSeq             int64             // boundary seq between replay and live events
-	lastProcessedSeq        int64             // highest seq processed, used to deduplicate bells
-	missedTerminalEvents    map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
-	missedTerminalEventsTm  map[string]string // turn ids -> timestamp for missed terminal events
-	isFirstConnect          bool              // true until first successful connection
-	emitBell                func()            // injectable bell emitter; if nil, bells are not emitted
-	terminalCapabilitiesSet bool              // tracks if terminalCapabilities was explicitly set via an Option
+	notify                 bool              // /notify on|off; default false
+	liveFromSeq            int64             // boundary seq between replay and live events
+	lastProcessedSeq       int64             // highest seq processed, used to deduplicate bells
+	missedTerminalEvents   map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
+	missedTerminalEventsTm map[string]string // turn ids -> timestamp for missed terminal events
+	isFirstConnect         bool              // true until first successful connection
+	emitBell               func()            // injectable bell emitter; if nil, bells are not emitted
 }
 
 // Option configures an App.
@@ -150,7 +149,6 @@ func WithWorkDir(dir string) Option {
 func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) {
 		a.terminalCapabilities = caps
-		a.terminalCapabilitiesSet = true
 	}
 }
 
@@ -255,9 +253,16 @@ func (a *App) draftsOn(turnID string) bool {
 	return false
 }
 
+// plainMode reports whether the screen is drawn plain: colour off, TERM=dumb,
+// or smaller than the minimum size. Plain mode has no spinner, pips, meter,
+// Markdown, animation or mouse.
+func (a *App) plainMode() bool {
+	return !a.terminalCapabilities.Color || a.width < regionMinWidth || a.height < regionMinHeight
+}
+
 // answerIn gathers what the answer tab needs for the turn.
 func (a *App) answerIn(turnID string) answerInput {
-	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
+	plainMode := a.plainMode()
 	return answerInput{
 		content:        a.content,
 		drafts:         a.draftsOn(turnID),
@@ -573,6 +578,11 @@ func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.want.Drawer = false
 		}
 		a.input.SetWidth(max(a.width, 1))
+		if a.mouseEnabled && a.plainMode() {
+			// Plain mode never has the mouse: release capture on shrinking.
+			a.mouseEnabled = false
+			return a, tea.DisableMouse
+		}
 		return a, nil
 	case tea.KeyMsg:
 		return a.updateKey(msg)
@@ -1498,7 +1508,7 @@ func (a *App) tabBar() string {
 // statusLine is the strip with the hints at its right edge, w cells wide:
 // ctrl+o: reviews while the chat tab is active, then keyHint.
 func (a *App) statusLine(w int) string {
-	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
+	plainMode := a.plainMode()
 	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat, plainMode)
 }
 
@@ -1612,7 +1622,7 @@ func (a *App) View() string {
 
 	// Add drawer, list, attached, and help lines
 	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-	plainMode := !a.terminalCapabilities.Color || a.width < 80 || a.height < 24
+	plainMode := a.plainMode()
 	drawerLines := strings.Split(a.reviewsDrawer.render(w, a.content, plainMode), "\n")
 	for i := 0; i < hs.Drawer; i++ {
 		if i < len(drawerLines) {

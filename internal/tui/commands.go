@@ -234,7 +234,7 @@ func cmdMouse(a *App, args []string) tea.Cmd {
 		return nil
 	}
 	if args[0] == "on" {
-		if !a.mouseAllowed() {
+		if !a.mouseAllowed() || a.plainMode() {
 			a.mouseEnabled = false
 			a.refusal = "mouse: not available in plain mode"
 			return nil

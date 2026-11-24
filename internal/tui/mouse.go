@@ -28,7 +28,7 @@ func (a *App) mouseAllowed() bool {
 // updateMouse handles a mouse event: only a left press does anything, and
 // only when the mouse is on.
 func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if !a.mouseEnabled || !a.mouseAllowed() || a.isTerminalTooSmall() {
+	if !a.mouseEnabled || a.plainMode() || a.isTerminalTooSmall() {
 		return a, nil
 	}
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
@@ -153,7 +153,7 @@ func (a *App) openDrawer(i int) tea.Cmd {
 	a.updateDrawerTurns()
 	a.closeCommandList()
 	a.showShortHelp = false
-	a.reviewsDrawer.Open(i, !a.terminalCapabilities.Color)
+	a.reviewsDrawer.Open(i, a.plainMode())
 	a.syncDrawerWant()
 	a.reviewsDrawer.SetDrawerHeight(a.layout().Drawer)
 	return tea.Batch(a.fetchReviewsForTurn(turns[i]), a.animateDrawer())
@@ -161,7 +161,7 @@ func (a *App) openDrawer(i int) tea.Cmd {
 
 // closeDrawer closes the reviews drawer; its lines stay reserved while it slides out.
 func (a *App) closeDrawer() tea.Cmd {
-	a.reviewsDrawer.Close(!a.terminalCapabilities.Color)
+	a.reviewsDrawer.Close(a.plainMode())
 	a.syncDrawerWant()
 	return a.animateDrawer()
 }
