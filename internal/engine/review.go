@@ -51,6 +51,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
+	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var hash, candidateID string
 	var round int
@@ -80,6 +81,16 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
 			return err
+		}
+		if isToolStep {
+			// Tool step accepted but not frozen as a candidate; text is journaled.
+			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
+				return err
+			}
+			// Tool step does not freeze a candidate; turn stays in review mode.
+			ended = false
+			term = nil
+			return nil
 		}
 		if gate != nil {
 			ended = true
@@ -154,6 +165,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		// A revision's author failed or changed nothing: the candidate and its
 		// reviews exist, so the terminal state is delivered (none before one).
 		e.deliverTerminal(t, StateIncomplete, endReason)
+		return false
+	}
+	if isToolStep {
+		// Tool step does not proceed to reviewers; turn stays open for the next author attempt.
+		e.commitTerminal(t, term)
 		return false
 	}
 	t.candidate = res.Text
@@ -486,6 +502,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
+	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var quarantined, approvedNow, exceeded, revise bool
 	var endState, endReason, kind string
@@ -521,6 +538,11 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		}
 		if held, err = e.failedIn(tx, emit, d.participant, d.attemptID, fail); err != nil {
 			return err
+		}
+		if isToolStep {
+			// Reviewer tool step accepted but not parsed as a verdict; text is journaled.
+			// The reviewer stays in its current phase for the next attempt.
+			return nil
 		}
 		if gate != nil {
 			endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":"+authorFailedStatus(res, gate)

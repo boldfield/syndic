@@ -207,7 +207,7 @@ func (e *Engine) endIn(tx *journal.Tx, emit hub.Emit, t *openTurn, state, reason
 
 // commitTerminal applies a committed terminal Tx to memory: the holds count
 // against their pools, the turn is no longer open, and nothing it queued
-// starts. e.mu is held.
+// starts. e.mu is held. If term is nil, the turn stays open (e.g., after a tool step).
 func (e *Engine) commitTerminal(t *openTurn, term *terminal) {
 	if term != nil {
 		for _, h := range term.holds {
@@ -220,10 +220,10 @@ func (e *Engine) commitTerminal(t *openTurn, term *terminal) {
 			e.pstate[h.participant] = ParticipantCancelling
 			e.armHold(h)
 		}
-	}
-	if e.open == t {
-		e.open = nil
-		e.turnEnded(t)
+		if e.open == t {
+			e.open = nil
+			e.turnEnded(t)
+		}
 	}
 }
 

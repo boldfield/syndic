@@ -1816,3 +1816,125 @@ func TestCompleteWithToolCallsSecretScrubbing(t *testing.T) {
 		}
 	}
 }
+
+// TestToolStepIsClassified verifies that tool steps (StatusToolCalls with ToolCalls) are classified correctly.
+func TestToolStepIsClassified(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	// Verify it's a tool step
+	if !transport.IsToolStep(result) {
+		t.Errorf("IsToolStep returned false for a StatusToolCalls result with calls")
+	}
+
+	// Verify the gate would pass (CheckResult returns nil for valid tool steps)
+	req.Envelope.Participant = "participant"
+	expected := transport.Expected{Identity: identity, ReportedModel: "test-model"}
+	gate := transport.CheckResult(req, result, expected)
+	if gate != nil {
+		t.Errorf("CheckResult failed for valid tool step: %v", gate)
+	}
+}
+
+// TestPlainReplyNilToolCalls verifies that plain replies have nil ToolCalls, not empty slice.
+func TestPlainReplyNilToolCalls(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Text:               "Plain response",
+			Status:             transport.StatusComplete,
+			NativeFinishReason: "stop",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          nil,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "participant",
+			TurnID:        "turn1",
+			Phase:         "author",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "hello"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Plain reply should have nil ToolCalls, not empty slice
+	if result.ToolCalls != nil {
+		t.Errorf("ToolCalls for plain reply: %v, want nil", result.ToolCalls)
+	}
+	if !transport.IsToolStep(result) == true {
+		// IsToolStep should return false for a plain reply
+		if transport.IsToolStep(result) {
+			t.Errorf("IsToolStep returned true for plain reply with nil ToolCalls")
+		}
+	}
+}
