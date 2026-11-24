@@ -495,7 +495,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
 	a.forgetStaleList()
 	a.forgetStaleConvList()
-	cmds := []tea.Cmd{cmd, a.syncTranscript()}
+	cmds := []tea.Cmd{cmd, a.syncTranscript(), a.ensureConversationsFetched()}
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		a.tStale = a.tStale || m.String() == "tab" || m.String() == "shift+tab"

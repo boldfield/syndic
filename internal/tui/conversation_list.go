@@ -59,6 +59,30 @@ func (a *App) forgetStaleConvList() {
 	a.convList.filter = filter
 }
 
+// ensureConversationsFetched triggers a fetch if the list is now active but has no items.
+func (a *App) ensureConversationsFetched() tea.Cmd {
+	if !a.convListActive() {
+		return nil
+	}
+	// If we already have items for this workspace, don't fetch again.
+	if len(a.convList.items) > 0 && a.convList.currentWS == a.workDir {
+		return nil
+	}
+	// Trigger a fetch
+	if a.cl == nil {
+		return nil
+	}
+	gen, cl, ctx, ws := a.gen, a.cl, a.ctx, a.workDir
+	return func() tea.Msg {
+		var items []wire.ConversationSummary
+		err := eachConversation(ctx, cl, &ws, func(c wire.ConversationSummary) bool {
+			items = append(items, c)
+			return true
+		})
+		return conversationsMsg{gen: gen, items: items, err: err}
+	}
+}
+
 // convListFilter extracts the filter text from the input.
 // If input is "/conversations abc", returns "abc".
 // If input is "/conversations", returns "".
