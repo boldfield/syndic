@@ -1059,33 +1059,33 @@ func TestAllowWebWithReadValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:   "allow_web_with_read not set (default true, no error)",
-			tools:  &ToolsConfig{},
-			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			name:    "allow_web_with_read not set (default true, no error)",
+			tools:   &ToolsConfig{},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
 			wantErr: false,
 		},
 		{
-			name:   "allow_web_with_read=true (no error)",
-			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(true)},
-			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			name:    "allow_web_with_read=true (no error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(true)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
 			wantErr: false,
 		},
 		{
-			name:   "allow_web_with_read=false with web+read (error)",
-			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
-			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			name:    "allow_web_with_read=false with web+read (error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
 			wantErr: true,
 		},
 		{
-			name:   "allow_web_with_read=false with web+write (error)",
-			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
-			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
+			name:    "allow_web_with_read=false with web+write (error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
 			wantErr: true,
 		},
 		{
-			name:   "allow_web_with_read=false with only web (no error)",
-			tools:  &ToolsConfig{AllowWebWithRead: ptrBool(false)},
-			preset: Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}},
+			name:    "allow_web_with_read=false with only web (no error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}},
 			wantErr: false,
 		},
 	}
@@ -1113,11 +1113,11 @@ func TestAllowedHostPatternValidation(t *testing.T) {
 	}{
 		{"example.com", true},
 		{"*.example.com", true},
-		{".example.com", false},  // suffix matching not allowed
+		{".example.com", false}, // suffix matching not allowed
 		{"**.example.com", true},
 		{"***.example.com", false}, // too many wildcards
-		{"192.168.1.1", false}, // IP literals not allowed
-		{"::1", false}, // IPv6 not allowed
+		{"192.168.1.1", false},     // IP literals not allowed
+		{"::1", false},             // IPv6 not allowed
 		{"", false},
 		{"*.com", false}, // wildcard must have dot after prefix
 	}
