@@ -601,3 +601,18 @@ func TestV6InputPromptIsABarAndTheAreaIsMultiLine(t *testing.T) {
 		t.Errorf("input region = %q, want %q", got, want)
 	}
 }
+
+// Code spans use a light/dark colour pair chosen from the terminal's background.
+func TestV6MarkdownCodeColourFollowsBackground(t *testing.T) {
+	t.Cleanup(func() { lipgloss.SetHasDarkBackground(true) })
+	lipgloss.SetHasDarkBackground(true)
+	dark := RenderMarkdown("a `code` b", 80, false)
+	lipgloss.SetHasDarkBackground(false)
+	light := RenderMarkdown("a `code` b", 80, false)
+	if !strings.Contains(dark, "\x1b[36mcode") || strings.Contains(dark, "\x1b[34m") {
+		t.Errorf("dark background: want colour 36 only: %q", dark)
+	}
+	if !strings.Contains(light, "\x1b[34mcode") || strings.Contains(light, "\x1b[36m") {
+		t.Errorf("light background: want colour 34 only: %q", light)
+	}
+}

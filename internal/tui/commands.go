@@ -72,6 +72,9 @@ var flagHelp = []string{
 	"--mouse                   enable mouse input for tabs and drawer",
 }
 
+// HelpFlagLines returns the flag lines /help shows.
+func HelpFlagLines() []string { return append([]string(nil), flagHelp...) }
+
 // keyHelp is one line per key, in the order /help lists them.
 var keyHelp = []string{
 	"Tab, Shift+Tab            switch tabs",

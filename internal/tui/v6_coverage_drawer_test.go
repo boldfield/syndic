@@ -455,7 +455,8 @@ func TestV6CoverageHelpListsEveryFlag(t *testing.T) {
 	a := covApp(t)
 	cmdHelp(a, nil)
 	help := strings.Join(a.panel, "\n")
-	for _, flag := range []string{"--new", "--conversation", "--rounds", "--notify", "--mouse"} {
+	for _, flag := range HelpFlagLines() {
+		flag = strings.Fields(flag)[0]
 		if !strings.Contains(help, flag+" ") {
 			t.Errorf("/help does not list %s", flag)
 		}

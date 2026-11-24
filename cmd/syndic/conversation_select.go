@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/boldfield/syndic/internal/tui"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -77,6 +78,19 @@ func parseStartupFlags(fs *flag.FlagSet, args []string) (startupFlags, error) {
 		return f, fmt.Errorf("--new and --conversation are mutually exclusive")
 	}
 	return f, nil
+}
+
+// appOptions turns the --notify and --mouse flags into TUI options. Both
+// settings last for this process only.
+func (f startupFlags) appOptions() []tui.Option {
+	var opts []tui.Option
+	if f.notify {
+		opts = append(opts, tui.WithNotify(true))
+	}
+	if f.mouse {
+		opts = append(opts, tui.WithMouse(true))
+	}
+	return opts
 }
 
 // openConversation is the conversation a start-up selected.
