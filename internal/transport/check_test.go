@@ -206,6 +206,109 @@ func TestCheckResult(t *testing.T) {
 			wantError:  true,
 			wantErrors: []error{ErrIdentityMismatch},
 		},
+		{
+			name: "tool calls with tool_calls status",
+			req: CompleteRequest{
+				Envelope: envelope,
+				Model:    "gpt-4",
+				Messages: []Message{},
+				Deadline: now,
+			},
+			res: CompleteResult{
+				Envelope:        envelope,
+				Identity:        identity,
+				ReportedModel:   reportedModel,
+				Status:          StatusToolCalls,
+				TransportStatus: TransportStatusOK,
+				ToolCalls: []ToolCall{
+					{
+						ID:   "call1",
+						Type: "function",
+						Function: ToolCallFunction{
+							Name:      "read_file",
+							Arguments: `{"path":"/etc/passwd"}`,
+						},
+					},
+				},
+			},
+			expected:  expected,
+			wantError: false,
+		},
+		{
+			name: "tool calls with complete status should fail",
+			req: CompleteRequest{
+				Envelope: envelope,
+				Model:    "gpt-4",
+				Messages: []Message{},
+				Deadline: now,
+			},
+			res: CompleteResult{
+				Envelope:        envelope,
+				Identity:        identity,
+				ReportedModel:   reportedModel,
+				Status:          StatusComplete,
+				TransportStatus: TransportStatusOK,
+				ToolCalls: []ToolCall{
+					{
+						ID:   "call1",
+						Type: "function",
+						Function: ToolCallFunction{
+							Name:      "read_file",
+							Arguments: `{"path":"/etc/passwd"}`,
+						},
+					},
+				},
+			},
+			expected:  expected,
+			wantError: true,
+		},
+		{
+			name: "tool_calls status without tool calls should fail",
+			req: CompleteRequest{
+				Envelope: envelope,
+				Model:    "gpt-4",
+				Messages: []Message{},
+				Deadline: now,
+			},
+			res: CompleteResult{
+				Envelope:        envelope,
+				Identity:        identity,
+				ReportedModel:   reportedModel,
+				Status:          StatusToolCalls,
+				TransportStatus: TransportStatusOK,
+				ToolCalls:       nil,
+			},
+			expected:  expected,
+			wantError: true,
+		},
+		{
+			name: "tool calls with truncated status should fail",
+			req: CompleteRequest{
+				Envelope: envelope,
+				Model:    "gpt-4",
+				Messages: []Message{},
+				Deadline: now,
+			},
+			res: CompleteResult{
+				Envelope:        envelope,
+				Identity:        identity,
+				ReportedModel:   reportedModel,
+				Status:          StatusTruncated,
+				TransportStatus: TransportStatusOK,
+				ToolCalls: []ToolCall{
+					{
+						ID:   "call1",
+						Type: "function",
+						Function: ToolCallFunction{
+							Name:      "read_file",
+							Arguments: `{"path":"/etc/passwd"}`,
+						},
+					},
+				},
+			},
+			expected:  expected,
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -1638,3 +1638,94 @@ func TestProbeMissingModelIsIncomplete(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIncompleteProbe", err)
 	}
 }
+
+func TestCompleteWithToolCalls(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd"}`,
+			},
+		},
+		{
+			ID:   "call_2",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "web_fetch",
+				Arguments: `{"url":"https://example.com"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read file contents",
+					Parameters:  map[string]interface{}{"path": "string"},
+				},
+			},
+		},
+		Deadline: time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	if result.Status != transport.StatusToolCalls {
+		t.Errorf("result status: %q, want tool_calls", result.Status)
+	}
+
+	if len(result.ToolCalls) != 2 {
+		t.Fatalf("result ToolCalls length: %d, want 2", len(result.ToolCalls))
+	}
+
+	if result.ToolCalls[0].ID != "call_1" {
+		t.Errorf("first call ID: %q, want call_1", result.ToolCalls[0].ID)
+	}
+
+	if result.ToolCalls[1].Function.Name != "web_fetch" {
+		t.Errorf("second call name: %q, want web_fetch", result.ToolCalls[1].Function.Name)
+	}
+
+	if result.NativeFinish != "tool_calls" {
+		t.Errorf("native finish: %q, want tool_calls", result.NativeFinish)
+	}
+}

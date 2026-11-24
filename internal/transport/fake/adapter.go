@@ -34,6 +34,7 @@ type Step struct {
 	EchoedString       string
 	Err                error
 	Usage              *transport.Usage
+	ToolCalls          []transport.ToolCall
 	// Build, when set on a reply step, computes Text from the request, so a
 	// reply can carry values that exist only after dispatch (an attempt id
 	// or a candidate hash).
@@ -228,6 +229,11 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		if text != "" {
 			text, _ = transport.Scrub(text, a.resolvedSecrets)
 		}
+
+		// Copy tool calls from step, if any
+		toolCalls := make([]transport.ToolCall, len(step.ToolCalls))
+		copy(toolCalls, step.ToolCalls)
+
 		return transport.CompleteResult{
 			Envelope:        req.Envelope,
 			RawOutput:       scrubbed,
@@ -237,6 +243,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			ReportedModel:   reportedModel,
 			Status:          step.Status,
 			NativeFinish:    step.NativeFinishReason,
+			ToolCalls:       toolCalls,
 			TransportStatus: step.TransportStatus,
 			Usage:           step.Usage,
 		}, nil
