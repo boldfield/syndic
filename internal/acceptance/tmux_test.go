@@ -601,7 +601,7 @@ func TestTMUX_EndToEnd(t *testing.T) {
 
 	// Scenario 1: a question gets an approved answer.
 	pid := host.start("s1")
-	host.waitPane("s1", "the TUI prompt", tmuxPaneWait, func(p string) bool { return regexp.MustCompile(`(?m)^>`).MatchString(p) }, daemon)
+	host.waitPane("s1", "the TUI prompt", tmuxPaneWait, func(p string) bool { return regexp.MustCompile(`(?m)^┃`).MatchString(p) }, daemon)
 	host.typeLine("s1", "first question")
 	pane := host.waitPane("s1", "the approved answer", tmuxPaneWait, func(p string) bool {
 		return strings.Contains(p, "approved by")
