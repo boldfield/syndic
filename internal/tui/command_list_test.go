@@ -1,13 +1,14 @@
 package tui
 
 import (
-	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
@@ -221,24 +222,68 @@ func TestShortHelpHidesOnTyping(t *testing.T) {
 	r.until(t, "a typed question mark", func(a *App) (string, bool) { return "", a.input.Value() == "a?" })
 }
 
+// listView is the rendered command list for the input, on an App that no
+// program goroutine is driving.
+func listView(a *App, input string) string {
+	a.input.SetValue(input)
+	return strings.Join(a.commandListLines(40), "\n")
+}
+
 // TestCommandValuesShowDefaults: rows show the value in force, defaults included.
 func TestCommandValuesShowDefaults(t *testing.T) {
-	r := newRig(t)
-	r.waitConnected(t)
-	a := r.app
-	if a.state.Status == nil {
-		t.Fatal("no status")
+	a := chatApp(t)
+	for input, want := range map[string]string{
+		"/rounds": "[2]",
+		"/mode":   "[review]",
+		"/notify": "[off]",
+	} {
+		if v := listView(a, input); !strings.Contains(v, want) {
+			t.Errorf("%s: row lacks %s:\n%s", input, want, v)
+		}
 	}
-	a.state.Status.Revision.Default = 3
-	if got, want := a.commandValue("rounds"), strconv.Itoa(a.state.Status.Revision.Default); got != want {
-		t.Errorf("rounds = %q, want %q", got, want)
-	}
-	if got := a.commandValue("mode"); got != a.state.Status.DefaultPreset {
-		t.Errorf("mode = %q, want %q", got, a.state.Status.DefaultPreset)
+	a.notify = true
+	if v := listView(a, "/notify"); !strings.Contains(v, "[on]") {
+		t.Errorf("notify on not shown:\n%s", v)
 	}
 	off := "off"
-	a.quickSelection.Override = &off
-	if got := a.commandValue("quick"); got != "off" {
-		t.Errorf("quick = %q", got)
+	a.quickSelection = &QuickSelection{Override: &off}
+	if v := listView(a, "/quick"); !strings.Contains(v, "[off]") {
+		t.Errorf("quick override not shown:\n%s", v)
+	}
+}
+
+// TestCommandValueApprovedProjectQuick: an approved project-file profile shows.
+func TestCommandValueApprovedProjectQuick(t *testing.T) {
+	a := chatApp(t)
+	a.state.Status.QuickProfiles = []wire.QuickProfile{{Name: "fast", DefinitionSHA256: "d1"}}
+	a.quickSelection = &QuickSelection{
+		ProjectProfile: "fast", ProjectFilePath: "/p/quick.toml", ProjectFileSHA: "f1",
+		approved: map[string]ApprovedProfile{"/p/quick.toml": {
+			FilePath: "/p/quick.toml", FileSHA256: "f1", ProfileName: "fast", ProfileDefinitionSHA256: "d1"}},
+	}
+	if v := listView(a, "/quick"); !strings.Contains(v, "[fast]") {
+		t.Errorf("approved project profile not shown:\n%s", v)
+	}
+}
+
+// TestCommandValuesAreSafeText: engine-derived values reach the list escaped.
+func TestCommandValuesAreSafeText(t *testing.T) {
+	hostile := "x\x1b]8;;http://e\x1b\\y\r\u009b31m\u202e\xff"
+	a := chatApp(t)
+	a.state.NextPreset = hostile
+	a.quickSelection = &QuickSelection{Override: &hostile}
+	for _, input := range []string{"/mode", "/quick"} {
+		v := listView(a, input)
+		if !strings.Contains(v, "\\x1b") {
+			t.Errorf("%s: value not escaped visibly:\n%q", input, v)
+		}
+		for _, r := range v {
+			if r == '\n' {
+				continue
+			}
+			if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || bidiChars[r] || r == utf8.RuneError {
+				t.Fatalf("%s: raw %U in %q", input, r, v)
+			}
+		}
 	}
 }

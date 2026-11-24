@@ -42,6 +42,8 @@ func (a *App) commandValue(name string) string {
 		return onOff(a.draftsOn(a.state.CurrentTurn))
 	case "raw":
 		return onOff(a.rawMode)
+	case "notify":
+		return onOff(a.notify)
 	case "rounds":
 		if a.roundsIsSet {
 			return strconv.Itoa(a.rounds)
@@ -186,7 +188,7 @@ func (a *App) commandListLines(rows int) []string {
 		}
 		line := marker + padRight(e.usage, helpColumn)
 		if v := a.commandValue(e.name); v != "" {
-			line += "[" + v + "] "
+			line += "[" + safeLine(v) + "] "
 		}
 		line += e.desc
 		out = append(out, line)
