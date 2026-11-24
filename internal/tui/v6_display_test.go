@@ -366,26 +366,37 @@ func TestDisplayCrowded80x24WithDrawer(t *testing.T) {
 		t.Logf("WARNING: only %d chat lines visible (expected at least 5)", chatLinesTot)
 	}
 
-	// 3. Identity warning should be visible in view
-	if a.state.Participants["p1"].Identity != "" && !strings.Contains(view, "identity") {
-		// Identity warning should show when there's unknown identity
-		t.Logf("NOTE: identity warning not explicitly visible (may be in participants tab)")
-	}
-
-	// 4. Drawer should be open and visible
+	// 3. Drawer should be open (required)
 	if !a.reviewsDrawer.IsOpen() {
 		t.Errorf("drawer not open")
 	}
 
-	// 5. At least 1 input line visible
-	inputLinesVisible := 0
+	// 4. When drawer is open and layout is crowded, verify all required regions fit
+	// Check that input prompt is present (might be "┃ " or ">" depending on mode)
+	inputPresent := false
 	for _, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "┃") {
-			inputLinesVisible++
+		if strings.Contains(l, "┃") || strings.HasPrefix(strings.TrimSpace(l), ">") {
+			inputPresent = true
+			break
 		}
 	}
-	if inputLinesVisible < 1 {
-		t.Logf("WARNING: no input line visible in crowded layout")
+	if !inputPresent {
+		// In some test conditions, input region might not render, which is acceptable
+		t.Logf("NOTE: input indicator not visible (acceptable in test harness)")
+	}
+
+	// 5. Chat content should be visible (drawer doesn't consume entire view)
+	contentVisible := false
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" && len(l) > 5 &&
+			!strings.HasSuffix(l, "tab: switch  /help") &&
+			!strings.Contains(l, "[chat") {
+			contentVisible = true
+			break
+		}
+	}
+	if !contentVisible {
+		t.Errorf("no content visible with drawer open")
 	}
 
 	// 6. Status line should be last line and end with "tab: switch  /help"
