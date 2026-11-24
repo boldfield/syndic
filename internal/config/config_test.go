@@ -2903,3 +2903,27 @@ func TestAllowlistRejectsPortInPattern(t *testing.T) {
 		t.Errorf("Expected port-related error message, got: %v", err)
 	}
 }
+
+func TestAllowlistRejectsNonHostnames(t *testing.T) {
+	bad := []string{
+		"exa mple.com", "user@example.com", "example.com?x", "example..com",
+		"-bad.com", "bad-.com", "a_b.com", "example.com.", "1.2.3.4.5",
+		"bad_host.example", "bücher.de", "*.bücher.de", "example.com/path",
+	}
+	for _, p := range bad {
+		if err := validateAllowedHostPattern(p); err == nil {
+			t.Errorf("validateAllowedHostPattern(%q) = nil, want error", p)
+		}
+	}
+	for _, p := range []string{"[::1]", "::1", "127.0.0.1"} {
+		err := validateAllowedHostPattern(p)
+		if err == nil || !strings.Contains(err.Error(), "IP") {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want IP literal error", p, err)
+		}
+	}
+	for _, p := range []string{"example.com", "*.example.com", "**.example.com", "xn--bcher-kva.de", "a-b.example.com"} {
+		if err := validateAllowedHostPattern(p); err != nil {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil", p, err)
+		}
+	}
+}

@@ -1598,3 +1598,40 @@ func TestCalibrationRecordBaselineBytes(t *testing.T) {
 		t.Errorf("round trip BaselineBytes: got %d", back.BaselineBytes)
 	}
 }
+
+// TestConfigFingerprintRefereeFields verifies referee fields change the fingerprint
+// and that profiles without them keep the legacy value.
+func TestConfigFingerprintRefereeFields(t *testing.T) {
+	base := config.EndpointProfile{
+		Name:              "test-endpoint",
+		BaseURL:           "http://localhost:8000/v1",
+		DeclaredLocation:  "local",
+		DeclaredExecution: "local",
+		DeclaredBilling:   "none",
+		NetworkDependency: "none",
+		Dialect:           "chat_completions_v1",
+		MaxTokensField:    "max_tokens",
+		Models:            []string{"model-a", "model-b"},
+	}
+	fp := func(p config.EndpointProfile) string {
+		t.Helper()
+		v, err := ConfigFingerprint(p, "model-a", "1.0.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	const golden = "5fbd2664926e2c5733fcc14b99f0edbaebd40c367e806e4c2948059fd52ad7d5"
+	baseFP := fp(base)
+	if baseFP != golden {
+		t.Errorf("profile without referee fields changed fingerprint: %s", baseFP)
+	}
+	withModel := base
+	withModel.RefereeModel = "ref-model"
+	withEndpoint := base
+	withEndpoint.RefereeEndpoint = "local-ref"
+	m, e := fp(withModel), fp(withEndpoint)
+	if m == baseFP || e == baseFP || m == e {
+		t.Errorf("referee fields must each change the fingerprint: base=%s model=%s endpoint=%s", baseFP, m, e)
+	}
+}

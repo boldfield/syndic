@@ -1516,20 +1516,30 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	store := journal.NewStore(db)
 
 	allowWeb := false
+	fetches, calls, revCalls, resBytes, refTokens := 7, 8, 9, 1234, 32
 	roster := &config.Roster{
 		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
-		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test", RefereeModel: "referee-model"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test", RefereeModel: "referee-model", RefereeEndpoint: "local-ref"}},
 		DefaultPreset: "default",
 		Presets: map[string]config.Preset{
 			"default": {
 				Mode:             "solo",
 				Author:           "p1",
 				Tools:            []string{"read", "write"},
+				ReviewerTools:    []string{"read", "web"},
 				AllowWebWithRead: &allowWeb,
 			},
 		},
 		Tools: &config.ToolsConfig{
-			AllowWebWithRead: &allowWeb,
+			AllowWebWithRead:       &allowWeb,
+			ProtectedPaths:         []string{".git/", "secret/**"},
+			FileEgressDestinations: []string{"ep1"},
+			MaxFetchesPerTurn:      &fetches,
+			MaxCallsPerTurn:        &calls,
+			MaxReviewerCalls:       &revCalls,
+			MaxResultBytes:         &resBytes,
+			Web:                    &config.WebConfig{AllowedHosts: []string{"example.com", "*.example.org"}},
+			Referee:                &config.RefereeConfig{MaxOutputTokens: &refTokens},
 		},
 		Budgets: config.Budgets{},
 		Pools:   map[string]config.Pool{},
@@ -1589,6 +1599,35 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	if endpointDefault["referee_model"] != "referee-model" {
 		t.Errorf("referee_model should be frozen in manifest, got %v", endpointDefault["referee_model"])
 	}
+	if endpointDefault["referee_endpoint"] != "local-ref" {
+		t.Errorf("referee_endpoint should be frozen in manifest, got %v", endpointDefault["referee_endpoint"])
+	}
+	if rt, ok := presetDefault["reviewer_tools"].([]interface{}); !ok || len(rt) != 2 {
+		t.Errorf("reviewer_tools not frozen: %v", presetDefault["reviewer_tools"])
+	}
+	wantList := func(name string, got interface{}, want ...string) {
+		l, ok := got.([]interface{})
+		if !ok || len(l) != len(want) {
+			t.Errorf("%s = %v, want %v", name, got, want)
+			return
+		}
+		for i := range want {
+			if l[i] != want[i] {
+				t.Errorf("%s = %v, want %v", name, got, want)
+			}
+		}
+	}
+	wantList("protected_paths", toolsObj["protected_paths"], ".git/", "secret/**")
+	wantList("file_egress_destinations", toolsObj["file_egress_destinations"], "ep1")
+	for k, v := range map[string]float64{"max_fetches_per_turn": 7, "max_calls_per_turn": 8, "max_reviewer_calls": 9, "max_result_bytes": 1234} {
+		if toolsObj[k] != v {
+			t.Errorf("%s = %v, want %v", k, toolsObj[k], v)
+		}
+	}
+	wantList("allowed_hosts", toolsObj["web"].(map[string]interface{})["allowed_hosts"], "example.com", "*.example.org")
+	if toolsObj["referee"].(map[string]interface{})["max_output_tokens"] != float64(32) {
+		t.Errorf("referee max_output_tokens not frozen: %v", toolsObj["referee"])
+	}
 }
 
 func TestBuild_AllowWebWithReadDifferenceAffectsRosterHash(t *testing.T) {
@@ -1611,9 +1650,6 @@ func TestBuild_AllowWebWithReadDifferenceAffectsRosterHash(t *testing.T) {
 				AllowWebWithRead: &allowWeb,
 			},
 		},
-		Tools: &config.ToolsConfig{
-			AllowWebWithRead: &allowWeb,
-		},
 		Budgets: config.Budgets{},
 		Pools:   map[string]config.Pool{},
 	}
@@ -1628,9 +1664,6 @@ func TestBuild_AllowWebWithReadDifferenceAffectsRosterHash(t *testing.T) {
 				Author:           "p1",
 				AllowWebWithRead: &disallowWeb,
 			},
-		},
-		Tools: &config.ToolsConfig{
-			AllowWebWithRead: &disallowWeb,
 		},
 		Budgets: config.Budgets{},
 		Pools:   map[string]config.Pool{},

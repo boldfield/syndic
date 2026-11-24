@@ -64,6 +64,11 @@ func validateAllowedHostPattern(pattern string) error {
 	}
 
 	// Check for IPv6 addresses (bare or bracketed) - not allowed
+	if strings.HasPrefix(baseDomain, "[") && strings.HasSuffix(baseDomain, "]") {
+		if ip := net.ParseIP(baseDomain[1 : len(baseDomain)-1]); ip != nil {
+			return fmt.Errorf("IPv6 literals are not allowed in allowlist: %q", pattern)
+		}
+	}
 	if strings.Contains(baseDomain, ":") {
 		// Could be IPv6 address or port separator
 		// Check if it's an IPv6 literal
@@ -77,6 +82,10 @@ func validateAllowedHostPattern(pattern string) error {
 	// Check for IPv4 addresses - not allowed when allowlist is set
 	if net.ParseIP(baseDomain) != nil {
 		return fmt.Errorf("IP literals are not allowed in allowlist: %q", pattern)
+	}
+
+	if err := validateHostLabels(baseDomain); err != nil {
+		return fmt.Errorf("pattern %q is not a valid hostname: %w", pattern, err)
 	}
 
 	// Canonicalize domain: convert to ASCII (punycode if needed) and lowercase
@@ -885,6 +894,44 @@ func (r *Roster) Validate() error {
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// validateHostLabels checks that name is a dotted sequence of LDH labels
+// (letters, digits, hyphens; 1-63 bytes; no leading/trailing hyphen).
+// Non-ASCII labels are allowed here and handled by IDNA canonicalization.
+func validateHostLabels(name string) error {
+	if strings.HasSuffix(name, ".") {
+		return errors.New("trailing dot is not canonical")
+	}
+	if len(name) > 253 {
+		return errors.New("hostname too long")
+	}
+	labels := strings.Split(name, ".")
+	for _, l := range labels {
+		if l == "" {
+			return errors.New("empty label")
+		}
+		if len(l) > 63 {
+			return fmt.Errorf("label %q too long", l)
+		}
+		if l[0] == '-' || l[len(l)-1] == '-' {
+			return fmt.Errorf("label %q must not start or end with a hyphen", l)
+		}
+		for _, r := range l {
+			if r >= 0x80 {
+				continue
+			}
+			ok := r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !ok {
+				return fmt.Errorf("label %q contains invalid character %q", l, r)
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	if strings.Trim(last, "0123456789") == "" {
+		return fmt.Errorf("top-level label %q must not be all numeric", last)
 	}
 	return nil
 }
