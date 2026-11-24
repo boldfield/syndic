@@ -10,7 +10,7 @@ no approved answer (incomplete)
   Yes, it is unreachable.
 › which flag enables the race detector?
 · UNREVIEWED (solo)
-loading…
+  Pass -race to go test.
 › rewrite the README section
 ! HUMAN OVERRIDE: covered by TestRepairOnce · 1 reviews
   Scheduler starts after recovery.

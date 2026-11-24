@@ -2,8 +2,10 @@ package tui
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode"
@@ -59,10 +61,34 @@ func assertGolden(t *testing.T, name, frame string) {
 	}
 }
 
-// onlyControlFree fails for any byte the terminal could act on.
+// onlyControlFree fails for any byte the terminal could act on. The frame is
+// scanned as drawn: the ASCII profile adds no style sequences, so any escape
+// byte present is the content's.
 func onlyControlFree(t *testing.T, what, s string) {
 	t.Helper()
-	for _, r := range ansi.Strip(s) {
+	controlFree(t, what, s)
+}
+
+// markdownSGR is a well-formed style sequence, the only escape the Markdown
+// renderer itself writes (bold, emphasis) whatever the colour profile.
+var markdownSGR = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// onlyStyleEscapes is onlyControlFree for a Markdown-rendered frame: the
+// renderer's own SGR sequences are allowed, but none of the hostile
+// sequences the tests feed in may survive, and nothing else may.
+func onlyStyleEscapes(t *testing.T, what, s string, hostile ...string) {
+	t.Helper()
+	for _, h := range hostile {
+		if strings.Contains(s, h) {
+			t.Errorf("%s holds the raw hostile sequence %q", what, h)
+		}
+	}
+	controlFree(t, what, markdownSGR.ReplaceAllString(s, ""))
+}
+
+func controlFree(t *testing.T, what, s string) {
+	t.Helper()
+	for _, r := range s {
 		if r == '\n' {
 			continue
 		}
@@ -194,7 +220,7 @@ func TestV6UnreviewedDraftBanner(t *testing.T) {
 // every line fits, and no content line loses its two-space indent.
 func TestV6AdversarialContentThroughChat(t *testing.T) {
 	asciiProfile(t)
-	hostile := "start \x1b[31mred\x1b[0m \x1b]8;;http://evil\x1b\\link\r\u202eRTL\u2066iso\u0085c1 \x00nul\x7fdel " +
+	hostile := "start \x1b[31mred\x1b[0m \x1b]8;;http://evil\x1b\\link\r\u202eRTL\u2066iso\u0085c1 \x00nul\x7fdel bad\xffbyte " +
 		strings.Repeat("long", 40) + "TAIL\n\n**bold** `code`\n\ttabbed"
 	for _, raw := range []bool{false, true} {
 		a := chatApp(t)
@@ -205,11 +231,12 @@ func TestV6AdversarialContentThroughChat(t *testing.T) {
 		for _, width := range []int{80, 100} {
 			a.Update(tea.WindowSizeMsg{Width: width, Height: 40})
 			v := a.View()
-			onlyControlFree(t, "chat", v)
-			for _, want := range []string{`\x1b`, `\x0d`, `\u202e`, `\u2066`, `\xc2\x85`, `\x00`, `\x7f`, "TAIL"} {
-				if want == `\xc2\x85` {
-					want = `\x`
-				}
+			if raw {
+				onlyControlFree(t, "chat", v)
+			} else {
+				onlyStyleEscapes(t, "chat", v, "\x1b[31m", "\x1b[2J", "\x1b]")
+			}
+			for _, want := range []string{`\x1b`, `\x0d`, `\u202e`, `\u2066`, `\xc2\x85`, `\x00`, `\x7f`, `\xff`, "TAIL"} {
 				if !strings.Contains(v, want) {
 					t.Errorf("raw=%v width=%d: view lacks %q:\n%s", raw, width, want, v)
 				}
@@ -389,7 +416,15 @@ func TestV6OutcomesGoldenFrame(t *testing.T) {
 		{"t5", "cancelled", "explain why detach never cancels", "The engine is a separate process.", 0, ptr(0), ""},
 	}
 	for i, s := range specs {
-		addTurn(a, s.id, int64(i+1), s.state, s.input, s.text)
+		if s.state == "solo_complete" {
+			// A solo answer is the author attempt's output, as the app loads it.
+			addTurn(a, s.id, int64(i+1), s.state, s.input, "")
+			att := "au-" + s.id
+			a.state.Attempts[att] = AttemptInfo{ID: att, TurnID: s.id, Phase: "author", Status: "complete"}
+			a.content.Store("attempt:"+att, s.text, nil)
+		} else {
+			addTurn(a, s.id, int64(i+1), s.state, s.input, s.text)
+		}
 		ti := a.state.Turns[s.id]
 		ti.Round = s.round
 		if s.reason != "" {
@@ -403,7 +438,7 @@ func TestV6OutcomesGoldenFrame(t *testing.T) {
 	for _, want := range []string{
 		"✓ approved by codex after 2 revisions against abcdef123456 · 6 reviews",
 		"! INCOMPLETE, not approved · 2 reviews",
-		"· UNREVIEWED (solo)",
+		"· UNREVIEWED (solo)\n  Pass -race to go test.",
 		"! HUMAN OVERRIDE: covered by TestRepairOnce · 1 reviews",
 		"× CANCELLED, not approved · 0 reviews",
 	} {
@@ -422,7 +457,9 @@ func TestV6NoEOnlyControls(t *testing.T) {
 	addTurn(a, "t1", 1, "approved", "look at @internal/x.go", "ok")
 	approveBy(a, "t1", "rev")
 	typeRunes(a, "see @int")
-	press(a, tea.KeyMsg{Type: tea.KeyTab})
+	if a.tab != tabChat {
+		t.Fatalf("tab = %v before Tab, want chat", a.tab)
+	}
 	v := a.View()
 	for _, bad := range []string{"files matching", "attached ", "attach", "changes", "/apply", "Apply", "Discard"} {
 		if strings.Contains(strings.ToLower(v), strings.ToLower(bad)) {
@@ -452,14 +489,47 @@ func TestV6NoEOnlyControls(t *testing.T) {
 		}
 	}
 	// Tab with the cursor in an @ word switches tabs; it attaches nothing.
-	before := a.tab
 	a.tab = tabChat
 	typeRunes(a, " @")
 	press(a, tea.KeyMsg{Type: tea.KeyTab})
-	if a.tab == tabChat && before == tabChat {
-		t.Error("Tab did not switch tabs")
+	if a.tab == tabChat {
+		t.Error("Tab did not leave the chat tab")
 	}
 	if strings.Contains(a.View(), "attached") {
 		t.Error("an attached line appeared")
+	}
+}
+
+// Hostile answer, user input and reviewer commentary shown on the transcript
+// tab, through Update and View: visible escapes, no control bytes, fits.
+func TestV6AdversarialContentInTranscript(t *testing.T) {
+	asciiProfile(t)
+	a := transcriptApp(80, 40)
+	hostile := "msg \x1b[31mred\x1b[0m \x1b]0;title\x07\r\u202eRTL\u2066iso\u0085c1 \x00nul\x7fdel bad\xffbyte " +
+		strings.Repeat("wide ", 30) + "END"
+	var items []wire.TranscriptItem
+	for i, who := range []string{"user input", "answer", "reviewer commentary"} {
+		ref := fmt.Sprintf("msg:h%d", i)
+		a.content.Store(ref, who+": "+hostile, nil)
+		items = append(items, wire.TranscriptItem{ID: fmt.Sprintf("h%d", i), Ref: ref, ByteLen: int64(len(hostile))})
+	}
+	a.Update(transcriptMsg{turn: "t1", items: items})
+	if a.tab != tabTranscript {
+		t.Fatalf("tab = %v, want transcript", a.tab)
+	}
+	v := a.View()
+	onlyControlFree(t, "transcript", v)
+	for _, want := range []string{"user input:", "answer:", "reviewer commentary:", `\x1b`, `\x0d`, `\u202e`, `\u2066`, `\xc2\x85`, `\x00`, `\x7f`, `\xff`} {
+		if !strings.Contains(v, want) {
+			t.Errorf("transcript lacks %q:\n%s", want, v)
+		}
+	}
+	if n := strings.Count(v, "END"); n != 3 {
+		t.Errorf("transcript shows %d wrapped tails, want 3:\n%s", n, v)
+	}
+	for i, l := range strings.Split(v, "\n") {
+		if w := lipgloss.Width(l); w > 80 {
+			t.Errorf("line %d is %d cells: %q", i, w, l)
+		}
 	}
 }
