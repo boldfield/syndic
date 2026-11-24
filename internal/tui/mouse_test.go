@@ -471,3 +471,18 @@ func TestProgramOptionsWithMouse(t *testing.T) {
 		}
 	}
 }
+
+func TestMouseZeroReviewCountClickOpensThatTurn(t *testing.T) {
+	a := mouseApp(t)
+	zero := 0
+	a.reviewCounts["t3"] = &zero
+	x, y := where(t, a, "0 reviews")
+	click(a, x+1, y)
+	if !a.reviewsDrawer.IsOpen() || a.reviewsDrawer.SelectedTurnIndex() != 2 {
+		t.Fatalf("drawer open = %v on turn index %d, want turn index 2", a.reviewsDrawer.IsOpen(), a.reviewsDrawer.SelectedTurnIndex())
+	}
+	settle(t, a)
+	if !hasHeader(a, 3) {
+		t.Fatalf("the drawer does not show turn 3:\n%s", a.View())
+	}
+}

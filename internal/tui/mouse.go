@@ -107,7 +107,7 @@ func (a *App) reviewCountAt(x, y int, hs heights) (string, bool) {
 		return "", false
 	}
 	count := a.reviewCounts[ids[turn]]
-	if count == nil || *count <= 0 {
+	if count == nil || *count < 0 {
 		return "", false
 	}
 	line := ansi.Strip(lines[idx])
@@ -151,6 +151,8 @@ func (a *App) openDrawer(i int) tea.Cmd {
 		return nil
 	}
 	a.updateDrawerTurns()
+	a.closeCommandList()
+	a.showShortHelp = false
 	a.reviewsDrawer.Open(i, !a.terminalCapabilities.Color)
 	a.syncDrawerWant()
 	a.reviewsDrawer.SetDrawerHeight(a.layout().Drawer)

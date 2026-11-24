@@ -96,6 +96,9 @@ type App struct {
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
 
+	list          listState // the command list's selection and dismissal
+	showShortHelp bool      // ? showed the short help line
+
 	reviewsDrawer    *ReviewsDrawer  // the reviews drawer state
 	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
 	reviewCounts     map[string]*int // review_count per turn, from conversation info; a key marks the count as read
@@ -497,6 +500,7 @@ func (a *App) Init() tea.Cmd {
 // on the next event or tick, not in a loop.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
+	a.forgetStaleList()
 	cmds := []tea.Cmd{cmd, a.syncTranscript()}
 	switch m := msg.(type) {
 	case tea.KeyMsg:
@@ -655,6 +659,26 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.input.InsertString(normalizePaste(msg.Runes))
 		return a, a.updateInput(nil)
 	}
+	if msg.String() == "?" && a.input.Value() == "" {
+		a.showShortHelp = !a.showShortHelp
+		return a, nil
+	}
+	if a.commandListOpen() {
+		switch msg.String() {
+		case "up":
+			a.moveCommandSel(-1)
+			return a, nil
+		case "down":
+			a.moveCommandSel(1)
+			return a, nil
+		case "tab":
+			a.completeCommand()
+			return a, nil
+		case "esc":
+			a.closeCommandList()
+			return a, nil
+		}
+	}
 	switch msg.String() {
 	case "ctrl+c", "ctrl+d":
 		if cmd, ok := a.detachKey(msg.String()); ok {
@@ -786,6 +810,9 @@ func (a *App) updateInput(msg tea.Msg) tea.Cmd {
 		a.input, _ = a.input.Update(nil)
 	}
 	a.inputOverflow = n > maxInputRows
+	if a.input.Value() != "" {
+		a.showShortHelp = false // ? is short help only on an empty input
+	}
 	return cmd
 }
 
@@ -1341,8 +1368,18 @@ func (a *App) layout() heights {
 		Width:      a.width,
 		Banners:    len(renderBanners(a.state)),
 		InputLines: inputLines(a.input),
-		Want:       a.want,
+		Want:       a.regionWant(),
 	})
+}
+
+// regionWant is the want with the command list and short help filled in.
+func (a *App) regionWant() regionWant {
+	w := a.want
+	if a.commandListOpen() {
+		w.ListLines = len(commandListMatches(a.input.Value()))
+	}
+	w.Help = a.showShortHelp
+	return w
 }
 
 // bodyHeight is the number of lines left for the active tab.
@@ -1526,8 +1563,15 @@ func (a *App) View() string {
 			output = append(output, "")
 		}
 	}
-	for range hs.List + hs.Attached + hs.Help {
+	listLines := a.commandListLines(hs.List)
+	for i := range hs.List {
+		output = append(output, padLine(listLines, i, w))
+	}
+	for range hs.Attached {
 		output = append(output, "")
+	}
+	for range hs.Help {
+		output = append(output, ansi.Truncate(a.shortHelpLine(), w, ""))
 	}
 
 	output = append(output, inputLines)
@@ -1604,4 +1648,12 @@ func clipToWidth(line string, width int) string {
 		return ""
 	}
 	return ansi.Truncate(line, width, "")
+}
+
+// padLine is lines[i] clipped to the width, or empty past the end.
+func padLine(lines []string, i, w int) string {
+	if i >= len(lines) {
+		return ""
+	}
+	return ansi.Truncate(lines[i], w, "")
 }
