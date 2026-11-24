@@ -45,18 +45,10 @@ type reasonForm struct {
 	useHuh      bool      // true if using huh form
 	reasonValue string    // the reason entered by the user
 	panelLines  []string  // the panel lines (prompt/warning)
-	initialized bool      // true after Init() has been called
 }
 
-// Init initializes the form (Huh only).
+// Init satisfies tea.Model but doesn't do anything since the form is managed by the app.
 func (rf *reasonForm) Init() tea.Cmd {
-	if !rf.useHuh || rf.initialized {
-		return nil
-	}
-	rf.initialized = true
-	if rf.huhForm != nil {
-		return rf.huhForm.Init()
-	}
 	return nil
 }
 
@@ -94,8 +86,7 @@ func (rf *reasonForm) Reason() string {
 // openReasonForm creates a form prompting for a required reason.
 // In colour mode, uses a Huh form with validation.
 // In TERM=dumb or no-colour mode, uses single-line input via panel.
-// Returns a command that initializes the form (or nil for fallback mode).
-func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd {
+func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 	a.confirm = confirm
 
 	// Determine if we should use Huh form
@@ -126,8 +117,7 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd 
 		// Set panel to show the warning/context
 		a.panel = panelLines
 		a.panelRow = 0
-		// Return the form's Init command
-		return rf.Init()
+		a.refusal = ""
 	} else {
 		// Fallback: use simple panel + textarea input
 		a.reasonForm = &reasonForm{
@@ -137,6 +127,5 @@ func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) tea.Cmd 
 		a.panel = panelLines
 		a.setPrompt(reasonPrompt)
 		a.refusal = ""
-		return nil
 	}
 }
