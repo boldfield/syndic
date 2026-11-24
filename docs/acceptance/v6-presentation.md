@@ -44,26 +44,32 @@ and the golden frames in `internal/tui/testdata/v6/golden/` follow the text
 
 ## Validation evidence
 
-Command run on the tree below, with the observed result:
+Commands run, in this order, on the tree below, with the observed results:
 
     make check
     make test
-    go test -short -count=1 ./internal/acceptance ./internal/server ./internal/journal ./internal/client ./cmd/syndic
+    go test -short -count=1 ./internal/acceptance ./internal/server ./internal/journal ./internal/client ./internal/tui ./cmd/syndic
 
-Tree: `ad34928e6525da99b387b0f8c579e5de5078e89e` (merged clean with `origin/main` 87e0f2a),
+Tree: `6e0d25c96320e6816a126d3e885c489496f44803` (up to date with `origin/main` 87e0f2a),
 run 2026-11-24. The only commit after it changes this file; the code under test is that tree.
 
     make check: pass (exit 0)
     make test: pass (exit 0)
-    go test -short -count=1 ./internal/tui ./cmd/syndic: pass
-      ok internal/tui 49.2s, cmd/syndic 0.8s
+    go test -short -count=1 ./internal/acceptance ./internal/server ./internal/journal ./internal/client ./internal/tui ./cmd/syndic: pass (exit 0)
+      ok  internal/acceptance  83.930s
+      ok  internal/server      31.870s
+      ok  internal/journal     55.675s
+      ok  internal/client       0.949s
+      ok  internal/tui         50.088s
+      ok  cmd/syndic            1.619s
 
-An earlier `make check` on a previous head failed once in
-`internal/acceptance.TestSocket_ReplayThenLive` (a timing flake of the live-socket
-replay test, unrelated to this change); it passed on this tree. `TestTMUX_EndToEnd`
-(`SYNDIC_TMUX_TEST=1`) needs tmux, which this worker does not have; it runs in the
-CI `test` job, which was green on 5f9ccf8 after its prompt match was updated to `┃ `.
-The CI run for the final head is the authority for that test.
+`internal/acceptance.TestSocket_ReplayThenLive` (a v3 socket test this change does not
+touch) failed twice as "lagging" on earlier heads of this work, when the full-size
+`TestV6WireCoverage_*` tests ran in parallel with it. Those two tests now run
+sequentially. The same command then passed three times in a row, the last of them on the tree above.
+`TestTMUX_EndToEnd` (`SYNDIC_TMUX_TEST=1`) needs tmux, which this worker does not
+have. It runs in the CI `test` job, and that job's run on this pull request's head commit is the
+authority for it.
 
 No test cited here is skipped; `TestV6PresentationLedger` enforces that on every run.
 
