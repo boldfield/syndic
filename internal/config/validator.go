@@ -34,7 +34,8 @@ func validateAllowedHostPattern(pattern string) error {
 		return fmt.Errorf("too many wildcards in pattern %q (max 2)", pattern)
 	}
 
-	if wildcardCount == 1 {
+	switch wildcardCount {
+	case 1:
 		// Single wildcard: must be "*.domain"
 		if !strings.HasPrefix(pattern, "*.") {
 			return fmt.Errorf("single wildcard must be at the start: %q", pattern)
@@ -43,10 +44,10 @@ func validateAllowedHostPattern(pattern string) error {
 		if strings.Contains(baseDomain, "*") {
 			return fmt.Errorf("invalid wildcard placement in %q", pattern)
 		}
-		if strings.Contains(baseDomain, ".") == false {
+		if !strings.Contains(baseDomain, ".") {
 			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
-	} else if wildcardCount == 2 {
+	case 2:
 		// Double wildcard: must be "**.domain"
 		if !strings.HasPrefix(pattern, "**.") {
 			return fmt.Errorf("double wildcard must be at the start: %q", pattern)
@@ -55,10 +56,10 @@ func validateAllowedHostPattern(pattern string) error {
 		if strings.Contains(baseDomain, "*") {
 			return fmt.Errorf("invalid wildcard placement in %q", pattern)
 		}
-		if strings.Contains(baseDomain, ".") == false {
+		if !strings.Contains(baseDomain, ".") {
 			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
 		}
-	} else if wildcardCount == 0 {
+	case 0:
 		// Exact match: no wildcards
 		// No suffix matching allowed, so pattern must not start with a dot
 		if strings.HasPrefix(pattern, ".") {
