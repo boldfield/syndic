@@ -154,7 +154,7 @@ func TestChatEchoesUserTextSafely(t *testing.T) {
 func TestPanelsAndBannersEscapeHostileText(t *testing.T) {
 	hostile := "p\x1b]8;;http://x\x1b\\L\x1b[2J\u202e"
 
-	lines := conversationLines([]wire.ConversationSummary{{ID: "c1", Preview: hostile}}, "", hostile, 80)
+	lines := conversationChooserLines(t, hostile, hostile, 80)
 	assertSafeRunes(t, "conversations", strings.Join(lines, "\n"))
 
 	reason := "block:" + hostile
@@ -326,7 +326,7 @@ func TestOneLineFieldsEscapeLineFeeds(t *testing.T) {
 	a.conversationID = "c1234567890"
 	assertNoInjectedRow(t, "header open", []string{a.conversationHeader()})
 
-	lines := conversationLines([]wire.ConversationSummary{{ID: "c1", Preview: inj}}, "", inj, 120)
+	lines := conversationChooserLines(t, inj, inj, 120)
 	assertNoInjectedRow(t, "conversations", lines)
 
 	prof := inj
@@ -355,4 +355,19 @@ func TestOneLineFieldsEscapeLineFeeds(t *testing.T) {
 	view := strings.Split(a.View(), "\n")
 	assertNoInjectedRow(t, "view", view)
 	assertSafeLines(t, "view", view)
+}
+
+// conversationChooserLines draws a list of one conversation of this
+// directory and one of another, whose preview and workspace are hostile.
+func conversationChooserLines(t *testing.T, preview, workspace string, width int) []string {
+	t.Helper()
+	a := chatApp(t)
+	a.workDir = workspace
+	other := workspace + "/other"
+	a.conv = &convChooser{loaded: true, items: []wire.ConversationSummary{
+		{ID: "c1", Preview: preview},
+		{ID: "c2", Preview: preview, Workspace: &other},
+	}}
+	a.resetSel()
+	return a.conversationLines(10, width)
 }

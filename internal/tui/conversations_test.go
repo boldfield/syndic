@@ -14,6 +14,7 @@ import (
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // convRig is an App on a real engine whose author and reviewer approve at
@@ -257,7 +258,7 @@ func TestConversationsAndSwitch(t *testing.T) {
 		t.Fatalf("conversation after /new = %q, first %q", second, first)
 	}
 
-	v := r.command("/conversations", "conversations in /ws/here", "first question", "second question")
+	v := r.command("/conversations", "conversations in /ws/here", "first question", "second question", "foreign question")
 	lines := strings.Split(v, "\n")
 	at := func(s string) int {
 		return slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, s) })
@@ -266,16 +267,28 @@ func TestConversationsAndSwitch(t *testing.T) {
 	if fi < 0 || si < 0 || si > fi {
 		t.Fatalf("want both conversations, the latest first:\n%s", v)
 	}
-	if !strings.HasPrefix(lines[si], "* "+shortID(second)) || !strings.HasPrefix(lines[fi], "  "+shortID(first)) {
-		t.Errorf("open conversation not marked:\n%s\n%s", lines[si], lines[fi])
+	if !strings.Contains(lines[si], "› * "+shortID(second)) || !strings.Contains(lines[fi], "  "+shortID(first)) || strings.Contains(lines[fi], "*") {
+		t.Errorf("open conversation not marked or selected:\n%s\n%s", lines[si], lines[fi])
 	}
 	for _, l := range []string{lines[si], lines[fi]} {
 		if !strings.Contains(l, "1 turns") || !strings.Contains(l, time.Now().Format("2006-01-02")) {
 			t.Errorf("line %q lacks the turn count or the last activity", l)
 		}
 	}
-	if strings.Contains(v, "foreign question") || strings.Contains(v, shortID(other)) {
-		t.Errorf("another directory's conversation is listed:\n%s", v)
+	// Another directory's conversation is listed with its workspace, and
+	// the selection skips it.
+	if oi := at(shortID(other)); oi < 0 || !strings.Contains(lines[oi], "[/ws/elsewhere]") || strings.Contains(lines[oi], "›") {
+		t.Errorf("another directory's conversation is not listed as unselectable:\n%s", v)
+	}
+	r.send(tea.KeyMsg{Type: tea.KeyDown})
+	r.send(tea.KeyMsg{Type: tea.KeyDown})
+	r.send(tea.KeyMsg{Type: tea.KeyDown})
+	if got := r.app.conv.visible()[r.app.conv.sel].ID; got != first {
+		t.Errorf("selection after Down = %q, want the first conversation %q", got, first)
+	}
+	r.send(tea.KeyMsg{Type: tea.KeyEsc})
+	if r.app.conv != nil {
+		t.Error("Esc left the list open")
 	}
 
 	// Another directory's conversation is refused, and nothing changes.
@@ -472,18 +485,18 @@ func TestTrimWithoutTurns(t *testing.T) {
 // The conversation list cuts a long preview to the width by cells, never
 // splitting a character.
 func TestConversationLinesFitTheWidth(t *testing.T) {
+	a := chatApp(t)
+	a.workDir = "/w"
 	ws := "/w"
-	items := []wire.ConversationSummary{{ID: "0123456789abcdef", Workspace: &ws, LastSubmittedAt: "", TurnCount: 3, Running: true, Preview: strings.Repeat("日本語", 30)}}
-	lines := conversationLines(items, "", ws, 40)
-	if lines[1] != "* new      (created at the next submit)" {
-		t.Errorf("new conversation line = %q", lines[1])
-	}
-	l := lines[2]
-	if !strings.HasPrefix(l, "  01234567  -  3 turns, running  日本") || !strings.HasSuffix(l, "…") {
+	a.conv = &convChooser{loaded: true, items: []wire.ConversationSummary{{ID: "0123456789abcdef", Workspace: &ws, LastSubmittedAt: "", TurnCount: 3, Running: true, Preview: strings.Repeat("日本語", 30)}}}
+	a.resetSel()
+	lines := a.conversationLines(10, 40)
+	l := lines[1]
+	if !strings.HasPrefix(l, "› ") || !strings.Contains(l, "01234567  -  3 turns, running  日本") || !strings.HasSuffix(l, "…") {
 		t.Errorf("line = %q", l)
 	}
-	if w := len([]rune(l)); w > 40 {
-		t.Errorf("line %q is %d runes", l, w)
+	if w := ansi.StringWidth(l); w > 40 {
+		t.Errorf("line %q is %d cells", l, w)
 	}
 	if !strings.Contains(l, "日") || strings.ContainsRune(l, '�') {
 		t.Errorf("line %q split a character", l)
