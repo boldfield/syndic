@@ -22,7 +22,7 @@ func TestReviewsDrawerOpen(t *testing.T) {
 		t.Error("drawer should start closed")
 	}
 	d.SetTurns([]string{"turn1", "turn2"})
-	d.Open(0)
+	d.Open(0, false)
 	if !d.IsOpen() {
 		t.Error("drawer should be open after Open()")
 	}
@@ -34,8 +34,8 @@ func TestReviewsDrawerOpen(t *testing.T) {
 func TestReviewsDrawerClose(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1", "turn2"})
-	d.Open(0)
-	d.Close()
+	d.Open(0, false)
+	d.Close(false)
 	if d.IsOpen() {
 		t.Error("drawer should be closed after Close()")
 	}
@@ -45,7 +45,7 @@ func TestReviewsDrawerNavigation(t *testing.T) {
 	d := NewReviewsDrawer()
 	turns := []string{"turn1", "turn2", "turn3"}
 	d.SetTurns(turns)
-	d.Open(0)
+	d.Open(0, false)
 
 	// Test down navigation
 	d.SelectDown()
@@ -81,7 +81,7 @@ func TestReviewsDrawerNavigation(t *testing.T) {
 func TestReviewsDrawerRoundNavigation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Add reviews with multiple rounds
 	items := []wire.ReviewItem{
@@ -141,7 +141,7 @@ func TestReviewsDrawerUpdateReviews(t *testing.T) {
 func TestReviewsDrawerScroll(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	d.ScrollDown(2, 20)
 	if d.scrollOffset != 2 {
@@ -164,12 +164,12 @@ func TestReviewsDrawerRender(t *testing.T) {
 	d.SetTurns([]string{"turn1", "turn2"})
 
 	// Test rendering when closed
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 	if output != "" {
 		t.Errorf("closed drawer should render empty, got %q", output)
 	}
 
-	d.Open(0)
+	d.Open(0, false)
 	items := []wire.ReviewItem{
 		{Round: 1, Participant: "p1", Kind: "approve", Blocks: []wire.ReviewBlock{
 			{BlockID: "b1", State: "withdrawn"},
@@ -177,7 +177,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output = d.render(80, NewContentCache())
+	output = d.render(80, NewContentCache(), false)
 	if output == "" {
 		t.Error("open drawer should not render empty")
 	}
@@ -190,7 +190,7 @@ func TestReviewsDrawerRender(t *testing.T) {
 func TestReviewsDrawerSafeText(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Test that control characters in block IDs are escaped
 	items := []wire.ReviewItem{
@@ -205,7 +205,7 @@ func TestReviewsDrawerSafeText(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 	// The block ID should have escaped control sequence, not raw ANSI
 	if strings.Contains(output, "\x1b") {
 		t.Error("drawer should not contain raw ANSI codes")
@@ -218,7 +218,7 @@ func TestReviewsDrawerSafeText(t *testing.T) {
 func TestReviewsDrawerCommentaryRendering(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	cc := NewContentCache()
 	commentRef := "ref:comment:123"
@@ -239,7 +239,7 @@ func TestReviewsDrawerCommentaryRendering(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, cc)
+	output := d.render(80, cc, false)
 	if !strings.Contains(output, "commentary") {
 		t.Error("drawer should show commentary label")
 	}
@@ -252,7 +252,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetRoster([]string{"p3", "p1", "p2"})
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Add reviews in non-roster order
 	items := []wire.ReviewItem{
@@ -262,7 +262,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 	}
 	d.UpdateReviews("turn1", items)
 
-	output := d.render(80, NewContentCache())
+	output := d.render(80, NewContentCache(), false)
 
 	// Check that p3 appears before p1, which appears before p2
 	pos3 := strings.Index(output, "p3")
@@ -280,7 +280,7 @@ func TestReviewsDrawerRosterOrder(t *testing.T) {
 func TestReviewsDrawerPaging(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
-	d.Open(0)
+	d.Open(0, false)
 
 	// Create many items to test paging
 	var items []wire.ReviewItem
@@ -327,7 +327,7 @@ func TestReviewsDrawerInputBlocking(t *testing.T) {
 	}
 
 	// Open drawer
-	d.Open(0)
+	d.Open(0, false)
 	if !d.IsOpen() {
 		t.Error("drawer should be open after Open()")
 	}
@@ -345,7 +345,7 @@ func TestReviewsDrawerInputBlocking(t *testing.T) {
 	}
 
 	// Close drawer
-	d.Close()
+	d.Close(false)
 	if d.IsOpen() {
 		t.Error("drawer should be closed after Close()")
 	}
@@ -385,11 +385,11 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 		},
 	}
 	d.UpdateReviews("turn1", items)
-	d.Open(0)
+	d.Open(0, false)
 
 	// Each round shows the block in the state that round's verdict gave it.
 	for i, want := range []string{"b1: opened", "b1: maintained", "b1: withdrawn"} {
-		out := d.render(80, NewContentCache())
+		out := d.render(80, NewContentCache(), false)
 		if !strings.Contains(out, want) {
 			t.Errorf("round %d does not show %q:\n%s", i+1, want, out)
 		}
@@ -402,11 +402,11 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 func TestReviewsDrawerHeaderWithoutReviews(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"t1", "t2", "t3"})
-	d.Open(0)
+	d.Open(0, false)
 	d.UpdateReviews("t2", nil)
 	d.SetReviewsError("t3", fmt.Errorf("refused"))
 	for i, want := range []string{"loading…", "no reviews", "reviews unavailable: refused"} {
-		out := d.render(80, NewContentCache())
+		out := d.render(80, NewContentCache(), false)
 		if !strings.Contains(out, fmt.Sprintf("Reviews · Turn %d", i+1)) || !strings.Contains(out, want) {
 			t.Errorf("turn %d: want the header and %q:\n%s", i+1, want, out)
 		}
@@ -631,7 +631,7 @@ func TestReviewsDrawerKeysAndResize(t *testing.T) {
 func TestReviewsDrawerSetTurnsKeepsSelection(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"a", "b"})
-	d.Open(0)
+	d.Open(0, false)
 	d.SelectDown()
 	d.SetTurns([]string{"a", "b", "c"})
 	if got := d.selectedTurnID(); got != "b" {
@@ -754,4 +754,164 @@ func repeatStep(s fake.Step, n int) []fake.Step {
 		steps[i] = s
 	}
 	return steps
+}
+
+// slide steps the drawer's frames until it settles and returns the progress after each.
+func slide(t *testing.T, d *ReviewsDrawer) []float64 {
+	t.Helper()
+	var seen []float64
+	for d.IsAnimating() {
+		d.Step()
+		seen = append(seen, d.AnimProgress())
+		if len(seen) > 200 {
+			t.Fatal("the slide does not settle")
+		}
+	}
+	return seen
+}
+
+// TestDrawerAnimation tests the drawer open animation.
+func TestDrawerAnimation(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(7)
+	d.Open(0, false)
+	if !d.IsAnimating() || d.AnimProgress() != 0 {
+		t.Fatalf("after Open: animating = %v, progress = %v, want sliding from 0", d.IsAnimating(), d.AnimProgress())
+	}
+	seen := slide(t, d)
+	if len(seen) < 3 || seen[len(seen)-1] != 1 || d.IsAnimating() {
+		t.Errorf("slide frames = %v, want several ending at 1", seen)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i] < seen[i-1] || seen[i] > 1 {
+			t.Errorf("opening is not monotone within 0..1: %v", seen)
+		}
+	}
+}
+
+// TestDrawerCloseAnimation tests the drawer close animation.
+func TestDrawerCloseAnimation(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0, false)
+	slide(t, d)
+
+	d.Close(false)
+	if d.IsOpen() || !d.Visible() || !d.IsAnimating() || d.AnimProgress() != 1 {
+		t.Fatalf("after Close: open = %v, visible = %v, progress = %v", d.IsOpen(), d.Visible(), d.AnimProgress())
+	}
+	seen := slide(t, d)
+	if len(seen) < 3 || seen[len(seen)-1] != 0 || d.Visible() {
+		t.Errorf("close frames = %v, want several ending at 0 and gone", seen)
+	}
+}
+
+// TestDrawerPlainModeDoesNotAnimate: plain mode opens and closes at once.
+func TestDrawerPlainModeDoesNotAnimate(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0, true)
+	if d.IsAnimating() || d.AnimProgress() != 1 || !d.Visible() {
+		t.Errorf("plain open: animating = %v, progress = %v", d.IsAnimating(), d.AnimProgress())
+	}
+	d.Close(true)
+	if d.IsAnimating() || d.Visible() || d.AnimProgress() != 0 {
+		t.Errorf("plain close: animating = %v, visible = %v", d.IsAnimating(), d.Visible())
+	}
+}
+
+// TestDrawerAnimationRender verifies animation affects rendering.
+func TestDrawerAnimationRender(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(10)
+
+	items := make([]wire.ReviewItem, 10)
+	for i := range items {
+		items[i] = wire.ReviewItem{Round: 0, Participant: fmt.Sprintf("p%d", i), Kind: "approve"}
+	}
+	d.UpdateReviews("turn1", items)
+	d.Open(0, false)
+
+	cc := NewContentCache()
+	rows := func(plain bool) int {
+		out := d.render(80, cc, plain)
+		if out == "" {
+			return 0
+		}
+		return len(strings.Split(out, "\n"))
+	}
+	if rows(false) != 0 {
+		t.Errorf("the first frame shows %d rows, want 0", rows(false))
+	}
+	d.Step()
+	d.Step()
+	partial := rows(false)
+	slide(t, d)
+	full := rows(false)
+	if partial >= full || full != 11 {
+		t.Errorf("partial = %d rows, full = %d, want fewer than the 11 of a whole drawer", partial, full)
+	}
+	// Plain mode shows every row whatever the slide.
+	d.Close(false)
+	d.Open(0, false)
+	d.animPos = 0.1
+	if rows(true) != full {
+		t.Errorf("plain render of a sliding drawer = %d rows, want %d", rows(true), full)
+	}
+}
+
+// TestDrawerReopenWhileClosingKeepsPosition: reopening mid-slide continues from where it is.
+func TestDrawerReopenWhileClosingKeepsPosition(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1", "turn2"})
+	d.Open(0, false)
+	slide(t, d)
+	d.Close(false)
+	d.Step()
+	d.Step()
+	mid := d.AnimProgress()
+	if mid <= 0 || mid >= 1 {
+		t.Fatalf("closing is at %v after two frames, want mid-slide", mid)
+	}
+	d.Open(1, false)
+	if d.AnimProgress() != mid || !d.IsAnimating() || !d.IsOpen() {
+		t.Errorf("reopen jumped from %v to %v", mid, d.AnimProgress())
+	}
+	if seen := slide(t, d); seen[len(seen)-1] != 1 {
+		t.Errorf("reopened drawer ends at %v, want 1", seen[len(seen)-1])
+	}
+}
+
+// TestDrawerNoRenderWhenFullyClosed: render should not output when drawer is fully closed.
+func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(7)
+	d.UpdateReviews("turn1", []wire.ReviewItem{
+		{Round: 0, Participant: "p1", Kind: "approve"},
+	})
+
+	// Render when closed and not animating should be empty
+	output := d.render(80, NewContentCache(), false)
+	if output != "" {
+		t.Errorf("closed drawer should render empty, got %q", output)
+	}
+
+	// But when closed and animating (close animation), it should render
+	d.Open(0, false)
+	slide(t, d)
+	d.Close(false)
+	output = d.render(80, NewContentCache(), false)
+	if output == "" {
+		t.Error("closed drawer should render during close animation")
+	}
+
+	// Once animation completes (progress == 0), it should not render
+	slide(t, d)
+	output = d.render(80, NewContentCache(), false)
+	if output != "" {
+		t.Errorf("fully closed drawer should not render, got %q", output)
+	}
 }
