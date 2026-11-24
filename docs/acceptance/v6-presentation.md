@@ -50,14 +50,20 @@ Command run on the tree below, with the observed result:
     make test
     go test -short -count=1 ./internal/acceptance ./internal/server ./internal/journal ./internal/client ./cmd/syndic
 
-Tree: `d1a90dcaa8e21423efb390f2125777c8cf6d065f` (base `origin/main` 87e0f2a, merged clean), run 2026-11-24.
-This ledger is committed on top of that tree and changes only this file.
+Tree: `ad34928e6525da99b387b0f8c579e5de5078e89e` (merged clean with `origin/main` 87e0f2a),
+run 2026-11-24. The only commit after it changes this file; the code under test is that tree.
 
-    make check: pass (build, lint and tests, exit 0)
-    make test: pass (`go test ./...`, exit 0; includes `internal/tui` in 110.9s and the ledger checker)
-    go test -short: pass
-      ok internal/acceptance 167.0s, internal/server 74.6s, internal/journal 119.7s,
-         internal/client 0.9s, cmd/syndic 4.8s
+    make check: pass (exit 0)
+    make test: pass (exit 0)
+    go test -short -count=1 ./internal/tui ./cmd/syndic: pass
+      ok internal/tui 49.2s, cmd/syndic 0.8s
+
+An earlier `make check` on a previous head failed once in
+`internal/acceptance.TestSocket_ReplayThenLive` (a timing flake of the live-socket
+replay test, unrelated to this change); it passed on this tree. `TestTMUX_EndToEnd`
+(`SYNDIC_TMUX_TEST=1`) needs tmux, which this worker does not have; it runs in the
+CI `test` job, which was green on 5f9ccf8 after its prompt match was updated to `┃ `.
+The CI run for the final head is the authority for that test.
 
 No test cited here is skipped; `TestV6PresentationLedger` enforces that on every run.
 
