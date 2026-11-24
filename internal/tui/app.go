@@ -696,7 +696,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
-		return a, nil
+		return a, a.ensureTick()
 	case "shift+tab":
 		a.panel = nil
 		a.tab = (a.tab + numTabs - 1) % numTabs
@@ -707,7 +707,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.want.Drawer = false
 		}
 		a.updateDrawerTurns()
-		return a, nil
+		return a, a.ensureTick()
 	case "enter":
 		return a, a.enter()
 	}
