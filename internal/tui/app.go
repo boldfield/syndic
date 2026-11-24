@@ -595,7 +595,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.ScrollUp(drawerHeight)
 			return a, nil
 		case "pgdown":
-			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines())
+			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines(a.width, a.content))
 			return a, nil
 		case "esc", "ctrl+o":
 			a.reviewsDrawer.Close()
@@ -1526,6 +1526,7 @@ type reviewsMsg struct {
 func (a *App) onReviews(msg reviewsMsg) (tea.Model, tea.Cmd) {
 	a.reviewsLoading[msg.turnID] = false
 	if msg.err != nil {
+		a.reviewsDrawer.SetReviewsError(msg.turnID, msg.err)
 		a.say("reviews: " + formatRefusal(msg.err))
 		return a, nil
 	}

@@ -2,14 +2,18 @@ package tui
 
 import (
 	"fmt"
-	"github.com/boldfield/syndic/internal/transport/fake"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/teatest"
 )
 
 func TestReviewsDrawerOpen(t *testing.T) {
@@ -291,13 +295,7 @@ func TestReviewsDrawerPaging(t *testing.T) {
 
 	// Render and check content lines are calculated
 	cc := NewContentCache()
-	_ = d.render(80, cc)
-	if d.ContentLines() == 0 {
-		t.Error("content lines should be calculated after render")
-	}
-
-	// Test scrolling - only scroll if content is larger than viewport
-	contentLines := d.ContentLines()
+	contentLines := d.ContentLines(80, cc)
 	if contentLines <= 10 {
 		t.Fatalf("fixture too small to page: %d lines", contentLines)
 	}
@@ -389,18 +387,30 @@ func TestReviewsDrawerHistoricalStates(t *testing.T) {
 	d.UpdateReviews("turn1", items)
 	d.Open(0)
 
-	// Navigate through rounds
-	rounds := d.getRounds()
-	if len(rounds) != 3 {
-		t.Errorf("should have 3 rounds, got %d", len(rounds))
-	}
-
-	// Check each round has the item
-	for i := 0; i < 3; i++ {
-		d.selectedRound = i
-		if len(d.reviewsByTurn["turn1"].rounds[rounds[i]]) == 0 {
-			t.Errorf("round %d should have items", rounds[i])
+	// Each round shows the block in the state that round's verdict gave it.
+	for i, want := range []string{"b1: opened", "b1: maintained", "b1: withdrawn"} {
+		out := d.render(80, NewContentCache())
+		if !strings.Contains(out, want) {
+			t.Errorf("round %d does not show %q:\n%s", i+1, want, out)
 		}
+		d.SelectRoundRight()
+	}
+}
+
+// TestReviewsDrawerHeaderWithoutReviews: a turn whose reviews are loading,
+// that has none, or whose reviews could not be read still names the turn.
+func TestReviewsDrawerHeaderWithoutReviews(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"t1", "t2", "t3"})
+	d.Open(0)
+	d.UpdateReviews("t2", nil)
+	d.SetReviewsError("t3", fmt.Errorf("refused"))
+	for i, want := range []string{"loading…", "no reviews", "reviews unavailable: refused"} {
+		out := d.render(80, NewContentCache())
+		if !strings.Contains(out, fmt.Sprintf("Reviews · Turn %d", i+1)) || !strings.Contains(out, want) {
+			t.Errorf("turn %d: want the header and %q:\n%s", i+1, want, out)
+		}
+		d.SelectDown()
 	}
 }
 
@@ -481,19 +491,45 @@ func TestSelectedInputHighlighting(t *testing.T) {
 	if !strings.Contains(output, "first input") {
 		t.Error("selected turn input should be in chat output")
 	}
-	// In a plain terminal the selection is a marker; unselected turns have none.
+	// In a plain terminal the selection is a mark in place of the user mark;
+	// unselected turns keep the user mark.
 	in.answer = func(id string) answerInput { return answerInput{width: 80, plainMode: true} }
 	for sel, other := range map[string]string{"t1": "t2", "t2": "t1"} {
 		in.selectedDrawerTurnID = sel
 		plain, _ := chatLines(s, in)
 		out := strings.Join(plain, "\n")
 		name := map[string]string{"t1": "first input", "t2": "second input"}
-		if !strings.Contains(out, "> "+userMark+name[sel]) {
+		if !strings.Contains(out, selectedMark+name[sel]) || strings.Contains(out, userMark+name[sel]) {
 			t.Errorf("selected %s lacks the plain marker:\n%s", sel, out)
 		}
-		if strings.Contains(out, "> "+userMark+name[other]) {
+		if !strings.Contains(out, userMark+name[other]) || strings.Contains(out, selectedMark+name[other]) {
 			t.Errorf("unselected %s carries the marker:\n%s", other, out)
 		}
+	}
+}
+
+// TestSelectedInputKeepsWrapping: the plain selection mark is as wide as the
+// user mark, so a full-width input still fits its line.
+func TestSelectedInputKeepsWrapping(t *testing.T) {
+	text := strings.Repeat("x", 77) + "Z"
+	s := State{
+		Turns: map[string]TurnInfo{"t1": {State: "solo_complete"}},
+		Scope: &TurnScope{ConversationID: "c", Order: []string{"t1"}, Turns: map[string]bool{"t1": true}},
+	}
+	in := chatInput{
+		answer:  func(string) answerInput { return answerInput{width: 80, plainMode: true} },
+		inputs:  map[string]string{"t1": text},
+		content: NewContentCache(),
+		width:   80,
+	}
+	plain, _ := chatLines(s, in)
+	in.selectedDrawerTurnID = "t1"
+	selected, _ := chatLines(s, in)
+	if len(plain) != len(selected) {
+		t.Fatalf("selection reflowed the chat: %d lines, was %d", len(selected), len(plain))
+	}
+	if selected[0] != selectedMark+text || ansi.StringWidth(selected[0]) != 80 {
+		t.Errorf("selected line = %q (%d cells), want the whole input in 80", selected[0], ansi.StringWidth(selected[0]))
 	}
 }
 
@@ -550,9 +586,9 @@ func TestReviewsDrawerEndToEnd(t *testing.T) {
 	r.until(t, "typing works again", func(a *App) (string, bool) { return a.input.Value(), a.input.Value() == "x" })
 }
 
-// TestReviewsDrawerDetachAndResize: Ctrl+D on an empty input detaches through
-// the drawer, a non-empty input is left alone, and shrinking below the
-// minimum size releases the keyboard.
+// TestReviewsDrawerKeysAndResize: shrinking below the minimum size releases
+// the keyboard, Ctrl+C leaves a non-empty input alone while the drawer has
+// the keyboard, and Ctrl+D on an empty input detaches through the drawer.
 func TestReviewsDrawerKeysAndResize(t *testing.T) {
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
 	r := startAnswerRig(t, h)
@@ -579,6 +615,17 @@ func TestReviewsDrawerKeysAndResize(t *testing.T) {
 	r.until(t, "input kept", func(a *App) (string, bool) {
 		return a.input.Value(), a.input.Value() == "x" && a.reviewsDrawer.IsOpen()
 	})
+
+	// Closed, Ctrl+C clears the input; reopened, Ctrl+D on the empty input detaches.
+	send(r, tea.KeyMsg{Type: tea.KeyEsc}, tea.KeyMsg{Type: tea.KeyCtrlC}, tea.KeyMsg{Type: tea.KeyCtrlO})
+	r.until(t, "drawer open on an empty input", func(a *App) (string, bool) {
+		return a.input.Value(), a.input.Value() == "" && a.reviewsDrawer.IsOpen()
+	})
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlD})
+	app := r.tm.FinalModel(t, teatest.WithFinalTimeout(10*time.Second)).(*probe).app
+	if !app.reviewsDrawer.IsOpen() {
+		t.Error("the detach did not come through the open drawer")
+	}
 }
 
 func TestReviewsDrawerSetTurnsKeepsSelection(t *testing.T) {
@@ -601,28 +648,104 @@ func TestReviewsDrawerTurnSelectionEndToEnd(t *testing.T) {
 		"reviewer": repeatStep(blockVerdict(), 12),
 	})
 	r := startAnswerRig(t, h)
+	// Tall enough that both turns' inputs stay on screen above the drawer.
+	send(r, tea.WindowSizeMsg{Width: 80, Height: 60})
 	settled := func(a *App) (string, bool) {
 		id := answerTurn(a.state)
 		return id, id != "" && a.input.Value() == "" && isTerminalState(a.state.Turns[id].State)
 	}
-	r.typeLine("first")
+	// Full-width inputs: the selection mark must not clip a byte of them.
+	firstText := "first " + strings.Repeat("a", 71) + "Z"
+	secondText := "second " + strings.Repeat("b", 70) + "Y"
+	r.typeLine(firstText)
 	first := r.until(t, "first settled", settled)
-	r.typeLine("second")
+	r.typeLine(secondText)
 	r.until(t, "second settled", func(a *App) (string, bool) {
 		id, ok := settled(a)
 		return id, ok && id != first
 	})
 
-	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
-	untilView(t, r, "Reviews · Turn 2")
-	if sel := r.until(t, "selection", func(a *App) (string, bool) { return a.reviewsDrawer.selectedTurnID(), true }); sel == first {
-		t.Fatalf("drawer opened on the first turn")
+	closed := view(t, r)
+	if !strings.Contains(closed, userMark+firstText) || !strings.Contains(closed, userMark+secondText) || strings.Contains(closed, selectedMark) {
+		t.Fatalf("with the drawer closed no input is marked:\n%s", closed)
 	}
+
+	// The drawer opens on the newest turn and marks its input.
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	v := untilView(t, r, "Reviews · Turn 2", selectedMark+secondText, userMark+firstText)
+	if strings.Contains(v, selectedMark+firstText) {
+		t.Fatalf("both inputs marked:\n%s", v)
+	}
+	// ↑ moves the mark to the first turn's input.
 	send(r, tea.KeyMsg{Type: tea.KeyUp})
-	untilView(t, r, "Reviews · Turn 1")
+	v = untilView(t, r, "Reviews · Turn 1", selectedMark+firstText, userMark+secondText)
+	if strings.Contains(v, selectedMark+secondText) {
+		t.Fatalf("the mark did not leave the second input:\n%s", v)
+	}
 	r.until(t, "first selected", func(a *App) (string, bool) { return "", a.reviewsDrawer.selectedTurnID() == first })
+	// ↓ moves it back.
 	send(r, tea.KeyMsg{Type: tea.KeyDown})
-	untilView(t, r, "Reviews · Turn 2")
+	untilView(t, r, "Reviews · Turn 2", selectedMark+secondText, userMark+firstText)
+	// Closing the drawer removes the mark.
+	send(r, tea.KeyMsg{Type: tea.KeyEsc})
+	r.until(t, "no mark once closed", func(a *App) (string, bool) {
+		v := a.View()
+		return v, !a.reviewsDrawer.IsOpen() && !strings.Contains(v, selectedMark) && strings.Contains(v, userMark+secondText)
+	})
+}
+
+// TestReviewsDrawerRoundsAndScrollEndToEnd drives a revised turn through the
+// App against a real engine: the drawer shows round 1's opened block, → shows
+// round 2's withdrawn one and ← shows round 1 again; content taller than the
+// drawer is reached with PgDn and left again with PgUp.
+func TestReviewsDrawerRoundsAndScrollEndToEnd(t *testing.T) {
+	roster := strings.Replace(enginetest.RosterTOML, "max_rounds = 0", "max_rounds = 2\nmax_rounds_ceiling = 5", 1)
+	var evidence []string
+	for i := range 60 {
+		evidence = append(evidence, fmt.Sprintf("e%02d", i))
+	}
+	block := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", strings.Join(evidence, " "), "remedy-tail", "wrong")
+	})
+	withdraw := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictV2WithBlockStates(req.Envelope.CandidateHash, req.Envelope.AttemptID, 1, []string{"block-state: b1 withdrawn"})
+	})
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author":   {enginetest.Reply("the answer is 41"), enginetest.Reply("the answer is 42"), enginetest.Reply("ok"), enginetest.Reply("ok")},
+		"reviewer": {block, withdraw},
+	})
+	r := startAnswerRig(t, h)
+	r.typeLine("what is the answer?")
+	r.until(t, "the revised turn approved", func(a *App) (string, bool) {
+		id := answerTurn(a.state)
+		return id, id != "" && a.state.Turns[id].State == "approved"
+	})
+
+	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	v := untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "b1: opened", "e00")
+	if strings.Contains(v, "b1: withdrawn") || strings.Contains(v, "remedy-tail") {
+		t.Fatalf("round 1 shows round 2's state, or content past the drawer:\n%s", v)
+	}
+
+	// PgDn reaches the remedy below the evidence; PgUp returns to the top.
+	send(r, tea.KeyMsg{Type: tea.KeyPgDown})
+	v = untilView(t, r, "remedy-tail")
+	if strings.Contains(v, "Reviews · Turn 1") {
+		t.Fatalf("PgDn did not scroll the header away:\n%s", v)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyPgUp})
+	v = untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "e00")
+	if strings.Contains(v, "remedy-tail") {
+		t.Fatalf("PgUp left the remedy on screen:\n%s", v)
+	}
+
+	send(r, tea.KeyMsg{Type: tea.KeyRight})
+	v = untilView(t, r, "Reviews · Turn 1 · [1 *2*]", "b1: withdrawn")
+	if strings.Contains(v, "b1: opened") {
+		t.Fatalf("round 2 still shows round 1's state:\n%s", v)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyLeft})
+	untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "b1: opened")
 }
 
 func repeatStep(s fake.Step, n int) []fake.Step {

@@ -25,11 +25,16 @@ const notInContext = "not in context"
 
 var dimmed = lipgloss.NewStyle().Faint(true)
 
-// markSelected shows a line as the drawer's selected input: styled when color
-// is available, otherwise prefixed so the selection is visible in plain terminals.
+// selectedMark takes the place of userMark on the drawer's selected input in
+// a plain terminal. It is as wide as userMark, so the chat is not reflowed.
+const selectedMark = "» "
+
+// markSelected shows an input's first line, which begins with userMark, as the
+// drawer's selected input: styled when color is available, otherwise with
+// selectedMark in place of userMark.
 func markSelected(l string, plain bool) string {
 	if plain {
-		return "> " + l
+		return selectedMark + strings.TrimPrefix(l, userMark)
 	}
 	return selectedInput.Render(l)
 }
