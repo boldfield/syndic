@@ -300,7 +300,7 @@ func TestPlainModeProgressLineNoSpinner(t *testing.T) {
 			ID: "t1", State: "reviewers_dispatched", Preset: "review",
 			SubmittedAt: stripT0, Round: 1, MaxRounds: 3,
 			Author: "w", AuthorState: "idle",
-			Reviewers: []string{"r1", "r2"},
+			Reviewers:      []string{"r1", "r2"},
 			ReviewerStates: map[string]string{"r1": "idle", "r2": "running"},
 		}
 		s.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"}
@@ -344,9 +344,9 @@ func TestPlainModeStatusLineNoMeter(t *testing.T) {
 	s.CurrentTurn = "t1"
 	s.Turns["t1"] = TurnInfo{
 		ID: "t1", State: "author_dispatched", Preset: "review",
-		SubmittedAt: stripT0,
+		SubmittedAt:     stripT0,
 		EstimatedTokens: 100,
-		LimitTokens: 1000,
+		LimitTokens:     1000,
 	}
 
 	now := stripT0.Add(5 * time.Second)

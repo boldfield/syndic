@@ -296,7 +296,7 @@ func TestRenderStripQuickAndIdle(t *testing.T) {
 	idle := NewState()
 	idle.ConnState = ConnStateConnected
 	idle.Status = &wire.StatusReply{DefaultPreset: "solo"}
-	if got := renderStrip(idle, 80, time.Time{}); got != "[solo] [idle]" {
+	if got := renderStrip(idle, 80, time.Time{}, false); got != "[solo] [idle]" {
 		t.Fatalf("idle strip = %q", got)
 	}
 }
@@ -318,7 +318,7 @@ func TestRenderStripLeavesParticipantsToTheProgressLine(t *testing.T) {
 		t.Fatalf("strip carries participant states: %q", got)
 	}
 	for _, w := range []int{1, 5, 20, 40, 79} {
-		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt); runewidth.StringWidth(g, false) > w || strings.Contains(g, "\n") {
+		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt, false); runewidth.StringWidth(g) > w || strings.Contains(g, "\n") {
 			t.Fatalf("width %d: strip is %d cells: %q", w, runewidth.StringWidth(g), g)
 		}
 	}
