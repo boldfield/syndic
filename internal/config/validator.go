@@ -4,8 +4,237 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"slices"
+	"strings"
+	"unicode"
+
+	"golang.org/x/net/idna"
 )
+
+func validateAllowedHostPattern(pattern string) error {
+	if pattern == "" {
+		return errors.New("pattern cannot be empty")
+	}
+
+	// Check for paths - patterns must be hostnames only, no slashes
+	if strings.Contains(pattern, "/") {
+		return fmt.Errorf("pattern %q must be a hostname, not a path", pattern)
+	}
+
+	// Extract the base domain (the part without wildcards) for validation
+	var baseDomain string
+	wildcardCount := strings.Count(pattern, "*")
+
+	if wildcardCount > 2 {
+		return fmt.Errorf("too many wildcards in pattern %q (max 2)", pattern)
+	}
+
+	switch wildcardCount {
+	case 2:
+		// Double wildcard: must be "**.domain"
+		if !strings.HasPrefix(pattern, "**.") {
+			return fmt.Errorf("double wildcard must be at the start: %q", pattern)
+		}
+		baseDomain = strings.TrimPrefix(pattern, "**.")
+		if strings.Contains(baseDomain, "*") {
+			return fmt.Errorf("invalid wildcard placement in %q", pattern)
+		}
+		if !strings.Contains(baseDomain, ".") {
+			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
+		}
+	case 1:
+		// Single wildcard: must be "*.domain"
+		if !strings.HasPrefix(pattern, "*.") {
+			return fmt.Errorf("single wildcard must be at the start: %q", pattern)
+		}
+		baseDomain = strings.TrimPrefix(pattern, "*.")
+		if strings.Contains(baseDomain, "*") {
+			return fmt.Errorf("invalid wildcard placement in %q", pattern)
+		}
+		if !strings.Contains(baseDomain, ".") {
+			return fmt.Errorf("wildcard pattern must have at least one dot: %q", pattern)
+		}
+	case 0:
+		// Exact match: no wildcards
+		// No suffix matching allowed, so pattern must not start with a dot
+		if strings.HasPrefix(pattern, ".") {
+			return fmt.Errorf("suffix matching is not allowed: %q", pattern)
+		}
+		baseDomain = pattern
+	}
+
+	// Check for IPv6 addresses (bare or bracketed) - not allowed
+	if strings.HasPrefix(baseDomain, "[") && strings.HasSuffix(baseDomain, "]") {
+		if ip := net.ParseIP(baseDomain[1 : len(baseDomain)-1]); ip != nil {
+			return fmt.Errorf("IPv6 literals are not allowed in allowlist: %q", pattern)
+		}
+	}
+	if strings.Contains(baseDomain, ":") {
+		// Could be IPv6 address or port separator
+		// Check if it's an IPv6 literal
+		if ip := net.ParseIP(baseDomain); ip != nil && ip.To4() == nil {
+			return fmt.Errorf("IPv6 literals are not allowed in allowlist: %q", pattern)
+		}
+		// Not an IPv6 address, but contains colon - likely a port
+		return fmt.Errorf("pattern %q must not include port; use just the hostname", pattern)
+	}
+
+	// Check for IPv4 addresses - not allowed when allowlist is set
+	if net.ParseIP(baseDomain) != nil {
+		return fmt.Errorf("IP literals are not allowed in allowlist: %q", pattern)
+	}
+
+	if err := validateHostLabels(baseDomain); err != nil {
+		return fmt.Errorf("pattern %q is not a valid hostname: %w", pattern, err)
+	}
+
+	// Canonicalize domain: convert to ASCII (punycode if needed) and lowercase
+	canonicalDomain, err := idna.Lookup.ToASCII(baseDomain)
+	if err != nil {
+		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
+	}
+
+	// Decode A-labels with the registration profile, then apply the IDNA2008
+	// derived properties and contextual rules that UTS #46 alone does not.
+	decoded, err := idnaRegistration.ToUnicode(canonicalDomain)
+	if err != nil {
+		return fmt.Errorf("pattern %q contains invalid hostname: %w", pattern, err)
+	}
+	for _, label := range strings.Split(decoded, ".") {
+		if err := checkIDNA2008Label(label); err != nil {
+			return fmt.Errorf("pattern %q is not a valid IDNA2008 hostname: %w", pattern, err)
+		}
+	}
+
+	// Check if the canonicalized version matches (lowercase and punycode)
+	canonicalLower := strings.ToLower(canonicalDomain)
+	if canonicalDomain != canonicalLower {
+		return fmt.Errorf("pattern %q must be in canonical form (lowercase): canonical is %q", pattern, canonicalLower)
+	}
+
+	// If domain was converted by IDNA (e.g., non-ASCII to punycode), reject the non-canonical form
+	if canonicalDomain != baseDomain {
+		// Build the canonical pattern
+		var canonicalPattern string
+		switch wildcardCount {
+		case 2:
+			canonicalPattern = "**." + canonicalDomain
+		case 1:
+			canonicalPattern = "*." + canonicalDomain
+		default:
+			canonicalPattern = canonicalDomain
+		}
+		return fmt.Errorf("pattern %q is not in canonical form; use %q instead", pattern, canonicalPattern)
+	}
+
+	return nil
+}
+
+// checkIDNA2008Label applies the RFC 5892 derived-property algorithm (§3)
+// and the CONTEXTO rules (Appendix A) to one decoded U-label. ContextJ
+// (U+200C/U+200D) and the Bidi rule are enforced by idnaRegistration.
+func checkIDNA2008Label(label string) error {
+	runes := []rune(label)
+	for i, r := range runes {
+		switch idna2008Property(r) {
+		case idnaPValid:
+		case idnaContextJ:
+			// Validated by the CheckJoiners option of idnaRegistration.
+		case idnaContextO:
+			if !contextORuleHolds(runes, i) {
+				return fmt.Errorf("code point %U fails its IDNA2008 contextual rule", r)
+			}
+		default:
+			return fmt.Errorf("code point %U is not allowed in hostnames", r)
+		}
+	}
+	return nil
+}
+
+type idnaProperty int
+
+const (
+	idnaDisallowed idnaProperty = iota
+	idnaPValid
+	idnaContextJ
+	idnaContextO
+)
+
+// idnaExceptions is the RFC 5892 §2.6 Exceptions table.
+var idnaExceptions = map[rune]idnaProperty{
+	0x00DF: idnaPValid, 0x03C2: idnaPValid, 0x06FD: idnaPValid,
+	0x06FE: idnaPValid, 0x0F0B: idnaPValid, 0x3007: idnaPValid,
+	0x00B7: idnaContextO, 0x0375: idnaContextO, 0x05F3: idnaContextO,
+	0x05F4: idnaContextO, 0x30FB: idnaContextO,
+	0x0640: idnaDisallowed, 0x07FA: idnaDisallowed, 0x302E: idnaDisallowed,
+	0x302F: idnaDisallowed, 0x3031: idnaDisallowed, 0x3032: idnaDisallowed,
+	0x3033: idnaDisallowed, 0x3034: idnaDisallowed, 0x3035: idnaDisallowed,
+	0x303B: idnaDisallowed,
+}
+
+// idna2008Property derives a code point's IDNA2008 property in the order
+// given by RFC 5892 §3. Unstable code points are excluded beforehand by the
+// UTS #46 registration mapping, which rejects anything NFKC_Casefold changes;
+// unassigned code points have no general category and fall through to
+// DISALLOWED.
+func idna2008Property(r rune) idnaProperty {
+	if p, ok := idnaExceptions[r]; ok {
+		return p
+	}
+	if (r >= 0x0660 && r <= 0x0669) || (r >= 0x06F0 && r <= 0x06F9) {
+		return idnaContextO
+	}
+	if r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+		return idnaPValid
+	}
+	if r == 0x200C || r == 0x200D {
+		return idnaContextJ
+	}
+	if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) ||
+		unicode.Is(unicode.Noncharacter_Code_Point, r) || unicode.Is(unicode.White_Space, r) {
+		return idnaDisallowed
+	}
+	if (r >= 0x20D0 && r <= 0x20FF) || (r >= 0x1D100 && r <= 0x1D24F) {
+		return idnaDisallowed // IgnorableBlocks
+	}
+	if (r >= 0x1100 && r <= 0x11FF) || (r >= 0xA960 && r <= 0xA97F) || (r >= 0xD7B0 && r <= 0xD7FF) {
+		return idnaDisallowed // OldHangulJamo
+	}
+	if unicode.In(r, unicode.Ll, unicode.Lu, unicode.Lo, unicode.Nd, unicode.Lm, unicode.Mn, unicode.Mc) {
+		return idnaPValid
+	}
+	return idnaDisallowed
+}
+
+// contextORuleHolds evaluates the RFC 5892 Appendix A rule for the CONTEXTO
+// code point at runes[i].
+func contextORuleHolds(runes []rune, i int) bool {
+	r := runes[i]
+	switch {
+	case r == 0x00B7: // MIDDLE DOT: between two 'l'
+		return i > 0 && i+1 < len(runes) && runes[i-1] == 'l' && runes[i+1] == 'l'
+	case r == 0x0375: // GREEK LOWER NUMERAL SIGN: followed by Greek
+		return i+1 < len(runes) && unicode.Is(unicode.Greek, runes[i+1])
+	case r == 0x05F3 || r == 0x05F4: // HEBREW GERESH/GERSHAYIM: preceded by Hebrew
+		return i > 0 && unicode.Is(unicode.Hebrew, runes[i-1])
+	case r == 0x30FB: // KATAKANA MIDDLE DOT: label has Hiragana, Katakana or Han
+		for _, o := range runes {
+			if o != 0x30FB && unicode.In(o, unicode.Hiragana, unicode.Katakana, unicode.Han) {
+				return true
+			}
+		}
+		return false
+	case r >= 0x0660 && r <= 0x0669: // ARABIC-INDIC DIGITS: no extended digits
+		return !slices.ContainsFunc(runes, func(o rune) bool { return o >= 0x06F0 && o <= 0x06F9 })
+	case r >= 0x06F0 && r <= 0x06F9: // EXTENDED ARABIC-INDIC DIGITS: no Arabic-Indic digits
+		return !slices.ContainsFunc(runes, func(o rune) bool { return o >= 0x0660 && o <= 0x0669 })
+	}
+	return false
+}
+
+// idnaRegistration validates A-labels against IDNA2008 registration rules.
+var idnaRegistration = idna.New(idna.ValidateForRegistration(), idna.StrictDomainName(true))
 
 func (r *Roster) Validate() error {
 	var errs []error
@@ -399,6 +628,227 @@ func (r *Roster) Validate() error {
 		}
 	}
 
+	// Validate tool sets
+	validAuthorTools := map[string]bool{"read": true, "web": true, "write": true}
+	validReviewerTools := map[string]bool{"read": true, "web": true}
+
+	for name, preset := range r.Presets {
+		// Validate author tools
+		for _, tool := range preset.Tools {
+			if !validAuthorTools[tool] {
+				errs = append(errs, fmt.Errorf("preset %q: invalid author tool %q", name, tool))
+			}
+		}
+
+		// Validate reviewer tools
+		for _, tool := range preset.ReviewerTools {
+			if !validReviewerTools[tool] {
+				errs = append(errs, fmt.Errorf("preset %q: invalid reviewer tool %q", name, tool))
+			}
+		}
+
+		// Solo preset cannot have write tools
+		if preset.Mode == "solo" && slices.Contains(preset.Tools, "write") {
+			errs = append(errs, fmt.Errorf("preset %q: solo mode cannot have write tools", name))
+		}
+
+		// Check if preset has file-derived content tools
+		hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
+		hasWrite := slices.Contains(preset.Tools, "write")
+		needsEgressCheck := hasRead || hasWrite
+
+		// If preset has read or write, check file egress destinations for all participants
+		if needsEgressCheck {
+			allParticipants := []string{preset.Author}
+			allParticipants = append(allParticipants, preset.RequiredReviewers...)
+
+			localEndpoints := make(map[string]bool)
+			for _, ep := range r.Endpoints {
+				if ep.DeclaredExecution == "local" {
+					localEndpoints[ep.Name] = true
+				}
+			}
+			egressDestinations := make(map[string]bool)
+			if r.Tools != nil {
+				for _, dest := range r.Tools.FileEgressDestinations {
+					egressDestinations[dest] = true
+				}
+			}
+
+			for _, pID := range allParticipants {
+				for _, p := range r.Participants {
+					if p.ID == pID {
+						switch p.Route {
+						case "api":
+							if p.Endpoint == "" {
+								errs = append(errs, fmt.Errorf("preset %q: api participant %q missing endpoint but has tools requiring file egress", name, pID))
+							} else if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
+								errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
+							}
+						case "cli":
+							// CLI participants cannot have file content tools - they must be on an endpoint
+							errs = append(errs, fmt.Errorf("preset %q: CLI participant %q cannot have read/write tools; use an api participant with an appropriate endpoint", name, pID))
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// If preset has web tools, check that each endpoint used by a web participant has referee_model
+		authorHasWeb := slices.Contains(preset.Tools, "web")
+		reviewerHasWeb := slices.Contains(preset.ReviewerTools, "web")
+
+		if authorHasWeb {
+			// Author has web; must have an api endpoint with referee_model
+			for _, p := range r.Participants {
+				if p.ID == preset.Author {
+					switch p.Route {
+					case "cli":
+						errs = append(errs, fmt.Errorf("preset %q: CLI author %q cannot have web tools", name, preset.Author))
+					case "api":
+						if p.Endpoint == "" {
+							errs = append(errs, fmt.Errorf("preset %q: api author %q missing endpoint but has web tools", name, preset.Author))
+						} else {
+							ep := endpointMap[p.Endpoint]
+							if ep.RefereeModel == "" {
+								errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by author has no referee_model but web tools are required", name, p.Endpoint))
+							}
+						}
+					}
+					break
+				}
+			}
+		}
+
+		if reviewerHasWeb {
+			// Reviewers have web; each must have an api endpoint with referee_model
+			for _, reviewerID := range preset.RequiredReviewers {
+				for _, p := range r.Participants {
+					if p.ID == reviewerID {
+						switch p.Route {
+						case "cli":
+							errs = append(errs, fmt.Errorf("preset %q: CLI reviewer %q cannot have web tools", name, reviewerID))
+						case "api":
+							if p.Endpoint == "" {
+								errs = append(errs, fmt.Errorf("preset %q: api reviewer %q missing endpoint but has web tools", name, reviewerID))
+							} else {
+								ep := endpointMap[p.Endpoint]
+								if ep.RefereeModel == "" {
+									errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by reviewer %q has no referee_model but web tools are required", name, p.Endpoint, reviewerID))
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// Check tools.allow_web_with_read constraint
+		// Determine effective allow_web_with_read setting (per-preset overrides roster-wide)
+		effectiveAllowWebWithRead := true // default is to allow
+		if preset.AllowWebWithRead != nil {
+			// Per-preset setting overrides roster-wide
+			effectiveAllowWebWithRead = *preset.AllowWebWithRead
+		} else if r.Tools != nil && r.Tools.AllowWebWithRead != nil {
+			// Use roster-wide setting
+			effectiveAllowWebWithRead = *r.Tools.AllowWebWithRead
+		}
+
+		if !effectiveAllowWebWithRead {
+			// If allow_web_with_read is false, preset cannot have:
+			// - any participant with web AND
+			// - any participant (same or different) with read or write
+			hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
+			hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
+			hasWrite := slices.Contains(preset.Tools, "write")
+
+			if hasWeb && (hasRead || hasWrite) {
+				// Find web and file-content participants
+				webParticipants := []string{}
+				fileParticipants := []string{}
+
+				if slices.Contains(preset.Tools, "web") {
+					webParticipants = append(webParticipants, preset.Author)
+				}
+				if slices.Contains(preset.ReviewerTools, "web") {
+					webParticipants = append(webParticipants, preset.RequiredReviewers...)
+				}
+
+				// File content recipients: anyone with read or write
+				if slices.Contains(preset.Tools, "read") || slices.Contains(preset.Tools, "write") {
+					fileParticipants = append(fileParticipants, preset.Author)
+				}
+				if hasRead {
+					fileParticipants = append(fileParticipants, preset.RequiredReviewers...)
+				}
+
+				// Reject if any web participant and any file participant exist (preset-wide rule)
+				if len(webParticipants) > 0 && len(fileParticipants) > 0 {
+					errs = append(errs, fmt.Errorf("preset %q: cannot combine web (participants: %v) with read/write (participants: %v) when tools.allow_web_with_read=false",
+						name, webParticipants, fileParticipants))
+				}
+			}
+		}
+	}
+
+	// Validate endpoint referee configuration
+	for _, ep := range r.Endpoints {
+		// If referee_endpoint is set, it must reference an endpoint with local execution
+		if ep.RefereeEndpoint != "" {
+			found := false
+			for _, otherEp := range r.Endpoints {
+				if otherEp.Name == ep.RefereeEndpoint {
+					if otherEp.DeclaredExecution != "local" {
+						errs = append(errs, fmt.Errorf("endpoint %q: referee_endpoint %q does not have local execution", ep.Name, ep.RefereeEndpoint))
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				errs = append(errs, fmt.Errorf("endpoint %q: referee_endpoint references non-existent endpoint: %q", ep.Name, ep.RefereeEndpoint))
+			}
+		}
+	}
+
+	// Validate tools configuration
+	if r.Tools != nil {
+		if r.Tools.MaxFetchesPerTurn != nil && *r.Tools.MaxFetchesPerTurn < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_fetches_per_turn must be at least 1"))
+		}
+		if r.Tools.MaxCallsPerTurn != nil && *r.Tools.MaxCallsPerTurn < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_calls_per_turn must be at least 1"))
+		}
+		if r.Tools.MaxReviewerCalls != nil && *r.Tools.MaxReviewerCalls < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_reviewer_calls must be at least 1"))
+		}
+		if r.Tools.MaxResultBytes != nil && *r.Tools.MaxResultBytes < 1 {
+			errs = append(errs, fmt.Errorf("tools.max_result_bytes must be at least 1"))
+		}
+		if r.Tools.Referee != nil && r.Tools.Referee.MaxOutputTokens != nil && *r.Tools.Referee.MaxOutputTokens < 1 {
+			errs = append(errs, fmt.Errorf("tools.referee.max_output_tokens must be at least 1"))
+		}
+
+		// Validate file_egress_destinations reference valid endpoints
+		for _, dest := range r.Tools.FileEgressDestinations {
+			if !seenEndpointNames[dest] {
+				errs = append(errs, fmt.Errorf("tools.file_egress_destinations references non-existent endpoint: %q", dest))
+			}
+		}
+
+		// Validate web allowed_hosts patterns
+		if r.Tools.Web != nil {
+			for _, pattern := range r.Tools.Web.AllowedHosts {
+				// Check for invalid patterns
+				if err := validateAllowedHostPattern(pattern); err != nil {
+					errs = append(errs, fmt.Errorf("tools.web.allowed_hosts: %w", err))
+				}
+			}
+		}
+	}
+
 	// Validate Preset deadlines, budgets and revision overrides
 	for name, preset := range r.Presets {
 		// Validate revision overrides
@@ -562,6 +1012,44 @@ func (r *Roster) Validate() error {
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// validateHostLabels checks that name is a dotted sequence of LDH labels
+// (letters, digits, hyphens; 1-63 bytes; no leading/trailing hyphen).
+// Non-ASCII labels are allowed here and handled by IDNA canonicalization.
+func validateHostLabels(name string) error {
+	if strings.HasSuffix(name, ".") {
+		return errors.New("trailing dot is not canonical")
+	}
+	if len(name) > 253 {
+		return errors.New("hostname too long")
+	}
+	labels := strings.Split(name, ".")
+	for _, l := range labels {
+		if l == "" {
+			return errors.New("empty label")
+		}
+		if len(l) > 63 {
+			return fmt.Errorf("label %q too long", l)
+		}
+		if l[0] == '-' || l[len(l)-1] == '-' {
+			return fmt.Errorf("label %q must not start or end with a hyphen", l)
+		}
+		for _, r := range l {
+			if r >= 0x80 {
+				continue
+			}
+			ok := r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !ok {
+				return fmt.Errorf("label %q contains invalid character %q", l, r)
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	if strings.Trim(last, "0123456789") == "" {
+		return fmt.Errorf("top-level label %q must not be all numeric", last)
 	}
 	return nil
 }

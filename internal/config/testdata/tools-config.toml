@@ -1,0 +1,111 @@
+# Example configuration with tools and referee model
+
+default_preset = "review-with-tools"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+
+[budgets]
+calibration_safety          = 0.75
+message_overhead_tokens     = 8
+request_overhead_tokens     = 16
+context_margin              = 0.10
+author_max_output_tokens    = 4096
+reviewer_max_output_tokens  = 2048
+delivery_max_tokens         = 64
+turn_max_estimated_tokens   = 250000
+
+[engine]
+stop_grace = "5s"
+
+[pools.default]
+concurrency             = 1
+uncertain_release_after = "0s"
+
+# Tool configuration
+[tools]
+allow_web_with_read         = true
+max_fetches_per_turn        = 20
+max_calls_per_turn          = 20
+max_reviewer_calls          = 10
+max_result_bytes            = 65536
+protected_paths             = [".git/", ".syndic/", ".env*"]
+file_egress_destinations    = ["local", "trusted"]
+
+[tools.web]
+allowed_hosts = ["*.anthropic.com", "*.github.com"]
+
+[tools.referee]
+max_output_tokens = 64
+
+[[participants]]
+id = "author"
+model = "claude-opus"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+context_tokens = 200000
+bytes_per_token = 3.5
+
+[[participants]]
+id = "reviewer1"
+model = "claude-sonnet"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+context_tokens = 200000
+bytes_per_token = 3.5
+
+[[participants]]
+id = "reviewer2"
+model = "gpt-4"
+route = "api"
+endpoint = "trusted"
+eligible_roles = ["reviewer"]
+pool = "default"
+context_tokens = 128000
+bytes_per_token = 4.0
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["claude-opus", "claude-sonnet"]
+tokens_per_byte_max = 1.0
+referee_model = "claude-haiku"
+
+[[endpoints]]
+name = "trusted"
+base_url = "https://api.openai.com/v1"
+declared_location = "cloud"
+declared_execution = "remote"
+declared_billing = "metered"
+spending_control = "external"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["gpt-4", "gpt-3.5-turbo"]
+tokens_per_byte_max = 1.0
+referee_model = "gpt-3.5-turbo"
+
+[presets.review-with-tools]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer1", "reviewer2"]
+tools = ["read", "web", "write"]
+reviewer_tools = ["read", "web"]
+
+[presets.review-with-tools.revision]
+max_rounds = 2
+max_rounds_ceiling = 5
+
+[policy]
+local_only = false
+allowed_destinations = ["local", "trusted"]

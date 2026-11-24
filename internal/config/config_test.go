@@ -32,7 +32,7 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("len(Presets) = %d, want 2", len(roster.Presets))
 	}
 
-	// Check deadlines
+	// Check deadlines defaults
 	if roster.Deadlines.Attempt == nil || roster.Deadlines.Attempt.Duration != 300*time.Second {
 		t.Errorf("Deadlines.Attempt = %v, want 300s", roster.Deadlines.Attempt)
 	}
@@ -46,7 +46,7 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("Deadlines.Provisional = %v, want true", roster.Deadlines.Provisional)
 	}
 
-	// Check budgets
+	// Check budgets defaults
 	if roster.Budgets.CalibrationSafety == nil || *roster.Budgets.CalibrationSafety != 0.75 {
 		t.Errorf("Budgets.CalibrationSafety = %v, want 0.75", roster.Budgets.CalibrationSafety)
 	}
@@ -72,7 +72,7 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("Budgets.TurnMaxEstimatedTokens = %v, want 250000", roster.Budgets.TurnMaxEstimatedTokens)
 	}
 
-	// Check engine
+	// Check engine defaults
 	if roster.Engine.StopGrace == nil || roster.Engine.StopGrace.Duration != 5*time.Second {
 		t.Errorf("Engine.StopGrace = %v, want 5s", roster.Engine.StopGrace)
 	}
@@ -91,12 +91,137 @@ func TestLoadExample(t *testing.T) {
 		t.Errorf("Pools[default].UncertainReleaseAfter = %v, want 0s", roster.Pools["default"].UncertainReleaseAfter)
 	}
 
-	// Check participants
+	// Check participant exact values from example.toml
+	if len(roster.Participants) < 1 {
+		t.Fatal("no participants found")
+	}
 	if roster.Participants[0].ContextTokens == nil || *roster.Participants[0].ContextTokens != 4096 {
 		t.Errorf("Participants[0].ContextTokens = %v, want 4096", roster.Participants[0].ContextTokens)
 	}
 	if roster.Participants[0].BytesPerToken == nil || *roster.Participants[0].BytesPerToken != 4.0 {
 		t.Errorf("Participants[0].BytesPerToken = %v, want 4.0", roster.Participants[0].BytesPerToken)
+	}
+
+	// Check tools defaults
+	if roster.Tools == nil {
+		t.Fatal("Tools config is nil")
+	}
+	if roster.Tools.AllowWebWithRead == nil || !*roster.Tools.AllowWebWithRead {
+		t.Errorf("Tools.AllowWebWithRead = %v, want true", roster.Tools.AllowWebWithRead)
+	}
+	if len(roster.Tools.ProtectedPaths) == 0 {
+		t.Error("Tools.ProtectedPaths should have defaults")
+	}
+	if roster.Tools.MaxFetchesPerTurn == nil || *roster.Tools.MaxFetchesPerTurn != 20 {
+		t.Errorf("Tools.MaxFetchesPerTurn = %v, want 20", roster.Tools.MaxFetchesPerTurn)
+	}
+	if roster.Tools.Referee == nil {
+		t.Fatal("Tools.Referee is nil")
+	}
+	if roster.Tools.Referee.MaxOutputTokens == nil || *roster.Tools.Referee.MaxOutputTokens != 64 {
+		t.Errorf("Tools.Referee.MaxOutputTokens = %v, want 64", roster.Tools.Referee.MaxOutputTokens)
+	}
+
+	// Check endpoints exact values from example.toml
+	if len(roster.Endpoints) < 1 {
+		t.Fatal("no endpoints found")
+	}
+	if roster.Endpoints[0].TokensPerByteMax == nil || *roster.Endpoints[0].TokensPerByteMax != 1.0 {
+		t.Errorf("Endpoints[0].TokensPerByteMax = %v, want 1.0", roster.Endpoints[0].TokensPerByteMax)
+	}
+}
+
+func TestProtectedPathsDefaults(t *testing.T) {
+	roster, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	roster.ApplyDefaults()
+
+	expectedDefaults := map[string]bool{
+		".git/":            true,
+		".syndic/":         true,
+		".env*":            true,
+		"**/*.key":         true,
+		"**/*.pem":         true,
+		"**/id_rsa":        true,
+		"**/id_dsa":        true,
+		"**/id_ecdsa":      true,
+		"**/id_ed25519":    true,
+		"**/id_ecdsa_sk":   true,
+		"**/id_ed25519_sk": true,
+		"syndic.toml":      true,
+	}
+
+	for _, path := range roster.Tools.ProtectedPaths {
+		if !expectedDefaults[path] {
+			t.Errorf("unexpected default protected path: %q", path)
+		}
+		delete(expectedDefaults, path)
+	}
+
+	for missing := range expectedDefaults {
+		t.Errorf("missing expected protected path: %q", missing)
+	}
+}
+
+func TestLoadToolsConfig(t *testing.T) {
+	roster, err := Load("testdata/tools-config.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if roster == nil {
+		t.Fatal("roster is nil")
+	}
+
+	// Check tools configuration
+	if roster.Tools == nil {
+		t.Fatal("Tools config is nil")
+	}
+	if roster.Tools.AllowWebWithRead == nil || !*roster.Tools.AllowWebWithRead {
+		t.Errorf("AllowWebWithRead = %v, want true", roster.Tools.AllowWebWithRead)
+	}
+	if roster.Tools.MaxFetchesPerTurn == nil || *roster.Tools.MaxFetchesPerTurn != 20 {
+		t.Errorf("MaxFetchesPerTurn = %v, want 20", roster.Tools.MaxFetchesPerTurn)
+	}
+	if roster.Tools.MaxCallsPerTurn == nil || *roster.Tools.MaxCallsPerTurn != 20 {
+		t.Errorf("MaxCallsPerTurn = %v, want 20", roster.Tools.MaxCallsPerTurn)
+	}
+	if roster.Tools.MaxReviewerCalls == nil || *roster.Tools.MaxReviewerCalls != 10 {
+		t.Errorf("MaxReviewerCalls = %v, want 10", roster.Tools.MaxReviewerCalls)
+	}
+	if roster.Tools.MaxResultBytes == nil || *roster.Tools.MaxResultBytes != 65536 {
+		t.Errorf("MaxResultBytes = %v, want 65536", roster.Tools.MaxResultBytes)
+	}
+
+	// Check web config
+	if roster.Tools.Web == nil {
+		t.Fatal("Web config is nil")
+	}
+	if len(roster.Tools.Web.AllowedHosts) != 2 {
+		t.Errorf("len(AllowedHosts) = %d, want 2", len(roster.Tools.Web.AllowedHosts))
+	}
+
+	// Check referee config
+	if roster.Tools.Referee == nil {
+		t.Fatal("Referee config is nil")
+	}
+	if roster.Tools.Referee.MaxOutputTokens == nil || *roster.Tools.Referee.MaxOutputTokens != 64 {
+		t.Errorf("MaxOutputTokens = %v, want 64", roster.Tools.Referee.MaxOutputTokens)
+	}
+
+	// Check endpoint referee model
+	if roster.Endpoints[0].RefereeModel != "claude-haiku" {
+		t.Errorf("Endpoints[0].RefereeModel = %q, want %q", roster.Endpoints[0].RefereeModel, "claude-haiku")
+	}
+
+	// Check preset tools
+	preset := roster.Presets["review-with-tools"]
+	if len(preset.Tools) != 3 {
+		t.Errorf("len(Tools) = %d, want 3", len(preset.Tools))
+	}
+	if len(preset.ReviewerTools) != 2 {
+		t.Errorf("len(ReviewerTools) = %d, want 2", len(preset.ReviewerTools))
 	}
 
 	// Check endpoints
@@ -831,6 +956,131 @@ func TestValidateViolations(t *testing.T) {
 			},
 			wantMsgs: []string{},
 		},
+		{
+			name: "solo preset with write tools (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Mode = "solo"
+				p.RequiredReviewers = []string{}
+				p.Tools = []string{"write"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "solo mode cannot have write tools"},
+		},
+		{
+			name: "invalid author tool",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"invalid_tool"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "invalid author tool"},
+		},
+		{
+			name: "invalid reviewer tool",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.ReviewerTools = []string{"write"}
+				r.Presets["review"] = p
+			},
+			wantMsgs: []string{"review", "invalid reviewer tool"},
+		},
+		{
+			name: "web tools without referee model (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = ""
+			},
+			wantMsgs: []string{"review", "no referee_model"},
+		},
+		{
+			name: "valid web tools with referee model",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = "gpt4"
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "referee_endpoint on non-local endpoint (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"web"}
+				r.Presets["review"] = p
+				r.Endpoints[0].RefereeModel = "gpt4"
+				r.Endpoints[0].DeclaredExecution = "remote"
+				r.Endpoints[0].RefereeEndpoint = "ep2"
+				r.Endpoints = append(r.Endpoints, EndpointProfile{
+					Name: "ep2", Dialect: "chat_completions_v1", DeclaredLocation: "cloud",
+					DeclaredExecution: "remote", DeclaredBilling: "flat", NetworkDependency: "none",
+				})
+			},
+			wantMsgs: []string{"ep2", "does not have local execution"},
+		},
+		{
+			name: "valid file egress destinations",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{"ep1"},
+				}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid file egress destination endpoint",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{"nonexistent"},
+				}
+			},
+			wantMsgs: []string{"nonexistent", "references non-existent endpoint"},
+		},
+		{
+			name: "read tools require egress route (invalid)",
+			mutate: func(r *Roster) {
+				p := r.Presets["review"]
+				p.Tools = []string{"read"}
+				r.Presets["review"] = p
+				r.Endpoints[0].DeclaredExecution = "remote"
+				r.Tools = &ToolsConfig{
+					FileEgressDestinations: []string{},
+				}
+			},
+			wantMsgs: []string{"review", "participant", "requires file egress"},
+		},
+		{
+			name: "valid tools max values",
+			mutate: func(r *Roster) {
+				max := 100
+				r.Tools = &ToolsConfig{
+					MaxFetchesPerTurn: &max,
+					MaxCallsPerTurn:   &max,
+					MaxReviewerCalls:  &max,
+					MaxResultBytes:    &max,
+				}
+			},
+			wantMsgs: []string{},
+		},
+		{
+			name: "invalid max_fetches_per_turn (zero)",
+			mutate: func(r *Roster) {
+				max := 0
+				r.Tools = &ToolsConfig{
+					MaxFetchesPerTurn: &max,
+				}
+			},
+			wantMsgs: []string{"max_fetches_per_turn must be at least 1"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -858,6 +1108,273 @@ func TestValidateViolations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAllowWebWithReadValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		tools   *ToolsConfig
+		preset  Preset
+		wantErr bool
+	}{
+		{
+			name:    "allow_web_with_read not set (default true, no error)",
+			tools:   &ToolsConfig{},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: false,
+		},
+		{
+			name:    "allow_web_with_read=true (no error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(true)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: false,
+		},
+		{
+			name:    "allow_web_with_read=false with web+read (error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "read"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with web+write (error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with only web (no error)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}},
+			wantErr: false,
+		},
+		{
+			name:    "allow_web_with_read=false with author web + reviewer read (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web"}, ReviewerTools: []string{"read"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with reviewer web + author read (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"read"}, ReviewerTools: []string{"web"}},
+			wantErr: true,
+		},
+		{
+			name:    "allow_web_with_read=false with author web + reviewer write (error - cross-role)",
+			tools:   &ToolsConfig{AllowWebWithRead: ptrBool(false)},
+			preset:  Preset{Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"}, Tools: []string{"web", "write"}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := makeBaseRoster()
+			r.Endpoints[0].RefereeModel = "claude-haiku"
+			r.Tools = tt.tools
+			r.Presets["test"] = tt.preset
+			r.ApplyDefaults()
+
+			err := r.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAllowWebWithReadPerPresetOverride(t *testing.T) {
+	tests := []struct {
+		name           string
+		rosterAllow    *bool
+		presetAllow    *bool
+		presetTools    []string
+		presetRevTools []string
+		wantErr        bool
+		description    string
+	}{
+		{
+			name:           "preset override false when roster is true",
+			rosterAllow:    ptrBool(true),
+			presetAllow:    ptrBool(false),
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        true,
+			description:    "per-preset override should take precedence",
+		},
+		{
+			name:           "preset override true when roster is false",
+			rosterAllow:    ptrBool(false),
+			presetAllow:    ptrBool(true),
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        false,
+			description:    "per-preset override should take precedence",
+		},
+		{
+			name:           "preset no override uses roster false",
+			rosterAllow:    ptrBool(false),
+			presetAllow:    nil,
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        true,
+			description:    "should use roster-wide setting when preset has no override",
+		},
+		{
+			name:           "preset no override uses roster true",
+			rosterAllow:    ptrBool(true),
+			presetAllow:    nil,
+			presetTools:    []string{"web"},
+			presetRevTools: []string{"read"},
+			wantErr:        false,
+			description:    "should use roster-wide setting when preset has no override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := makeBaseRoster()
+			r.Endpoints[0].RefereeModel = "claude-haiku"
+			r.Tools = &ToolsConfig{AllowWebWithRead: tt.rosterAllow}
+			r.Presets["test"] = Preset{
+				Mode:              "review",
+				Author:            "author",
+				RequiredReviewers: []string{"reviewer"},
+				Tools:             tt.presetTools,
+				ReviewerTools:     tt.presetRevTools,
+				AllowWebWithRead:  tt.presetAllow,
+			}
+			r.ApplyDefaults()
+
+			err := r.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("%s: Validate() error = %v, wantErr %v", tt.description, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCLIParticipantWithWebToolsRejected(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+
+	// Add a CLI participant to the roster
+	r.Participants = append(r.Participants, Participant{
+		ID:            "cli-author",
+		Model:         "gpt4",
+		Route:         "cli",
+		Binary:        "/bin/app",
+		EligibleRoles: []Role{RoleAuthor},
+	})
+
+	// Create a preset with CLI author having web tools
+	r.Presets["test"] = Preset{
+		Mode:   "solo",
+		Author: "cli-author",
+		Tools:  []string{"web"},
+	}
+	r.ApplyDefaults()
+
+	err := r.Validate()
+	if err == nil {
+		t.Errorf("Validate() should reject CLI participant with web tools, but got nil error")
+	}
+	if err != nil && !strings.Contains(err.Error(), "CLI") {
+		t.Errorf("Validate() error should mention CLI, got: %v", err)
+	}
+}
+
+func TestCLIParticipantWithReadToolsRejected(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+
+	// Add a CLI participant
+	r.Participants = append(r.Participants, Participant{
+		ID:            "cli-reviewer",
+		Model:         "gpt4",
+		Route:         "cli",
+		Binary:        "/bin/app",
+		EligibleRoles: []Role{RoleReviewer},
+	})
+
+	// Create a preset with CLI reviewer having read tools
+	r.Presets["test"] = Preset{
+		Mode:              "review",
+		Author:            "author",
+		RequiredReviewers: []string{"cli-reviewer"},
+		ReviewerTools:     []string{"read"},
+	}
+	r.ApplyDefaults()
+
+	err := r.Validate()
+	if err == nil {
+		t.Errorf("Validate() should reject CLI participant with read tools, but got nil error")
+	}
+	if err != nil && !strings.Contains(err.Error(), "CLI") {
+		t.Errorf("Validate() error should mention CLI, got: %v", err)
+	}
+}
+
+func TestAllowedHostPatternValidation(t *testing.T) {
+	tests := []struct {
+		pattern string
+		valid   bool
+	}{
+		{"example.com", true},
+		{"*.example.com", true},
+		{".example.com", false}, // suffix matching not allowed
+		{"**.example.com", true},
+		{"***.example.com", false}, // too many wildcards
+		{"192.168.1.1", false},     // IP literals not allowed
+		{"::1", false},             // IPv6 not allowed
+		{"", false},
+		{"*.com", false},           // wildcard must have dot after prefix
+		{"Example.com", false},     // must be lowercase (canonical)
+		{"*.GitHub.com", false},    // must be lowercase (canonical)
+		{"example.com:443", false}, // port not allowed
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			err := validateAllowedHostPattern(tt.pattern)
+			if (err == nil) != tt.valid {
+				t.Errorf("validateAllowedHostPattern(%q) error = %v, want valid = %v", tt.pattern, err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestRefereeModelValidation(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+	r.Presets["test"] = Preset{
+		Mode: "review", Author: "author", RequiredReviewers: []string{"reviewer"},
+		Tools: []string{"web"},
+	}
+	r.ApplyDefaults()
+
+	if err := r.Validate(); err != nil {
+		t.Errorf("Validate() with valid referee_model = %v, want nil", err)
+	}
+}
+
+func TestRefereeEndpointValidation(t *testing.T) {
+	r := makeBaseRoster()
+	r.Endpoints = append(r.Endpoints, EndpointProfile{
+		Name: "local-ref", Dialect: "chat_completions_v1", DeclaredLocation: "local",
+		DeclaredExecution: "local", DeclaredBilling: "none", NetworkDependency: "none",
+	})
+	r.Endpoints[0].RefereeModel = "claude-haiku"
+	r.Endpoints[0].RefereeEndpoint = "local-ref"
+	r.ApplyDefaults()
+
+	if err := r.Validate(); err != nil {
+		t.Errorf("Validate() with valid referee_endpoint = %v, want nil", err)
+	}
+}
+
+func ptrBool(b bool) *bool {
+	return &b
 }
 
 func TestSecretRefString(t *testing.T) {
@@ -1579,6 +2096,102 @@ func TestValidateQuickProfilePresetCannotBeEmpty(t *testing.T) {
 	}
 }
 
+func TestValidateAllowedHostPatternCanonical(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "valid exact match lowercase",
+			pattern: "example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid exact match with dot",
+			pattern: "sub.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid single wildcard",
+			pattern: "*.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "valid double wildcard",
+			pattern: "**.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "uppercase not canonical",
+			pattern: "Example.COM",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "non-ASCII needs punycode",
+			pattern: "bücher.de",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "non-ASCII wildcard",
+			pattern: "*.bücher.de",
+			wantErr: true,
+			errMsg:  "canonical",
+		},
+		{
+			name:    "IPv4 not allowed",
+			pattern: "192.168.1.1",
+			wantErr: true,
+			errMsg:  "IP literals",
+		},
+		{
+			name:    "IPv6 not allowed",
+			pattern: "::1",
+			wantErr: true,
+			errMsg:  "IPv6",
+		},
+		{
+			name:    "port not allowed",
+			pattern: "example.com:443",
+			wantErr: true,
+			errMsg:  "port",
+		},
+		{
+			name:    "path not allowed",
+			pattern: "example.com/path",
+			wantErr: true,
+			errMsg:  "hostname",
+		},
+		{
+			name:    "empty pattern",
+			pattern: "",
+			wantErr: true,
+			errMsg:  "empty",
+		},
+		{
+			name:    "suffix matching not allowed",
+			pattern: ".example.com",
+			wantErr: true,
+			errMsg:  "suffix",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAllowedHostPattern(tc.pattern)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
+			}
+			if tc.wantErr && tc.errMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.errMsg)) {
+				t.Errorf("expected error containing %q, got %v", tc.errMsg, err)
+			}
+		})
+	}
+}
+
 func TestValidatePresetBudgetOverrideRanges(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2196,5 +2809,187 @@ allowed_destinations = []
 	}
 	if eff.Revision.MaxRoundsCeiling == nil || *eff.Revision.MaxRoundsCeiling != 4 {
 		t.Errorf("Effective revision MaxRoundsCeiling = %v, want 4 (roster default)", eff.Revision.MaxRoundsCeiling)
+	}
+}
+
+func TestCrossRoleWebWithRead(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Tools = &ToolsConfig{}
+	allowWebWithRead := false
+	roster.Tools.AllowWebWithRead = &allowWebWithRead
+
+	preset := roster.Presets["review"]
+	preset.Tools = []string{"web"}
+	preset.ReviewerTools = []string{"read"}
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for cross-role web+read combination with allow_web_with_read=false, got nil")
+	} else if !strings.Contains(err.Error(), "cannot combine web") {
+		t.Errorf("Expected cross-role validation error, got: %v", err)
+	}
+}
+
+func TestPerPresetAllowWebWithRead(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Tools = &ToolsConfig{}
+	allowWebWithRead := true
+	roster.Tools.AllowWebWithRead = &allowWebWithRead
+
+	preset := roster.Presets["review"]
+	preset.Tools = []string{"web"}
+	preset.ReviewerTools = []string{"read"}
+	allowWebFalse := false
+	preset.AllowWebWithRead = &allowWebFalse
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for preset-level allow_web_with_read=false override, got nil")
+	} else if !strings.Contains(err.Error(), "cannot combine web") {
+		t.Errorf("Expected cross-role validation error with preset override, got: %v", err)
+	}
+}
+
+func TestCLIParticipantWithTools(t *testing.T) {
+	roster := makeBaseRoster()
+	roster.Participants = []Participant{
+		{ID: "cli-author", Model: "gpt4", Route: "cli", Binary: "syndic", EligibleRoles: []Role{RoleAuthor}, Pool: "default"},
+		{ID: "reviewer", Model: "gpt4", Route: "api", Endpoint: "ep1", EligibleRoles: []Role{RoleReviewer}, Pool: "default"},
+	}
+
+	preset := roster.Presets["review"]
+	preset.Author = "cli-author"
+	preset.Tools = []string{"read"}
+	roster.Presets["review"] = preset
+
+	if err := roster.Validate(); err == nil {
+		t.Error("Expected validation error for CLI participant with read tools, got nil")
+	} else if !strings.Contains(err.Error(), "CLI participant") {
+		t.Errorf("Expected CLI participant error, got: %v", err)
+	}
+}
+
+func TestAllowlistHostCanonicalization(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		wantErr bool
+	}{
+		{name: "lowercase exact", pattern: "example.com", wantErr: false},
+		{name: "uppercase exact", pattern: "Example.com", wantErr: true},
+		{name: "lowercase wildcard", pattern: "*.example.com", wantErr: false},
+		{name: "uppercase wildcard", pattern: "*.Example.com", wantErr: true},
+		{name: "port not allowed", pattern: "example.com:443", wantErr: true},
+		{name: "double wildcard lowercase", pattern: "**.example.com", wantErr: false},
+		{name: "double wildcard uppercase", pattern: "**.Example.com", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAllowedHostPattern(tt.pattern)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAllowedHostPattern(%q) error = %v, wantErr %v", tt.pattern, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAllowlistRejectsPortInPattern(t *testing.T) {
+	err := validateAllowedHostPattern("example.com:443")
+	if err == nil {
+		t.Error("Expected validation error for pattern with port, got nil")
+	}
+	if !strings.Contains(err.Error(), "port") {
+		t.Errorf("Expected port-related error message, got: %v", err)
+	}
+}
+
+func TestAllowlistIDNA2008ContextualRules(t *testing.T) {
+	invalid := map[string]string{
+		"xn--ab-0ea.cat":      "middle dot not between two l",
+		"xn--uba.cat":         "lone middle dot",
+		"xn--a-kib.example":   "Greek keraia not followed by Greek",
+		"xn--ab-3n4a.example": "katakana middle dot without Hiragana/Katakana/Han",
+		"xn--e28h.example":    "emoji",
+		"xn--ls8h.example":    "emoji",
+	}
+	for p, why := range invalid {
+		if err := validateAllowedHostPattern(p); err == nil {
+			t.Errorf("validateAllowedHostPattern(%q) = nil, want error (%s)", p, why)
+		}
+	}
+	valid := map[string]string{
+		"xn--ll-0ea.cat":     "middle dot between two l",
+		"*.xn--ll-0ea.cat":   "wildcard over middle dot label",
+		"xn--ccka0y.example": "katakana middle dot with Katakana",
+		"xn--4db4e.example":  "Hebrew geresh after Hebrew letter",
+		"xn--w6j.example":    "U+3007 PVALID exception",
+		"xn--nbd9hb.example": "U+0F0B PVALID exception",
+		"xn--zca.example":    "U+00DF PVALID exception",
+		"xn--bcher-kva.de":   "ordinary IDN",
+	}
+	for p, why := range valid {
+		if err := validateAllowedHostPattern(p); err != nil {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil (%s)", p, err, why)
+		}
+	}
+}
+
+func TestIDNA2008LabelRules(t *testing.T) {
+	tests := []struct {
+		label string
+		ok    bool
+	}{
+		{"l\u00b7l", true},
+		{"a\u00b7b", false},
+		{"\u00b7", false},
+		{"\u0375\u03b1", true},
+		{"a\u0375", false},
+		{"\u05d0\u05f4", true},
+		{"a\u05f3", false},
+		{"\u4e00\u30fb", true},
+		{"a\u30fbb", false},
+		{"\u0628\u0660\u0661", true},
+		{"\u0628\u06f0\u06f1", true},
+		{"\u0628\u0660\u06f1", false},
+		{"\u0628\u0640", false}, // ARABIC TATWEEL is a DISALLOWED exception
+		{"a\u01c5", false},      // Lt is not LetterDigits
+		{"a\u20dd", false},      // Me is not LetterDigits
+		{"a\u2160", false},      // Nl outside the exceptions is DISALLOWED
+		{"a\ufe0f", false},      // variation selector
+		{"\u1100\u1161", false}, // old Hangul jamo
+		{"\u3007", true},
+		{"\u0f40\u0f0b\u0f40", true},
+		{"a\u0378", false}, // unassigned
+	}
+	for _, tt := range tests {
+		if got := checkIDNA2008Label(tt.label); (got == nil) != tt.ok {
+			t.Errorf("checkIDNA2008Label(%+q) = %v, want ok=%v", tt.label, got, tt.ok)
+		}
+	}
+}
+
+func TestAllowlistRejectsNonHostnames(t *testing.T) {
+	bad := []string{
+		"exa mple.com", "user@example.com", "example.com?x", "example..com",
+		"-bad.com", "bad-.com", "a_b.com", "example.com.", "1.2.3.4.5",
+		"bad_host.example", "bücher.de", "*.bücher.de", "example.com/path",
+		"xn--e28h.example", "xn--ls8h.example", "*.xn--e28h.example",
+	}
+	for _, p := range bad {
+		if err := validateAllowedHostPattern(p); err == nil {
+			t.Errorf("validateAllowedHostPattern(%q) = nil, want error", p)
+		}
+	}
+	for _, p := range []string{"[::1]", "::1", "127.0.0.1"} {
+		err := validateAllowedHostPattern(p)
+		if err == nil || !strings.Contains(err.Error(), "IP") {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want IP literal error", p, err)
+		}
+	}
+	for _, p := range []string{"example.com", "*.example.com", "**.example.com", "xn--bcher-kva.de", "a-b.example.com", "xn--ll-0ea.cat", "*.xn--ll-0ea.cat"} {
+		if err := validateAllowedHostPattern(p); err != nil {
+			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil", p, err)
+		}
 	}
 }

@@ -1508,3 +1508,202 @@ func TestBuild_SubSecondStartedAtDiffers(t *testing.T) {
 		t.Error("RosterHash must not depend on StartedAt")
 	}
 }
+
+func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	allowWeb := false
+	fetches, calls, revCalls, resBytes, refTokens := 7, 8, 9, 1234, 32
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test", RefereeModel: "referee-model", RefereeEndpoint: "local-ref"}},
+		DefaultPreset: "default",
+		Presets: map[string]config.Preset{
+			"default": {
+				Mode:             "solo",
+				Author:           "p1",
+				Tools:            []string{"read", "write"},
+				ReviewerTools:    []string{"read", "web"},
+				AllowWebWithRead: &allowWeb,
+			},
+		},
+		Tools: &config.ToolsConfig{
+			AllowWebWithRead:       &allowWeb,
+			ProtectedPaths:         []string{".git/", "secret/**"},
+			FileEgressDestinations: []string{"ep1"},
+			MaxFetchesPerTurn:      &fetches,
+			MaxCallsPerTurn:        &calls,
+			MaxReviewerCalls:       &revCalls,
+			MaxResultBytes:         &resBytes,
+			Web:                    &config.WebConfig{AllowedHosts: []string{"example.com", "*.example.org"}},
+			Referee:                &config.RefereeConfig{MaxOutputTokens: &refTokens},
+		},
+		Budgets: config.Budgets{},
+		Pools:   map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	in := Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built, err := Build(in)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	var manifest_out map[string]interface{}
+	err = json.Unmarshal(built.JSON, &manifest_out)
+	if err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+
+	rosterObj := manifest_out["roster"].(map[string]interface{})
+
+	// Check that tools are frozen in the manifest
+	toolsObj, ok := rosterObj["tools"].(map[string]interface{})
+	if !ok {
+		t.Fatal("tools should be in manifest")
+	}
+
+	if toolsObj["allow_web_with_read"] != false {
+		t.Errorf("allow_web_with_read should be false in manifest, got %v", toolsObj["allow_web_with_read"])
+	}
+
+	// Check that preset tools are frozen
+	presetsObj := rosterObj["presets"].(map[string]interface{})
+	presetDefault := presetsObj["default"].(map[string]interface{})
+
+	if tools, ok := presetDefault["tools"].([]interface{}); !ok || len(tools) != 2 {
+		t.Errorf("preset tools not properly frozen in manifest")
+	}
+
+	if presetDefault["allow_web_with_read"] != false {
+		t.Errorf("preset allow_web_with_read should be false in manifest, got %v", presetDefault["allow_web_with_read"])
+	}
+
+	// Check that referee model is frozen in endpoints
+	endpointsObj := rosterObj["endpoints"].([]interface{})
+	endpointDefault := endpointsObj[0].(map[string]interface{})
+
+	if endpointDefault["referee_model"] != "referee-model" {
+		t.Errorf("referee_model should be frozen in manifest, got %v", endpointDefault["referee_model"])
+	}
+	if endpointDefault["referee_endpoint"] != "local-ref" {
+		t.Errorf("referee_endpoint should be frozen in manifest, got %v", endpointDefault["referee_endpoint"])
+	}
+	if rt, ok := presetDefault["reviewer_tools"].([]interface{}); !ok || len(rt) != 2 {
+		t.Errorf("reviewer_tools not frozen: %v", presetDefault["reviewer_tools"])
+	}
+	wantList := func(name string, got interface{}, want ...string) {
+		l, ok := got.([]interface{})
+		if !ok || len(l) != len(want) {
+			t.Errorf("%s = %v, want %v", name, got, want)
+			return
+		}
+		for i := range want {
+			if l[i] != want[i] {
+				t.Errorf("%s = %v, want %v", name, got, want)
+			}
+		}
+	}
+	wantList("protected_paths", toolsObj["protected_paths"], ".git/", "secret/**")
+	wantList("file_egress_destinations", toolsObj["file_egress_destinations"], "ep1")
+	for k, v := range map[string]float64{"max_fetches_per_turn": 7, "max_calls_per_turn": 8, "max_reviewer_calls": 9, "max_result_bytes": 1234} {
+		if toolsObj[k] != v {
+			t.Errorf("%s = %v, want %v", k, toolsObj[k], v)
+		}
+	}
+	wantList("allowed_hosts", toolsObj["web"].(map[string]interface{})["allowed_hosts"], "example.com", "*.example.org")
+	if toolsObj["referee"].(map[string]interface{})["max_output_tokens"] != float64(32) {
+		t.Errorf("referee max_output_tokens not frozen: %v", toolsObj["referee"])
+	}
+}
+
+func TestBuild_AllowWebWithReadDifferenceAffectsRosterHash(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	allowWeb := true
+	disallowWeb := false
+
+	roster1 := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets: map[string]config.Preset{
+			"default": {
+				Mode:             "solo",
+				Author:           "p1",
+				AllowWebWithRead: &allowWeb,
+			},
+		},
+		Budgets: config.Budgets{},
+		Pools:   map[string]config.Pool{},
+	}
+
+	roster2 := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets: map[string]config.Preset{
+			"default": {
+				Mode:             "solo",
+				Author:           "p1",
+				AllowWebWithRead: &disallowWeb,
+			},
+		},
+		Budgets: config.Budgets{},
+		Pools:   map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	now := time.Now().Truncate(time.Second)
+
+	in1 := Input{
+		Store:          store,
+		Roster:         roster1,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      now,
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built1, err := Build(in1)
+	if err != nil {
+		t.Fatalf("first Build failed: %v", err)
+	}
+
+	in2 := Input{
+		Store:          store,
+		Roster:         roster2,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      now,
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	}
+
+	built2, err := Build(in2)
+	if err != nil {
+		t.Fatalf("second Build failed: %v", err)
+	}
+
+	if built1.RosterHash == built2.RosterHash {
+		t.Error("different allow_web_with_read should produce different roster hash")
+	}
+}
