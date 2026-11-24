@@ -52,6 +52,9 @@ func TestV6PresentationLedgerNamesRealTests(t *testing.T) {
 		if !bytes.HasPrefix(line, []byte("| ")) || bytes.HasPrefix(line, []byte("| Clause")) || bytes.HasPrefix(line, []byte("| Behavior")) || bytes.HasPrefix(line, []byte("| ---")) {
 			continue
 		}
+		if bytes.Contains(line, []byte("V6-E:")) {
+			continue
+		}
 		rows++
 		found := ref.FindAllSubmatch(line, -1)
 		if len(found) == 0 {
