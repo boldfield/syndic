@@ -367,6 +367,7 @@ func cmdRelease(a *App, args []string) tea.Cmd {
 // opens any question that waited behind it.
 func (a *App) cancelConfirm(why string) {
 	a.confirm = nil
+	a.reasonForm = nil
 	a.panel = nil
 	a.setPrompt(defaultPrompt)
 	a.clearInput()
@@ -376,21 +377,34 @@ func (a *App) cancelConfirm(why string) {
 
 // confirmEnter answers the pending confirmation with the input line.
 func (a *App) confirmEnter() tea.Cmd {
+	var reason string
+
+	// Extract reason from either Huh form or input textarea
+	if a.reasonForm != nil && a.reasonForm.useHuh {
+		reason = strings.TrimSpace(a.reasonForm.reasonValue)
+	} else {
+		reason = strings.TrimSpace(a.input.Value())
+	}
+
+	// Validate reason when not using Huh (Huh validates in the form itself)
+	if (a.reasonForm == nil || !a.reasonForm.useHuh) && reason == "" {
+		a.refusal = "reason required"
+		a.clearInput()
+		return nil
+	}
+
+	if a.cl == nil {
+		a.cancelConfirm("engine: not connected")
+		defer func() { a.reasonForm = nil }()
+		return nil
+	}
+
 	switch p := a.confirm.(type) {
 	case *overridePrompt:
-		reason := strings.TrimSpace(a.input.Value())
-		if reason == "" {
-			a.refusal = "reason required"
-			a.clearInput()
-			return nil
-		}
-		if a.cl == nil {
-			a.cancelConfirm("engine: not connected")
-			return nil
-		}
 		a.cancelConfirm("")
 		gen, cl := a.gen, a.cl
 		turn := p.turn
+		defer func() { a.reasonForm = nil }()
 		return func() tea.Msg {
 			if err := cl.Override(context.Background(), turn, reason); err != nil {
 				return commandMsg{gen: gen, err: err}
@@ -399,22 +413,13 @@ func (a *App) confirmEnter() tea.Cmd {
 		}
 
 	case *releasePrompt:
-		reason := strings.TrimSpace(a.input.Value())
-		if reason == "" {
-			a.refusal = "reason required"
-			a.clearInput()
-			return nil
-		}
-		if a.cl == nil {
-			a.cancelConfirm("engine: not connected")
-			return nil
-		}
 		a.cancelConfirm("")
 		req := wire.ReleaseRequest{Pool: p.pool, Reason: reason}
 		if p.attemptID != "" {
 			req.AttemptID = &p.attemptID
 		}
 		gen, cl := a.gen, a.cl
+		defer func() { a.reasonForm = nil }()
 		return func() tea.Msg {
 			reply, err := cl.Release(context.Background(), req)
 			if err != nil {
@@ -425,6 +430,7 @@ func (a *App) confirmEnter() tea.Cmd {
 
 	default:
 		a.cancelConfirm("unknown confirmation type")
+		defer func() { a.reasonForm = nil }()
 		return nil
 	}
 }

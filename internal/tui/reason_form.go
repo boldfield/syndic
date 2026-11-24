@@ -1,5 +1,13 @@
 package tui
 
+import (
+	"errors"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
+)
+
 // confirmPrompt is an interface for confirmation prompts that require a reason.
 type confirmPrompt interface {
 	isPendingConfirmation()
@@ -30,18 +38,55 @@ func (p *releasePrompt) cancelText() string {
 	return "release cancelled; nothing sent"
 }
 
-// openReasonForm shows a form prompting for a required reason.
-// It sets a.confirm, a.panel, and the prompt to reasonPrompt.
-// When the user presses Enter, confirmEnter() is called with the reason.
-// When Esc is pressed, cancelConfirm() is called.
-// In TERM=dumb or no-colour mode, uses single-line input.
-// In coloured mode, the input validates that the reason cannot be empty.
+// reasonForm holds the state of a reason-entry form.
+// It wraps either a Huh form (for colour mode) or falls back to panel-based input (for dumb mode).
+type reasonForm struct {
+	huhForm     tea.Model // the Huh form model, or nil for fallback mode
+	useHuh      bool      // true if huh form should be used
+	reasonValue string    // the reason entered by the user (source of truth for Huh mode)
+	panelLines  []string  // used for fallback display in dumb mode
+}
+
+// openReasonForm creates a form prompting for a required reason.
+// In colour mode, uses a Huh form with validation.
+// In TERM=dumb or no-colour mode, uses single-line input via panel.
 func openReasonForm(a *App, panelLines []string, confirm confirmPrompt) {
 	a.confirm = confirm
-	// Use panel fallback for TERM=dumb or no-colour mode; Huh form for coloured mode.
-	// For now, panel lines are always set; they serve as the display in single-line fallback mode.
-	// The form renderer will check terminal capabilities.
-	a.panel = panelLines
-	a.setPrompt(reasonPrompt)
+
+	// Determine if we should use Huh form
+	useHuh := a.terminalCapabilities.Color
+
+	if useHuh {
+		// Create reasonForm first with an empty reasonValue
+		rf := &reasonForm{
+			useHuh:     true,
+			panelLines: panelLines,
+		}
+		// Create a Huh form with one required text field, using the reasonForm's reasonValue field
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewText().
+					Title("").
+					Value(&rf.reasonValue).
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return errors.New("reason required")
+						}
+						return nil
+					}),
+			),
+		)
+		rf.huhForm = form
+		a.reasonForm = rf
+	} else {
+		// Fallback: use simple panel + textarea input
+		a.reasonForm = &reasonForm{
+			useHuh:     false,
+			panelLines: panelLines,
+		}
+		a.panel = panelLines
+		a.setPrompt(reasonPrompt)
+	}
+
 	a.refusal = ""
 }
