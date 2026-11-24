@@ -59,11 +59,20 @@ func isatty(fd uintptr) bool {
 
 // ProgramOptions returns the Bubble Tea options the capabilities allow. The
 // alternate screen is used only when the terminal has one; mouse reporting is
-// never enabled.
+// enabled only when explicitly requested and not suppressed by terminal mode.
 func ProgramOptions(caps TerminalCapabilities) []tea.ProgramOption {
 	var opts []tea.ProgramOption
 	if caps.AltScreen {
 		opts = append(opts, tea.WithAltScreen())
+	}
+	return opts
+}
+
+// ProgramOptionsWithMouse returns Bubble Tea options including mouse support when enabled.
+func ProgramOptionsWithMouse(caps TerminalCapabilities, enableMouse bool) []tea.ProgramOption {
+	opts := ProgramOptions(caps)
+	if enableMouse && caps.Color {
+		opts = append(opts, tea.WithMouseCellMotion())
 	}
 	return opts
 }

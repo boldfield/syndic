@@ -76,6 +76,7 @@ type App struct {
 	want                 regionWant                  // optional regions the layout reserves lines for; none in milestone D
 	inputOverflow        bool                        // the input's text was taller than it shows, so it may be scrolled
 	rawMode              bool                        // /raw on|off; true disables Markdown rendering
+	mouseEnabled         bool                        // /mouse on|off; default false
 
 	// The transcript tab: the loaded items of one turn, their rendering
 	// at the current width, and the scroll position within it.
@@ -145,6 +146,11 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 // WithNotify enables terminal notifications for terminal events.
 func WithNotify(notify bool) Option {
 	return func(a *App) { a.notify = notify }
+}
+
+// WithMouse enables mouse input for tabs and drawer interaction.
+func WithMouse(mouse bool) Option {
+	return func(a *App) { a.mouseEnabled = mouse }
 }
 
 // WithBellEmitter sets a custom bell emitter function; used for testing.
@@ -521,6 +527,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case tea.KeyMsg:
 		return a.updateKey(msg)
+	case tea.MouseMsg:
+		return a.updateMouse(msg)
 	case connectedMsg:
 		return a.onConnected(msg)
 	case eventMsg:
@@ -550,6 +558,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
+		a.reviewsDrawer.AnimationTick()
 		return a, a.ensureTick()
 	}
 	return a, a.updateInput(msg)
@@ -774,6 +783,90 @@ func (a *App) detachKey(k string) (cmd tea.Cmd, ok bool) {
 	return a.quit(), true
 }
 
+// updateMouse handles mouse events when mouse is enabled.
+func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !a.mouseEnabled || !a.terminalCapabilities.Color {
+		return a, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonLeft:
+		switch msg.Action {
+		case tea.MouseActionPress:
+			return a, a.handleMouseClick(msg.X, msg.Y)
+		}
+	}
+	return a, nil
+}
+
+// handleMouseClick processes a mouse click at the given coordinates.
+func (a *App) handleMouseClick(x, y int) tea.Cmd {
+	// Check for tab bar clicks (first line)
+	if y == 0 && x >= 0 {
+		return a.handleTabClick(x)
+	}
+
+	// Check for review count clicks in the chat tab
+	if !a.reviewsDrawer.IsOpen() && y > 0 && y < a.height-2 {
+		return a.handleReviewCountClick(x, y)
+	}
+
+	// Check for drawer round header clicks
+	if a.reviewsDrawer.IsOpen() {
+		drawerStart := a.height - a.reviewsDrawer.drawerHeight - 1
+		if y >= drawerStart && y < drawerStart+1 {
+			return a.handleDrawerRoundClick(x)
+		}
+	}
+
+	return nil
+}
+
+// handleTabClick processes a click in the tab bar.
+func (a *App) handleTabClick(x int) tea.Cmd {
+	// Tab positions depend on rendering, approximate positions:
+	// Chat starts at 0, Transcript at ~20, Participants at ~35
+	switch {
+	case x < 20:
+		if a.tab != tabChat {
+			a.tab = tabChat
+		}
+	case x < 35:
+		if a.tab != tabTranscript {
+			a.tab = tabTranscript
+		}
+	default:
+		if a.tab != tabParticipants {
+			a.tab = tabParticipants
+		}
+	}
+	return nil
+}
+
+// handleReviewCountClick processes a click on a review count in the chat.
+func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
+	// Find which turn was clicked by checking the rendered chat
+	// For now, this is a placeholder; actual implementation would
+	// correlate screen position with turn data
+	return nil
+}
+
+// handleDrawerRoundClick processes a click in the drawer header for round selection.
+func (a *App) handleDrawerRoundClick(x int) tea.Cmd {
+	rounds := a.reviewsDrawer.getRounds()
+	if len(rounds) <= 1 {
+		return nil
+	}
+	// Simple left/right detection: left half moves left, right half moves right
+	drawerWidth := a.width - 4
+	if x < drawerWidth/2 {
+		a.reviewsDrawer.SelectRoundLeft()
+	} else {
+		a.reviewsDrawer.SelectRoundRight()
+	}
+	return nil
+}
+
 // updateInput passes a message to the input. When its text shrinks back to
 // fit, it is laid out again from its first line, so no line above the cursor
 // stays scrolled out of sight.
@@ -893,9 +986,10 @@ func (a *App) send(sub submission) tea.Cmd {
 	return submitCmd(a.ctx, a.cl, sub, a.onSubmitRequest)
 }
 
-// ensureTick starts the one-second tick chain if a turn is open and none runs.
+// ensureTick starts the one-second tick chain if a turn is open, drawer is animating, or none runs.
 func (a *App) ensureTick() tea.Cmd {
-	if a.state.CurrentTurn == "" || a.tickRunning {
+	needsTick := a.state.CurrentTurn != "" || a.reviewsDrawer.IsAnimating()
+	if !needsTick || a.tickRunning {
 		return nil
 	}
 	a.tickRunning = true

@@ -755,3 +755,173 @@ func repeatStep(s fake.Step, n int) []fake.Step {
 	}
 	return steps
 }
+
+// TestDrawerAnimation tests the drawer open/close animation.
+func TestDrawerAnimation(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(7)
+	d.Open(0)
+
+	// When opened, animation should start
+	if !d.IsAnimating() {
+		t.Error("drawer should be animating after Open()")
+	}
+	if d.animProgress != 0 {
+		t.Errorf("animation should start at 0, got %v", d.animProgress)
+	}
+
+	// Advance animation frame
+	stillAnimating := d.AnimationTick()
+	if !stillAnimating {
+		t.Error("animation should still be in progress after one tick")
+	}
+	if d.animProgress <= 0 {
+		t.Error("progress should advance")
+	}
+
+	// Keep ticking until animation completes
+	for stillAnimating {
+		stillAnimating = d.AnimationTick()
+	}
+
+	if d.IsAnimating() {
+		t.Error("animation should be done")
+	}
+	if d.animProgress < 1.0 {
+		t.Errorf("animation should reach 1.0, got %v", d.animProgress)
+	}
+}
+
+// TestDrawerCloseAnimation tests the drawer close animation.
+func TestDrawerCloseAnimation(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0)
+
+	// Skip to end of open animation
+	for d.IsAnimating() {
+		d.AnimationTick()
+	}
+
+	if d.animProgress < 1.0 {
+		t.Fatalf("open animation should be complete, got %v", d.animProgress)
+	}
+
+	// Close the drawer
+	d.Close()
+	if !d.IsAnimating() {
+		t.Error("drawer should be animating after Close()")
+	}
+	if d.animProgress != 1.0 {
+		t.Errorf("close animation should start at 1.0, got %v", d.animProgress)
+	}
+
+	// Advance animation
+	stillAnimating := d.AnimationTick()
+	if !stillAnimating {
+		t.Error("animation should still be in progress")
+	}
+	if d.animProgress >= 1.0 {
+		t.Error("progress should decrease")
+	}
+
+	// Complete the close animation
+	for stillAnimating {
+		stillAnimating = d.AnimationTick()
+	}
+
+	if d.animProgress > 0 {
+		t.Errorf("close animation should reach 0, got %v", d.animProgress)
+	}
+	if d.IsOpen() {
+		t.Error("drawer should still report closed after close animation")
+	}
+}
+
+// TestDrawerAnimationRender verifies animation affects rendering.
+func TestDrawerAnimationRender(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(10)
+
+	// Create reviews with multiple participants to generate enough content
+	items := make([]wire.ReviewItem, 10)
+	for i := range items {
+		items[i] = wire.ReviewItem{
+			Round:       0,
+			Participant: fmt.Sprintf("p%d", i),
+			Kind:        "approve",
+		}
+	}
+	d.UpdateReviews("turn1", items)
+	d.Open(0)
+
+	// Let animation progress most of the way to see full content
+	d.animProgress = 0.95
+	fullRender := d.render(80, NewContentCache())
+	fullLines := strings.Split(fullRender, "\n")
+
+	// During earlier animation, fewer lines should be rendered
+	d.animProgress = 0.3
+	partialRender := d.render(80, NewContentCache())
+	partialLines := strings.Split(partialRender, "\n")
+
+	if len(partialLines) >= len(fullLines) {
+		t.Errorf("partial animation should show fewer lines: %d vs %d", len(partialLines), len(fullLines))
+	}
+}
+
+// TestDrawerAnimationCompleteBeforeReopen: reopening while animation is ongoing works correctly.
+func TestDrawerAnimationCompleteBeforeReopen(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1", "turn2"})
+	d.Open(0)
+
+	// Interrupt open animation with close
+	d.animProgress = 0.3
+	d.Close()
+
+	if d.animProgress != 0.3 {
+		t.Errorf("close should not reset progress mid-animation, got %v", d.animProgress)
+	}
+
+	// When closing, we should be decreasing
+	startProgress := d.animProgress
+	d.AnimationTick()
+	if d.animProgress >= startProgress {
+		t.Error("progress should decrease during close animation")
+	}
+}
+
+// TestDrawerNoRenderWhenFullyClosed: render should not output when drawer is fully closed.
+func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(7)
+	d.UpdateReviews("turn1", []wire.ReviewItem{
+		{Round: 0, Participant: "p1", Kind: "approve"},
+	})
+
+	// Render when closed and not animating should be empty
+	output := d.render(80, NewContentCache())
+	if output != "" {
+		t.Errorf("closed drawer should render empty, got %q", output)
+	}
+
+	// But when closed and animating (close animation), it should render
+	d.animating = true
+	d.animProgress = 0.5
+	output = d.render(80, NewContentCache())
+	if output == "" {
+		t.Error("closed drawer should render during close animation")
+	}
+
+	// Once animation completes (progress == 0), it should not render
+	d.animProgress = 0
+	d.animating = false
+	output = d.render(80, NewContentCache())
+	if output != "" {
+		t.Errorf("fully closed drawer should not render, got %q", output)
+	}
+}

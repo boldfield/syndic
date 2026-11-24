@@ -19,6 +19,8 @@ type ReviewsDrawer struct {
 	scrollOffset  int      // scroll position within the drawer content
 	roster        []string // participant IDs in roster order
 	drawerHeight  int      // allocated height for rendering
+	animProgress  float64  // 0 to 1, animation progress for open/close
+	animating     bool     // whether animation is in progress
 }
 
 // drawerReviews holds the reviews for one turn, grouped by round.
@@ -67,7 +69,7 @@ func (d *ReviewsDrawer) SetDrawerHeight(height int) {
 	d.drawerHeight = height
 }
 
-// Open opens the drawer on the given turn index.
+// Open opens the drawer on the given turn index with animation.
 func (d *ReviewsDrawer) Open(turnIdx int) {
 	if turnIdx < 0 || turnIdx >= len(d.turns) {
 		return
@@ -76,17 +78,52 @@ func (d *ReviewsDrawer) Open(turnIdx int) {
 	d.selectedTurn = turnIdx
 	d.selectedRound = 0
 	d.scrollOffset = 0
+	d.animating = true
+	d.animProgress = 0
 }
 
-// Close closes the drawer.
+// Close closes the drawer with animation.
 func (d *ReviewsDrawer) Close() {
 	d.open = false
 	d.scrollOffset = 0
+	if !d.animating || d.animProgress >= 1 {
+		// Not animating or open animation complete, start close animation
+		d.animating = true
+		d.animProgress = 1
+	}
+	// Otherwise, if mid-open animation, keep animating but mark as closed
 }
 
 // IsOpen reports whether the drawer is open.
 func (d *ReviewsDrawer) IsOpen() bool {
 	return d.open
+}
+
+// AnimationTick advances the animation by one frame.
+// Returns true if the animation is still in progress.
+func (d *ReviewsDrawer) AnimationTick() bool {
+	if !d.animating {
+		return false
+	}
+	// Advance progress
+	const animSpeed = 0.15
+	if d.open {
+		d.animProgress = min(d.animProgress+animSpeed, 1.0)
+		if d.animProgress >= 1.0 {
+			d.animating = false
+		}
+	} else {
+		d.animProgress = max(d.animProgress-animSpeed, 0)
+		if d.animProgress <= 0 {
+			d.animating = false
+		}
+	}
+	return d.animating
+}
+
+// IsAnimating reports whether the drawer is currently animating.
+func (d *ReviewsDrawer) IsAnimating() bool {
+	return d.animating
 }
 
 // UpdateReviews stores reviews for a turn, including decoded oversized records.
@@ -201,18 +238,36 @@ func (d *ReviewsDrawer) SelectedTurnIndex() int {
 }
 
 // render renders the drawer at width w from its scroll position, using
-// content from the cache.
+// content from the cache, with animation effects.
 func (d *ReviewsDrawer) render(w int, cc *ContentCache) string {
-	if !d.open {
+	// Don't render if fully closed and not animating
+	if !d.open && d.animProgress <= 0 {
 		return ""
 	}
+
 	lines := d.lines(w, cc)
 	if d.scrollOffset < len(lines) {
 		lines = lines[d.scrollOffset:]
 	} else {
 		lines = nil
 	}
+
+	// Apply animation: show only a portion of lines during animation
+	if d.animating && d.drawerHeight > 0 {
+		progress := easeOutCubic(d.animProgress)
+		visibleLines := int(float64(d.drawerHeight) * progress)
+		if visibleLines < len(lines) {
+			lines = lines[:visibleLines]
+		}
+	}
+
 	return strings.Join(lines, "\n")
+}
+
+// easeOutCubic is an easing function for smooth animation.
+func easeOutCubic(t float64) float64 {
+	t = 1 - t
+	return 1 - (t * t * t)
 }
 
 // lines is the drawer's whole content at width w: a header naming the turn

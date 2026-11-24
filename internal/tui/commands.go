@@ -29,6 +29,7 @@ var commands = map[string]commandHandler{
 	"drafts":        cmdDrafts,
 	"raw":           cmdRaw,
 	"notify":        cmdNotify,
+	"mouse":         cmdMouse,
 	"help":          cmdHelp,
 	"new":           cmdNew,
 	"conversations": cmdConversations,
@@ -56,6 +57,7 @@ var commandHelp = []string{
 	"/drafts on|off            show or hide the author's unreviewed draft",
 	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
 	"/notify on|off            ring the terminal on a live terminal event",
+	"/mouse on|off             enable or disable mouse input for tabs and drawer",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -199,6 +201,16 @@ func cmdNotify(a *App, args []string) tea.Cmd {
 	}
 	a.notify = args[0] == "on"
 	a.refusal = "notify " + args[0]
+	return nil
+}
+
+func cmdMouse(a *App, args []string) tea.Cmd {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		a.refusal = "usage: /mouse on|off"
+		return nil
+	}
+	a.mouseEnabled = args[0] == "on"
+	a.refusal = "mouse " + args[0]
 	return nil
 }
 
