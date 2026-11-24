@@ -25,23 +25,37 @@ func spinnerAt(now time.Time) string {
 	return spinnerFrames[int(now.Unix()%int64(len(spinnerFrames)))]
 }
 
-// progressLine is the one line a running turn shows: a spinner, the phase,
-// round n/m with one pip per allowed round, filled for the rounds started,
+// progressLine is the one line a running turn shows: a spinner or state word, the phase,
+// round n/m with one pip per allowed round (omitted in plainMode), filled for the rounds started,
 // each participant with its mark, and the elapsed time.
-func progressLine(s State, turnID string, now time.Time) string {
+func progressLine(s State, turnID string, now time.Time, plainMode bool) string {
 	ti := s.Turns[turnID]
 	spin := spinnerAt(now)
-	parts := []string{spin + " turn in progress: " + ti.State}
+
+	var parts []string
+	if plainMode {
+		// In plain mode, show state word instead of spinner
+		parts = []string{ti.State + " turn in progress"}
+	} else {
+		// Normal mode: show spinner
+		parts = []string{spin + " turn in progress: " + ti.State}
+	}
+
 	if ti.MaxRounds > 0 {
-		started := min(max(ti.Round, 0), ti.MaxRounds)
-		pips := strings.Repeat(pipStarted, started) + strings.Repeat(pipAhead, ti.MaxRounds-started)
-		parts = append(parts, fmt.Sprintf("round %d/%d %s", ti.Round, ti.MaxRounds, pips))
+		if plainMode {
+			// In plain mode, omit pips but keep round n/m
+			parts = append(parts, fmt.Sprintf("round %d/%d", ti.Round, ti.MaxRounds))
+		} else {
+			started := min(max(ti.Round, 0), ti.MaxRounds)
+			pips := strings.Repeat(pipStarted, started) + strings.Repeat(pipAhead, ti.MaxRounds-started)
+			parts = append(parts, fmt.Sprintf("round %d/%d %s", ti.Round, ti.MaxRounds, pips))
+		}
 	}
 	if ti.Author != "" {
-		parts = append(parts, participantMark(s, turnID, ti.Author, true, spin)+" "+ti.Author)
+		parts = append(parts, participantMark(s, turnID, ti.Author, true, spin, plainMode)+" "+ti.Author)
 	}
 	for _, id := range ti.Reviewers {
-		parts = append(parts, participantMark(s, turnID, id, false, spin)+" "+id)
+		parts = append(parts, participantMark(s, turnID, id, false, spin, plainMode)+" "+id)
 	}
 	if !ti.SubmittedAt.IsZero() && !now.IsZero() {
 		parts = append(parts, formatDuration(max(now.Sub(ti.SubmittedAt), 0)))
@@ -51,9 +65,9 @@ func progressLine(s State, turnID string, now time.Time) string {
 
 // participantMark is the spinner while the participant works, ✓ once it has
 // done its part for the current candidate, and ○ while it is queued or its
-// part has not begun. The engine returns a participant to idle both before
-// and after its work, so done comes from the turn's phase and attempts.
-func participantMark(s State, turnID, id string, author bool, spin string) string {
+// part has not begun. In plainMode, running/cancelling states show a text marker instead of spinner.
+// The engine returns a participant to idle both before and after its work, so done comes from the turn's phase and attempts.
+func participantMark(s State, turnID, id string, author bool, spin string, plainMode bool) string {
 	ti := s.Turns[turnID]
 	state := ti.AuthorState
 	if !author {
@@ -61,6 +75,9 @@ func participantMark(s State, turnID, id string, author bool, spin string) strin
 	}
 	switch state {
 	case "running", "cancelling", "unknown":
+		if plainMode {
+			return "⋯" // text marker for working in plain mode (not a spinner animation)
+		}
 		return spin
 	case "queued":
 		return markQueued

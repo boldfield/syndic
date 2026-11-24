@@ -397,7 +397,7 @@ func TestProgressLineWithReviewersInOrder(t *testing.T) {
 		},
 	}
 
-	strip := progressLine(s, "turn-1", testTime)
+	strip := progressLine(s, "turn-1", testTime, false)
 	spin := spinnerAt(testTime)
 	if !contains(strip, "○ r1") || !contains(strip, spin+" r2") || !contains(strip, "○ r3") {
 		t.Errorf("strip = %s", strip)
@@ -428,7 +428,7 @@ func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 		},
 	}
 
-	strip := renderStrip(s, 15, testTime)
+	strip := renderStrip(s, 15, testTime, false)
 	displayWidth := runewidth.StringWidth(strip)
 	if displayWidth > 15 {
 		t.Errorf("strip display width = %d, want <= 15", displayWidth)

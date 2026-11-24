@@ -248,7 +248,7 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			lines = append(lines, styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
 			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
-		lines = append(lines, progressLine(s, turnID, in.now))
+		lines = append(lines, progressLine(s, turnID, in.now, in.plainMode))
 	}
 	return strings.Join(lines, "\n")
 }

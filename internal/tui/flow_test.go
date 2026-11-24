@@ -279,7 +279,7 @@ func TestRenderStripFull(t *testing.T) {
 	s := openTurnState("r1", "r2")
 	now := s.Turns["t1"].SubmittedAt.Add(75 * time.Second)
 	want := "[review] [author_dispatched] [1m15s / 15m0s] [░░░░░░░░ est. 1234 / 250000]"
-	if got := renderStrip(s, 200, now); got != want {
+	if got := renderStrip(s, 200, now, false); got != want {
 		t.Fatalf("strip =\n%q\nwant\n%q", got, want)
 	}
 }
@@ -289,7 +289,7 @@ func TestRenderStripQuickAndIdle(t *testing.T) {
 	ti := s.Turns["t1"]
 	ti.QuickProfile = ptr("fast")
 	s.Turns["t1"] = ti
-	if got := renderStrip(s, 200, ti.SubmittedAt); !strings.HasPrefix(got, "[review] [quick:fast] [author_dispatched] ") {
+	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.HasPrefix(got, "[review] [quick:fast] [author_dispatched] ") {
 		t.Fatalf("strip = %q", got)
 	}
 
@@ -306,19 +306,19 @@ func TestRenderStripEstimateIsLabelled(t *testing.T) {
 	ti := s.Turns["t1"]
 	ti.LimitTokens = 0
 	s.Turns["t1"] = ti
-	if got := renderStrip(s, 200, ti.SubmittedAt); !strings.Contains(got, "[est. 1234]") {
+	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.Contains(got, "[est. 1234]") {
 		t.Fatalf("strip = %q", got)
 	}
 }
 
 func TestRenderStripLeavesParticipantsToTheProgressLine(t *testing.T) {
 	s := openTurnState("reviewer-1", "reviewer-2", "reviewer-3", "reviewer-4", "reviewer-5")
-	got := renderStrip(s, 200, s.Turns["t1"].SubmittedAt)
+	got := renderStrip(s, 200, s.Turns["t1"].SubmittedAt, false)
 	if strings.Contains(got, "reviewer-") || strings.Contains(got, "author:") {
 		t.Fatalf("strip carries participant states: %q", got)
 	}
 	for _, w := range []int{1, 5, 20, 40, 79} {
-		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt); runewidth.StringWidth(g) > w || strings.Contains(g, "\n") {
+		if g := renderStrip(s, w, s.Turns["t1"].SubmittedAt); runewidth.StringWidth(g, false) > w || strings.Contains(g, "\n") {
 			t.Fatalf("width %d: strip is %d cells: %q", w, runewidth.StringWidth(g), g)
 		}
 	}
@@ -343,7 +343,7 @@ func TestRenderBanners(t *testing.T) {
 		t.Fatalf("banners = %q, want %q", got, want)
 	}
 	// The reconnect notice is a banner only, not also the strip.
-	if strings.Contains(renderStrip(s, 200, time.Time{}), "reconnecting") {
+	if strings.Contains(renderStrip(s, 200, time.Time{}, false), "reconnecting") {
 		t.Fatal("reconnecting shown in the strip as well")
 	}
 }

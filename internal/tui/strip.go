@@ -11,17 +11,18 @@ import (
 
 // renderStrip returns the status fields alone, width cells at most: preset,
 // the next preset, quick:<name> when one governs, the turn state or idle,
-// elapsed/turn_deadline, the budget meter with tokens/limit, and round n/m
-// during a revision. Participant states are on the chat's progress line and
+// elapsed/turn_deadline, the budget meter with tokens/limit (meter omitted in plainMode),
+// and round n/m during a revision. Participant states are on the chat's progress line and
 // in the participants tab, not here.
-func renderStrip(s State, width int, now time.Time) string {
-	return statusFieldsOf(s, now).fit(width, false, false)
+func renderStrip(s State, width int, now time.Time, plainMode bool) string {
+	return statusFieldsOf(s, now, plainMode).fit(width, false, false)
 }
 
 // renderStatusLine is the strip with the right-edge hints, exactly width
 // cells when they fit: ctrl+o: reviews when reviews is set, then keyHint.
-func renderStatusLine(s State, width int, now time.Time, reviews bool) string {
-	return statusFieldsOf(s, now).fit(width, true, reviews)
+// In plainMode, the meter is omitted but tokens/limit are kept.
+func renderStatusLine(s State, width int, now time.Time, reviews bool, plainMode bool) string {
+	return statusFieldsOf(s, now, plainMode).fit(width, true, reviews)
 }
 
 // reviewsHint names the reviews drawer's key; it sits left of keyHint while
@@ -46,7 +47,7 @@ type statusFields struct {
 	round   string   // [round n/m] during a revision, or ""
 }
 
-func statusFieldsOf(s State, now time.Time) statusFields {
+func statusFieldsOf(s State, now time.Time, plainMode bool) statusFields {
 	var f statusFields
 	if s.ConnState == ConnStateConnecting {
 		f.fixed = "engine: connecting"
@@ -96,7 +97,9 @@ func statusFieldsOf(s State, now time.Time) statusFields {
 
 	switch {
 	case ti.LimitTokens > 0:
-		f.meter = budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
+		if !plainMode {
+			f.meter = budgetMeter(ti.EstimatedTokens, ti.LimitTokens)
+		}
 		f.tokens = fmt.Sprintf("est. %d / %d", ti.EstimatedTokens, ti.LimitTokens)
 	case ti.EstimatedTokens > 0:
 		f.tokens = fmt.Sprintf("est. %d", ti.EstimatedTokens)

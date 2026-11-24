@@ -134,7 +134,7 @@ func TestChatRoundCountComesFromRevisionEvents(t *testing.T) {
 	if ti := s.Turns["t1"]; ti.Round != 2 || ti.MaxRounds != 2 {
 		t.Fatalf("after two revisions: round %d of %d, want 2 of 2", ti.Round, ti.MaxRounds)
 	}
-	if strip := renderStrip(s, 200, chatNow); !strings.Contains(strip, "[round 2/2]") {
+	if strip := renderStrip(s, 200, chatNow, false); !strings.Contains(strip, "[round 2/2]") {
 		t.Errorf("strip = %q, want [round 2/2]", strip)
 	}
 	// A limit this process set wins over the roster default.
@@ -436,7 +436,7 @@ func TestChatRoundSurvivesRecordBetweenReplayedEvents(t *testing.T) {
 	if got := s.Turns["t1"].Round; got != 1 {
 		t.Fatalf("round after the terminal record = %d, want 1", got)
 	}
-	if strip := renderStrip(s, 200, chatNow); strings.Contains(strip, "[round 2/") {
+	if strip := renderStrip(s, 200, chatNow, false); strings.Contains(strip, "[round 2/") {
 		t.Errorf("strip = %q, want no doubled round", strip)
 	}
 

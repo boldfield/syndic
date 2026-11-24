@@ -1492,7 +1492,8 @@ func (a *App) tabBar() string {
 // statusLine is the strip with the hints at its right edge, w cells wide:
 // ctrl+o: reviews while the chat tab is active, then keyHint.
 func (a *App) statusLine(w int) string {
-	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat)
+	plainMode := !a.terminalCapabilities.Color
+	return renderStatusLine(a.state, w, a.now(), a.tab == tabChat, plainMode)
 }
 
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.

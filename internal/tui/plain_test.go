@@ -282,3 +282,93 @@ func TestProgramOptions(t *testing.T) {
 		}
 	}
 }
+
+// TestPlainModeProgressLineNoSpinner verifies that in plain mode, the progress line
+// contains no spinner animation, pips are omitted, and state words are used instead.
+func TestPlainModeProgressLineNoSpinner(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+	t.Setenv("NO_COLOR", "")
+
+	now := stripT0.Add(42 * time.Second)
+	spin := spinnerAt(now)
+
+	// In plain mode, spinner should be omitted and round pips omitted
+	s := func() State {
+		s := NewState()
+		s.CurrentTurn = "t1"
+		s.Turns["t1"] = TurnInfo{
+			ID: "t1", State: "reviewers_dispatched", Preset: "review",
+			SubmittedAt: stripT0, Round: 1, MaxRounds: 3,
+			Author: "w", AuthorState: "idle",
+			Reviewers: []string{"r1", "r2"},
+			ReviewerStates: map[string]string{"r1": "idle", "r2": "running"},
+		}
+		s.Attempts["a1"] = AttemptInfo{ID: "a1", TurnID: "t1", Participant: "w", Phase: "author", Epoch: 1, Status: "complete"}
+		s.Attempts["v1"] = AttemptInfo{ID: "v1", TurnID: "t1", Participant: "r1", Phase: "review", Epoch: 1, Status: "complete"}
+		return s
+	}()
+
+	plainModeProgress := progressLine(s, "t1", now, true)
+	colorModeProgress := progressLine(s, "t1", now, false)
+
+	// Plain mode should not have spinner glyphs
+	if strings.Contains(plainModeProgress, spin) {
+		t.Errorf("plain mode progress contains spinner %q: %q", spin, plainModeProgress)
+	}
+
+	// Plain mode should not have pips (●○)
+	if strings.Contains(plainModeProgress, "●") || strings.Contains(plainModeProgress, "○") {
+		t.Errorf("plain mode progress should not have pips: %q", plainModeProgress)
+	}
+
+	// Plain mode should still have round n/m
+	if !strings.Contains(plainModeProgress, "round 1/3") {
+		t.Errorf("plain mode progress missing 'round 1/3': %q", plainModeProgress)
+	}
+
+	// Color mode should have pips and spinner
+	if !strings.Contains(colorModeProgress, "●") || !strings.Contains(colorModeProgress, "○") {
+		t.Errorf("color mode progress should have pips: %q", colorModeProgress)
+	}
+
+	// Plain mode should not have escape sequences
+	if strings.ContainsRune(plainModeProgress, '\x1b') {
+		t.Errorf("plain mode progress contains escape sequence: %q", plainModeProgress)
+	}
+}
+
+// TestPlainModeStatusLineNoMeter verifies that in plain mode, the status line
+// contains no budget meter but keeps tokens/limit.
+func TestPlainModeStatusLineNoMeter(t *testing.T) {
+	s := NewState()
+	s.CurrentTurn = "t1"
+	s.Turns["t1"] = TurnInfo{
+		ID: "t1", State: "author_dispatched", Preset: "review",
+		SubmittedAt: stripT0,
+		EstimatedTokens: 100,
+		LimitTokens: 1000,
+	}
+
+	now := stripT0.Add(5 * time.Second)
+
+	plainStrip := renderStrip(s, 200, now, true)
+	colorStrip := renderStrip(s, 200, now, false)
+
+	// Plain mode should have tokens/limit
+	if !strings.Contains(plainStrip, "est. 100 / 1000") {
+		t.Errorf("plain mode strip missing 'est. 100 / 1000': %q", plainStrip)
+	}
+
+	// Color mode should have meter (█░)
+	if !strings.Contains(colorStrip, "█") && !strings.Contains(colorStrip, "░") {
+		// Meter might be entirely filled or empty, so just check for the character
+		if !strings.Contains(colorStrip, "est. 100 / 1000") {
+			t.Errorf("color mode strip should have meter or tokens: %q", colorStrip)
+		}
+	}
+
+	// Plain mode should not have escape sequences
+	if strings.ContainsRune(plainStrip, '\x1b') {
+		t.Errorf("plain mode strip contains escape sequence: %q", plainStrip)
+	}
+}

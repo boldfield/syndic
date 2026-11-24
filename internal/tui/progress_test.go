@@ -92,7 +92,7 @@ func TestProgressLineMarks(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		got := progressLine(c.s, "t1", now)
+		got := progressLine(c.s, "t1", now, false)
 		if got != c.want {
 			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
 		}
@@ -109,7 +109,7 @@ func TestProgressLineIsTheRenderedTurns(t *testing.T) {
 	other := s.Turns["t1"]
 	other.ID, other.State, other.Author = "t0", "author_dispatched", "x"
 	s.Turns["t0"] = other
-	if got := progressLine(s, "t0", stripT0); !strings.Contains(got, "author_dispatched") || !strings.Contains(got, " x, ") {
+	if got := progressLine(s, "t0", stripT0, false); !strings.Contains(got, "author_dispatched") || !strings.Contains(got, " x, ") {
 		t.Errorf("progress of t0 = %q", got)
 	}
 }

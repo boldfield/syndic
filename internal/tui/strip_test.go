@@ -68,7 +68,7 @@ func TestStatusLineOverflowOrder(t *testing.T) {
 		{40, "… " + tokens + "  " + keyHint},
 	}
 	for _, c := range cases {
-		got := renderStatusLine(s, c.w, now, true)
+		got := renderStatusLine(s, c.w, now, true, false)
 		if got != c.want {
 			t.Errorf("w=%d:\n got %q\nwant %q", c.w, got, c.want)
 		}
@@ -96,7 +96,7 @@ func TestStatusLineKeepsTokensAndHint(t *testing.T) {
 		s.Turns["t1"] = ti
 		for w := 40; w <= 140; w++ {
 			for _, reviews := range []bool{false, true} {
-				got := renderStatusLine(s, w, now, reviews)
+				got := renderStatusLine(s, w, now, reviews, false)
 				assertStatusLine(t, w, got)
 				if !strings.Contains(got, tc.tokens) {
 					t.Errorf("%s, w=%d: tokens/limit lost: %q", tc.name, w, got)
@@ -119,12 +119,12 @@ func TestStatusLineNoLimitShedsNothingForTheMeter(t *testing.T) {
 	s.Turns["t1"] = ti
 	now := stripT0.Add(30 * time.Second)
 	want := "[review] [quick:fast] [reviewers_dispatched] [30s / 15m0s] [est. 1500] [round 1/3] ctrl+o: reviews  " + keyHint
-	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true); got != want {
+	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
 	// One cell short, the reviews hint goes and the estimate stays.
 	want = "[review] [quick:fast] [reviewers_dispatched] [30s / 15m0s] [est. 1500] [round 1/3]" + strings.Repeat(" ", 16) + keyHint
-	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true); got != want {
+	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
 }
@@ -133,12 +133,12 @@ func TestStatusLineNoLimitShedsNothingForTheMeter(t *testing.T) {
 func TestStatusLineIdle(t *testing.T) {
 	s := revisingState()
 	s.CurrentTurn = ""
-	got := renderStatusLine(s, 80, stripT0, true)
+	got := renderStatusLine(s, 80, stripT0, true, false)
 	want := "[review] [idle]" + strings.Repeat(" ", 80-15-35) + "ctrl+o: reviews  " + keyHint
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
-	if got := renderStrip(s, 80, stripT0); got != "[review] [idle]" {
+	if got := renderStrip(s, 80, stripT0, false); got != "[review] [idle]" {
 		t.Errorf("idle strip = %q", got)
 	}
 }
@@ -151,7 +151,7 @@ func TestStatusLineShortensWideStatesByCell(t *testing.T) {
 	ti.State = "révision_審査中_dispatché"
 	s.Turns["t1"] = ti
 	for w := 40; w <= 100; w++ {
-		got := renderStatusLine(s, w, stripT0, true)
+		got := renderStatusLine(s, w, stripT0, true, false)
 		if !utf8.ValidString(got) {
 			t.Fatalf("w=%d: invalid UTF-8: %q", w, got)
 		}
@@ -193,18 +193,18 @@ func TestStatusLineConnectingKeepsBothHints(t *testing.T) {
 	const fixed = "engine: connecting"
 	right := reviewsHint + "  " + keyHint
 	want := fixed + strings.Repeat(" ", 80-len(fixed)-len(right)) + right
-	if got := renderStatusLine(s, 80, stripT0, true); got != want {
+	if got := renderStatusLine(s, 80, stripT0, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
 	w := len(fixed) + 1 + len(right)
-	if got := renderStatusLine(s, w, stripT0, true); got != fixed+" "+right {
+	if got := renderStatusLine(s, w, stripT0, true, false); got != fixed+" "+right {
 		t.Errorf("w=%d: got %q", w, got)
 	}
 	want = fixed + strings.Repeat(" ", w-1-len(fixed)-len(keyHint)) + keyHint
-	if got := renderStatusLine(s, w-1, stripT0, true); got != want {
+	if got := renderStatusLine(s, w-1, stripT0, true, false); got != want {
 		t.Errorf("w=%d: got %q\nwant %q", w-1, got, want)
 	}
-	if got := renderStatusLine(s, 80, stripT0, false); strings.Contains(got, reviewsHint) || !strings.HasSuffix(got, " "+keyHint) {
+	if got := renderStatusLine(s, 80, stripT0, false, false); strings.Contains(got, reviewsHint) || !strings.HasSuffix(got, " "+keyHint) {
 		t.Errorf("without reviews: %q", got)
 	}
 }
