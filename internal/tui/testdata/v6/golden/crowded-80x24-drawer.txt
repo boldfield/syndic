@@ -1,0 +1,24 @@
+[chat]  transcript  participants
+conversation: new (created at the first submit) · workspace /home/agent/.odonian
+› which flag turns on the race detector?
+! INCOMPLETE, not approved · 2 reviews
+no approved answer (incomplete)
+  Pass -race to go test.
+identity: unknown(name-matched): alpha
++4 more
+Reviews · Turn 1 · Round 1
+  alpha (block)
+    • b1: opened
+
+
+
+
+
+
+  i3
+  i4
+  i5
+  i6
+  i7
+  i8
+[review] [idle]                              ctrl+o: reviews  tab: switch  /help
