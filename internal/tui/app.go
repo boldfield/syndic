@@ -100,7 +100,7 @@ type App struct {
 	reviewCountFinal map[string]bool // true once the count was read from a terminal turn
 	reviewCounts     map[string]*int // review_count per turn, from conversation info; a key marks the count as read
 	reviewsLoading   map[string]bool // turns whose reviews are being fetched
-	lineToTurnID     map[int]string  // map from chat view line to turn ID for click handling
+	drawerAnimating  bool            // a drawerFrameMsg is on its way
 
 	// Conversation startup options
 	conversationID string   // the open conversation; empty until the first submit creates one
@@ -197,7 +197,6 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		reviewsDrawer:          NewReviewsDrawer(),
 		reviewCounts:           map[string]*int{},
 		reviewsLoading:         make(map[string]bool),
-		lineToTurnID:           make(map[int]string),
 		missedTerminalEvents:   make(map[string]string),
 		missedTerminalEventsTm: make(map[string]string),
 		isFirstConnect:         true,
@@ -207,6 +206,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	for _, o := range opts {
 		o(a)
 	}
+	a.mouseEnabled = a.mouseEnabled && a.mouseAllowed()
 	var errs []error
 	if a.workDir == "" {
 		wd, err := os.Getwd()
@@ -501,7 +501,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		a.tStale = a.tStale || m.String() == "tab" || m.String() == "shift+tab"
-	case tickMsg:
+	case tickMsg, drawerFrameMsg:
 	default:
 		a.tStale = true
 	}
@@ -522,8 +522,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 		if a.reviewsDrawer.IsOpen() && (a.width < regionMinWidth || a.height < regionMinHeight) {
 			// A drawer too small to draw must not keep the keyboard.
-			plainMode := !a.terminalCapabilities.Color
-			a.reviewsDrawer.Close(plainMode)
+			a.reviewsDrawer.ForceClose()
 			a.want.Drawer = false
 		}
 		a.input.SetWidth(max(a.width, 1))
@@ -561,8 +560,12 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// The message itself re-renders; keep the one tick chain going while a turn is open.
 		a.tickRunning = false
-		a.reviewsDrawer.AnimationTick()
 		return a, a.ensureTick()
+	case drawerFrameMsg:
+		a.drawerAnimating = false
+		a.reviewsDrawer.Step()
+		a.syncDrawerWant()
+		return a, a.animateDrawer()
 	}
 	return a, a.updateInput(msg)
 }
@@ -640,10 +643,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines(a.width, a.content))
 			return a, nil
 		case "esc", "ctrl+o":
-			plainMode := !a.terminalCapabilities.Color
-			a.reviewsDrawer.Close(plainMode)
-			a.want.Drawer = false
-			return a, a.ensureTick()
+			return a, a.closeDrawer()
 		default:
 			// Input cannot change while drawer is focused; ignore other keys
 			return a, nil
@@ -662,52 +662,23 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		a.panel, a.refusal, a.panelRow = nil, "", 0
-		plainMode := !a.terminalCapabilities.Color
-		a.reviewsDrawer.Close(plainMode)
-		a.want.Drawer = false
-		return a, a.ensureTick()
+		return a, a.closeDrawer()
 	case "ctrl+o":
 		if a.tab == tabChat {
-			plainMode := !a.terminalCapabilities.Color
 			if a.reviewsDrawer.IsOpen() {
-				a.reviewsDrawer.Close(plainMode)
-				a.want.Drawer = false
-				return a, a.ensureTick()
+				return a, a.closeDrawer()
 			} else if a.width >= regionMinWidth && a.height >= regionMinHeight {
 				turns := chatTurns(a.state)
 				if len(turns) > 0 {
-					a.updateDrawerTurns()
-					hs := a.layout()
-					a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-					a.reviewsDrawer.Open(len(turns)-1, plainMode)
-					a.want.Drawer = true
-					return a, tea.Batch(a.fetchReviewsForTurn(turns[len(turns)-1]), a.ensureTick())
+					return a, a.openDrawer(len(turns) - 1)
 				}
 			}
 		}
 		return a, nil
 	case "tab":
-		a.panel = nil
-		a.tab = (a.tab + 1) % numTabs
-		a.answerScrollRow, a.answerFollow = 0, true
-		if a.tab != tabChat {
-			plainMode := !a.terminalCapabilities.Color
-			a.reviewsDrawer.Close(plainMode)
-			a.want.Drawer = false
-		}
-		a.updateDrawerTurns()
-		return a, a.ensureTick()
+		return a, a.setTab((a.tab + 1) % numTabs)
 	case "shift+tab":
-		a.panel = nil
-		a.tab = (a.tab + numTabs - 1) % numTabs
-		a.answerScrollRow, a.answerFollow = 0, true
-		if a.tab != tabChat {
-			plainMode := !a.terminalCapabilities.Color
-			a.reviewsDrawer.Close(plainMode)
-			a.want.Drawer = false
-		}
-		a.updateDrawerTurns()
-		return a, a.ensureTick()
+		return a, a.setTab((a.tab + numTabs - 1) % numTabs)
 	case "enter":
 		return a, a.enter()
 	}
@@ -790,142 +761,6 @@ func (a *App) detachKey(k string) (cmd tea.Cmd, ok bool) {
 		return nil, true
 	}
 	return a.quit(), true
-}
-
-// updateMouse handles mouse events when mouse is enabled.
-func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if !a.mouseEnabled || !a.terminalCapabilities.Color {
-		return a, nil
-	}
-
-	switch msg.Button {
-	case tea.MouseButtonLeft:
-		switch msg.Action {
-		case tea.MouseActionPress:
-			return a, a.handleMouseClick(msg.X, msg.Y)
-		}
-	}
-	return a, nil
-}
-
-// handleMouseClick processes a mouse click at the given coordinates.
-func (a *App) handleMouseClick(x, y int) tea.Cmd {
-	// Check for tab bar clicks (first line)
-	if y == 0 && x >= 0 {
-		return a.handleTabClick(x)
-	}
-
-	// Check for review count clicks in the chat tab
-	if !a.reviewsDrawer.IsOpen() && y > 0 && y < a.height-2 {
-		return a.handleReviewCountClick(x, y)
-	}
-
-	// Check for drawer round header clicks
-	if a.reviewsDrawer.IsOpen() {
-		hs := a.layout()
-		drawerStart := tabBarHeight + hs.Body + hs.Banners
-		if y >= drawerStart && y < drawerStart+1 {
-			return a.handleDrawerRoundClick(x)
-		}
-	}
-
-	return nil
-}
-
-// handleTabClick processes a click in the tab bar by calculating actual tab positions.
-func (a *App) handleTabClick(x int) tea.Cmd {
-	names := []string{"chat", "transcript", "participants"}
-
-	pos := 0
-	for i, name := range names {
-		selected := tab(i) == a.tab
-		if selected {
-			name = "[" + name + "]"
-		}
-		tabStart := pos
-		tabEnd := pos + len(name)
-
-		if x >= tabStart && x < tabEnd {
-			if tab(i) != a.tab {
-				a.tab = tab(i)
-			}
-			return nil
-		}
-
-		pos = tabEnd + 2
-	}
-
-	return nil
-}
-
-// handleReviewCountClick processes a click on a review count in the chat.
-func (a *App) handleReviewCountClick(x int, y int) tea.Cmd {
-	if a.tab != tabChat {
-		return nil
-	}
-
-	hs := a.layout()
-	lines, lastTurn := chatLines(a.state, a.chatIn())
-	total := len(lines)
-
-	// Map screen y coordinate to chat view line using the actual starting position
-	chatStartY := tabBarHeight + hs.Banners
-	if y < chatStartY || y >= chatStartY+hs.Body {
-		return nil
-	}
-
-	scrollStart := a.chatStart(total, lastTurn)
-	viewLine := y - chatStartY + scrollStart
-
-	// Find which turn this line belongs to
-	turnID, ok := a.lineToTurnID[viewLine]
-	if !ok || turnID == "" {
-		return nil
-	}
-
-	// Check if this turn has reviews
-	count, hasCount := a.reviewCounts[turnID]
-	if !hasCount || count == nil || *count == 0 {
-		return nil
-	}
-
-	// Update drawer with current turns and open on this turn
-	a.updateDrawerTurns()
-	a.reviewsDrawer.SetDrawerHeight(hs.Drawer)
-
-	// Find the turn index in the drawer's turn list
-	ids := chatTurns(a.state)
-	var turnIdx int
-	for i, id := range ids {
-		if id == turnID {
-			turnIdx = i
-			break
-		}
-	}
-
-	plainMode := !a.terminalCapabilities.Color
-	a.reviewsDrawer.Open(turnIdx, plainMode)
-	a.want.Drawer = true
-	return tea.Batch(a.fetchReviewsForTurn(turnID), a.ensureTick())
-}
-
-// handleDrawerRoundClick processes a click in the drawer header for round selection.
-func (a *App) handleDrawerRoundClick(x int) tea.Cmd {
-	rounds := a.reviewsDrawer.getRounds()
-	if len(rounds) <= 1 {
-		return nil
-	}
-
-	plainMode := !a.terminalCapabilities.Color
-	drawerOutput := a.reviewsDrawer.render(a.width, a.content, plainMode)
-	lines := strings.Split(drawerOutput, "\n")
-	if len(lines) == 0 {
-		return nil
-	}
-
-	headerLine := lines[0]
-	a.reviewsDrawer.SelectRoundByClick(headerLine, x)
-	return nil
 }
 
 // updateInput passes a message to the input. When its text shrinks back to
@@ -1047,10 +882,9 @@ func (a *App) send(sub submission) tea.Cmd {
 	return submitCmd(a.ctx, a.cl, sub, a.onSubmitRequest)
 }
 
-// ensureTick starts the one-second tick chain if a turn is open, drawer is animating, or none runs.
+// ensureTick starts the one-second tick chain if a turn is open and none runs.
 func (a *App) ensureTick() tea.Cmd {
-	needsTick := a.state.CurrentTurn != "" || a.reviewsDrawer.IsAnimating()
-	if !needsTick || a.tickRunning {
+	if a.state.CurrentTurn == "" || a.tickRunning {
 		return nil
 	}
 	a.tickRunning = true
@@ -1557,9 +1391,15 @@ func (a *App) scrollAnswer(delta int) {
 	a.answerFollow = row == min(lastTurn, maxStart)
 }
 
+// tabGap separates the tab names in the tab bar.
+const tabGap = "  "
+
+// tabNames are the tabs' names, in tab order.
+func tabNames() []string { return []string{"chat", "transcript", "participants"} }
+
 // tabBar names the tabs, the active one in brackets.
 func (a *App) tabBar() string {
-	names := []string{"chat", "transcript", "participants"}
+	names := tabNames()
 	parts := make([]string, len(names))
 	for i, n := range names {
 		if tab(i) == a.tab {
@@ -1567,7 +1407,7 @@ func (a *App) tabBar() string {
 		}
 		parts[i] = n
 	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, tabGap)
 }
 
 // statusLine is the strip with the hints at its right edge, w cells wide:
@@ -1608,20 +1448,6 @@ func (a *App) View() string {
 		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
 		tabView = strings.Join(chat, "\n")
 
-		a.lineToTurnID = make(map[int]string)
-		turnIDs := chatTurns(a.state)
-		for i, turnID := range turnIDs {
-			if i < len(turnStarts) {
-				startLine := turnStarts[i]
-				endLine := len(chat)
-				if i+1 < len(turnStarts) {
-					endLine = turnStarts[i+1]
-				}
-				for line := startLine; line < endLine; line++ {
-					a.lineToTurnID[line] = turnID
-				}
-			}
-		}
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
 	case tabParticipants:

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/boldfield/syndic/internal/wire"
+	"github.com/charmbracelet/harmonica"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -17,14 +18,23 @@ type ReviewsDrawer struct {
 	selectedRound int      // index in rounds list
 	turns         []string // turn IDs to display, oldest first
 	reviewsByTurn map[string]*drawerReviews
-	scrollOffset  int           // scroll position within the drawer content
-	roster        []string      // participant IDs in roster order
-	drawerHeight  int           // allocated height for rendering
-	animStart     time.Time     // when animation started
-	animDuration  time.Duration // how long animation should take
-	animating     bool          // whether animation is in progress
-	closing       bool          // whether we're animating a close
+	scrollOffset  int      // scroll position within the drawer content
+	roster        []string // participant IDs in roster order
+	drawerHeight  int      // allocated height for rendering
+	animating     bool     // a spring is still moving animPos toward its target
+	animPos       float64  // how much of the drawer shows while animating, 0 to 1
+	animVel       float64  // the spring's velocity
 }
+
+// drawerSpring moves the drawer open and shut in a few tenths of a second
+// without overshooting; a frame is one drawerFrameInterval.
+var drawerSpring = harmonica.NewSpring(harmonica.FPS(60), 22, 1)
+
+// drawerFrameInterval is the time between animation frames.
+const drawerFrameInterval = time.Second / 60
+
+// drawerSettle is how close to its target the spring must be to stop.
+const drawerSettle = 0.02
 
 // drawerReviews holds the reviews for one turn, grouped by round.
 type drawerReviews struct {
@@ -72,38 +82,41 @@ func (d *ReviewsDrawer) SetDrawerHeight(height int) {
 	d.drawerHeight = height
 }
 
-// Open opens the drawer on the given turn index with animation (unless in plain mode).
+// Open opens the drawer on the given turn index. It slides in unless plainMode
+// is set, when it is whole at once.
 func (d *ReviewsDrawer) Open(turnIdx int, plainMode bool) {
 	if turnIdx < 0 || turnIdx >= len(d.turns) {
 		return
 	}
+	from := d.progress()
 	d.open = true
 	d.selectedTurn = turnIdx
 	d.selectedRound = 0
 	d.scrollOffset = 0
-	if !plainMode {
-		d.animating = true
-		d.animStart = time.Now()
-		d.animDuration = 250 * time.Millisecond
-	}
-	d.closing = false
+	d.animPos, d.animVel = from, d.animVel*boolFloat(d.animating)
+	d.animating = !plainMode && from < 1
 }
 
-// Close closes the drawer with animation (unless in plain mode).
+// Close closes the drawer. It slides out unless plainMode is set, when it is
+// gone at once; the keyboard is released either way.
 func (d *ReviewsDrawer) Close(plainMode bool) {
+	from := d.progress()
 	d.open = false
 	d.scrollOffset = 0
-	if !plainMode {
-		if !d.animating {
-			d.animating = true
-			d.animStart = time.Now()
-			d.animDuration = 150 * time.Millisecond
-			d.closing = true
-		} else {
-			// If already animating (open), continue and mark as closing
-			d.closing = true
-		}
+	d.animPos, d.animVel = from, d.animVel*boolFloat(d.animating)
+	d.animating = !plainMode && from > 0
+}
+
+// ForceClose closes the drawer with no animation.
+func (d *ReviewsDrawer) ForceClose() {
+	d.Close(true)
+}
+
+func boolFloat(b bool) float64 {
+	if b {
+		return 1
 	}
+	return 0
 }
 
 // IsOpen reports whether the drawer is open.
@@ -111,81 +124,44 @@ func (d *ReviewsDrawer) IsOpen() bool {
 	return d.open
 }
 
-// AnimationTick advances the animation by checking elapsed time.
-// Returns true if the animation is still in progress.
-func (d *ReviewsDrawer) AnimationTick() bool {
-	if !d.animating {
-		return false
-	}
-
-	elapsed := time.Since(d.animStart)
-	if elapsed >= d.animDuration {
-		d.animating = false
-		return false
-	}
-
-	return true
+// Visible reports whether the drawer takes any screen lines: it is open, or
+// still sliding shut.
+func (d *ReviewsDrawer) Visible() bool {
+	return d.open || d.animating
 }
 
-// getAnimProgress returns the current animation progress (0 to 1) based on elapsed time.
-func (d *ReviewsDrawer) getAnimProgress() float64 {
-	if !d.animating {
-		if d.closing {
-			return 0
-		}
-		if d.open {
-			return 1
-		}
-		return 0
-	}
-
-	elapsed := time.Since(d.animStart)
-	progress := float64(elapsed) / float64(d.animDuration)
-	if progress > 1 {
-		progress = 1
-	}
-
-	// Use cubic ease-in-out for smooth animation
-	eased := easeInOutCubic(progress)
-
-	if d.closing {
-		// For close animation, reverse it
-		return 1 - eased
-	}
-	return eased
-}
-
-// easeInOutCubic is a cubic easing function for smooth animation.
-func easeInOutCubic(t float64) float64 {
-	if t < 0.5 {
-		return 4 * t * t * t
-	}
-	t = 1 - t
-	return 1 - (t * t * t / 2)
-}
-
-// IsAnimating reports whether the drawer is currently animating.
+// IsAnimating reports whether the drawer is sliding.
 func (d *ReviewsDrawer) IsAnimating() bool {
 	return d.animating
 }
 
-// AnimProgress returns the current animation progress (0 to 1) for testing.
-func (d *ReviewsDrawer) AnimProgress() float64 {
-	return d.getAnimProgress()
+// progress is how much of the drawer shows, 0 to 1.
+func (d *ReviewsDrawer) progress() float64 {
+	if d.animating {
+		return d.animPos
+	}
+	return boolFloat(d.open)
 }
 
-// setAnimProgressForTest advances the animation to a specific progress (0 to 1) for testing.
-// This is only for testing purposes.
-func (d *ReviewsDrawer) setAnimProgressForTest(progress float64) {
-	if progress >= 1.0 {
-		d.animating = false
-	} else if progress <= 0 {
-		d.animating = false
-		d.closing = false
-	} else {
-		elapsed := time.Duration(float64(d.animDuration) * progress)
-		d.animStart = time.Now().Add(-elapsed)
+// Step advances the slide by one frame and reports whether it is still moving.
+// It reads no clock, so frames are the only thing that moves the drawer.
+func (d *ReviewsDrawer) Step() bool {
+	if !d.animating {
+		return false
 	}
+	target := boolFloat(d.open)
+	d.animPos, d.animVel = drawerSpring.Update(d.animPos, d.animVel, target)
+	d.animPos = min(max(d.animPos, 0), 1)
+	if diff := d.animPos - target; diff < drawerSettle && diff > -drawerSettle && d.animVel < drawerSettle && d.animVel > -drawerSettle {
+		d.animating = false
+		d.animPos, d.animVel = target, 0
+	}
+	return d.animating
+}
+
+// AnimProgress returns how much of the drawer shows, 0 to 1.
+func (d *ReviewsDrawer) AnimProgress() float64 {
+	return d.progress()
 }
 
 // UpdateReviews stores reviews for a turn, including decoded oversized records.
@@ -274,54 +250,59 @@ func (d *ReviewsDrawer) SelectRoundRight() {
 	}
 }
 
-// RoundClickPositions returns the x (cell) positions where each round's number starts in the header,
-// for use in click handling. Returns a map from round index to x cell position.
-func (d *ReviewsDrawer) RoundClickPositions(headerLine string) map[int]int {
-	rounds := d.getRounds()
-	if len(rounds) <= 1 {
-		return nil
-	}
+// span is a run of cells in a line: from start up to, not including, end.
+type span struct{ start, end int }
 
-	positions := make(map[int]int)
-
-	pos := strings.Index(headerLine, "[")
-	if pos < 0 {
-		return positions
-	}
-	pos++ // Move past the opening bracket
-
+// roundsHeader is the bracketed list of round numbers, the selected one
+// starred, with the cells each number takes within it. It is ASCII, so cells
+// and bytes agree.
+func roundsHeader(rounds []int, selected int) (string, []span) {
+	var b strings.Builder
+	spans := make([]span, len(rounds))
+	b.WriteString("[")
 	for i, r := range rounds {
-		roundStr := fmt.Sprintf("%d", r+1)
-		idx := strings.Index(headerLine[pos:], roundStr)
-		if idx >= 0 {
-			// Convert byte position to cell width by counting display width up to that point
-			cellPos := ansi.StringWidth(headerLine[:pos+idx])
-			positions[i] = cellPos
+		if i > 0 {
+			b.WriteString(" ")
 		}
+		start := b.Len()
+		if i == selected {
+			fmt.Fprintf(&b, "*%d*", r+1)
+		} else {
+			fmt.Fprintf(&b, "%d", r+1)
+		}
+		spans[i] = span{start, b.Len()}
 	}
-
-	return positions
+	b.WriteString("]")
+	return b.String(), spans
 }
 
-// SelectRoundByClick selects the round at the given x coordinate, using the provided header line.
-func (d *ReviewsDrawer) SelectRoundByClick(headerLine string, x int) {
-	positions := d.RoundClickPositions(headerLine)
-	if len(positions) == 0 {
-		return
-	}
+// headerPrefix is the header's text before the round list.
+func (d *ReviewsDrawer) headerPrefix() string {
+	return fmt.Sprintf("Reviews · Turn %d · ", d.selectedTurn+1)
+}
 
-	var selectedIdx int
-	closestDist := 999
-	for idx, xPos := range positions {
-		dist := x - xPos
-		if dist >= 0 && dist < closestDist {
-			selectedIdx = idx
-			closestDist = dist
+// RoundAt returns the index of the round whose number is under cell x of the
+// drawer's header line, if the header lists several rounds and a number is
+// there. The header scrolls with the content, so it is only there at the top.
+func (d *ReviewsDrawer) RoundAt(x, w int) (int, bool) {
+	rounds := d.getRounds()
+	if len(rounds) <= 1 || d.scrollOffset != 0 || x < 0 || x >= w {
+		return 0, false
+	}
+	_, spans := roundsHeader(rounds, d.selectedRound)
+	base := ansi.StringWidth(d.headerPrefix())
+	for i, sp := range spans {
+		if x >= base+sp.start && x < base+sp.end {
+			return i, true
 		}
 	}
+	return 0, false
+}
 
-	if closestDist < 999 {
-		d.selectedRound = selectedIdx
+// SelectRound selects the round at index i of the turn's rounds.
+func (d *ReviewsDrawer) SelectRound(i int) {
+	if i >= 0 && i < len(d.getRounds()) {
+		d.selectedRound = i
 		d.scrollOffset = 0
 	}
 }
@@ -352,12 +333,10 @@ func (d *ReviewsDrawer) SelectedTurnIndex() int {
 }
 
 // render renders the drawer at width w from its scroll position, using
-// content from the cache, with animation effects (unless in plain mode).
+// content from the cache. While it slides, only the top part of the lines
+// shows; plainMode never slides.
 func (d *ReviewsDrawer) render(w int, cc *ContentCache, plainMode bool) string {
-	progress := d.getAnimProgress()
-
-	// Don't render if fully closed
-	if !d.open && progress <= 0 {
+	if !d.Visible() {
 		return ""
 	}
 
@@ -368,11 +347,10 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache, plainMode bool) string {
 		lines = nil
 	}
 
-	// Apply animation: show only a portion of lines during animation (skip in plain mode)
 	if !plainMode && d.animating && d.drawerHeight > 0 {
-		visibleLines := int(float64(d.drawerHeight) * progress)
-		if visibleLines < len(lines) {
-			lines = lines[:visibleLines]
+		visible := int(d.animPos*float64(d.drawerHeight) + 0.5)
+		if visible < len(lines) {
+			lines = lines[:visible]
 		}
 	}
 
@@ -406,19 +384,8 @@ func (d *ReviewsDrawer) lines(w int, cc *ContentCache) []string {
 
 	header += fmt.Sprintf(" · Round %d", selectedRoundNum+1)
 	if len(rounds) > 1 {
-		roundStr := "["
-		for i, r := range rounds {
-			if i > 0 {
-				roundStr += " "
-			}
-			if i == d.selectedRound {
-				roundStr += fmt.Sprintf("*%d*", r+1)
-			} else {
-				roundStr += fmt.Sprintf("%d", r+1)
-			}
-		}
-		roundStr += "]"
-		header = fmt.Sprintf("Reviews · Turn %d · %s", d.selectedTurn+1, roundStr)
+		list, _ := roundsHeader(rounds, d.selectedRound)
+		header = d.headerPrefix() + list
 	}
 
 	lines := []string{ansi.Truncate(header, w, "")}

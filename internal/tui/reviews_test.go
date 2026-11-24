@@ -756,35 +756,37 @@ func repeatStep(s fake.Step, n int) []fake.Step {
 	return steps
 }
 
-// TestDrawerAnimation tests the drawer open/close animation.
+// slide steps the drawer's frames until it settles and returns the progress after each.
+func slide(t *testing.T, d *ReviewsDrawer) []float64 {
+	t.Helper()
+	var seen []float64
+	for d.IsAnimating() {
+		d.Step()
+		seen = append(seen, d.AnimProgress())
+		if len(seen) > 200 {
+			t.Fatal("the slide does not settle")
+		}
+	}
+	return seen
+}
+
+// TestDrawerAnimation tests the drawer open animation.
 func TestDrawerAnimation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
 	d.SetDrawerHeight(7)
 	d.Open(0, false)
-
-	// When opened, animation should start
-	if !d.IsAnimating() {
-		t.Error("drawer should be animating after Open()")
+	if !d.IsAnimating() || d.AnimProgress() != 0 {
+		t.Fatalf("after Open: animating = %v, progress = %v, want sliding from 0", d.IsAnimating(), d.AnimProgress())
 	}
-	// Allow small timing error (animation just started, may have tiny progress)
-	if d.AnimProgress() > 0.01 {
-		t.Errorf("animation should start near 0, got %v", d.AnimProgress())
+	seen := slide(t, d)
+	if len(seen) < 3 || seen[len(seen)-1] != 1 || d.IsAnimating() {
+		t.Errorf("slide frames = %v, want several ending at 1", seen)
 	}
-
-	// Advance animation to partway through
-	d.setAnimProgressForTest(0.5)
-	if d.AnimProgress() <= 0 || d.AnimProgress() >= 1 {
-		t.Errorf("progress should advance: got %v", d.AnimProgress())
-	}
-
-	// Advance to completion
-	d.setAnimProgressForTest(1.0)
-	if d.IsAnimating() {
-		t.Error("animation should be done")
-	}
-	if d.AnimProgress() < 1.0 {
-		t.Errorf("animation should reach 1.0, got %v", d.AnimProgress())
+	for i := 1; i < len(seen); i++ {
+		if seen[i] < seen[i-1] || seen[i] > 1 {
+			t.Errorf("opening is not monotone within 0..1: %v", seen)
+		}
 	}
 }
 
@@ -793,41 +795,29 @@ func TestDrawerCloseAnimation(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1"})
 	d.Open(0, false)
+	slide(t, d)
 
-	// Skip to end of open animation
-	d.setAnimProgressForTest(1.0)
-
-	if d.AnimProgress() < 1.0 {
-		t.Fatalf("open animation should be complete, got %v", d.AnimProgress())
-	}
-
-	// Close the drawer
 	d.Close(false)
-	if !d.IsAnimating() {
-		t.Error("drawer should be animating after Close()")
+	if d.IsOpen() || !d.Visible() || !d.IsAnimating() || d.AnimProgress() != 1 {
+		t.Fatalf("after Close: open = %v, visible = %v, progress = %v", d.IsOpen(), d.Visible(), d.AnimProgress())
 	}
-	// Close animation shows full drawer at start, then animates down
-	if d.AnimProgress() < 0.9 || d.AnimProgress() > 1.0 {
-		t.Errorf("close animation should start near 1.0, got %v", d.AnimProgress())
+	seen := slide(t, d)
+	if len(seen) < 3 || seen[len(seen)-1] != 0 || d.Visible() {
+		t.Errorf("close frames = %v, want several ending at 0 and gone", seen)
 	}
+}
 
-	// Advance animation
-	d.setAnimProgressForTest(0.5)
-	if d.AnimProgress() >= 1.0 || d.AnimProgress() <= 0 {
-		t.Error("close animation should be progressing")
+// TestDrawerPlainModeDoesNotAnimate: plain mode opens and closes at once.
+func TestDrawerPlainModeDoesNotAnimate(t *testing.T) {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0, true)
+	if d.IsAnimating() || d.AnimProgress() != 1 || !d.Visible() {
+		t.Errorf("plain open: animating = %v, progress = %v", d.IsAnimating(), d.AnimProgress())
 	}
-
-	// Complete the close animation
-	d.setAnimProgressForTest(0.0)
-	if d.IsAnimating() {
-		t.Error("animation should be done")
-	}
-
-	if d.AnimProgress() > 0 {
-		t.Errorf("close animation should reach 0, got %v", d.AnimProgress())
-	}
-	if d.IsOpen() {
-		t.Error("drawer should still report closed after close animation")
+	d.Close(true)
+	if d.IsAnimating() || d.Visible() || d.AnimProgress() != 0 {
+		t.Errorf("plain close: animating = %v, visible = %v", d.IsAnimating(), d.Visible())
 	}
 }
 
@@ -837,55 +827,60 @@ func TestDrawerAnimationRender(t *testing.T) {
 	d.SetTurns([]string{"turn1"})
 	d.SetDrawerHeight(10)
 
-	// Create reviews with multiple participants to generate enough content
 	items := make([]wire.ReviewItem, 10)
 	for i := range items {
-		items[i] = wire.ReviewItem{
-			Round:       0,
-			Participant: fmt.Sprintf("p%d", i),
-			Kind:        "approve",
-		}
+		items[i] = wire.ReviewItem{Round: 0, Participant: fmt.Sprintf("p%d", i), Kind: "approve"}
 	}
 	d.UpdateReviews("turn1", items)
 	d.Open(0, false)
 
-	// Let animation progress most of the way to see full content
-	d.setAnimProgressForTest(0.95)
-	fullRender := d.render(80, NewContentCache(), false)
-	fullLines := strings.Split(fullRender, "\n")
-
-	// During earlier animation, fewer lines should be rendered
-	d.setAnimProgressForTest(0.3)
-	partialRender := d.render(80, NewContentCache(), false)
-	partialLines := strings.Split(partialRender, "\n")
-
-	if len(partialLines) >= len(fullLines) {
-		t.Errorf("partial animation should show fewer lines: %d vs %d", len(partialLines), len(fullLines))
+	cc := NewContentCache()
+	rows := func(plain bool) int {
+		out := d.render(80, cc, plain)
+		if out == "" {
+			return 0
+		}
+		return len(strings.Split(out, "\n"))
+	}
+	if rows(false) != 0 {
+		t.Errorf("the first frame shows %d rows, want 0", rows(false))
+	}
+	d.Step()
+	d.Step()
+	partial := rows(false)
+	slide(t, d)
+	full := rows(false)
+	if partial >= full || full != 11 {
+		t.Errorf("partial = %d rows, full = %d, want fewer than the 11 of a whole drawer", partial, full)
+	}
+	// Plain mode shows every row whatever the slide.
+	d.Close(false)
+	d.Open(0, false)
+	d.animPos = 0.1
+	if rows(true) != full {
+		t.Errorf("plain render of a sliding drawer = %d rows, want %d", rows(true), full)
 	}
 }
 
-// TestDrawerAnimationCompleteBeforeReopen: reopening while animation is ongoing works correctly.
-func TestDrawerAnimationCompleteBeforeReopen(t *testing.T) {
+// TestDrawerReopenWhileClosingKeepsPosition: reopening mid-slide continues from where it is.
+func TestDrawerReopenWhileClosingKeepsPosition(t *testing.T) {
 	d := NewReviewsDrawer()
 	d.SetTurns([]string{"turn1", "turn2"})
 	d.Open(0, false)
-
-	// Interrupt open animation with close
-	d.setAnimProgressForTest(0.3)
-	startProgress := d.AnimProgress()
+	slide(t, d)
 	d.Close(false)
-
-	// When Close() is called mid-animation, it starts a new close animation
-	// The behavior depends on whether we're in the middle of an open animation
-	if !d.IsAnimating() {
-		t.Error("drawer should still be animating after Close() during animation")
+	d.Step()
+	d.Step()
+	mid := d.AnimProgress()
+	if mid <= 0 || mid >= 1 {
+		t.Fatalf("closing is at %v after two frames, want mid-slide", mid)
 	}
-
-	// Advance close animation partway
-	d.setAnimProgressForTest(0.5)
-	newProgress := d.AnimProgress()
-	if newProgress >= startProgress {
-		t.Errorf("close animation progress should change, was %v now %v", startProgress, newProgress)
+	d.Open(1, false)
+	if d.AnimProgress() != mid || !d.IsAnimating() || !d.IsOpen() {
+		t.Errorf("reopen jumped from %v to %v", mid, d.AnimProgress())
+	}
+	if seen := slide(t, d); seen[len(seen)-1] != 1 {
+		t.Errorf("reopened drawer ends at %v, want 1", seen[len(seen)-1])
 	}
 }
 
@@ -905,6 +900,8 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	}
 
 	// But when closed and animating (close animation), it should render
+	d.Open(0, false)
+	slide(t, d)
 	d.Close(false)
 	output = d.render(80, NewContentCache(), false)
 	if output == "" {
@@ -912,7 +909,7 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	}
 
 	// Once animation completes (progress == 0), it should not render
-	d.setAnimProgressForTest(0.0)
+	slide(t, d)
 	output = d.render(80, NewContentCache(), false)
 	if output != "" {
 		t.Errorf("fully closed drawer should not render, got %q", output)

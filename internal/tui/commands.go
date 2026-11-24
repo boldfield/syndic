@@ -219,20 +219,19 @@ func cmdMouse(a *App, args []string) tea.Cmd {
 		a.refusal = "usage: /mouse on|off"
 		return nil
 	}
-	on := args[0] == "on"
-	a.mouseEnabled = on
-	a.refusal = "mouse " + args[0]
-
-	if on && !a.terminalCapabilities.Color {
-		a.refusal = "mouse: not available in plain mode"
-		a.mouseEnabled = false
-		return nil
+	if args[0] == "on" {
+		if !a.mouseAllowed() {
+			a.mouseEnabled = false
+			a.refusal = "mouse: not available in plain mode"
+			return nil
+		}
+		a.mouseEnabled = true
+		a.refusal = "mouse on"
+		return tea.EnableMouseCellMotion
 	}
-
-	if on {
-		return func() tea.Msg { return tea.EnableMouseCellMotion() }
-	}
-	return func() tea.Msg { return tea.DisableMouse() }
+	a.mouseEnabled = false
+	a.refusal = "mouse off"
+	return tea.DisableMouse
 }
 
 // commandMsg is the outcome of a command that sent a request: the line to
