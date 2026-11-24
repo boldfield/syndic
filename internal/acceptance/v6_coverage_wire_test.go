@@ -47,7 +47,8 @@ func v6Pages(t *testing.T, s *suite, c *client.Client, turn string, limit int) (
 // 600 KiB on every block is retrieved completely by paging reviews and
 // fetching each reference: no reply exceeds one frame and nothing is truncated.
 func TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks(t *testing.T) {
-	t.Parallel()
+	// Not parallel: at full size it would starve the timing-sensitive
+	// socket tests that run in parallel.
 	s := newSuite(t, enginetest.RosterTOML, reviewScripts(verdict(fake.VerdictApprove)))
 	c := s.Dial(t)
 
@@ -111,7 +112,8 @@ func TestV6WireCoverage_FiveReviewersSixRoundsLargeBlocks(t *testing.T) {
 // exceeds one frame. The same holds for a verdict accepted before the record
 // existed.
 func TestV6WireCoverage_OversizedRecordIdsStatesAndHashes(t *testing.T) {
-	t.Parallel()
+	// Not parallel: at full size it would starve the timing-sensitive
+	// socket tests that run in parallel.
 	const n = 3000
 	opened, ids := v6BigBlocks(n)
 	vs := []v6Verdict{
