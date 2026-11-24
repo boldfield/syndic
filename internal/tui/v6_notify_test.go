@@ -136,7 +136,8 @@ func TestV6NotifyMousePlainModeDisablesMouse(t *testing.T) {
 	}
 }
 
-// TestV6NotifyMouseOffByDefault verifies mouse is off by default and can be opted in.
+// TestV6NotifyMouseOffByDefault verifies mouse is off by default, can be opted in on capable
+// terminals, and is always off under TERM=dumb or when colour is unavailable.
 func TestV6NotifyMouseOffByDefault(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -145,15 +146,20 @@ func TestV6NotifyMouseOffByDefault(t *testing.T) {
 	appNoMouse := NewApp(ctx, "x")
 	appNoMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Create app WITH mouse flag - should have mouse on (if terminal supports it)
+	// Verify mouse is off by default
+	if appNoMouse.mouseAllowed() {
+		t.Error("mouse should be off by default; appNoMouse.mouseAllowed() returned true")
+	}
+
+	// Create app WITH mouse flag on a capable terminal
+	// (Build with explicit terminal capabilities to avoid ambient environment)
 	appWithMouse := NewApp(ctx, "x", WithMouse(true))
+	appWithMouse.terminalCapabilities.Color = true // Explicit capable terminal
 	appWithMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// Verify mouseAllowed reflects terminal capabilities (should be false only under TERM=dumb or no color)
-	// On a capable terminal with mouse opted in, mouseAllowed() should be true
-	if !appWithMouse.plainMode() && !appWithMouse.mouseAllowed() && appWithMouse.terminalCapabilities.Color {
-		// This may be expected if color is off, so only fail if we have a capable terminal
-		t.Error("app with mouse opted in should allow mouse on capable terminal")
+	// Verify mouse is allowed when opted in and terminal supports it
+	if !appWithMouse.mouseAllowed() {
+		t.Error("mouse should be allowed when opted in on capable terminal; mouseAllowed() returned false")
 	}
 
 	// Both should render
@@ -166,7 +172,7 @@ func TestV6NotifyMouseOffByDefault(t *testing.T) {
 		t.Error("app with mouse flag should render")
 	}
 
-	// Under plain mode, mouse should be disabled even when opted in
+	// Under TERM=dumb, mouse should be disabled even when opted in
 	t.Setenv("TERM", "dumb")
 	appPlainWithMouse := NewApp(ctx, "x", WithMouse(true))
 	appPlainWithMouse.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -175,14 +181,21 @@ func TestV6NotifyMouseOffByDefault(t *testing.T) {
 		t.Error("TERM=dumb should put app in plain mode")
 	}
 
-	// Under plain mode, mouseAllowed should be false
+	// Under TERM=dumb, mouseAllowed should be false
 	if appPlainWithMouse.mouseAllowed() {
-		t.Error("mouse should be disabled in plain mode even when opted in")
+		t.Error("mouse should be disabled under TERM=dumb even when opted in; mouseAllowed() returned true")
+	}
+
+	// Verify that mouse events don't change app state under TERM=dumb
+	oldView := appPlainWithMouse.View()
+	appPlainWithMouse.Update(tea.MouseMsg{X: 10, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	newView := appPlainWithMouse.View()
+	if oldView != newView {
+		t.Error("mouse event should not change app rendering under TERM=dumb")
 	}
 
 	// Should still render
-	view3 := appPlainWithMouse.View()
-	if view3 == "" {
+	if newView == "" {
 		t.Error("plain mode app should render")
 	}
 }
