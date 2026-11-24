@@ -48,11 +48,18 @@ Command run on the tree below, with the observed result:
 
     make check
     make test
-    go test -short -count=1 ./internal/acceptance ./internal/tui ./internal/server ./internal/journal ./internal/client ./cmd/syndic
+    go test -short -count=1 ./internal/acceptance ./internal/server ./internal/journal ./internal/client ./cmd/syndic
 
-Tree: `0000000000000000000000000000000000000000`
-make check: pass
-make test: pass
+Tree: `d1a90dcaa8e21423efb390f2125777c8cf6d065f` (base `origin/main` 87e0f2a, merged clean), run 2026-11-24.
+This ledger is committed on top of that tree and changes only this file.
+
+    make check: pass (build, lint and tests, exit 0)
+    make test: pass (`go test ./...`, exit 0; includes `internal/tui` in 110.9s and the ledger checker)
+    go test -short: pass
+      ok internal/acceptance 167.0s, internal/server 74.6s, internal/journal 119.7s,
+         internal/client 0.9s, cmd/syndic 4.8s
+
+No test cited here is skipped; `TestV6PresentationLedger` enforces that on every run.
 
 ## D-side clauses
 
