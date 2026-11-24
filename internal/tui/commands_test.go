@@ -644,6 +644,8 @@ func TestReasonFormDumbFallback(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 	h := scripted(t, enginetest.Reply(answerText), blockVerdict())
 	r := startAnswerRig(t, h)
+	caps := DetectTerminalCapabilities()
+	r.until(t, "caps from env", func(a *App) (string, bool) { a.terminalCapabilities = caps; return "", true })
 	r.typeLine("question")
 	turnIn(t, r, "incomplete")
 	r.typeLine("/override")
@@ -653,6 +655,61 @@ func TestReasonFormDumbFallback(t *testing.T) {
 	}
 	r.typeLine("plain reason")
 	untilView(t, r, "overridden: plain reason")
+}
+
+// keyQuits fails if the key detaches the TUI.
+func keyQuits(t *testing.T, r *rig, k tea.KeyType, name string) {
+	t.Helper()
+	quit := false
+	r.until(t, name, func(a *App) (string, bool) {
+		_, cmd := a.update(tea.KeyMsg{Type: k})
+		if cmd != nil {
+			_, quit = cmd().(tea.QuitMsg)
+		}
+		return "", true
+	})
+	if quit {
+		t.Fatalf("%s detached with a reason typed", name)
+	}
+}
+
+func TestReasonFormColourCtrlKeys(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	before := sent(r)
+	r.typeLine("/release default")
+	untilView(t, r, "may overlap it")
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("partial")})
+	untilView(t, r, "partial")
+	// ctrl+c clears the typed reason instead of detaching.
+	keyQuits(t, r, tea.KeyCtrlC, "ctrl+c")
+	v := untilView(t, r, "may overlap it")
+	if strings.Contains(v, "partial") {
+		t.Fatalf("ctrl+c left the text:\n%s", v)
+	}
+	// ctrl+d with text is the delete key, not a detach.
+	send(r, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ab")})
+	untilView(t, r, "ab")
+	keyQuits(t, r, tea.KeyCtrlD, "ctrl+d")
+	if after := sent(r); after != before {
+		t.Fatalf("commands sent: %d -> %d", before, after)
+	}
+}
+
+func TestReasonFormColourFitsTerminal(t *testing.T) {
+	r := holdRig(t, enginetest.RosterTOML, []string{"reviewer"}, "default", 1)
+	r.until(t, "color on", func(a *App) (string, bool) { a.terminalCapabilities.Color = true; return "", true })
+	send(r, tea.WindowSizeMsg{Width: 80, Height: 24})
+	r.typeLine("/release default")
+	v := untilView(t, r, "may overlap it", "reason> ")
+	if n := len(strings.Split(v, "\n")); n > 24 {
+		t.Fatalf("view is %d lines on a 24-row terminal:\n%s", n, v)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyEnter})
+	v = untilView(t, r, "reason required", "may overlap it")
+	if n := len(strings.Split(v, "\n")); n > 24 {
+		t.Fatalf("view with validation error is %d lines:\n%s", n, v)
+	}
 }
 
 func TestReleaseWarningVisible(t *testing.T) {

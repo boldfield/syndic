@@ -532,8 +532,13 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.cancelConfirm(a.confirm.cancelText())
 				return a, nil
 			case "ctrl+c", "ctrl+d":
-				if cmd, ok := a.detachKey(keyMsg.String()); ok {
-					return a, cmd
+				if a.reasonForm.reasonValue != "" {
+					// Typed text: ctrl+c clears it; ctrl+d stays the field's delete key.
+					if keyMsg.String() == "ctrl+c" {
+						return a, a.reasonForm.reset()
+					}
+				} else {
+					return a, a.quit()
 				}
 			}
 			return a, a.reasonForm.Update(msg)
@@ -627,7 +632,6 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if a.confirm != nil {
 		// A confirmation owns the keyboard: the line is its answer.
-		// (Huh form handling is now in the update() method before we get here)
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			if cmd, ok := a.detachKey(msg.String()); ok {
@@ -1577,7 +1581,7 @@ func (a *App) View() string {
 	var inputLines string
 	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
 		// Render Huh form for colour mode
-		inputLines = a.reasonForm.View()
+		inputLines = a.reasonForm.view(w, hs.Input)
 	} else {
 		inputLines = renderInput(a.input, ToSafeText([]byte(a.refusal)), w, hs.Input)
 	}
