@@ -107,6 +107,13 @@ type App struct {
 	roundsIsSet    bool     // a round limit was set, by --rounds or /rounds
 	rounds         int      // round limit for this process
 	roundsSource   string   // where the round limit came from: "--rounds" or "/rounds"
+
+	// Notification state: process-scoped, not persisted
+	notify                 bool              // /notify on|off; default false
+	liveFromSeq            int64             // boundary seq between replay and live events
+	lastProcessedSeq       int64             // highest seq processed, used to deduplicate bells
+	missedTerminalEvents   map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
+	missedTerminalEventsTm map[string]string // turn ids -> timestamp for missed terminal events
 }
 
 // Option configures an App.
@@ -133,6 +140,11 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 	return func(a *App) { a.terminalCapabilities = caps }
 }
 
+// WithNotify enables terminal notifications for terminal events.
+func WithNotify(notify bool) Option {
+	return func(a *App) { a.notify = notify }
+}
+
 // WithConversation starts the app on the conversation id, which holds the
 // turns with the given ids, oldest first. The caller has already resolved the
 // id and checked its workspace. An empty id starts an empty conversation that
@@ -152,25 +164,27 @@ func WithRounds(n int) Option {
 func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 	ctx, cancel := context.WithCancel(ctx)
 	a := &App{
-		ctx:               ctx,
-		cancel:            cancel,
-		socket:            socketPath,
-		input:             newInput(),
-		answerFollow:      true,
-		width:             80,
-		height:            24,
-		state:             NewState(),
-		now:               time.Now,
-		content:           NewContentCache(),
-		candidateIDByTurn: make(map[string]string),
-		inputs:            make(map[string]string),
-		openBlocksByTurn:  make(map[string][]wire.OpenBlock),
-		overrideReasons:   make(map[string]string),
-		quarantined:       make(map[string]bool),
-		blockDetail:       make(map[string]wire.OpenBlock),
-		reviewsDrawer:     NewReviewsDrawer(),
-		reviewCounts:      map[string]*int{},
-		reviewsLoading:    make(map[string]bool),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		socket:                 socketPath,
+		input:                  newInput(),
+		answerFollow:           true,
+		width:                  80,
+		height:                 24,
+		state:                  NewState(),
+		now:                    time.Now,
+		content:                NewContentCache(),
+		candidateIDByTurn:      make(map[string]string),
+		inputs:                 make(map[string]string),
+		openBlocksByTurn:       make(map[string][]wire.OpenBlock),
+		overrideReasons:        make(map[string]string),
+		quarantined:            make(map[string]bool),
+		blockDetail:            make(map[string]wire.OpenBlock),
+		reviewsDrawer:          NewReviewsDrawer(),
+		reviewCounts:           map[string]*int{},
+		reviewsLoading:         make(map[string]bool),
+		missedTerminalEvents:   make(map[string]string),
+		missedTerminalEventsTm: make(map[string]string),
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -942,6 +956,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.updateQuickProfileState()
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
+	a.liveFromSeq = msg.liveFromSeq
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
 	open := ""
 	for _, id := range msg.status.TurnsOpen {
@@ -1104,6 +1119,16 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 			a.overrideReasons[body.TurnID] = *body.Reason
 		}
 	}
+
+	// Handle notifications for terminal events
+	bell, notice, turnID, outcome, at := a.shouldNotify(msg.frame)
+	if bell {
+		writeBell()
+	}
+	if notice {
+		a.recordMissedTerminalEvent(turnID, outcome, at)
+	}
+
 	if a.onEvent != nil {
 		a.onEvent(msg.frame)
 	}

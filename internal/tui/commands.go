@@ -28,6 +28,7 @@ var commands = map[string]commandHandler{
 	"release":       cmdRelease,
 	"drafts":        cmdDrafts,
 	"raw":           cmdRaw,
+	"notify":        cmdNotify,
 	"help":          cmdHelp,
 	"new":           cmdNew,
 	"conversations": cmdConversations,
@@ -54,6 +55,7 @@ var commandHelp = []string{
 	"/release <pool> [attempt] release held capacity, after a confirmation",
 	"/drafts on|off            show or hide the author's unreviewed draft",
 	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
+	"/notify on|off            ring the terminal on a live terminal event",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -187,6 +189,16 @@ func cmdRaw(a *App, args []string) tea.Cmd {
 	}
 	a.rawMode = args[0] == "on"
 	a.refusal = "raw " + args[0]
+	return nil
+}
+
+func cmdNotify(a *App, args []string) tea.Cmd {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		a.refusal = "usage: /notify on|off"
+		return nil
+	}
+	a.notify = args[0] == "on"
+	a.refusal = "notify " + args[0]
 	return nil
 }
 
