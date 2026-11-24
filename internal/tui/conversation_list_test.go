@@ -241,3 +241,37 @@ func TestChooserEnterSwitchesAndKeepsRunningTurn(t *testing.T) {
 		t.Error("still on the second conversation")
 	}
 }
+
+// A reply to a list that was closed and opened again does not fill the new list.
+func TestConversationsReplyOfEarlierOpeningDropped(t *testing.T) {
+	a := chatApp(t)
+	open := func() {
+		a.convEpoch++
+		a.conv = &convChooser{sel: -1, epoch: a.convEpoch}
+	}
+	open()
+	first := a.conv.epoch
+	a.closeConversations()
+	open()
+	if a.conv.epoch == first {
+		t.Fatal("reopened list has the same epoch")
+	}
+	a.onConversations(conversationsMsg{gen: a.gen, epoch: first, items: []wire.ConversationSummary{{ID: "stale"}}})
+	if a.conv.loaded || len(a.conv.items) != 0 {
+		t.Fatalf("stale reply filled the new list: %+v", a.conv)
+	}
+	a.onConversations(conversationsMsg{gen: a.gen, epoch: a.conv.epoch, items: []wire.ConversationSummary{{ID: "fresh"}}})
+	if !a.conv.loaded || len(a.conv.items) != 1 || a.conv.items[0].ID != "fresh" {
+		t.Fatalf("current reply not taken: %+v", a.conv)
+	}
+}
+
+// /help lists the conversation chooser's keys.
+func TestHelpListsConversationKeys(t *testing.T) {
+	all := strings.Join(keyHelp, "\n") + "\n" + strings.Join(commandHelp, "\n")
+	for _, want := range []string{"/ (conversation list)", "Up, Down (conversations)", "Enter (conversations)", "n (conversations)", "close this panel, a list"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("/help does not list %q", want)
+		}
+	}
+}

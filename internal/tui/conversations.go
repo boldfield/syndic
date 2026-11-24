@@ -176,6 +176,7 @@ func (a *App) onSwitch(msg switchMsg) (tea.Model, tea.Cmd) {
 // conversationsMsg carries the list /conversations asked for.
 type conversationsMsg struct {
 	gen   int
+	epoch int // which opening of the list asked
 	items []wire.ConversationSummary
 	err   error
 }
@@ -187,21 +188,22 @@ func cmdConversations(a *App, _ []string) tea.Cmd {
 		a.refusal = "engine: not connected"
 		return nil
 	}
-	a.conv = &convChooser{sel: -1}
-	gen, cl, ctx := a.gen, a.cl, a.ctx
+	a.convEpoch++
+	a.conv = &convChooser{sel: -1, epoch: a.convEpoch}
+	gen, epoch, cl, ctx := a.gen, a.convEpoch, a.cl, a.ctx
 	return func() tea.Msg {
 		var items []wire.ConversationSummary
 		err := eachConversation(ctx, cl, nil, func(c wire.ConversationSummary) bool {
 			items = append(items, c)
 			return true
 		})
-		return conversationsMsg{gen: gen, items: items, err: err}
+		return conversationsMsg{gen: gen, epoch: epoch, items: items, err: err}
 	}
 }
 
-// onConversations fills the list once. A list closed meanwhile stays closed.
+// onConversations fills the list once. A list closed meanwhile stays closed, and a reply to an earlier opening is dropped.
 func (a *App) onConversations(msg conversationsMsg) (tea.Model, tea.Cmd) {
-	if msg.gen != a.gen || a.conv == nil || a.conv.loaded {
+	if msg.gen != a.gen || a.conv == nil || a.conv.loaded || msg.epoch != a.conv.epoch {
 		return a, nil
 	}
 	a.conv.loaded, a.conv.err, a.conv.items = true, msg.err, msg.items

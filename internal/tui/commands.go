@@ -42,7 +42,7 @@ var commands = map[string]commandHandler{
 // commandHelp is one line per command, in the order /help lists them.
 var commandHelp = []string{
 	"/new                      start a new conversation; a running turn continues",
-	"/conversations            list this directory's conversations",
+	"/conversations            list conversations; other directories dimmed",
 	"/switch <id>              open the conversation with this id or unique prefix",
 	"/trim <turn>              leave the turns before this one out of later history",
 	"/rounds [n]               show, or set for this process, the revisions per turn",
@@ -82,6 +82,10 @@ var keyHelp = []string{
 	"Up, Down (drawer)         choose the turn; its input line is highlighted",
 	"Left, Right (drawer)      choose the round",
 	"PgUp, PgDn (drawer)       scroll the drawer",
+	"/ (conversation list)     filter the list; letters, n included, edit the filter",
+	"Up, Down (conversations)  select a conversation of this directory",
+	"Enter (conversations)     switch to the selected conversation",
+	"n (conversations)         start a new conversation",
 	"Up, Down                  scroll a tab or this panel; select a participant",
 	"PgUp, PgDn                scroll the active tab, or this panel",
 	"Home, End (transcript)    go to the first or the last line",
@@ -89,7 +93,7 @@ var keyHelp = []string{
 	"Alt+Enter                 insert a newline; a multi-line paste is kept as typed",
 	"Ctrl+C                    clear the input; on an empty input, detach",
 	"Ctrl+D                    on an empty input, detach, exactly as /quit",
-	"Esc                       close this panel, the command list or the drawer",
+	"Esc                       close this panel, a list or the drawer",
 	"y, n                      answer a yes/no question; Esc answers no",
 	"Detaching never cancels a turn; only /cancel does.",
 }

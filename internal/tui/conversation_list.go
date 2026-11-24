@@ -14,6 +14,7 @@ import (
 // filter instead of acting as keys.
 type convChooser struct {
 	items     []wire.ConversationSummary
+	epoch     int    // which opening of the list this is
 	loaded    bool   // the list has arrived, empty or not
 	err       error  // why it could not be read
 	filtering bool   // letters edit the filter
