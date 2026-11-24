@@ -547,12 +547,14 @@ func TestTabCompletesCommand(t *testing.T) {
 	r.until(t, "command list appears", func(a *App) (string, bool) {
 		return "", len(a.commandList.commands) > 0
 	})
-	selected := r.app.commandList.selected
 	send(r, tea.KeyMsg{Type: tea.KeyTab})
+	r.until(t, "tab completion completes", func(a *App) (string, bool) {
+		input := a.input.Value()
+		return "", strings.HasPrefix(input, "/") && strings.Contains(input, " ")
+	})
 	input := r.app.input.Value()
 	if !strings.HasPrefix(input, "/") || !strings.Contains(input, " ") {
-		t.Logf("tab completion did not work. Input: %q, Selected before Tab: %d, After: %d", input, selected, r.app.commandList.selected)
-		t.Fatalf("tab completion did not complete")
+		t.Fatalf("tab completion did not complete. Input: %q", input)
 	}
 }
 
@@ -564,6 +566,9 @@ func TestArrowSelectsCommand(t *testing.T) {
 		return "", len(a.commandList.commands) > 0
 	})
 	send(r, tea.KeyMsg{Type: tea.KeyDown})
+	r.until(t, "arrow selects command", func(a *App) (string, bool) {
+		return "", a.commandList.selected == 0
+	})
 	if r.app.commandList.selected != 0 {
 		t.Fatalf("arrow key did not select a command. Selected=%d", r.app.commandList.selected)
 	}
@@ -576,11 +581,12 @@ func TestEscClosesCommandList(t *testing.T) {
 	r.until(t, "command list appears", func(a *App) (string, bool) {
 		return "", len(a.commandList.commands) > 0
 	})
-	before := len(r.app.commandList.commands)
 	send(r, tea.KeyMsg{Type: tea.KeyEsc})
-	after := len(r.app.commandList.commands)
-	if after != 0 || before == 0 {
-		t.Fatalf("command list not closed. Before=%d, After=%d", before, after)
+	r.until(t, "command list closes", func(a *App) (string, bool) {
+		return "", len(a.commandList.commands) == 0
+	})
+	if len(r.app.commandList.commands) != 0 {
+		t.Fatalf("command list not closed. After=%d", len(r.app.commandList.commands))
 	}
 }
 

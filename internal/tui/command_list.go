@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -60,6 +61,24 @@ func buildCommandList(prefix string, a *App) []Command {
 				return "on"
 			}
 			return "off"
+		}(),
+		"rounds": func() string {
+			if a.roundsIsSet {
+				return fmt.Sprintf("%d", a.rounds)
+			}
+			return ""
+		}(),
+		"mode": func() string {
+			if a.state.NextPreset != "" {
+				return a.state.NextPreset
+			}
+			return ""
+		}(),
+		"quick": func() string {
+			if a.quickSelection.Override != nil {
+				return *a.quickSelection.Override
+			}
+			return ""
 		}(),
 	}
 
