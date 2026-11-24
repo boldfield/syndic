@@ -114,6 +114,8 @@ type App struct {
 	lastProcessedSeq       int64             // highest seq processed, used to deduplicate bells
 	missedTerminalEvents   map[string]string // turn ids -> outcome, for display on reconnect; keyed by turn id
 	missedTerminalEventsTm map[string]string // turn ids -> timestamp for missed terminal events
+	isFirstConnect         bool              // true until first successful connection
+	emitBell               func()            // injectable bell emitter; if nil, bells are not emitted
 }
 
 // Option configures an App.
@@ -143,6 +145,11 @@ func WithTerminalCapabilities(caps TerminalCapabilities) Option {
 // WithNotify enables terminal notifications for terminal events.
 func WithNotify(notify bool) Option {
 	return func(a *App) { a.notify = notify }
+}
+
+// WithBellEmitter sets a custom bell emitter function; used for testing.
+func WithBellEmitter(emit func()) Option {
+	return func(a *App) { a.emitBell = emit }
 }
 
 // WithConversation starts the app on the conversation id, which holds the
@@ -185,6 +192,8 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		reviewsLoading:         make(map[string]bool),
 		missedTerminalEvents:   make(map[string]string),
 		missedTerminalEventsTm: make(map[string]string),
+		isFirstConnect:         true,
+		emitBell:               func() { _, _ = fmt.Fprint(os.Stdout, "\x07") },
 	}
 	a.state.ConnState = ConnStateConnecting
 	for _, o := range opts {
@@ -245,7 +254,14 @@ func (a *App) answerIn(turnID string) answerInput {
 
 // chatIn gathers what the chat tab needs.
 func (a *App) chatIn() chatInput {
-	ci := chatInput{answer: a.answerIn, inputs: a.inputs, content: a.content, width: a.width}
+	ci := chatInput{
+		answer:               a.answerIn,
+		inputs:               a.inputs,
+		content:              a.content,
+		width:                a.width,
+		missedTerminalEvents: a.missedTerminalEvents,
+		missedTerminalTimes:  a.missedTerminalEventsTm,
+	}
 	if a.reviewsDrawer.IsOpen() {
 		ci.selectedDrawerTurnID = a.reviewsDrawer.selectedTurnID()
 	}
@@ -957,6 +973,12 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 	a.state.ConnState = ConnStateConnected
 	a.statusRefreshPending, a.statusDirty = false, false
 	a.liveFromSeq = msg.liveFromSeq
+	// On first connect, initialize lastProcessedSeq to liveFromSeq so we don't
+	// show notices for turns that ended before this process started.
+	if a.isFirstConnect {
+		a.lastProcessedSeq = a.liveFromSeq
+		a.isFirstConnect = false
+	}
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
 	open := ""
 	for _, id := range msg.status.TurnsOpen {
@@ -1121,10 +1143,7 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Handle notifications for terminal events
-	bell, notice, turnID, outcome, at := a.shouldNotify(msg.frame)
-	if bell {
-		writeBell()
-	}
+	bell, notice, turnID, outcome, at := a.shouldNotify(msg.frame, a.isFirstConnect)
 	if notice {
 		a.recordMissedTerminalEvent(turnID, outcome, at)
 	}
@@ -1139,6 +1158,12 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 	// The next read is always armed here, and only here, so there is exactly
 	// one outstanding read; status and turn replies never re-arm it.
 	cmds := []tea.Cmd{readCmd(a.ctx, a.gen, a.cl)}
+	if bell {
+		bellCmd := a.bellCmd()
+		if bellCmd != nil {
+			cmds = append(cmds, bellCmd)
+		}
+	}
 	switch msg.frame.Kind {
 	case wire.EventKindEngineStarted, wire.EventKindParticipantState, wire.EventKindCapacity:
 		cmds = append(cmds, a.requestStatus())

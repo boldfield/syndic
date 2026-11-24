@@ -8,23 +8,23 @@ import (
 )
 
 func TestShouldNotifyOffByDefault(t *testing.T) {
-	a := &App{notify: false}
-	frame := terminalEventFrame(1, 10)
+	a := &App{notify: false, liveFromSeq: 10, lastProcessedSeq: 0}
+	frame := terminalEventFrame(1, 15)
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, notice, _, _, _ := a.shouldNotify(frame, true)
 	if bell || notice {
 		t.Errorf("expected no bell/notice when notify is off")
 	}
 }
 
 func TestShouldNotifyIgnoresNonTerminalEvents(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10}
+	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
 	frame := wire.Frame{
 		Kind: wire.EventKindTurnSubmitted,
 		Seq:  15,
 	}
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, notice, _, _, _ := a.shouldNotify(frame, true)
 	if bell || notice {
 		t.Errorf("expected no bell/notice for non-terminal events")
 	}
@@ -34,7 +34,7 @@ func TestShouldNotifyBellForLiveTerminalEvent(t *testing.T) {
 	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
 	frame := terminalEventFrame(1, 15) // seq 15 >= liveFromSeq 10
 
-	bell, notice, turnID, outcome, _ := a.shouldNotify(frame)
+	bell, notice, turnID, outcome, _ := a.shouldNotify(frame, true)
 	if !bell || notice {
 		t.Errorf("expected bell but no notice for live terminal event")
 	}
@@ -49,16 +49,21 @@ func TestShouldNotifyBellForLiveTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestShouldNotifyNoticeForReplayTerminalEvent(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 20, lastProcessedSeq: 0}
+func TestShouldNotifyNoticeOnlyOnReconnect(t *testing.T) {
+	a := &App{notify: false, liveFromSeq: 20, lastProcessedSeq: 0}
 	frame := terminalEventFrame(1, 15) // seq 15 < liveFromSeq 20
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
-	if bell || !notice {
-		t.Errorf("expected no bell but notice for replay terminal event")
+	// On first connect, no notice
+	bell, notice, _, _, _ := a.shouldNotify(frame, true)
+	if bell || notice {
+		t.Errorf("expected no bell/notice on first connect for replay event")
 	}
-	if a.lastProcessedSeq != 15 {
-		t.Errorf("expected lastProcessedSeq=15, got %d", a.lastProcessedSeq)
+
+	// Reset for reconnect test
+	a.lastProcessedSeq = 0
+	bell, notice, _, _, _ = a.shouldNotify(frame, false)
+	if bell || !notice {
+		t.Errorf("expected no bell but notice on reconnect for replay event")
 	}
 }
 
@@ -66,17 +71,17 @@ func TestShouldNotifyDeduplicatesBells(t *testing.T) {
 	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 15}
 	frame := terminalEventFrame(1, 15) // same seq, already processed
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, notice, _, _, _ := a.shouldNotify(frame, true)
 	if bell || notice {
 		t.Errorf("expected no bell/notice for already-processed event")
 	}
 }
 
 func TestShouldNotifyDeduplicatesNotices(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 20, lastProcessedSeq: 15}
+	a := &App{notify: false, liveFromSeq: 20, lastProcessedSeq: 15}
 	frame := terminalEventFrame(1, 15) // same seq, already processed
 
-	bell, notice, _, _, _ := a.shouldNotify(frame)
+	bell, notice, _, _, _ := a.shouldNotify(frame, false)
 	if bell || notice {
 		t.Errorf("expected no bell/notice for already-processed event")
 	}
@@ -98,22 +103,68 @@ func TestBoundaryEventBell(t *testing.T) {
 	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
 	frame := terminalEventFrame(1, 10) // seq exactly at liveFromSeq boundary
 
-	bell, _, _, _, _ := a.shouldNotify(frame)
+	bell, _, _, _, _ := a.shouldNotify(frame, true)
 	if !bell {
 		t.Errorf("expected bell for event at live_from_seq boundary")
 	}
 }
 
-func TestReplayAfterEmptyReplay(t *testing.T) {
-	a := &App{notify: true, liveFromSeq: 10, lastProcessedSeq: 0}
+func TestShouldNotifyTracksEveryFrame(t *testing.T) {
+	a := &App{notify: false, liveFromSeq: 10, lastProcessedSeq: 0}
 
-	// Empty replay (no events before live_from_seq)
-	// Then a live event arrives
-	frame := terminalEventFrame(1, 10)
+	// A non-terminal event should still update lastProcessedSeq
+	frame := wire.Frame{
+		Kind: wire.EventKindTurnSubmitted,
+		Seq:  5,
+	}
+	a.shouldNotify(frame, true)
+	if a.lastProcessedSeq != 5 {
+		t.Errorf("expected lastProcessedSeq=5 after non-terminal event, got %d", a.lastProcessedSeq)
+	}
+}
 
-	bell, _, _, _, _ := a.shouldNotify(frame)
+func TestBellEmitterInjection(t *testing.T) {
+	bellCount := 0
+	emit := func() { bellCount++ }
+	a := &App{
+		notify:      true,
+		liveFromSeq: 10,
+		lastProcessedSeq: 0,
+		emitBell:    emit,
+	}
+
+	frame := terminalEventFrame(1, 15) // live terminal event
+	bell, _, _, _, _ := a.shouldNotify(frame, true)
 	if !bell {
-		t.Errorf("expected bell after empty replay for first live terminal event")
+		t.Errorf("expected bell")
+	}
+
+	cmd := a.bellCmd()
+	if cmd == nil {
+		t.Errorf("expected bellCmd to return a command")
+	}
+
+	// Execute the command
+	msg := cmd()
+	if msg == nil {
+		t.Errorf("expected bellCmd to execute and return a message")
+	}
+	if bellCount != 1 {
+		t.Errorf("expected bell emitter to be called once, got %d", bellCount)
+	}
+}
+
+func TestNilBellEmitterReturnsNilCmd(t *testing.T) {
+	a := &App{
+		notify:           true,
+		liveFromSeq:      10,
+		lastProcessedSeq: 0,
+		emitBell:         nil,
+	}
+
+	cmd := a.bellCmd()
+	if cmd != nil {
+		t.Errorf("expected bellCmd to return nil when emitBell is nil")
 	}
 }
 
