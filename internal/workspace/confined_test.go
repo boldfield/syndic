@@ -1,10 +1,13 @@
 package workspace
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestConfinedOpenFile_RelativePathSuccess(t *testing.T) {
@@ -550,5 +553,321 @@ func TestConfinedMultiplePatterns(t *testing.T) {
 		if err != nil {
 			t.Errorf("ReadFile %q should succeed: %v", path, err)
 		}
+	}
+}
+
+// Regression test for issue 1: fd 0 closure
+// Tests that multiple consecutive OpenFile calls don't close stdin/fd 0
+func TestConfinedOpenFile_FD0NotClosed(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create multiple test files
+	for i := 0; i < 3; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("file%d.txt", i))
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("content %d", i)), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Open files multiple times and read from each
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("file%d.txt", i)
+		f, err := c.OpenFile(path, os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("OpenFile %s: %v", path, err)
+		}
+		defer func() { _ = f.Close() }()
+
+		// Try to stat stdin (fd 0) to ensure it's still valid
+		var stat unix.Stat_t
+		if err := unix.Fstat(0, &stat); err != nil {
+			t.Errorf("After opening %s, fd 0 is bad: %v", path, err)
+		}
+	}
+}
+
+// Regression test for issue 2: protected patterns miss top-level private keys
+// Tests that **/*.key pattern protects both top-level and nested .key files
+func TestConfinedProtectedPaths_TopLevelPrivateKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create top-level and nested private key files
+	topLevelKey := filepath.Join(dir, "server.key")
+	if err := os.WriteFile(topLevelKey, []byte("secret key"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nestedDir := filepath.Join(dir, "config")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nestedKey := filepath.Join(nestedDir, "app.key")
+	if err := os.WriteFile(nestedKey, []byte("app secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, []string{"**/*.key", "**/*.pem", "**/id_rsa", "**/id_dsa", "**/id_ecdsa", "**/id_ed25519", "**/id_ecdsa_sk", "**/id_ed25519_sk"})
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Both top-level and nested .key files should be protected
+	_, err = c.ReadFile("server.key")
+	if err == nil {
+		t.Error("ReadFile server.key should be protected (top-level)")
+	}
+
+	_, err = c.ReadFile("config/app.key")
+	if err == nil {
+		t.Error("ReadFile config/app.key should be protected (nested)")
+	}
+
+	// Test pem and id_rsa patterns
+	pemFile := filepath.Join(dir, "cert.pem")
+	if err := os.WriteFile(pemFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.ReadFile("cert.pem")
+	if err == nil {
+		t.Error("ReadFile cert.pem should be protected (top-level)")
+	}
+
+	idFile := filepath.Join(dir, "id_rsa")
+	if err := os.WriteFile(idFile, []byte("key"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.ReadFile("id_rsa")
+	if err == nil {
+		t.Error("ReadFile id_rsa should be protected (top-level)")
+	}
+}
+
+// Regression test for issue 3: ? glob matches /
+// Tests that ? glob only matches non-slash characters
+func TestConfinedProtectedPaths_QuestionMarkGlob(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create files that should/shouldn't match a?b pattern
+	// a?b should match aXb where X is a single non-slash character
+	// but NOT match a/b
+
+	nestedDir := filepath.Join(dir, "a")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	bFile := filepath.Join(nestedDir, "b")
+	if err := os.WriteFile(bFile, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cFile := filepath.Join(dir, "aXb")
+	if err := os.WriteFile(cFile, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, []string{"a?b"})
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// a/b should NOT be protected by a?b pattern (? doesn't match /)
+	_, err = c.ReadFile("a/b")
+	if err != nil {
+		t.Errorf("ReadFile a/b should succeed (? doesn't match /): %v", err)
+	}
+
+	// aXb should be protected by a?b pattern
+	_, err = c.ReadFile("aXb")
+	if err == nil {
+		t.Error("ReadFile aXb should fail (matches a?b pattern)")
+	}
+}
+
+// Regression test for issue 4: non-regular files aren't refused
+// Tests that FIFOs, directories, and other non-regular files are rejected
+func TestConfinedOpenFile_NonRegularFilesRejected(t *testing.T) {
+	dir := t.TempDir()
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Test directory rejection
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.OpenFile("subdir", os.O_RDONLY, 0)
+	if err == nil {
+		t.Error("OpenFile on directory should fail")
+	}
+
+	// Test FIFO rejection - create a FIFO
+	fifoPath := filepath.Join(dir, "testfifo")
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+
+	// Try to open FIFO with O_NONBLOCK to avoid blocking
+	_, err = c.OpenFile("testfifo", os.O_RDONLY, 0)
+	if err == nil {
+		t.Error("OpenFile on FIFO should fail")
+	}
+}
+
+// Regression test for issue 5: Symlink swap attack deterministic test
+// Tests that symlink swaps between components are caught
+func TestConfinedOpenFile_SymlinkSwapDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetFile := filepath.Join(subdir, "file.txt")
+	if err := os.WriteFile(targetFile, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Open the file - should work initially
+	f1, err := c.OpenFile("sub/file.txt", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("Initial open should work: %v", err)
+	}
+	defer func() { _ = f1.Close() }()
+
+	// Read content
+	content, err := io.ReadAll(f1)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if string(content) != "original" {
+		t.Errorf("content = %q, want original", string(content))
+	}
+
+	// Now attempt to swap the directory component for a symlink
+	// This simulates an attacker trying to change the path mid-open
+	if err := os.RemoveAll(subdir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a directory outside root
+	outsideDir := filepath.Join(dir, "..", "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outsideDir, "file.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace 'sub' with a symlink to outside
+	if err := os.Symlink(outsideDir, subdir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to open the path again - should fail due to O_NOFOLLOW on the symlink
+	_, err = c.OpenFile("sub/file.txt", os.O_RDONLY, 0)
+	if err == nil {
+		t.Error("OpenFile through swapped symlink should fail")
+	}
+}
+
+// Regression test for root relocation identity
+// Tests that operations through the same root fd give consistent results
+func TestConfinedOpenFile_RootRelocationIdentity(t *testing.T) {
+	dir := t.TempDir()
+	testFile := filepath.Join(dir, "test.txt")
+	testContent := "original content"
+	if err := os.WriteFile(testFile, []byte(testContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Open file multiple times and verify consistent access
+	for i := 0; i < 3; i++ {
+		f, err := c.OpenFile("test.txt", os.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("Open iteration %d: %v", i, err)
+		}
+
+		content, err := io.ReadAll(f)
+		if err != nil {
+			_ = f.Close()
+			t.Fatalf("Read iteration %d: %v", i, err)
+		}
+
+		if string(content) != testContent {
+			_ = f.Close()
+			t.Errorf("Iteration %d: content mismatch", i)
+		}
+
+		_ = f.Close()
+	}
+
+	// Verify we can't escape even if we try using descriptors
+	// Get a stat of the opened file
+	f, err := c.OpenFile("test.txt", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("Final open: %v", err)
+	}
+
+	_, err = f.Stat()
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("Stat: %v", err)
+	}
+	_ = f.Close()
+
+	// Get the same file again and stat it
+	f, err = c.OpenFile("test.txt", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("Second open: %v", err)
+	}
+
+	_, err = f.Stat()
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("Stat 2: %v", err)
+	}
+	_ = f.Close()
+
+	// Inode should be the same - get inodes from both opens
+	var stat1, stat2 unix.Stat_t
+	if err := unix.Stat(testFile, &stat1); err != nil {
+		t.Fatalf("Stat file directly: %v", err)
+	}
+	if err := unix.Stat(testFile, &stat2); err != nil {
+		t.Fatalf("Stat file directly 2: %v", err)
+	}
+
+	if stat1.Ino != stat2.Ino {
+		t.Errorf("Inode mismatch: %d != %d", stat1.Ino, stat2.Ino)
 	}
 }

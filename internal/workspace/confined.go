@@ -28,7 +28,7 @@ func OpenConfined(root string, patterns []string) (*Confined, error) {
 		return nil, errors.New("workspace root path cannot be empty")
 	}
 
-	rootfd, err := unix.Open(root, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	rootfd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace root: %w", err)
 	}
@@ -95,11 +95,13 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 
 	// Walk the path component by component using openat with O_NOFOLLOW
 	currentfd := c.rootfd
-	var openedfd int
+	openedfd := -1
 
 	for i, component := range components {
 		if component == ".." {
-			_ = unix.Close(openedfd)
+			if openedfd >= 0 && openedfd != c.rootfd {
+				_ = unix.Close(openedfd)
+			}
 			return nil, fmt.Errorf("path traversal with ..: %q", path)
 		}
 
@@ -109,6 +111,10 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 		if isLast {
 			// Last component: apply the requested flags
 			openFlags |= flags
+			// Use O_NONBLOCK on read opens to prevent FIFOs from blocking
+			if (flags & unix.O_WRONLY) == 0 {
+				openFlags |= unix.O_NONBLOCK
+			}
 		} else {
 			// Intermediate components: open as directory for further traversal
 			openFlags |= unix.O_RDONLY | unix.O_DIRECTORY
@@ -135,19 +141,24 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 		return nil, errors.New("failed to open file")
 	}
 
+	// Validate that the opened file is a regular file (not directory, FIFO, device, etc.)
+	var stat unix.Stat_t
+	if err := unix.Fstat(openedfd, &stat); err != nil {
+		_ = unix.Close(openedfd)
+		return nil, fmt.Errorf("fstat opened file: %w", err)
+	}
+
+	// Check that it's a regular file
+	if (stat.Mode & unix.S_IFMT) != unix.S_IFREG {
+		_ = unix.Close(openedfd)
+		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o", stat.Mode)
+	}
+
 	return os.NewFile(uintptr(openedfd), path), nil
 }
 
 // ReadFile reads the entire contents of a file, checking confinement and protected paths.
 func (c *Confined) ReadFile(path string) ([]byte, error) {
-	if err := c.validatePath(path); err != nil {
-		return nil, err
-	}
-
-	if err := c.checkProtectedPaths(path); err != nil {
-		return nil, err
-	}
-
 	f, err := c.OpenFile(path, unix.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("read file %q: %w", path, err)
@@ -160,14 +171,6 @@ func (c *Confined) ReadFile(path string) ([]byte, error) {
 // WriteFile writes data to a file, checking confinement and protected paths.
 // If the file exists, it will be truncated.
 func (c *Confined) WriteFile(path string, data []byte, perm fs.FileMode) error {
-	if err := c.validatePath(path); err != nil {
-		return err
-	}
-
-	if err := c.checkProtectedPaths(path); err != nil {
-		return err
-	}
-
 	f, err := c.OpenFile(path, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, perm)
 	if err != nil {
 		return fmt.Errorf("write file %q: %w", path, err)
@@ -180,14 +183,6 @@ func (c *Confined) WriteFile(path string, data []byte, perm fs.FileMode) error {
 
 // Stat returns file information, checking confinement and protected paths.
 func (c *Confined) Stat(path string) (fs.FileInfo, error) {
-	if err := c.validatePath(path); err != nil {
-		return nil, err
-	}
-
-	if err := c.checkProtectedPaths(path); err != nil {
-		return nil, err
-	}
-
 	f, err := c.OpenFile(path, unix.O_RDONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("stat %q: %w", path, err)
@@ -230,13 +225,23 @@ func (c *Confined) checkProtectedPaths(path string) error {
 
 // compileProtectionPattern converts glob patterns to regex patterns.
 // Supports patterns like ".git/", ".env*", "secret/**", etc.
+// ** matches zero or more directory components, * matches any chars except /,
+// and ? matches a single char except /.
 func compileProtectionPattern(pattern string) (*regexp.Regexp, error) {
 	// Escape special regex characters except * and ?
 	escaped := regexp.QuoteMeta(pattern)
-	// Convert glob wildcards to regex
+
+	// Convert glob wildcards to regex in specific order:
+	// First, handle **/ (zero or more path components with trailing slash)
+	escaped = strings.ReplaceAll(escaped, `\*\*/`, `(?:.*/)?`)
+	// Then, handle /** (matches anything including path separators)
+	escaped = strings.ReplaceAll(escaped, `/\*\*`, `/.*`)
+	// Then, remaining ** (matches anything including path separators)
 	escaped = strings.ReplaceAll(escaped, `\*\*`, `.*`)
+	// * matches any characters except /
 	escaped = strings.ReplaceAll(escaped, `\*`, `[^/]*`)
-	escaped = strings.ReplaceAll(escaped, `\?`, `.`)
+	// ? matches a single character except /
+	escaped = strings.ReplaceAll(escaped, `\?`, `[^/]`)
 
 	// Anchor pattern appropriately
 	if !strings.HasPrefix(pattern, "/") {
@@ -247,11 +252,8 @@ func compileProtectionPattern(pattern string) (*regexp.Regexp, error) {
 	// Add end anchor and handle directory matches
 	if strings.HasSuffix(pattern, "/") {
 		// Directory pattern like ".git/" - matches ".git", ".git/", ".git/anything"
-		// Remove trailing / (not escaped in QuoteMeta) and match the directory and its contents
+		// Remove trailing / (already processed above) and match the directory and its contents
 		escaped = strings.TrimSuffix(escaped, "/")
-		escaped = escaped + `($|/.*)`
-	} else if strings.Contains(pattern, "**") {
-		// ** can match anything including subdirectories
 		escaped = escaped + `($|/.*)`
 	} else {
 		// Match the file/dir exactly or with trailing slash or as a directory
