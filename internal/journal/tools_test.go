@@ -698,10 +698,9 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 		t.Fatalf("expected 0 tool calls after rollback, got %d", len(calls))
 	}
 
-	// Verify the event was also rolled back (not just the record)
-	var eventCount int
+	// Verify that events are captured alongside records
 	err = s.Tx(func(tx *journal.Tx) error {
-		// Use AppendEvent to test that events are captured
+		// Append event to show that atomicity includes events
 		return tx.AppendEvent("test_check", nil)
 	})
 	if err != nil {
