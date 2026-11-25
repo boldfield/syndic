@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestMigration014 verifies that migration 014 creates the tools schema correctly.
@@ -161,18 +162,25 @@ func TestMigration014UpgradeFromV13(t *testing.T) {
 	turnID := "turn-1"
 	attemptID := "attempt-1"
 
-	if _, err := conn.Exec(`INSERT INTO runs (id, model, messages_sent, tokens_in, tokens_out, frozen_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		runID, "opus", 1, 100, 200, nil); err != nil {
+	if _, err := conn.Exec(`INSERT INTO runs (id, manifest, manifest_hash) VALUES (?, ?, ?)`,
+		runID, "{}", "hash123"); err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 
-	if _, err := conn.Exec(`INSERT INTO turns (id, run_id, turn_number, state, assigned_to, epoch, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		turnID, runID, 1, "completed", "participant1", 1, nil); err != nil {
+	// Create conversation for the turn
+	convID := "conv-" + turnID
+	if _, err := conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, convID); err != nil {
+		t.Fatalf("insert conversation: %v", err)
+	}
+
+	if _, err := conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`,
+		turnID, runID, "review", convID); err != nil {
 		t.Fatalf("insert turn: %v", err)
 	}
 
+	now := time.Now().Format(time.RFC3339Nano)
 	if _, err := conn.Exec(`INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		attemptID, turnID, "participant1", "author", 1, nil, "completed"); err != nil {
+		attemptID, turnID, "participant1", "author", 1, now, "completed"); err != nil {
 		t.Fatalf("insert attempt: %v", err)
 	}
 
