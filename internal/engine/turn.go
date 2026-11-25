@@ -199,6 +199,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
+	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	quarantined, exceeded := false, false
 	var term *terminal
@@ -260,7 +261,14 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
 			return err
 		}
-		if gate == nil {
+		if isToolStep {
+			// Tool step accepted but not parsed; text is journaled for the transcript.
+			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
+				return err
+			}
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonToolStepUnsupported)
+		} else if gate == nil {
 			// The solo answer is not a candidate; keep its text so later
 			// turns' history can carry it.
 			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {

@@ -4,18 +4,20 @@ import "errors"
 
 // Sentinel errors.
 var (
-	ErrUsageUnavailable  = errors.New("usage unavailable")
-	ErrNotImplemented    = errors.New("not implemented")
-	ErrEnvelopeMismatch  = errors.New("envelope mismatch")
-	ErrIdentityMismatch  = errors.New("identity mismatch")
-	ErrStatusNotComplete = errors.New("status not complete")
-	ErrUnreachable       = errors.New("unreachable")
-	ErrUnauthorized      = errors.New("unauthorized")
-	ErrModelUnavailable  = errors.New("model unavailable")
-	ErrInvalidIdentity   = errors.New("invalid identity")
-	ErrNotSent           = errors.New("request not sent")
-	ErrUncertain         = errors.New("request sent; completion uncertain")
-	ErrIncompleteProbe   = errors.New("incomplete probe: missing model or max-tokens field")
+	ErrUsageUnavailable          = errors.New("usage unavailable")
+	ErrNotImplemented            = errors.New("not implemented")
+	ErrEnvelopeMismatch          = errors.New("envelope mismatch")
+	ErrIdentityMismatch          = errors.New("identity mismatch")
+	ErrStatusNotComplete         = errors.New("status not complete")
+	ErrUnreachable               = errors.New("unreachable")
+	ErrUnauthorized              = errors.New("unauthorized")
+	ErrModelUnavailable          = errors.New("model unavailable")
+	ErrInvalidIdentity           = errors.New("invalid identity")
+	ErrNotSent                   = errors.New("request not sent")
+	ErrUncertain                 = errors.New("request sent; completion uncertain")
+	ErrIncompleteProbe           = errors.New("incomplete probe: missing model or max-tokens field")
+	ErrToolCallsWithoutStatus    = errors.New("tool_calls status without tool calls")
+	ErrToolCallsUnderOtherStatus = errors.New("tool calls under non-tool_calls finish status")
 )
 
 // ProbeStepError is a probe failure that names the probe request it failed
