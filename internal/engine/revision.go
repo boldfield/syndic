@@ -166,11 +166,13 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", t.author, missing)
 	}
-	total := satAdd(pb.estimate(authorMsgs), authorMaxOut)
+	authorTools := toolsForAdmission(t.eff.Preset.Tools)
+	total := satAdd(pb.estimateWithTools(authorMsgs, authorTools), authorMaxOut)
 	next := *t
 	next.round = t.round + 1
 	next.candidateHash = standInHash
 	next.candidate = pb.standIn(authorMaxOut)
+	reviewTools := toolsForAdmission(t.eff.Preset.ReviewerTools)
 	for _, id := range t.required {
 		blocks, err := tx.ReviewerOpenBlocks(t.id, id)
 		if err != nil {
@@ -185,12 +187,12 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 			return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 		}
 		maxOut := rb.maxOutput(*t.eff.Budgets.ReviewerMaxOutputTokens)
-		total = satAdd(total, satAdd(rb.estimate(msgs), maxOut))
+		total = satAdd(total, satAdd(rb.estimateWithTools(msgs, reviewTools), maxOut))
 		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rb.estimate(repair), maxOut))
+		total = satAdd(total, satAdd(rb.estimateWithTools(repair, reviewTools), maxOut))
 	}
 	return total, nil
 }

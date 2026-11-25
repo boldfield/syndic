@@ -686,7 +686,7 @@ func TestAdmissionTokensWithTools(t *testing.T) {
 			tools:            []transport.Tool{},
 			tokensPerByteMax: 1.0,
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:             92, // msg1(4+8) + msg2(6+8) + framing(50) + request(16)
+			want:             142, // msg1(4+8) + msg2(6+8) + framing(100) + request(16)
 		},
 	}
 

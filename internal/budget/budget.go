@@ -227,7 +227,10 @@ func toolCallArgumentsBytes(msgs []transport.Message) (int, error) {
 // toolMessageFramingBytes estimates the framing overhead for tool messages.
 // Tool messages include role labels, delimiters, and an untrusted-content notice.
 // This provides a conservative estimate of the fixed overhead per tool message.
-const toolMessageFramingOverhead = 50
+// The overhead includes the JSON structure and typical tool_call_id length.
+// Minimum JSON structure {"role":"tool","content":"","tool_call_id":""} is ~44 bytes,
+// plus typical tool_call_id of 20+ bytes and framing = ~100 bytes total.
+const toolMessageFramingOverhead = 100
 
 func toolMessageFramingBytes(msgs []transport.Message) int {
 	sum := 0
