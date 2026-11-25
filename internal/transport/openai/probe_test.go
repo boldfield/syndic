@@ -45,6 +45,9 @@ type probeServer struct {
 	truncateCalibrationText  bool // when true, the calibration text response is cut short after its headers
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
+	// tool_calls probe control
+	toolCallsRequest map[string]any // body of the last tool_calls probe request
+	toolCallsSupport string         // "yes", "no", or "unknown"; controls tool_calls probe response
 }
 
 func (p *probeServer) count(k string) int {
@@ -96,6 +99,12 @@ func (p *probeServer) handler() http.Handler {
 
 		isCalibration := user == ""            // empty = baseline calibration request
 		isCalibrationText := len(user) == 4096 // calibration text is exactly 4096 bytes
+		isToolCallsProbe := strings.Contains(user, "Call the probe tool") && strings.Contains(user, "PROBE")
+		if isToolCallsProbe {
+			p.mu.Lock()
+			p.toolCallsRequest = req
+			p.mu.Unlock()
+		}
 
 		if isCalibration || isCalibrationText {
 			p.mu.Lock()
@@ -125,7 +134,45 @@ func (p *probeServer) handler() http.Handler {
 
 		answer := "ok"
 		promptTokens := 1
+		finishReason := "stop"
+		var toolCalls []any
 		switch {
+		case isToolCallsProbe && p.toolCallsSupport == "yes_stop":
+			// A forced named call finished with "stop", as vLLM does.
+			finishReason = "stop"
+			toolCalls = []any{
+				map[string]any{
+					"id":   "call_probe",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "probe_tool",
+						"arguments": `{"message":"PROBE"}`,
+					},
+				},
+			}
+		case isToolCallsProbe && p.toolCallsSupport == "yes":
+			// Return tool_calls to indicate yes
+			answer = "Using tool"
+			finishReason = "tool_calls"
+			toolCalls = []any{
+				map[string]any{
+					"id":   "call_probe",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "probe_tool",
+						"arguments": `{"message":"PROBE"}`,
+					},
+				},
+			}
+		case isToolCallsProbe && p.toolCallsSupport == "unknown":
+			// Return 400 to indicate unknown
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"tools not supported"}`))
+			return
+		case isToolCallsProbe && p.toolCallsSupport == "no":
+			// Return plain stop to indicate no
+			answer = "Cannot use tools"
+			finishReason = "stop"
 		case system != "":
 			answer = "PING"
 		case isCalibration:
@@ -178,11 +225,15 @@ func (p *probeServer) handler() http.Handler {
 				}
 			}
 		}
+		msgContent := map[string]any{"role": "assistant", "content": answer}
+		if len(toolCalls) > 0 {
+			msgContent["tool_calls"] = toolCalls
+		}
 		resp := map[string]any{
 			"model": "m1-reported",
 			"choices": []any{map[string]any{
-				"message":       map[string]any{"role": "assistant", "content": answer},
-				"finish_reason": "stop",
+				"message":       msgContent,
+				"finish_reason": finishReason,
 			}},
 		}
 		if !p.noUsage {
@@ -263,8 +314,8 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	if got := rec.FinishReasons["stop"]; got != transport.StatusComplete {
 		t.Errorf("FinishReasons[stop]: got %v", got)
 	}
-	if len(rec.ToolRestrictions) == 0 || !strings.Contains(rec.ToolRestrictions[0], "no tool") {
-		t.Errorf("ToolRestrictions: %v", rec.ToolRestrictions)
+	if rec.ToolCalls != transport.TriNo && rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want yes or no", rec.ToolCalls)
 	}
 	if rec.ObservedAt.IsZero() {
 		t.Errorf("ObservedAt zero")
@@ -273,13 +324,90 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"models", "max_tokens", "system_role", "over_length", "calibration_baseline", "calibration"} {
+	for _, k := range []string{"models", "max_tokens", "system_role", "tool_calls", "over_length", "calibration_baseline", "calibration"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("Raw missing step %q", k)
 		}
 	}
-	if p.count("models") != 1 || p.count("chat") != 5 {
-		t.Errorf("request counts: models=%d chat=%d, want 1 and 5", p.count("models"), p.count("chat"))
+	if p.count("models") != 1 || p.count("chat") != 6 {
+		t.Errorf("request counts: models=%d chat=%d, want 1 and 6", p.count("models"), p.count("chat"))
+	}
+}
+
+// TestProbeToolCallsYes verifies that tool_calls probe returns TriYes when the model responds with tool_calls.
+func TestProbeToolCallsYes(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "yes"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want TriYes", rec.ToolCalls)
+	}
+}
+
+// TestProbeToolCallsForcedStop verifies a forced probe_tool call finished with
+// "stop" counts as yes, and that the probe request carries the tool and choice.
+func TestProbeToolCallsForcedStop(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "yes_stop"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want TriYes", rec.ToolCalls)
+	}
+	p.mu.Lock()
+	req := p.toolCallsRequest
+	p.mu.Unlock()
+	tools, _ := req["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools: got %v, want one definition", req["tools"])
+	}
+	fn, _ := tools[0].(map[string]any)["function"].(map[string]any)
+	if tools[0].(map[string]any)["type"] != "function" || fn["name"] != "probe_tool" {
+		t.Errorf("tool definition: got %v", tools[0])
+	}
+	choice, _ := req["tool_choice"].(map[string]any)
+	cfn, _ := choice["function"].(map[string]any)
+	if choice["type"] != "function" || cfn["name"] != "probe_tool" {
+		t.Errorf("tool_choice: got %v", req["tool_choice"])
+	}
+}
+
+// TestProbeToolCallsNo verifies that tool_calls probe returns TriNo when the model responds with stop (no tool_calls).
+func TestProbeToolCallsNo(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "no"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriNo {
+		t.Errorf("ToolCalls: got %v, want TriNo", rec.ToolCalls)
+	}
+}
+
+// TestProbeToolCallsUnknown verifies that tool_calls probe returns TriUnknown when the server rejects the request.
+func TestProbeToolCallsUnknown(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "unknown"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriUnknown {
+		t.Errorf("ToolCalls: got %v, want TriUnknown", rec.ToolCalls)
 	}
 }
 
@@ -293,11 +421,11 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 		wantOver  string
 		wantElig  transport.Tri
 	}{
-		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 6, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
-		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run:skipped", transport.TriUnknown},
+		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 7, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
+		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 4, "", "not_run:skipped", transport.TriUnknown},
 		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run:skipped", transport.TriUnknown},
-		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 5, "max_tokens", "rejected:other", transport.TriUnknown},
-		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 5, "max_tokens", "markers_missing", transport.TriUnknown},
+		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 6, "max_tokens", "rejected:other", transport.TriUnknown},
+		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 6, "max_tokens", "markers_missing", transport.TriUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

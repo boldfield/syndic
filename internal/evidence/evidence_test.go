@@ -1635,3 +1635,61 @@ func TestConfigFingerprintRefereeFields(t *testing.T) {
 		t.Errorf("referee fields must each change the fingerprint: base=%s model=%s endpoint=%s", baseFP, m, e)
 	}
 }
+
+// TestExportIncludesToolCalls verifies that the Export includes the ToolCalls field.
+func TestExportIncludesToolCalls(t *testing.T) {
+	testCases := []struct {
+		name      string
+		toolCalls transport.Tri
+	}{
+		{"yes", transport.TriYes},
+		{"no", transport.TriNo},
+		{"unknown", transport.TriUnknown},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := transport.CapabilityRecord{
+				Endpoint:       "test-endpoint",
+				Model:          "test-model",
+				AuthMode:       "api-key",
+				Identity:       transport.NewUnknownIdentity(),
+				ReportedModel:  "test-model",
+				ToolCalls:      tc.toolCalls,
+				AdapterVersion: "1.0.0",
+				ObservedAt:     time.Now(),
+				Raw:            json.RawMessage("{}"),
+			}
+
+			profile := config.EndpointProfile{
+				Name:             "test-endpoint",
+				BaseURL:          "http://localhost:8000",
+				DeclaredLocation: "local",
+			}
+
+			export, err := Redact(record, profile)
+			if err != nil {
+				t.Fatalf("Redact failed: %v", err)
+			}
+
+			if export.ToolCalls != tc.toolCalls {
+				t.Errorf("ToolCalls: got %v, want %v", export.ToolCalls, tc.toolCalls)
+			}
+
+			// Verify it marshals to JSON correctly
+			data, err := json.Marshal(export)
+			if err != nil {
+				t.Fatalf("Marshal failed: %v", err)
+			}
+
+			var unmarshaled Export
+			if err := json.Unmarshal(data, &unmarshaled); err != nil {
+				t.Fatalf("Unmarshal failed: %v", err)
+			}
+
+			if unmarshaled.ToolCalls != tc.toolCalls {
+				t.Errorf("After round-trip marshal/unmarshal: ToolCalls got %v, want %v", unmarshaled.ToolCalls, tc.toolCalls)
+			}
+		})
+	}
+}

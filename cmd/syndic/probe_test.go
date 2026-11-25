@@ -189,6 +189,11 @@ required_reviewers = ["reviewer"]
 		t.Fatalf("expected exit code 0, got %d\nOutput: %s", exitCode, outputStr)
 	}
 
+	// Verify tool_calls capability appears in output
+	if !strings.Contains(outputStr, "Tool calls:") {
+		t.Fatalf("expected 'Tool calls:' in output\nOutput: %s", outputStr)
+	}
+
 	// Check that exactly one file was written to each directory
 	rawFiles, err := os.ReadDir(rawDir)
 	if err != nil {

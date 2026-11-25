@@ -20,7 +20,7 @@ import (
 
 // allProbeSteps is the full request sequence when the server rejects max_tokens,
 // so every probe request path is exercised.
-var allProbeSteps = []string{"models", "max_tokens", "max_completion_tokens", "system_role", "calibration_baseline", "calibration", "over_length"}
+var allProbeSteps = []string{"models", "max_tokens", "max_completion_tokens", "system_role", "tool_calls", "calibration_baseline", "calibration", "over_length"}
 
 // newDispatchServer rejects max_tokens (forcing the max_completion_tokens
 // follow-up), honors the system role, and reports prompt tokens by content size

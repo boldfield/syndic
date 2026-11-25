@@ -41,7 +41,7 @@ type Adapter struct {
 }
 
 // AdapterVersion identifies this adapter in capability records.
-const AdapterVersion = "openai-v1"
+const AdapterVersion = "openai-v2"
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
@@ -236,12 +236,13 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		ModelListed:              transport.TriUnknown,
 		SystemRoleHonored:        transport.TriUnknown,
 		EligibleRequiredReviewer: transport.TriUnknown,
+		ToolCalls:                transport.TriUnknown,
 		MaxTokensField:           "",
 		FinishReasons:            make(map[string]transport.CompletionStatus),
 		OverLength:               "not_run:skipped",
 		OverLengthClassifier:     overLengthClassificationRule,
 		LatencyMillis:            nil,
-		ToolRestrictions:         []string{"no tool definitions sent"},
+		ToolRestrictions:         []string{},
 		ServerVersion:            "unknown",
 		AdapterVersion:           AdapterVersion,
 		ObservedAt:               time.Now(),
@@ -326,6 +327,13 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			return record, err
 		}
 		return record, stepError(err, rawSteps, "system_role")
+	}
+
+	if err := a.probeToolCalls(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts, probeFinishReasons); err != nil {
+		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
+			return record, err
+		}
+		return record, stepError(err, rawSteps, "tool_calls")
 	}
 
 	if !opts.DisableCalibration {
@@ -495,8 +503,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	}
 
 	for _, msg := range req.Messages {
-		if msg.Role != "system" && msg.Role != "user" && msg.Role != "assistant" {
+		if msg.Role != "system" && msg.Role != "user" && msg.Role != "assistant" && msg.Role != "tool" {
 			return result, fmt.Errorf("%w: invalid message role: %s", transport.ErrNotSent, msg.Role)
+		}
+		// Tool messages must have a non-empty ToolCallID
+		if msg.Role == "tool" && msg.ToolCallID == "" {
+			return result, fmt.Errorf("%w: tool message with empty ToolCallID", transport.ErrNotSent)
 		}
 	}
 
@@ -686,6 +698,25 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	result.Status = mapFinishReason(finishReason)
 
+	// Extract tool_calls from the response if present
+	if len(respData.Choices[0].Message.ToolCalls) > 0 {
+		result.ToolCalls = make([]transport.ToolCall, len(respData.Choices[0].Message.ToolCalls))
+		for i, toolCall := range respData.Choices[0].Message.ToolCalls {
+			scrubbedArgs, _ := transport.Scrub(toolCall.Function.Arguments, resolvedSecrets)
+			scrubbedID, _ := transport.Scrub(toolCall.ID, resolvedSecrets)
+			scrubbedType, _ := transport.Scrub(toolCall.Type, resolvedSecrets)
+			scrubbedName, _ := transport.Scrub(toolCall.Function.Name, resolvedSecrets)
+			result.ToolCalls[i] = transport.ToolCall{
+				ID:   scrubbedID,
+				Type: scrubbedType,
+				Function: transport.ToolCallFunction{
+					Name:      scrubbedName,
+					Arguments: scrubbedArgs,
+				},
+			}
+		}
+	}
+
 	if respData.Usage != nil {
 		result.Usage = &transport.Usage{}
 		if respData.Usage.PromptTokens != nil {
@@ -753,8 +784,20 @@ type ChoiceBody struct {
 }
 
 type ChoiceMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string             `json:"role"`
+	Content   string             `json:"content"`
+	ToolCalls []ResponseToolCall `json:"tool_calls"`
+}
+
+type ResponseToolCall struct {
+	ID       string                   `json:"id"`
+	Type     string                   `json:"type"`
+	Function ResponseToolCallFunction `json:"function"`
+}
+
+type ResponseToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type UsageData struct {
@@ -763,12 +806,45 @@ type UsageData struct {
 }
 
 func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointProfile) map[string]any {
-	messages := make([]MessageInput, len(req.Messages))
+	messages := make([]map[string]any, len(req.Messages))
 	for i, msg := range req.Messages {
-		messages[i] = MessageInput{
-			Role:    msg.Role,
-			Content: msg.Content,
+		msgMap := map[string]any{
+			"role": msg.Role,
 		}
+
+		// Add tool_calls for assistant messages that have them
+		hasToolCalls := msg.Role == "assistant" && len(msg.ToolCalls) > 0
+		if hasToolCalls {
+			toolCalls := make([]map[string]any, len(msg.ToolCalls))
+			for j, call := range msg.ToolCalls {
+				toolCalls[j] = map[string]any{
+					"id":   call.ID,
+					"type": call.Type,
+					"function": map[string]any{
+						"name":      call.Function.Name,
+						"arguments": call.Function.Arguments,
+					},
+				}
+			}
+			msgMap["tool_calls"] = toolCalls
+		}
+
+		// Content is included for user, system, and tool messages.
+		// For assistant messages without tool_calls, content is also included.
+		// For assistant messages with tool_calls, content is optional and may be omitted.
+		if msg.Role != "assistant" || !hasToolCalls {
+			msgMap["content"] = msg.Content
+		} else if msg.Content != "" {
+			// For assistant messages with tool_calls, only include content if non-empty
+			msgMap["content"] = msg.Content
+		}
+
+		// Add tool_call_id for tool messages
+		if msg.Role == "tool" && msg.ToolCallID != "" {
+			msgMap["tool_call_id"] = msg.ToolCallID
+		}
+
+		messages[i] = msgMap
 	}
 
 	maxTokensField := profile.MaxTokensField
@@ -782,6 +858,22 @@ func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointPro
 		"stream":   false,
 	}
 	body[maxTokensField] = req.MaxOutputTokens
+
+	// Add tools to the request if present
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]any, len(req.Tools))
+		for i, tool := range req.Tools {
+			tools[i] = map[string]any{
+				"type": tool.Type,
+				"function": map[string]any{
+					"name":        tool.Function.Name,
+					"description": tool.Function.Description,
+					"parameters":  tool.Function.Parameters,
+				},
+			}
+		}
+		body["tools"] = tools
+	}
 
 	return body
 }
@@ -850,6 +942,8 @@ func mapFinishReason(reason string) transport.CompletionStatus {
 		return transport.StatusTruncated
 	case "content_filter":
 		return transport.StatusRefused
+	case "tool_calls":
+		return transport.StatusToolCalls
 	default:
 		return transport.StatusError
 	}
@@ -1275,6 +1369,144 @@ func truncateUTF8(s string, max int) string {
 		cut--
 	}
 	return s[:cut]
+}
+
+func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions, finishReasons map[string]transport.CompletionStatus) error {
+	endpoint := baseURL.JoinPath("/chat/completions")
+
+	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
+
+	// Use a simple harmless tool for the probe.
+	// The request forces the model to call the tool by setting
+	// tool_choice to require a call, ensuring we get definitive yes/no results
+	// rather than a model that skips optional tool calls.
+	messages := []MessageInput{
+		{Role: "user", Content: "Call the probe tool with the message PROBE."},
+	}
+
+	maxTokensField := record.MaxTokensField
+	if maxTokensField == "" {
+		maxTokensField = "max_tokens"
+	}
+
+	// Define one harmless tool for probing
+	tools := []map[string]any{
+		{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "probe_tool",
+				"description": "A harmless probe tool for testing tool_calls support",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"message": map[string]any{
+							"type":        "string",
+							"description": "A message to echo",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	requestBody := map[string]any{
+		"model":        model,
+		"messages":     messages,
+		"stream":       false,
+		"tools":        tools,
+		"tool_choice":  map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}},
+		maxTokensField: 50,
+	}
+
+	bodyBytes, err := json.Marshal(requestBody)
+	if err != nil {
+		return &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+	}
+
+	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if err := a.addProbeAuth(httpReq, secrets); err != nil {
+		return err
+	}
+
+	if opts.BeforeSend != nil {
+		if err := opts.BeforeSend(&transport.ProbeRequest{
+			Model:   model,
+			Step:    "tool_calls",
+			Timeout: opts.Timeout,
+		}); err != nil {
+			return fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		}
+	}
+
+	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: "tool_calls", Timeout: opts.Timeout})
+	if err != nil {
+		record.ToolCalls = transport.TriUnknown
+		return uncertainErr(err)
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	closeErr := httpResp.Body.Close()
+	if readErr != nil {
+		return uncertainErr(readErr)
+	}
+	if closeErr != nil {
+		return uncertainErr(closeErr)
+	}
+
+	recordRawStep(rawSteps, "tool_calls", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+
+	if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
+		record.ToolCalls = transport.TriUnknown
+		return nil
+	}
+
+	if httpResp.StatusCode == 404 {
+		record.ToolCalls = transport.TriUnknown
+		return nil
+	}
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		record.ToolCalls = transport.TriUnknown
+		return nil
+	}
+
+	var respData ResponseBody
+	if err := json.Unmarshal(body, &respData); err != nil {
+		record.ToolCalls = transport.TriUnknown
+		return nil
+	}
+
+	if len(respData.Choices) == 0 {
+		record.ToolCalls = transport.TriUnknown
+		return nil
+	}
+
+	choice := respData.Choices[0]
+
+	// Record the finish reason for tool_calls if present
+	if choice.FinishReason != "" {
+		finishReasons[choice.FinishReason] = mapFinishReason(choice.FinishReason)
+	}
+
+	// The call is forced by name, and some servers (vLLM) finish such a call
+	// with "stop", so a returned probe_tool call is yes whatever the finish
+	// reason. A reply without that call is no.
+	// A 400 rejecting tools entirely would have been caught as a 4xx error above and returns unknown.
+	record.ToolCalls = transport.TriNo
+	for _, call := range choice.Message.ToolCalls {
+		if call.Function.Name == "probe_tool" {
+			record.ToolCalls = transport.TriYes
+			break
+		}
+	}
+
+	return nil
 }
 
 func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions) error {

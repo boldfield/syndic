@@ -1758,11 +1758,319 @@ func TestUnresolvableAuthSecret(t *testing.T) {
 	}
 }
 
-// TestToolRoleNotAllowed verifies tool role returns ErrNotSent and no request is sent.
-func TestToolRoleNotAllowed(t *testing.T) {
+// TestToolRoleAllowed verifies tool role messages are allowed and sent correctly.
+func TestToolRoleAllowed(t *testing.T) {
 	requestReceived := false
+	var capturedBody map[string]any
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestReceived = true
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "tool", Content: "tool response", ToolCallID: "call123"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+	if result.Status != transport.StatusComplete {
+		t.Errorf("unexpected status: %v", result.Status)
+	}
+
+	// Verify tool message was included in request
+	if capturedBody != nil {
+		messages, ok := capturedBody["messages"].([]any)
+		if !ok || len(messages) == 0 {
+			t.Errorf("no messages in request body")
+		} else {
+			lastMsg := messages[len(messages)-1].(map[string]any)
+			if lastMsg["role"] != "tool" {
+				t.Errorf("tool message role not sent: %v", lastMsg["role"])
+			}
+			if lastMsg["tool_call_id"] != "call123" {
+				t.Errorf("tool_call_id not sent correctly: %v", lastMsg["tool_call_id"])
+			}
+		}
+	}
+}
+
+// TestToolRoundtrip verifies tool definitions are sent, tool_calls are decoded with correct
+// IDs and arguments (scrubbed), multiple calls are ordered, and tool_call_id is sent correctly.
+func TestToolRoundtrip(t *testing.T) {
+	requestReceived := false
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Verify tool definitions were sent with correct schema
+		tools, ok := capturedBody["tools"].([]any)
+		if !ok || len(tools) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "expected 2 tools, got %d", len(tools))
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Using tools",
+						ToolCalls: []ResponseToolCall{
+							{
+								ID:   "call_1",
+								Type: "function",
+								Function: ResponseToolCallFunction{
+									Name:      "read_file",
+									Arguments: `{"path":"/etc/passwd","secret":"super-secret-token"}`,
+								},
+							},
+							{
+								ID:   "call_2",
+								Type: "function",
+								Function: ResponseToolCallFunction{
+									Name:      "web_fetch",
+									Arguments: `{"url":"https://example.com","auth":"super-secret-token"}`,
+								},
+							},
+						},
+					},
+					FinishReason: "tool_calls",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: "super-secret-token"})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "Use these tools"},
+		},
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read a file",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "web_fetch",
+					Description: "Fetch a URL",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"url": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+	if result.Status != transport.StatusToolCalls {
+		t.Errorf("unexpected status: %v, want %v", result.Status, transport.StatusToolCalls)
+	}
+
+	// Verify tool definitions were sent with complete metadata
+	if capturedBody != nil {
+		tools, ok := capturedBody["tools"].([]any)
+		if !ok || len(tools) != 2 {
+			t.Errorf("tool definitions not sent correctly")
+		} else {
+			// Check first tool metadata
+			tool1, ok := tools[0].(map[string]any)
+			if !ok {
+				t.Errorf("tool 0 is not a map")
+			} else {
+				if tool1["type"] != "function" {
+					t.Errorf("tool 0 type: got %v, want function", tool1["type"])
+				}
+				if fn, ok := tool1["function"].(map[string]any); ok {
+					if fn["name"] != "read_file" {
+						t.Errorf("tool 0 function name: got %v, want read_file", fn["name"])
+					}
+					if fn["description"] != "Read a file" {
+						t.Errorf("tool 0 function description: got %v, want 'Read a file'", fn["description"])
+					}
+					if params, ok := fn["parameters"].(map[string]any); ok {
+						if params["type"] != "object" {
+							t.Errorf("tool 0 parameters type: got %v, want object", params["type"])
+						}
+					} else {
+						t.Errorf("tool 0 parameters not a map")
+					}
+				} else {
+					t.Errorf("tool 0 function not a map")
+				}
+			}
+			// Check second tool metadata
+			tool2, ok := tools[1].(map[string]any)
+			if !ok {
+				t.Errorf("tool 1 is not a map")
+			} else {
+				if tool2["type"] != "function" {
+					t.Errorf("tool 1 type: got %v, want function", tool2["type"])
+				}
+				if fn, ok := tool2["function"].(map[string]any); ok {
+					if fn["name"] != "web_fetch" {
+						t.Errorf("tool 1 function name: got %v, want web_fetch", fn["name"])
+					}
+					if fn["description"] != "Fetch a URL" {
+						t.Errorf("tool 1 function description: got %v, want 'Fetch a URL'", fn["description"])
+					}
+				} else {
+					t.Errorf("tool 1 function not a map")
+				}
+			}
+		}
+	}
+
+	// Verify tool_calls are decoded with correct IDs and order
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	} else {
+		// Check first call
+		if result.ToolCalls[0].ID != "call_1" {
+			t.Errorf("first call ID: %q, want call_1", result.ToolCalls[0].ID)
+		}
+		if result.ToolCalls[0].Function.Name != "read_file" {
+			t.Errorf("first call name: %q, want read_file", result.ToolCalls[0].Function.Name)
+		}
+		// Verify arguments are scrubbed: secret should be replaced
+		if strings.Contains(result.ToolCalls[0].Function.Arguments, "super-secret-token") {
+			t.Errorf("first call arguments contain unredacted secret")
+		}
+		// But the structure should be preserved
+		if !strings.Contains(result.ToolCalls[0].Function.Arguments, "path") {
+			t.Errorf("first call arguments missing 'path' field")
+		}
+
+		// Check second call
+		if result.ToolCalls[1].ID != "call_2" {
+			t.Errorf("second call ID: %q, want call_2", result.ToolCalls[1].ID)
+		}
+		if result.ToolCalls[1].Function.Name != "web_fetch" {
+			t.Errorf("second call name: %q, want web_fetch", result.ToolCalls[1].Function.Name)
+		}
+		// Verify arguments are scrubbed
+		if strings.Contains(result.ToolCalls[1].Function.Arguments, "super-secret-token") {
+			t.Errorf("second call arguments contain unredacted secret")
+		}
+		// But the structure should be preserved
+		if !strings.Contains(result.ToolCalls[1].Function.Arguments, "url") {
+			t.Errorf("second call arguments missing 'url' field")
+		}
+	}
+}
+
+// TestToolMessageEmptyCallID verifies that tool messages with empty ToolCallID are rejected with ErrNotSent.
+func TestToolMessageEmptyCallID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Should not reach here
+		t.Errorf("request should not be sent for tool message with empty ToolCallID")
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(server.Close)
@@ -1789,7 +2097,7 @@ func TestToolRoleNotAllowed(t *testing.T) {
 		},
 		Model: "test-model",
 		Messages: []transport.Message{
-			{Role: "tool", Content: "tool response"},
+			{Role: "tool", Content: "tool response", ToolCallID: ""}, // Empty ToolCallID
 		},
 		MaxOutputTokens: 100,
 		Deadline:        time.Now().Add(2 * time.Second),
@@ -1800,11 +2108,97 @@ func TestToolRoleNotAllowed(t *testing.T) {
 
 	_, err := adapter.Complete(ctx, req)
 
-	if !errors.Is(err, transport.ErrNotSent) {
-		t.Errorf("error not ErrNotSent: %v", err)
+	if err == nil {
+		t.Errorf("expected error for empty ToolCallID, got nil")
+	} else if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("expected ErrNotSent, got %T: %v", err, err)
 	}
-	if requestReceived {
-		t.Errorf("request was sent despite invalid tool role")
+}
+
+// TestEmptyContentPreserved verifies that empty content is preserved for user/system/tool messages.
+func TestEmptyContentPreserved(t *testing.T) {
+	requestReceived := false
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: ""}, // Empty user content
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+
+	// Verify empty content was preserved
+	if capturedBody != nil {
+		messages, ok := capturedBody["messages"].([]any)
+		if !ok || len(messages) == 0 {
+			t.Errorf("no messages in request body")
+		} else {
+			firstMsg := messages[0].(map[string]any)
+			content, hasContent := firstMsg["content"]
+			if !hasContent {
+				t.Errorf("empty content was omitted from user message")
+			}
+			if content != "" {
+				t.Errorf("empty content was not preserved; got: %q", content)
+			}
+		}
 	}
 }
 
@@ -1853,8 +2247,8 @@ func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
 		t.Errorf("probe record AdapterVersion: %q, want %q", record.AdapterVersion, AdapterVersion)
 	}
 
-	if AdapterVersion != "openai-v1" {
-		t.Errorf("AdapterVersion: %q, want openai-v1", AdapterVersion)
+	if AdapterVersion != "openai-v2" {
+		t.Errorf("AdapterVersion: %q, want openai-v2", AdapterVersion)
 	}
 }
 
@@ -2074,5 +2468,187 @@ func TestBeforeSendNil(t *testing.T) {
 	}
 	if result.Text != "response" {
 		t.Errorf("response text: %q, want 'response'", result.Text)
+	}
+}
+
+// TestAssistantMessageWithToolCalls verifies that assistant messages with tool_calls
+// are properly reserialized and sent in the request body.
+func TestAssistantMessageWithToolCalls(t *testing.T) {
+	capturedBody := map[string]any{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Verify messages include assistant message with tool_calls
+		messages, ok := capturedBody["messages"].([]any)
+		if !ok || len(messages) < 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "expected at least 2 messages")
+			return
+		}
+
+		// Check that last message is assistant with tool_calls
+		lastMsg, ok := messages[len(messages)-1].(map[string]any)
+		if !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "last message is not a map")
+			return
+		}
+
+		if lastMsg["role"] != "assistant" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "last message role is not assistant: %v", lastMsg["role"])
+			return
+		}
+
+		toolCalls, hasToolCalls := lastMsg["tool_calls"]
+		if !hasToolCalls {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "last message has no tool_calls")
+			return
+		}
+
+		tcList, ok := toolCalls.([]any)
+		if !ok || len(tcList) != 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "tool_calls is not a list of 1 items")
+			return
+		}
+
+		// Respond with plain text
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "user request"},
+			{
+				Role:    "assistant",
+				Content: "Using tool",
+				ToolCalls: []transport.ToolCall{
+					{
+						ID: "call_1",
+						Function: transport.ToolCallFunction{
+							Name:      "read_file",
+							Arguments: `{"path":"/etc/file"}`,
+						},
+					},
+				},
+			},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Status != transport.StatusComplete {
+		t.Errorf("unexpected status: %v, want %v", result.Status, transport.StatusComplete)
+	}
+	if result.Text != "Response" {
+		t.Errorf("unexpected text: %q, want 'Response'", result.Text)
+	}
+}
+
+// TestCompleteScrubsToolCallFields verifies the resolved secret is removed
+// from every response-derived tool-call string, not only the arguments.
+func TestCompleteScrubsToolCallFields(t *testing.T) {
+	const secret = "super-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{{
+				Message: ChoiceMessage{
+					Role: "assistant",
+					ToolCalls: []ResponseToolCall{{
+						ID:   "id_" + secret,
+						Type: "function_" + secret,
+						Function: ResponseToolCallFunction{
+							Name:      "name_" + secret,
+							Arguments: `{"k":"` + secret + `"}`,
+						},
+					}},
+				},
+				FinishReason: "tool_calls",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+	adapter := New(profile, &mockResolver{secret: secret})
+	res, err := adapter.Complete(context.Background(), transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant: "test", TurnID: "turn1", Phase: "phase1", Epoch: 1,
+			AttemptID: "attempt1", CandidateHash: "hash1",
+		},
+		Model:           "test-model",
+		Messages:        []transport.Message{{Role: "user", Content: "go"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(res.ToolCalls))
+	}
+	tc := res.ToolCalls[0]
+	for name, v := range map[string]string{"id": tc.ID, "type": tc.Type, "name": tc.Function.Name, "arguments": tc.Function.Arguments} {
+		if strings.Contains(v, secret) {
+			t.Errorf("tool call %s retains the secret: %q", name, v)
+		}
 	}
 }

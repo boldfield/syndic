@@ -216,6 +216,7 @@ type CapabilityRecord struct {
 	ModelListed              Tri
 	SystemRoleHonored        Tri
 	EligibleRequiredReviewer Tri
+	ToolCalls                Tri
 	MaxTokensField           string
 	FinishReasons            map[string]CompletionStatus
 	OverLength               string // "rejected:context", "rejected:other", "accepted_whole", "markers_missing", "errored", "not_run:no_calibration", "not_run:no_context"

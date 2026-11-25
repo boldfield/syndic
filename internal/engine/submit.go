@@ -242,6 +242,24 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
+	// Check tool capability requirement: tool-granted roles must have tool_calls: yes
+	if len(eff.Preset.Tools) > 0 {
+		if mp := e.built.Participants[eff.Preset.Author]; mp.ToolCalls != transport.TriYes {
+			invalid := refusal(wire.ErrorCodePresetInvalid)
+			invalid.Detail = strPtr("no_tool_calls:" + eff.Preset.Author)
+			return wire.SubmitReply{}, invalid
+		}
+	}
+	if len(eff.Preset.ReviewerTools) > 0 {
+		for _, id := range eff.Preset.RequiredReviewers {
+			if mp := e.built.Participants[id]; mp.ToolCalls != transport.TriYes {
+				invalid := refusal(wire.ErrorCodePresetInvalid)
+				invalid.Detail = strPtr("no_tool_calls:" + id)
+				return wire.SubmitReply{}, invalid
+			}
+		}
+	}
+
 	maxRounds, ceiling := revisionLimits(eff)
 	if req.MaxRounds != nil {
 		if *req.MaxRounds < 0 || *req.MaxRounds > ceiling {
