@@ -609,6 +609,7 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 
 	turnID := "turn1"
 	setupTestData(t, conn, "run1", turnID)
+	createTestAttempt(t, conn, "attempt1", turnID, "author")
 
 	s := journal.NewStore(db)
 
@@ -653,14 +654,14 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 	}
 
 	// Now test that a failed transaction with both record and event is rolled back
-	attemptID := "attempt1"
-	createTestAttempt(t, conn, attemptID, turnID, "author")
+	attemptID2 := "attempt2"
+	createTestAttempt(t, conn, attemptID2, turnID, "author")
 
 	err = s.Tx(func(tx *journal.Tx) error {
 		// Store a tool call
 		call := journal.ToolCall{
 			ID:         "call2",
-			AttemptID:  attemptID,
+			AttemptID:  attemptID2,
 			Name:       "web_fetch",
 			ArgsSHA256: "hash2",
 			Class:      "web",
@@ -686,7 +687,7 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 	var calls []journal.ToolCall
 	err = s.Tx(func(tx *journal.Tx) error {
 		var err error
-		calls, err = tx.GetToolCallsByAttempt(attemptID)
+		calls, err = tx.GetToolCallsByAttempt(attemptID2)
 		return err
 	})
 	if err != nil {
