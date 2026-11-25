@@ -792,8 +792,9 @@ func TestCandidateAuthorEvidenceMutation(t *testing.T) {
 
 // TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate tests that reviewer-only
 // observations (post-freeze) do not change the candidate's frozen hash. The candidate
-// freezes with both a snapshot_hash and author Evidence, and post-freeze observations
-// create a new version but don't change the original frozen candidate's hash.
+// freezes with both a snapshot_hash and author Evidence. When a reviewer later adds a
+// post-freeze observation to extend the snapshot, the original frozen candidate's stored
+// hash must remain unchanged.
 func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	hash2 := strings.Repeat("b", 64)
@@ -831,9 +832,21 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 		ChangesHash: frozenChangesHash,
 	}
 
+	// Compute and pin the canonical form of the frozen candidate
+	frozenCanonical, err := candidate.Canonical(frozenCandidate)
+	if err != nil {
+		t.Fatalf("candidate.Canonical frozen failed: %v", err)
+	}
+
 	frozenCandidateHash, err := candidate.Hash(frozenCandidate)
 	if err != nil {
 		t.Fatalf("candidate.Hash frozen failed: %v", err)
+	}
+
+	// Pin the expected golden hash value for the frozen candidate
+	expectedFrozenHash := "b7ca6a28f64c5570a08cfc354779be93a1a88f8441b7a4f3c92b74a0be0c6c02"
+	if frozenCandidateHash != expectedFrozenHash {
+		t.Errorf("Frozen candidate hash mismatch.\nExpected: %s\nGot: %s", expectedFrozenHash, frozenCandidateHash)
 	}
 
 	// Reviewer observes an additional path (post-freeze observation)
@@ -880,15 +893,32 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 		t.Error("Refrozen candidate hash must differ from frozen when snapshot changes")
 	}
 
-	// But the original frozen candidate's hash remains unchanged
-	// (verified by hashing the frozen candidate again)
+	// Pin the expected hash for the refrozen candidate (with extended snapshot)
+	expectedRefrozenHash := "41080fd614cf74fe2aad0baa3138b298a1321b86f62bb9b806a2728202fb2cf9"
+	if refrozenCandidateHash != expectedRefrozenHash {
+		t.Errorf("Refrozen candidate hash mismatch.\nExpected: %s\nGot: %s", expectedRefrozenHash, refrozenCandidateHash)
+	}
+
+	// Verify that the original frozen candidate's stored canonical form is unchanged
+	// When a reviewer adds evidence (post-freeze), it must not be added to the frozen candidate's Evidence field
+	// The frozen candidate's hash is computed from its stored snapshot_hash and Evidence
+	// and must remain the same regardless of post-freeze observations
+	refrozenFrozenCanonical, err := candidate.Canonical(frozenCandidate)
+	if err != nil {
+		t.Fatalf("candidate.Canonical refrozen frozen failed: %v", err)
+	}
+
+	if !bytes.Equal(frozenCanonical, refrozenFrozenCanonical) {
+		t.Error("Frozen candidate canonical form should remain unchanged after post-freeze observations")
+	}
+
 	refrozenFrozenCandidateHash, err := candidate.Hash(frozenCandidate)
 	if err != nil {
 		t.Fatalf("candidate.Hash refrozen frozen failed: %v", err)
 	}
 
 	if frozenCandidateHash != refrozenFrozenCandidateHash {
-		t.Error("Frozen candidate hash should be stable when using the same evidence and changes hash")
+		t.Error("Frozen candidate hash should remain stable; reviewer observations do not modify the frozen candidate")
 	}
 }
 
@@ -1003,11 +1033,10 @@ func TestGoldenFixturesChangeSet(t *testing.T) {
 		t.Fatalf("ChangesHash fixture 1 failed: %v", err)
 	}
 
-	// Verify the frame is deterministic and matches the expected format
-	changesBytes := append(frame1, []byte(fmt.Sprintf("snapshot:%s\n", snapshotHash1))...)
-	actualChangesHash1 := fmt.Sprintf("%x", sha256.Sum256(changesBytes))
-	if actualChangesHash1 != changesHash1 {
-		t.Errorf("ChangesHash fixture 1 mismatch: expected computation %q, got %q", actualChangesHash1, changesHash1)
+	// Pin the expected golden hash value
+	expectedChangesHash1 := "d497882bb55f2fabb311af181dbe1d5cae793b348cb17ce388b34d774a5b17c5"
+	if changesHash1 != expectedChangesHash1 {
+		t.Errorf("ChangesHash fixture 1 mismatch.\nExpected: %s\nGot: %s", expectedChangesHash1, changesHash1)
 	}
 
 	// Golden fixture 2: path with newline
@@ -1034,9 +1063,10 @@ func TestGoldenFixturesChangeSet(t *testing.T) {
 		t.Fatalf("ChangesHash fixture newline failed: %v", err)
 	}
 
-	changesHexNewline := fmt.Sprintf("%x", sha256.Sum256(append(frameNewline, []byte(fmt.Sprintf("snapshot:%s\n", snapshotHashNewline))...)))
-	if changesHexNewline != changesHashNewline {
-		t.Errorf("ChangesHash fixture newline mismatch")
+	// Pin the expected golden hash value
+	expectedChangesHashNewline := "a95f8516357c56c585bcdd3cfe80847d7a7326fcc86ed19273662935e485c16e"
+	if changesHashNewline != expectedChangesHashNewline {
+		t.Errorf("ChangesHash fixture newline mismatch.\nExpected: %s\nGot: %s", expectedChangesHashNewline, changesHashNewline)
 	}
 }
 
@@ -1061,8 +1091,10 @@ func TestGoldenFixturesEntries(t *testing.T) {
 
 	hash1 := sha256.Sum256(frame1)
 	hashHex1 := fmt.Sprintf("%x", hash1)
-	if !IsValidSHA256Hex(hashHex1) {
-		t.Errorf("entries_sha256 fixture 1 is not valid hex: %q", hashHex1)
+	// Pin the expected golden hash value for fixture 1
+	expectedHashHex1 := "a242233895b1847d8bb0a3ee12c3e1558f3a31a973d1d1bab9e2f8c94a9dc5a2"
+	if hashHex1 != expectedHashHex1 {
+		t.Errorf("entries_sha256 fixture 1 mismatch.\nExpected: %s\nGot: %s", expectedHashHex1, hashHex1)
 	}
 
 	// Golden fixture 2: entry with newline in name
@@ -1084,8 +1116,10 @@ func TestGoldenFixturesEntries(t *testing.T) {
 
 	hash2 := sha256.Sum256(frame2)
 	hashHex2 := fmt.Sprintf("%x", hash2)
-	if !IsValidSHA256Hex(hashHex2) {
-		t.Errorf("entries_sha256 fixture 2 is not valid hex: %q", hashHex2)
+	// Pin the expected golden hash value for fixture 2
+	expectedHashHex2 := "afbda6162f3986a7b1d489b10b6936d08af1a07f1977f5aa5cf4938dfa2889de"
+	if hashHex2 != expectedHashHex2 {
+		t.Errorf("entries_sha256 fixture 2 mismatch.\nExpected: %s\nGot: %s", expectedHashHex2, hashHex2)
 	}
 
 	// The two fixtures must have different hashes
@@ -1112,8 +1146,10 @@ func TestGoldenFixturesEntries(t *testing.T) {
 
 	hash3 := sha256.Sum256(frame3)
 	hashHex3 := fmt.Sprintf("%x", hash3)
-	if !IsValidSHA256Hex(hashHex3) {
-		t.Errorf("entries_sha256 fixture 3 is not valid hex: %q", hashHex3)
+	// Pin the expected golden hash value for fixture 3
+	expectedHashHex3 := "534864632548452c5ed523708cf5accc770c4ad3651dfb0cfcb20b602e7b7e24"
+	if hashHex3 != expectedHashHex3 {
+		t.Errorf("entries_sha256 fixture 3 mismatch.\nExpected: %s\nGot: %s", expectedHashHex3, hashHex3)
 	}
 
 	// All three hashes must be different
@@ -1187,8 +1223,10 @@ func TestGoldenFixturesSnapshot(t *testing.T) {
 		t.Fatalf("SnapshotHash fixture 1 failed: %v", err)
 	}
 
-	if !IsValidSHA256Hex(snapshotHash1) {
-		t.Errorf("snapshot_hash fixture 1 is not valid hex: %q", snapshotHash1)
+	// Pin the expected golden hash value for fixture 1
+	expectedSnapshotHash1 := "a9ffba56971f169c4f49caa880bdf342771181be8190c92966ab3146a48896c7"
+	if snapshotHash1 != expectedSnapshotHash1 {
+		t.Errorf("snapshot_hash fixture 1 mismatch.\nExpected: %s\nGot: %s", expectedSnapshotHash1, snapshotHash1)
 	}
 
 	// Golden fixture 2: path with newline
@@ -1212,8 +1250,10 @@ func TestGoldenFixturesSnapshot(t *testing.T) {
 		t.Fatalf("SnapshotHash fixture 2 failed: %v", err)
 	}
 
-	if !IsValidSHA256Hex(snapshotHash2) {
-		t.Errorf("snapshot_hash fixture 2 is not valid hex: %q", snapshotHash2)
+	// Pin the expected golden hash value for fixture 2
+	expectedSnapshotHash2 := "456ba9809199d7bd2c9309dc99432414603e34c181de767a81ee5d56799682ea"
+	if snapshotHash2 != expectedSnapshotHash2 {
+		t.Errorf("snapshot_hash fixture 2 mismatch.\nExpected: %s\nGot: %s", expectedSnapshotHash2, snapshotHash2)
 	}
 
 	// The two snapshot hashes must be different
@@ -1243,8 +1283,10 @@ func TestGoldenFixturesSnapshot(t *testing.T) {
 		t.Fatalf("SnapshotHash fixture 3 failed: %v", err)
 	}
 
-	if !IsValidSHA256Hex(snapshotHash3) {
-		t.Errorf("snapshot_hash fixture 3 is not valid hex: %q", snapshotHash3)
+	// Pin the expected golden hash value for fixture 3
+	expectedSnapshotHash3 := "3b914c5992bef8fe50439704751b2ccee822ad4f532cf5cb06a487b12961e8e1"
+	if snapshotHash3 != expectedSnapshotHash3 {
+		t.Errorf("snapshot_hash fixture 3 mismatch.\nExpected: %s\nGot: %s", expectedSnapshotHash3, snapshotHash3)
 	}
 
 	// All three snapshot hashes must be different
