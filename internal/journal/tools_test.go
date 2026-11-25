@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/observation"
 )
 
 // toolsFixture is one review turn with an author attempt and two reviewers,
@@ -1236,5 +1238,115 @@ func TestToolRecordsAtScale(t *testing.T) {
 	obs, err := store.Observations(f.turn)
 	if err != nil || len(obs) != n {
 		t.Fatalf("observations = %d, %v", len(obs), err)
+	}
+}
+
+// A reviewer's post-freeze observation and tool-result evidence, recorded
+// through RecordVerdictEvidence, leave the stored candidate and its frozen
+// change set byte for byte unchanged, and the reviewer's result never enters
+// the author's evidence that the candidate hash binds.
+func TestReviewerEvidenceDoesNotRewriteFrozenCandidate(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := buildToolsTurn(t, store)
+
+	const hexA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	snap, err := observation.SnapshotHash([]observation.Record{{Kind: observation.KindFile, Path: "a\nb", Value: hexA}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := observation.ChangesHash([]observation.Change{{Path: "a\nb", Op: observation.OpCreate, BaseSHA: observation.Absent, NewSHA: hexA, NewLen: 1}}, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := candidate.Identity{
+		ManifestHash: "m", TurnID: f.turn, AuthorAttemptID: f.author, Content: []byte("c"),
+		Evidence:    []candidate.EvidencePair{{CallID: "c0", ResultSHA256: hexA}},
+		ContextHash: hexA, ChangesHash: changes, Round: 1,
+	}
+	hash, err := candidate.Hash(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var candID string
+	var frozen journal.ChangeSet
+	err = store.Tx(func(tx *journal.Tx) error {
+		var err error
+		if candID, err = tx.CreateCandidate(f.turn, "c", hash); err != nil {
+			return err
+		}
+		if _, err = tx.RecordObservation(f.turn, f.author, "a\nb", journal.ObservationAbsent, nil); err != nil {
+			return err
+		}
+		if _, err = tx.StageWrite(f.turn, "a\nb", []byte("x")); err != nil {
+			return err
+		}
+		frozen, err = tx.FreezeChangeSet(f.turn, candID, snap, changes)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetCandidate(candID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The reviewer's tool step: a result and a first-touch observation that
+	// extend the turn's record after the freeze, then its verdict and evidence.
+	var result, obs string
+	err = store.Tx(func(tx *journal.Tx) error {
+		step, err := tx.BeginAttempt(f.turn, "r1", "review", 1, nil, "")
+		if err != nil {
+			return err
+		}
+		c, err := tx.RecordToolCall(step, 0, "rev1", "read_file", "read", []byte(`{}`))
+		if err != nil {
+			return err
+		}
+		r, err := tx.RecordToolResult(c.ID, journal.ToolCallExecuted, []byte("r"), "")
+		if err != nil {
+			return err
+		}
+		result = r.ID
+		o, err := tx.RecordObservation(f.turn, step, "dep.go", journal.ObservationFile, []byte("d"))
+		obs = o.ID
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	giveVerdict(t, store, &f, "r1")
+	if err := store.Tx(func(tx *journal.Tx) error {
+		version, err := tx.SnapshotVersion(f.turn)
+		if err != nil {
+			return err
+		}
+		if version <= frozen.SnapshotVersion {
+			return fmt.Errorf("reviewer observation left version %d at the frozen %d", version, frozen.SnapshotVersion)
+		}
+		return tx.RecordVerdictEvidence(f.verdict["r1"], version, []string{result}, []string{obs})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := store.GetCandidate(candID)
+	if err != nil || *after != *before || after.ContentHash != hash {
+		t.Fatalf("stored candidate = %+v, %v; want %+v with hash %s", after, err, before, hash)
+	}
+	cs, err := store.GetChangeSet(frozen.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.SnapshotHash != snap || cs.ChangesHash != changes || cs.SnapshotVersion != frozen.SnapshotVersion || len(cs.Paths) != len(frozen.Paths) {
+		t.Fatalf("frozen change set changed: %+v, was %+v", cs, frozen)
+	}
+	if again, err := candidate.Hash(id); err != nil || again != after.ContentHash {
+		t.Fatalf("author identity hash %s, %v does not match stored %s", again, err, after.ContentHash)
+	}
+	if len(id.Evidence) != 1 || id.Evidence[0].CallID != "c0" {
+		t.Fatalf("author evidence = %+v", id.Evidence)
 	}
 }
