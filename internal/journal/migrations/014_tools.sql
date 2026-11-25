@@ -53,10 +53,21 @@ CREATE TABLE tool_results (
 	result_byte_len INTEGER,
 	error_message TEXT,
 	recorded_at TEXT NOT NULL,
-	CHECK (status <> 'executed' OR result_sha256 IS NOT NULL)
+	CHECK (status <> 'executed' OR result_sha256 IS NOT NULL),
+	-- A stored result carries its byte length, and only a stored result does.
+	CHECK ((result_sha256 IS NULL) = (result_byte_len IS NULL)),
+	CHECK (result_byte_len IS NULL OR result_byte_len >= 0)
 );
 
 CREATE INDEX tool_results_tool_call_idx ON tool_results(tool_call_id);
+
+-- The byte length must be that of the stored result content.
+CREATE TRIGGER tool_results_byte_len_matches BEFORE INSERT ON tool_results
+WHEN NEW.result_sha256 IS NOT NULL
+	AND NEW.result_byte_len IS NOT (SELECT length(body) FROM tool_content WHERE sha256 = NEW.result_sha256)
+BEGIN
+	SELECT RAISE(ABORT, 'tool_results.result_byte_len does not match stored content');
+END;
 
 -- Immutability: tool results are journaled and never change.
 CREATE TRIGGER tool_results_update_prevented BEFORE UPDATE ON tool_results

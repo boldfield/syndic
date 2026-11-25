@@ -255,7 +255,7 @@ func TestEveryRecordMethodEmitsAnEvent(t *testing.T) {
 				return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h})
 			},
 			func() error {
-				return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: "executed", ResultSHA256: &h, RecordedAt: now})
+				return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: "executed", ResultSHA256: &h, ResultByteLen: int64Ptr(4), RecordedAt: now})
 			},
 			func() error {
 				return tx.StoreObservation(journal.Observation{ID: "o1", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a", Kind: "f", BaseSHA256: &h, ObservedAt: now})
@@ -476,7 +476,7 @@ func TestVerdictEvidenceAndStagingSurviveRestart(t *testing.T) {
 		if _, err := tx.StoreVerdictToolResult("v1", "c1"); err == nil {
 			t.Error("unfinished call must not be verdict evidence")
 		}
-		if err := tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &h2, RecordedAt: time.Now()}); err != nil {
+		if err := tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &h2, ResultByteLen: int64Ptr(2), RecordedAt: time.Now()}); err != nil {
 			return err
 		}
 		if rid, err := tx.StoreVerdictToolResult("v1", "c1"); err != nil || rid != "r1" {
@@ -690,7 +690,7 @@ func TestVerdictEvidenceComesFromTheReviewLoop(t *testing.T) {
 			if err := tx.StoreToolCall(journal.ToolCall{ID: e.call, AttemptID: e.attempt, Name: "x", ArgsSHA256: h}); err != nil {
 				return err
 			}
-			if err := tx.StoreToolResult(journal.ToolResult{ID: "r-" + e.call, ToolCallID: e.call, Status: journal.ToolCallStatusExecuted, ResultSHA256: &h, RecordedAt: time.Now()}); err != nil {
+			if err := tx.StoreToolResult(journal.ToolResult{ID: "r-" + e.call, ToolCallID: e.call, Status: journal.ToolCallStatusExecuted, ResultSHA256: &h, ResultByteLen: int64Ptr(4), RecordedAt: time.Now()}); err != nil {
 				return err
 			}
 			if err := tx.StoreObservation(journal.Observation{ID: e.obs, TurnID: "turn1", AttemptID: e.attempt, SnapshotVersion: i + 1, Path: e.path, Kind: journal.ObservationKindAbsent, ObservedAt: time.Now()}); err != nil {
@@ -743,6 +743,30 @@ func TestEvidenceRecordsMatchTheirKind(t *testing.T) {
 			}
 			return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, RecordedAt: time.Now()})
 		}},
+		{"executed result without byte length", func(tx *journal.Tx) error {
+			if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h}); err != nil {
+				return err
+			}
+			return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &h, RecordedAt: time.Now()})
+		}},
+		{"executed result with mismatched byte length", func(tx *journal.Tx) error {
+			if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h}); err != nil {
+				return err
+			}
+			return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &h, ResultByteLen: int64Ptr(2), RecordedAt: time.Now()})
+		}},
+		{"executed result with negative byte length", func(tx *journal.Tx) error {
+			if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h}); err != nil {
+				return err
+			}
+			return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &h, ResultByteLen: int64Ptr(-1), RecordedAt: time.Now()})
+		}},
+		{"error result with byte length but no content", func(tx *journal.Tx) error {
+			if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h}); err != nil {
+				return err
+			}
+			return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusError, ResultByteLen: int64Ptr(1), RecordedAt: time.Now()})
+		}},
 		{"file observation without content", func(tx *journal.Tx) error {
 			return tx.StoreObservation(journal.Observation{ID: "o1", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a", Kind: journal.ObservationKindFile, ObservedAt: time.Now()})
 		}},
@@ -764,4 +788,21 @@ func TestEvidenceRecordsMatchTheirKind(t *testing.T) {
 		}
 		return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusError, RecordedAt: time.Now()})
 	})
+}
+
+func TestSchemaRefusesResultByteLenThatDoesNotMatchContent(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("body")
+	f.tx(func(tx *journal.Tx) error {
+		return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h})
+	})
+	insert := `INSERT INTO tool_results (id, tool_call_id, status, result_sha256, result_byte_len, recorded_at) VALUES ('r1', 'c1', 'executed', ?, ?, 'now')`
+	for _, n := range []any{nil, int64(3), int64(-1)} {
+		if _, err := f.db.Conn().Exec(insert, h, n); err == nil {
+			t.Errorf("byte length %v must be refused", n)
+		}
+	}
+	if _, err := f.db.Conn().Exec(insert, h, int64(4)); err != nil {
+		t.Errorf("matching byte length refused: %v", err)
+	}
 }

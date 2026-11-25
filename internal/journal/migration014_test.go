@@ -207,7 +207,8 @@ func TestMigration014UpgradeFromV13(t *testing.T) {
 		if err := tx.StoreToolCall(journal.ToolCall{ID: "tc1", AttemptID: "a1", Name: "read_file", ArgsSHA256: sum}); err != nil {
 			return err
 		}
-		return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "tc1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &sum, RecordedAt: time.Now()})
+		n := int64(len("args"))
+		return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "tc1", Status: journal.ToolCallStatusExecuted, ResultSHA256: &sum, ResultByteLen: &n, RecordedAt: time.Now()})
 	})
 	if err != nil {
 		t.Fatalf("tool records on upgraded db: %v", err)

@@ -201,8 +201,28 @@ func (tx *Tx) GetToolCallsByAttempt(attemptID string) ([]ToolCall, error) {
 	return calls, nil
 }
 
-// StoreToolResult records a tool call result in the journal.
+// StoreToolResult records a tool call result in the journal. A result with
+// content must carry ResultByteLen, the length of the content already stored
+// under ResultSHA256.
 func (tx *Tx) StoreToolResult(result ToolResult) error {
+	if result.ResultSHA256 != nil {
+		if result.ResultByteLen == nil {
+			return fmt.Errorf("store tool result %q: result byte length is required", result.ID)
+		}
+		var stored int64
+		err := tx.tx.QueryRow(`SELECT length(body) FROM tool_content WHERE sha256 = ?`, *result.ResultSHA256).Scan(&stored)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("store tool result %q: content %q: %w", result.ID, *result.ResultSHA256, ErrNoSuchContent)
+		}
+		if err != nil {
+			return fmt.Errorf("query tool result content: %w", err)
+		}
+		if *result.ResultByteLen != stored {
+			return fmt.Errorf("store tool result %q: byte length %d does not match stored content length %d", result.ID, *result.ResultByteLen, stored)
+		}
+	} else if result.ResultByteLen != nil {
+		return fmt.Errorf("store tool result %q: byte length without result content", result.ID)
+	}
 	_, err := tx.tx.Exec(`
 		INSERT INTO tool_results (id, tool_call_id, status, result_sha256, result_byte_len, error_message, recorded_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -212,6 +232,7 @@ func (tx *Tx) StoreToolResult(result ToolResult) error {
 	}
 	return tx.emitToolEvent(EventToolResultRecorded, map[string]any{
 		"tool_call_id": result.ToolCallID, "status": result.Status, "result_sha256": result.ResultSHA256,
+		"result_byte_len": result.ResultByteLen,
 	})
 }
 
