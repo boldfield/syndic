@@ -1,7 +1,9 @@
 package journal_test
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
@@ -206,7 +208,6 @@ func TestChangeSetPathStorage(t *testing.T) {
 				BaseSHA256:  strPtr("old1"),
 				NewSHA256:   "new1",
 				NewLen:      100,
-				Outcome:     journal.ChangeSetPathOutcomePending,
 			},
 			{
 				ID:          "path2",
@@ -215,7 +216,6 @@ func TestChangeSetPathStorage(t *testing.T) {
 				Op:          journal.ChangeSetOpCreate,
 				NewSHA256:   "new2",
 				NewLen:      200,
-				Outcome:     journal.ChangeSetPathOutcomePending,
 			},
 		}
 		for _, p := range paths {
@@ -444,7 +444,7 @@ func TestPerPathApplyOutcomes(t *testing.T) {
 			return err
 		}
 
-		// Store paths initially as pending
+		// Store paths
 		paths := []journal.ChangeSetPath{
 			{
 				ID:          "path1",
@@ -454,7 +454,6 @@ func TestPerPathApplyOutcomes(t *testing.T) {
 				BaseSHA256:  strPtr("oldsha1"),
 				NewSHA256:   "newsha1",
 				NewLen:      100,
-				Outcome:     journal.ChangeSetPathOutcomePending,
 			},
 			{
 				ID:          "path2",
@@ -464,7 +463,6 @@ func TestPerPathApplyOutcomes(t *testing.T) {
 				BaseSHA256:  strPtr("oldsha2"),
 				NewSHA256:   "newsha2",
 				NewLen:      200,
-				Outcome:     journal.ChangeSetPathOutcomePending,
 			},
 		}
 
@@ -518,21 +516,19 @@ func TestPerPathApplyOutcomes(t *testing.T) {
 		t.Fatalf("store data: %v", err)
 	}
 
-	// Verify paths are still pending (outcomes not updated via UPDATE)
-	var paths []journal.ChangeSetPath
+	// Verify paths are stored correctly
+	var retrievedPaths []journal.ChangeSetPath
 	err = s.Tx(func(tx *journal.Tx) error {
 		var err error
-		paths, err = tx.GetChangeSetPathsByChangeSet(cs.ID)
+		retrievedPaths, err = tx.GetChangeSetPathsByChangeSet(cs.ID)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("get paths: %v", err)
 	}
 
-	for _, p := range paths {
-		if p.Outcome != journal.ChangeSetPathOutcomePending {
-			t.Errorf("path %s outcome should be pending, got %s", p.Path, p.Outcome)
-		}
+	if len(retrievedPaths) != 2 {
+		t.Errorf("expected 2 paths, got %d", len(retrievedPaths))
 	}
 
 	// Verify that apply_ops record the transitions
@@ -657,6 +653,15 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 	attemptID2 := "attempt2"
 	createTestAttempt(t, conn, attemptID2, turnID, "author")
 
+	// Get event count before failed transaction
+	var eventCountBefore int
+	err = s.Tx(func(tx *journal.Tx) error {
+		return conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCountBefore)
+	})
+	if err != nil {
+		t.Fatalf("count events before: %v", err)
+	}
+
 	err = s.Tx(func(tx *journal.Tx) error {
 		// Store a tool call
 		call := journal.ToolCall{
@@ -698,13 +703,17 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 		t.Fatalf("expected 0 tool calls after rollback, got %d", len(calls))
 	}
 
-	// Verify that events are captured alongside records
+	// Verify that the event was also rolled back (atomicity)
+	var eventCountAfter int
 	err = s.Tx(func(tx *journal.Tx) error {
-		// Append event to show that atomicity includes events
-		return tx.AppendEvent("test_check", nil)
+		return conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCountAfter)
 	})
 	if err != nil {
-		t.Fatalf("append event: %v", err)
+		t.Fatalf("count events after: %v", err)
+	}
+
+	if eventCountAfter != eventCountBefore {
+		t.Errorf("event count changed after rollback: before %d, after %d (expected no change)", eventCountBefore, eventCountAfter)
 	}
 }
 
@@ -791,8 +800,20 @@ func TestToolResultRollback(t *testing.T) {
 
 	s := journal.NewStore(db)
 
-	// Attempt to store call and result, but fail the transaction
+	// Get record counts before failed transaction
+	var callCountBefore, resultCountBefore int
 	err := s.Tx(func(tx *journal.Tx) error {
+		if err := conn.QueryRow("SELECT COUNT(*) FROM tool_calls").Scan(&callCountBefore); err != nil {
+			return err
+		}
+		return conn.QueryRow("SELECT COUNT(*) FROM tool_results").Scan(&resultCountBefore)
+	})
+	if err != nil {
+		t.Fatalf("count records before: %v", err)
+	}
+
+	// Attempt to store call and result, but fail the transaction
+	err = s.Tx(func(tx *journal.Tx) error {
 		call := journal.ToolCall{
 			ID:         "call2",
 			AttemptID:  attemptID,
@@ -822,19 +843,23 @@ func TestToolResultRollback(t *testing.T) {
 		t.Fatal("expected transaction to fail")
 	}
 
-	// Verify neither call nor result were stored
-	var calls []journal.ToolCall
+	// Verify record counts unchanged (atomic rollback)
+	var callCountAfter, resultCountAfter int
 	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		calls, err = tx.GetToolCallsByAttempt(attemptID)
-		return err
+		if err := conn.QueryRow("SELECT COUNT(*) FROM tool_calls").Scan(&callCountAfter); err != nil {
+			return err
+		}
+		return conn.QueryRow("SELECT COUNT(*) FROM tool_results").Scan(&resultCountAfter)
 	})
 	if err != nil {
-		t.Fatalf("get tool calls: %v", err)
+		t.Fatalf("count records after: %v", err)
 	}
 
-	if len(calls) != 0 {
-		t.Fatalf("expected 0 calls after rollback, got %d", len(calls))
+	if callCountAfter != callCountBefore {
+		t.Errorf("tool_calls count changed: before %d, after %d", callCountBefore, callCountAfter)
+	}
+	if resultCountAfter != resultCountBefore {
+		t.Errorf("tool_results count changed: before %d, after %d", resultCountBefore, resultCountAfter)
 	}
 }
 
@@ -842,7 +867,7 @@ func TestToolResultRollback(t *testing.T) {
 func TestHashAddressedReconstruction(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
 
-	// First session: Store tool call with known hash
+	// First session: Store tool call and observation with computed hashes
 	db1, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db session 1: %v", err)
@@ -855,14 +880,16 @@ func TestHashAddressedReconstruction(t *testing.T) {
 	createTestAttempt(t, conn1, attemptID, turnID, "author")
 
 	callID := "call1"
-	argsSHA256 := "abc123def456"
+	// Use real content and compute its SHA256
+	argsContent := "read_file{\"path\": \"/etc/hosts\"}"
+	argsSHA256 := computeSHA256(t, argsContent)
 
 	s1 := journal.NewStore(db1)
 	err = s1.Tx(func(tx *journal.Tx) error {
 		call := journal.ToolCall{
 			ID:         callID,
 			AttemptID:  attemptID,
-			Name:       "test_tool",
+			Name:       "read_file",
 			ArgsSHA256: argsSHA256,
 			Status:     journal.ToolCallStatusAccepted,
 		}
@@ -872,11 +899,32 @@ func TestHashAddressedReconstruction(t *testing.T) {
 		t.Fatalf("store tool call: %v", err)
 	}
 
+	// Store an observation with computed hash
+	obsContent := "127.0.0.1\tlocalhost\n::1\tlocalhost"
+	obsSHA256 := computeSHA256(t, obsContent)
+
+	err = s1.Tx(func(tx *journal.Tx) error {
+		obs := journal.Observation{
+			ID:              "obs1",
+			TurnID:          turnID,
+			AttemptID:       attemptID,
+			SnapshotVersion: 1,
+			Path:            "file.txt",
+			Kind:            journal.ObservationKindFile,
+			BaseSHA256:      &obsSHA256,
+			ObservedAt:      time.Now(),
+		}
+		return tx.StoreObservation(obs)
+	})
+	if err != nil {
+		t.Fatalf("store observation: %v", err)
+	}
+
 	if err := db1.Close(); err != nil {
 		t.Logf("close db1: %v", err)
 	}
 
-	// Second session: Reopen and retrieve the tool call
+	// Second session: Verify hashes persist and can be used to identify content
 	db2, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db session 2: %v", err)
@@ -888,6 +936,8 @@ func TestHashAddressedReconstruction(t *testing.T) {
 	}()
 
 	s2 := journal.NewStore(db2)
+
+	// Verify call hash matches what we computed
 	var calls []journal.ToolCall
 	err = s2.Tx(func(tx *journal.Tx) error {
 		var err error
@@ -906,17 +956,18 @@ func TestHashAddressedReconstruction(t *testing.T) {
 		t.Errorf("expected args hash %s, got %s", argsSHA256, calls[0].ArgsSHA256)
 	}
 
-	// Verify tool result persists across restart
-	resultID := "result1"
-	resultSHA256 := "xyz789"
+	// Store result with computed hash
+	resultContent := `{"status": "success", "content": "file contents here"}`
+	resultSHA256 := computeSHA256(t, resultContent)
 
+	resultID := "result1"
 	err = s2.Tx(func(tx *journal.Tx) error {
 		result := journal.ToolResult{
 			ID:            resultID,
 			ToolCallID:    callID,
 			Status:        journal.ToolCallStatusExecuted,
 			ResultSHA256:  &resultSHA256,
-			ResultByteLen: int64Ptr(100),
+			ResultByteLen: int64Ptr(int64(len(resultContent))),
 			RecordedAt:    time.Now(),
 		}
 		return tx.StoreToolResult(result)
@@ -925,11 +976,30 @@ func TestHashAddressedReconstruction(t *testing.T) {
 		t.Fatalf("store tool result: %v", err)
 	}
 
+	// Verify observation hash matches
+	var obss []journal.Observation
+	err = s2.Tx(func(tx *journal.Tx) error {
+		var err error
+		obss, err = tx.GetObservationsByTurn(turnID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get observations: %v", err)
+	}
+
+	if len(obss) != 1 {
+		t.Fatalf("expected 1 observation, got %d", len(obss))
+	}
+
+	if obss[0].BaseSHA256 == nil || *obss[0].BaseSHA256 != obsSHA256 {
+		t.Errorf("observation hash mismatch: expected %s, got %v", obsSHA256, obss[0].BaseSHA256)
+	}
+
 	if err := db2.Close(); err != nil {
 		t.Logf("close db2: %v", err)
 	}
 
-	// Third session: Verify both call and result persist
+	// Third session: Verify all hashes persist and are consistent
 	db3, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db session 3: %v", err)
@@ -941,6 +1011,8 @@ func TestHashAddressedReconstruction(t *testing.T) {
 	}()
 
 	s3 := journal.NewStore(db3)
+
+	// Verify call, result, and observation hashes all persist
 	var results []journal.ToolResult
 	err = s3.Tx(func(tx *journal.Tx) error {
 		var err error
@@ -957,6 +1029,11 @@ func TestHashAddressedReconstruction(t *testing.T) {
 
 	if results[0].ResultSHA256 == nil || *results[0].ResultSHA256 != resultSHA256 {
 		t.Errorf("expected result hash %s, got %v", resultSHA256, results[0].ResultSHA256)
+	}
+
+	// Verify byte lengths are correct
+	if results[0].ResultByteLen == nil || *results[0].ResultByteLen != int64(len(resultContent)) {
+		t.Errorf("expected result byte len %d, got %v", len(resultContent), results[0].ResultByteLen)
 	}
 }
 
@@ -978,4 +1055,9 @@ func createTestAttempt(t *testing.T, conn *sql.DB, attemptID, turnID, participan
 	if err != nil {
 		t.Fatalf("create attempt: %v", err)
 	}
+}
+
+func computeSHA256(t *testing.T, content string) string {
+	h := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(h[:])
 }

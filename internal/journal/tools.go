@@ -72,13 +72,6 @@ const (
 	ChangeSetStateDiscarded = "discarded"
 )
 
-// ChangeSetPathOutcome values as constrained by the schema.
-const (
-	ChangeSetPathOutcomePending  = "pending"
-	ChangeSetPathOutcomeApplied  = "applied"
-	ChangeSetPathOutcomeConflict = "conflict"
-)
-
 // ChangeSet represents a change set at candidate freeze.
 type ChangeSet struct {
 	ID           string
@@ -98,7 +91,6 @@ type ChangeSetPath struct {
 	BaseSHA256  *string
 	NewSHA256   string
 	NewLen      int64
-	Outcome     string
 }
 
 // ChangeSetOp values: create or modify.
@@ -292,9 +284,9 @@ func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 // StoreChangeSetPath records a single path in a change set.
 func (tx *Tx) StoreChangeSetPath(csp ChangeSetPath) error {
 	_, err := tx.tx.Exec(`
-		INSERT INTO change_set_paths (id, change_set_id, path, op, base_sha256, new_sha256, new_len, outcome)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, csp.ID, csp.ChangeSetID, csp.Path, csp.Op, csp.BaseSHA256, csp.NewSHA256, csp.NewLen, csp.Outcome)
+		INSERT INTO change_set_paths (id, change_set_id, path, op, base_sha256, new_sha256, new_len)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, csp.ID, csp.ChangeSetID, csp.Path, csp.Op, csp.BaseSHA256, csp.NewSHA256, csp.NewLen)
 	if err != nil {
 		return fmt.Errorf("store change set path: %w", err)
 	}
@@ -304,7 +296,7 @@ func (tx *Tx) StoreChangeSetPath(csp ChangeSetPath) error {
 // GetChangeSetPathsByChangeSet retrieves all paths in a change set.
 func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath, error) {
 	rows, err := tx.tx.Query(`
-		SELECT id, change_set_id, path, op, base_sha256, new_sha256, new_len, outcome
+		SELECT id, change_set_id, path, op, base_sha256, new_sha256, new_len
 		FROM change_set_paths
 		WHERE change_set_id = ?
 		ORDER BY path
@@ -318,7 +310,7 @@ func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath,
 	for rows.Next() {
 		var csp ChangeSetPath
 		if err := rows.Scan(&csp.ID, &csp.ChangeSetID, &csp.Path, &csp.Op, &csp.BaseSHA256,
-			&csp.NewSHA256, &csp.NewLen, &csp.Outcome); err != nil {
+			&csp.NewSHA256, &csp.NewLen); err != nil {
 			return nil, fmt.Errorf("scan change set path: %w", err)
 		}
 		paths = append(paths, csp)
@@ -512,3 +504,84 @@ func (tx *Tx) GetApplyOps(changeSetID string) ([]ApplyOp, error) {
 	}
 	return ops, nil
 }
+
+// ComputeApplyState derives the final apply state and per-path outcomes from apply_ops and change_set_paths.
+// Returns the final change set state and a map of path -> outcome.
+func (tx *Tx) ComputeApplyState(changeSetID string) (string, map[string]string, error) {
+	ops, err := tx.GetApplyOps(changeSetID)
+	if err != nil {
+		return "", nil, fmt.Errorf("get apply ops: %w", err)
+	}
+
+	paths, err := tx.GetChangeSetPathsByChangeSet(changeSetID)
+	if err != nil {
+		return "", nil, fmt.Errorf("get change set paths: %w", err)
+	}
+
+	// Build set of originally pending paths
+	pendingPaths := make(map[string]bool)
+	for _, p := range paths {
+		pendingPaths[p.Path] = true
+	}
+
+	// Track applied paths from apply_file ops
+	appliedPaths := make(map[string]bool)
+	hasApplyStarted := false
+	hasApplyFinished := false
+
+	for _, op := range ops {
+		switch op.OpType {
+		case "started":
+			hasApplyStarted = true
+		case "file":
+			if op.Path != nil {
+				appliedPaths[*op.Path] = true
+			}
+		case "finished":
+			hasApplyFinished = true
+		}
+	}
+
+	// Determine state: if no apply_ops, stay appliable; if unfinished, partial; if finished, check for conflicts
+	var finalState string
+	if !hasApplyStarted {
+		finalState = ChangeSetStateAppliable
+	} else if !hasApplyFinished {
+		finalState = ChangeSetStatePartial
+	} else {
+		// All paths applied -> applied; some paths not applied -> conflict
+		allApplied := true
+		for path := range pendingPaths {
+			if !appliedPaths[path] {
+				allApplied = false
+				break
+			}
+		}
+		if allApplied {
+			finalState = ChangeSetStateApplied
+		} else {
+			finalState = ChangeSetStateConflict
+		}
+	}
+
+	// Build per-path outcome map
+	outcomes := make(map[string]string)
+	for path := range pendingPaths {
+		if appliedPaths[path] {
+			outcomes[path] = ChangeSetPathOutcomeApplied
+		} else if finalState == ChangeSetStatePartial {
+			outcomes[path] = ChangeSetPathOutcomePending
+		} else {
+			outcomes[path] = ChangeSetPathOutcomeConflict
+		}
+	}
+
+	return finalState, outcomes, nil
+}
+
+// ChangeSetPathOutcome values derived from apply_ops.
+const (
+	ChangeSetPathOutcomePending  = "pending"
+	ChangeSetPathOutcomeApplied  = "applied"
+	ChangeSetPathOutcomeConflict = "conflict"
+)

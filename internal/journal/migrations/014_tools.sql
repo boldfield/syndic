@@ -28,9 +28,10 @@ END;
 
 -- Tool results: Append-only records of tool call results and status transitions.
 -- Each result record captures the final status and outcome of a tool call after execution.
+-- One tool call has at most one terminal result record.
 CREATE TABLE tool_results (
 	id TEXT PRIMARY KEY,
-	tool_call_id TEXT NOT NULL REFERENCES tool_calls(id),
+	tool_call_id TEXT NOT NULL UNIQUE REFERENCES tool_calls(id),
 	status TEXT NOT NULL CHECK (status IN ('executed', 'error', 'abandoned')),
 	result_sha256 TEXT,
 	result_byte_len INTEGER,
@@ -95,8 +96,9 @@ CREATE TABLE change_sets (
 
 CREATE INDEX change_sets_turn_idx ON change_sets(turn_id);
 
--- Per-path outcomes in a change set: pending, applied, or conflict.
--- Never rewritten by later state changes; both are journaled and shown separately.
+-- Per-path records in a change set.
+-- Outcomes are derived from apply_ops: paths with apply_file records are applied,
+-- others remain pending or become conflict based on apply state.
 CREATE TABLE change_set_paths (
 	id TEXT PRIMARY KEY,
 	change_set_id TEXT NOT NULL REFERENCES change_sets(id),
@@ -105,7 +107,6 @@ CREATE TABLE change_set_paths (
 	base_sha256 TEXT,
 	new_sha256 TEXT NOT NULL,
 	new_len INTEGER NOT NULL,
-	outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN ('pending', 'applied', 'conflict')),
 	UNIQUE (change_set_id, path)
 );
 
