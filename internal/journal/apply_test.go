@@ -90,15 +90,9 @@ func TestApplyPendingReturnErrorIfConflict(t *testing.T) {
 	turnID := createTestTurn(t, store)
 	csID := createTestChangeSet(t, store, turnID)
 
-	if err := store.Tx(func(tx *Tx) error {
-		return tx.BeginApply(csID, false)
-	}); err != nil {
-		t.Fatalf("begin apply: %v", err)
-	}
-
 	intent, _ := store.ParseApplyIntent(csID)
 
-	// Write a file with different content to cause conflict
+	// Write a file with different content to cause conflict (first apply, should fail)
 	for path := range intent.Paths {
 		if err := os.WriteFile(filepath.Join(wsDir, path), []byte("different"), 0o644); err != nil {
 			t.Fatalf("write file: %v", err)
@@ -106,16 +100,18 @@ func TestApplyPendingReturnErrorIfConflict(t *testing.T) {
 	}
 
 	getContent := func(sha256 string) ([]byte, error) {
-		return []byte("new content"), nil
+		return store.GetContent(sha256)
 	}
 
-	// Try to apply; should fail because all paths are conflicted
+	// Try to apply; should fail because all paths are conflicted on first apply
 	err := store.Tx(func(tx *Tx) error {
-		_, err := tx.ApplyPendingPaths(wsDir, intent, getContent)
-		return err
+		if err := tx.BeginApply(csID, false); err != nil {
+			return err
+		}
+		return tx.ApplyPendingPaths(wsDir, intent, getContent)
 	})
 	if err == nil {
-		t.Fatalf("ApplyPendingPaths should return error when paths are in conflict")
+		t.Fatalf("ApplyPendingPaths should return error when paths are in conflict on first apply")
 	}
 }
 
