@@ -263,8 +263,8 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	if got := rec.FinishReasons["stop"]; got != transport.StatusComplete {
 		t.Errorf("FinishReasons[stop]: got %v", got)
 	}
-	if len(rec.ToolRestrictions) == 0 || !strings.Contains(rec.ToolRestrictions[0], "no tool") {
-		t.Errorf("ToolRestrictions: %v", rec.ToolRestrictions)
+	if rec.ToolCalls != transport.TriNo && rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want yes or no", rec.ToolCalls)
 	}
 	if rec.ObservedAt.IsZero() {
 		t.Errorf("ObservedAt zero")
@@ -273,13 +273,13 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"models", "max_tokens", "system_role", "over_length", "calibration_baseline", "calibration"} {
+	for _, k := range []string{"models", "max_tokens", "system_role", "tool_calls", "over_length", "calibration_baseline", "calibration"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("Raw missing step %q", k)
 		}
 	}
-	if p.count("models") != 1 || p.count("chat") != 5 {
-		t.Errorf("request counts: models=%d chat=%d, want 1 and 5", p.count("models"), p.count("chat"))
+	if p.count("models") != 1 || p.count("chat") != 6 {
+		t.Errorf("request counts: models=%d chat=%d, want 1 and 6", p.count("models"), p.count("chat"))
 	}
 }
 
@@ -293,11 +293,11 @@ func TestProbeRequestCountsAndVariants(t *testing.T) {
 		wantOver  string
 		wantElig  transport.Tri
 	}{
-		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 6, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
-		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 3, "", "not_run:skipped", transport.TriUnknown},
+		{"fallback_to_max_completion_tokens", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true}}, false, 7, "max_completion_tokens", "accepted_whole", transport.TriUnknown},
+		{"both_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, rejectField: map[string]bool{"max_tokens": true, "max_completion_tokens": true}}, true, 4, "", "not_run:skipped", transport.TriUnknown},
 		{"server_error_no_followup", &probeServer{chatStatus: 500}, true, 2, "", "not_run:skipped", transport.TriUnknown},
-		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 5, "max_tokens", "rejected:other", transport.TriUnknown},
-		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 5, "max_tokens", "markers_missing", transport.TriUnknown},
+		{"over_length_other_rejected", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "error"}, false, 6, "max_tokens", "rejected:other", transport.TriUnknown},
+		{"over_length_markers_missing", &probeServer{calibrationBaseline: 1, calibrationObserved: 1034, overLength: "head"}, false, 6, "max_tokens", "markers_missing", transport.TriUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

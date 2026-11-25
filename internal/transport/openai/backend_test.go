@@ -1758,12 +1758,32 @@ func TestUnresolvableAuthSecret(t *testing.T) {
 	}
 }
 
-// TestToolRoleNotAllowed verifies tool role returns ErrNotSent and no request is sent.
+// TestToolRoleAllowed verifies tool role messages are allowed and sent correctly.
 func TestToolRoleNotAllowed(t *testing.T) {
 	requestReceived := false
+	var capturedBody map[string]any
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestReceived = true
-		w.WriteHeader(http.StatusInternalServerError)
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(server.Close)
 
@@ -1789,7 +1809,7 @@ func TestToolRoleNotAllowed(t *testing.T) {
 		},
 		Model: "test-model",
 		Messages: []transport.Message{
-			{Role: "tool", Content: "tool response"},
+			{Role: "tool", Content: "tool response", ToolCallID: "call123"},
 		},
 		MaxOutputTokens: 100,
 		Deadline:        time.Now().Add(2 * time.Second),
@@ -1798,13 +1818,32 @@ func TestToolRoleNotAllowed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := adapter.Complete(ctx, req)
+	result, err := adapter.Complete(ctx, req)
 
-	if !errors.Is(err, transport.ErrNotSent) {
-		t.Errorf("error not ErrNotSent: %v", err)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
 	}
-	if requestReceived {
-		t.Errorf("request was sent despite invalid tool role")
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+	if result.Status != transport.StatusComplete {
+		t.Errorf("unexpected status: %v", result.Status)
+	}
+
+	// Verify tool message was included in request
+	if capturedBody != nil {
+		messages, ok := capturedBody["messages"].([]any)
+		if !ok || len(messages) == 0 {
+			t.Errorf("no messages in request body")
+		} else {
+			lastMsg := messages[len(messages)-1].(map[string]any)
+			if lastMsg["role"] != "tool" {
+				t.Errorf("tool message role not sent: %v", lastMsg["role"])
+			}
+			if lastMsg["tool_call_id"] != "call123" {
+				t.Errorf("tool_call_id not sent correctly: %v", lastMsg["tool_call_id"])
+			}
+		}
 	}
 }
 
