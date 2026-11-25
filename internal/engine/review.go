@@ -294,7 +294,9 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err != nil {
 			return err
 		}
-		estimated, err := e.reserve(tx, t, id, msgs, maxOut)
+		// The tool definitions the request carries; no dispatch sends any yet.
+		var defs []transport.Tool
+		estimated, err := e.reserve(tx, t, id, msgs, defs, maxOut)
 		if err != nil {
 			return err
 		}
@@ -354,6 +356,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 				},
 				Model:           p.Model,
 				Messages:        msgs,
+				Tools:           defs,
 				MaxOutputTokens: maxOut,
 				Deadline:        deadline,
 			},
@@ -429,7 +432,8 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
-	estimated, err := e.reserve(tx, t, originalDispatch.participant, msgs, maxOut)
+	// A repair carries no tool definitions.
+	estimated, err := e.reserve(tx, t, originalDispatch.participant, msgs, nil, maxOut)
 	if err != nil {
 		return nil, err
 	}

@@ -160,7 +160,8 @@ func (e *Engine) beginDelivery(t *openTurn, id string, msgs []transport.Message)
 		if err != nil {
 			return err
 		}
-		estimated, err := e.reserve(tx, t, id, msgs, maxOut)
+		// A delivery carries no tool definitions.
+		estimated, err := e.reserve(tx, t, id, msgs, nil, maxOut)
 		begun := wire.EvAttemptBegun{
 			AttemptID:             attemptID,
 			Participant:           id,

@@ -160,13 +160,14 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 // turn's charge, in the worst case it can know: the author's revision with its
 // output bound and each required reviewer's review of a candidate as long as
 // a candidate as long as the author's output bound allows, plus the one repair
-// each may be given.
-func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorMaxOut int) (int, error) {
+// each may be given. authorDefs are the tool definitions the author's revision
+// carries; no review or repair dispatch sends any yet.
+func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorDefs []transport.Tool, authorMaxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, t.author)
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", t.author, missing)
 	}
-	total := satAdd(pb.estimate(authorMsgs), authorMaxOut)
+	total := satAdd(pb.estimate(authorMsgs, authorDefs), authorMaxOut)
 	next := *t
 	next.round = t.round + 1
 	next.candidateHash = standInHash
@@ -185,19 +186,19 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 			return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 		}
 		maxOut := rb.maxOutput(*t.eff.Budgets.ReviewerMaxOutputTokens)
-		total = satAdd(total, satAdd(rb.estimate(msgs), maxOut))
+		total = satAdd(total, satAdd(rb.estimate(msgs, nil), maxOut))
 		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rb.estimate(repair), maxOut))
+		total = satAdd(total, satAdd(rb.estimate(repair, nil), maxOut))
 	}
 	return total, nil
 }
 
 // checkRoundFits refuses a revision round whose projection does not fit what
 // is left of the turn's budget.
-func (e *Engine) checkRoundFits(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorMaxOut int) error {
+func (e *Engine) checkRoundFits(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorDefs []transport.Tool, authorMaxOut int) error {
 	turn, err := tx.GetTurn(t.id)
 	if err != nil {
 		return err
@@ -206,7 +207,7 @@ func (e *Engine) checkRoundFits(tx *journal.Tx, t *openTurn, authorMsgs []transp
 	if err != nil || !ok {
 		return err
 	}
-	projection, err := e.roundProjection(tx, t, authorMsgs, authorMaxOut)
+	projection, err := e.roundProjection(tx, t, authorMsgs, authorDefs, authorMaxOut)
 	if err != nil {
 		return err
 	}

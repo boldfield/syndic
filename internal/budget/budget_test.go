@@ -113,6 +113,9 @@ func TestAdmissionTokens(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("AdmissionTokens() = %d, want %d", got, tt.want)
 			}
+			if got := RequestAdmissionTokens(tt.msgs, nil, tt.tokensPerByteMax, tt.o); got != tt.want {
+				t.Errorf("RequestAdmissionTokens(no tools) = %d, want %d", got, tt.want)
+			}
 		})
 	}
 }
@@ -217,6 +220,9 @@ func TestEstimateTokens(t *testing.T) {
 			got := EstimateTokens(tt.msgs, tt.bytesPerToken, tt.o)
 			if got != tt.want {
 				t.Errorf("EstimateTokens() = %d, want %d", got, tt.want)
+			}
+			if got := RequestEstimateTokens(tt.msgs, nil, tt.bytesPerToken, tt.o); got != tt.want {
+				t.Errorf("RequestEstimateTokens(no tools) = %d, want %d", got, tt.want)
 			}
 		})
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -155,12 +156,16 @@ func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string)
 
 func (pb partBudget) usable() int { return budget.UsableBound(pb.contextBound, pb.margin) }
 
-func (pb partBudget) admission(msgs []transport.Message) int {
-	return budget.AdmissionTokens(msgs, pb.tokensPerByteMax, pb.overheads)
+// admission is the admission bound of a request carrying msgs and the tool
+// definitions defs.
+func (pb partBudget) admission(msgs []transport.Message, defs []transport.Tool) int {
+	return budget.RequestAdmissionTokens(msgs, defs, pb.tokensPerByteMax, pb.overheads)
 }
 
-func (pb partBudget) estimate(msgs []transport.Message) int {
-	return budget.EstimateTokens(msgs, pb.bytesPerToken, pb.overheads)
+// estimate is the estimate of a request carrying msgs and the tool
+// definitions defs.
+func (pb partBudget) estimate(msgs []transport.Message, defs []transport.Tool) int {
+	return budget.RequestEstimateTokens(msgs, defs, pb.bytesPerToken, pb.overheads)
 }
 
 // maxOutput is the MaxOutputTokens a request of this participant carries.
@@ -180,10 +185,39 @@ func budgetError(kind string) *wire.Error {
 	return err
 }
 
+// searchProvider reports whether the roster configures a web search provider.
+// The roster has no search provider setting yet, so none is configured and
+// web_search is never among a role's definitions.
+func (e *Engine) searchProvider() bool { return false }
+
+// roleTools are the tool definitions the effective preset gives the author
+// and the reviewers, from internal/tools.
+type roleTools struct {
+	author   []transport.Tool
+	reviewer []transport.Tool
+}
+
+func (e *Engine) roleTools(eff config.Effective) (roleTools, error) {
+	author, err := tools.ForGroups(eff.Preset.Tools, e.searchProvider())
+	if err != nil {
+		return roleTools{}, err
+	}
+	reviewer, err := tools.ForGroups(eff.Preset.ReviewerTools, e.searchProvider())
+	if err != nil {
+		return roleTools{}, err
+	}
+	return roleTools{author: author, reviewer: reviewer}, nil
+}
+
 // projectBudget runs the submit-time budget checks and returns the record to
 // store on the turn. It computes the first-round projection and reports the
 // worst-case projection across all configured rounds, refusing only on the
 // first-round projection.
+//
+// Each projected author and review dispatch carries the definitions the
+// preset gives that role; a repair or delivery dispatch carries none. No tool
+// calls or results are projected: those attempts are reserved when they are
+// dispatched.
 func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int) (budgetRecord, error) {
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
@@ -208,13 +242,18 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 		consts[id] = pb
 	}
 
+	defs, err := e.roleTools(eff)
+	if err != nil {
+		return budgetRecord{}, err
+	}
+
 	limit := *eff.Budgets.TurnMaxEstimatedTokens
 	total := 0
 
 	// fits checks the recipient's admission bound and adds the request's
 	// estimate and output bound to the aggregate.
-	fits := func(pb partBudget, msgs []transport.Message, maxOut int) error {
-		adm := pb.admission(msgs)
+	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
+		adm := pb.admission(msgs, toolDefs)
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)
@@ -222,7 +261,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			err.Limit = i64Ptr(pb.usable())
 			return err
 		}
-		total = satAdd(total, satAdd(pb.estimate(msgs), maxOut))
+		total = satAdd(total, satAdd(pb.estimate(msgs, toolDefs), maxOut))
 		return nil
 	}
 
@@ -231,7 +270,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.AuthorWithHistory(doc, input), authorOut); err != nil {
+	if err := fits(author, prompt.AuthorWithHistory(doc, input), defs.author, authorOut); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -258,14 +297,14 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, msgs, out); err != nil {
+			if err := fits(rv, msgs, defs.reviewer, out); err != nil {
 				return budgetRecord{}, err
 			}
 			repair, err := prompt.Repair(review, output, standInToken)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, repair, out); err != nil {
+			if err := fits(rv, repair, nil, out); err != nil {
 				return budgetRecord{}, err
 			}
 			delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
@@ -290,7 +329,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	// history. See revisionRoundCost for what a round is assumed to carry.
 	if eff.Preset.Mode != modeSolo {
 		for round := 1; round <= maxRounds; round++ {
-			cost, err := revisionRoundCost(eff, consts, input, doc, round)
+			cost, err := revisionRoundCost(eff, consts, defs, input, doc, round)
 			if err != nil {
 				return budgetRecord{}, err
 			}
@@ -331,7 +370,7 @@ func deliveryRecipientsCost(eff config.Effective, consts map[string]partBudget, 
 	for _, id := range ids {
 		pb := consts[id]
 		out := pb.maxOutput(*eff.Budgets.DeliveryMaxTokens)
-		total = satAdd(total, satAdd(pb.estimate(msgs), out))
+		total = satAdd(total, satAdd(pb.estimate(msgs, nil), out))
 	}
 	return total
 }
@@ -348,14 +387,15 @@ func longBlockID(rv partBudget, out int, participant string, i int) string {
 // revisionRoundCost is the most the round-th revision round (1-based) can add
 // to the turn's charge: the author's revision with its output bound, and each
 // required reviewer's review and one repair, all built by the revision prompt
-// builders over the turn's history.
+// builders over the turn's history. The revision and each review carry their
+// role's definitions; a repair carries none.
 //
 // The candidate and every reviewer output are as long as their output bounds
 // allow. A reviewer's output bound caps the block text one verdict can open,
 // and a block it does not withdraw stays open, so by round N a reviewer may
 // hold N verdicts' worth of open blocks: N blocks, each carrying one output
 // bound of text between its evidence and remedy.
-func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input string, doc *history.Document, round int) (int, error) {
+func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs roleTools, input string, doc *history.Document, round int) (int, error) {
 	if doc == nil {
 		doc = history.New()
 	}
@@ -378,7 +418,7 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input
 	if err != nil {
 		return 0, err
 	}
-	total := satAdd(author.estimate(msgs), authorOut)
+	total := satAdd(author.estimate(msgs, defs.author), authorOut)
 
 	for _, id := range eff.Preset.RequiredReviewers {
 		rv := consts[id]
@@ -406,12 +446,12 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(review), out))
+		total = satAdd(total, satAdd(rv.estimate(review, defs.reviewer), out))
 		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(repair), out))
+		total = satAdd(total, satAdd(rv.estimate(repair, nil), out))
 	}
 	return total, nil
 }
@@ -425,19 +465,21 @@ func satAdd(a, b int) int {
 }
 
 // reserve is the dispatch check. Inside the Tx that begins the attempt it
-// checks the real messages against the recipient's usable bound, then adds
-// the request's estimate and output bound to the turn's running total and
-// writes it, or returns a *budgetRefusal. It returns the request's estimate.
-func (e *Engine) reserve(tx *journal.Tx, t *openTurn, id string, msgs []transport.Message, maxOut int) (int, error) {
+// checks the real request, its messages and the tool definitions defs sent
+// with them, against the recipient's usable bound, then adds the request's
+// estimate and output bound to the turn's running total and writes it, or
+// returns a *budgetRefusal. It returns the request's estimate. msgs and defs
+// are the values the caller places in the request's Messages and Tools.
+func (e *Engine) reserve(tx *journal.Tx, t *openTurn, id string, msgs []transport.Message, defs []transport.Tool, maxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, id)
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 	}
-	adm := pb.admission(msgs)
+	adm := pb.admission(msgs, defs)
 	if !budget.Fits(adm, maxOut, pb.usable()) {
 		return 0, &budgetRefusal{kind: budgetContext, participant: id, admission: satAdd(adm, maxOut), limit: pb.usable()}
 	}
-	est := pb.estimate(msgs)
+	est := pb.estimate(msgs, defs)
 
 	turn, err := tx.GetTurn(t.id)
 	if err != nil {

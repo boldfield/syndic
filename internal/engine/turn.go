@@ -105,6 +105,8 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 	}
 	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
 	deadline := e.attemptDeadline(t)
+	// The tool definitions the request carries; no dispatch sends any yet.
+	var defs []transport.Tool
 
 	var req transport.CompleteRequest
 	var attemptID string
@@ -114,11 +116,11 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 			return err
 		}
 		if t.revising {
-			if err := e.checkRoundFits(tx, t, msgs, maxOut); err != nil {
+			if err := e.checkRoundFits(tx, t, msgs, defs, maxOut); err != nil {
 				return err
 			}
 		}
-		estimated, err := e.reserve(tx, t, t.author, msgs, maxOut)
+		estimated, err := e.reserve(tx, t, t.author, msgs, defs, maxOut)
 		if err != nil {
 			return err
 		}
@@ -178,6 +180,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 			},
 			Model:           p.Model,
 			Messages:        msgs,
+			Tools:           defs,
 			MaxOutputTokens: maxOut,
 			Deadline:        deadline,
 		}

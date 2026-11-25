@@ -1,6 +1,7 @@
 package budget
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"strconv"
@@ -83,39 +84,150 @@ func ceilDiv(n int, rate float64) int {
 	return ratCeil(new(big.Rat).Quo(big.NewRat(int64(n), 1), decimalRat(rate)))
 }
 
+// PromptBytes returns the counted prompt bytes of one request: the messages
+// and the tool definitions sent with them. It is the sum of
+//
+//  1. each message's content, len(Content), for every role;
+//  2. for each "assistant" message, the length of the JSON encoding of its
+//     tool_calls array as the Chat Completions adapter sends it, an array of
+//     {"id", "type", "function": {"name", "arguments"}}; zero with no calls;
+//  3. for each "tool" message, len(ToolCallID);
+//  4. the length of the JSON encoding of the whole tools array as the adapter
+//     sends it, an array of {"type", "function": {"name", "description",
+//     "parameters"}}; zero with no definitions.
+//
+// The encoding is encoding/json with default settings. Nothing else is
+// counted: the JSON framing of the message objects is covered by the declared
+// overheads. A part that cannot be encoded, which the adapter could not send
+// either, counts as math.MaxInt. The sum saturates at math.MaxInt.
+func PromptBytes(msgs []transport.Message, tools []transport.Tool) int {
+	sum := toolsBytes(tools)
+	for _, msg := range msgs {
+		sum = addSat(sum, messageBytes(msg))
+	}
+	return sum
+}
+
+// messageBytes is the counted bytes of one message: items 1 to 3 of
+// PromptBytes.
+func messageBytes(msg transport.Message) int {
+	n := len(msg.Content)
+	switch msg.Role {
+	case "assistant":
+		n = addSat(n, toolCallsBytes(msg.ToolCalls))
+	case "tool":
+		n = addSat(n, len(msg.ToolCallID))
+	}
+	return n
+}
+
+// toolCallsBytes is item 2 of PromptBytes.
+func toolCallsBytes(calls []transport.ToolCall) int {
+	if len(calls) == 0 {
+		return 0
+	}
+	shaped := make([]map[string]any, len(calls))
+	for i, call := range calls {
+		shaped[i] = map[string]any{
+			"id":   call.ID,
+			"type": call.Type,
+			"function": map[string]any{
+				"name":      call.Function.Name,
+				"arguments": call.Function.Arguments,
+			},
+		}
+	}
+	return encodedLen(shaped)
+}
+
+// toolsBytes is item 4 of PromptBytes.
+func toolsBytes(tools []transport.Tool) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	shaped := make([]map[string]any, len(tools))
+	for i, tool := range tools {
+		shaped[i] = map[string]any{
+			"type": tool.Type,
+			"function": map[string]any{
+				"name":        tool.Function.Name,
+				"description": tool.Function.Description,
+				"parameters":  tool.Function.Parameters,
+			},
+		}
+	}
+	return encodedLen(shaped)
+}
+
+// encodedLen is the length of v's default encoding/json encoding, or
+// math.MaxInt when v cannot be encoded.
+func encodedLen(v any) int {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return math.MaxInt
+	}
+	return len(b)
+}
+
 // AdmissionTokens computes the token count for messages using an admission bound formula.
 // It calculates: sum of (ceil(len(content in bytes) × tokensPerByteMax) + MessageTokens) + RequestTokens.
+// It is RequestAdmissionTokens with no tool definitions.
 // Panics if tokensPerByteMax is not greater than zero (including NaN).
 // Float arguments are taken at their shortest decimal form and must be finite.
 // A result beyond the int range saturates at math.MaxInt.
 func AdmissionTokens(msgs []transport.Message, tokensPerByteMax float64, o Overheads) int {
+	return RequestAdmissionTokens(msgs, nil, tokensPerByteMax, o)
+}
+
+// RequestAdmissionTokens computes the admission bound of one request: its
+// messages and the tool definitions sent with them, counted by PromptBytes.
+// It calculates: sum over messages of (ceil(message bytes × tokensPerByteMax)
+// + MessageTokens) + ceil(definition bytes × tokensPerByteMax) + RequestTokens.
+// The definitions are not a message and add no MessageTokens.
+// Panics if tokensPerByteMax is not greater than zero (including NaN).
+// Float arguments are taken at their shortest decimal form and must be finite.
+// A result beyond the int range saturates at math.MaxInt.
+func RequestAdmissionTokens(msgs []transport.Message, tools []transport.Tool, tokensPerByteMax float64, o Overheads) int {
 	if !(tokensPerByteMax > 0) {
 		panic("tokensPerByteMax must be greater than zero")
 	}
 
 	sum := 0
 	for _, msg := range msgs {
-		bytes := len(msg.Content)
-		sum = addSat(sum, addSat(ceilMul(bytes, tokensPerByteMax), o.MessageTokens))
+		sum = addSat(sum, addSat(ceilMul(messageBytes(msg), tokensPerByteMax), o.MessageTokens))
 	}
+	sum = addSat(sum, ceilMul(toolsBytes(tools), tokensPerByteMax))
 	return addSat(sum, o.RequestTokens)
 }
 
 // EstimateTokens computes an estimate of token count for messages.
 // It calculates: sum of (ceil(len(content in bytes) / bytesPerToken) + MessageTokens) + RequestTokens.
+// It is RequestEstimateTokens with no tool definitions.
 // Panics if bytesPerToken is not greater than zero (including NaN).
 // Float arguments are taken at their shortest decimal form and must be finite.
 // A result beyond the int range saturates at math.MaxInt.
 func EstimateTokens(msgs []transport.Message, bytesPerToken float64, o Overheads) int {
+	return RequestEstimateTokens(msgs, nil, bytesPerToken, o)
+}
+
+// RequestEstimateTokens computes the estimate of one request: its messages
+// and the tool definitions sent with them, counted by PromptBytes.
+// It calculates: sum over messages of (ceil(message bytes / bytesPerToken)
+// + MessageTokens) + ceil(definition bytes / bytesPerToken) + RequestTokens.
+// The definitions are not a message and add no MessageTokens.
+// Panics if bytesPerToken is not greater than zero (including NaN).
+// Float arguments are taken at their shortest decimal form and must be finite.
+// A result beyond the int range saturates at math.MaxInt.
+func RequestEstimateTokens(msgs []transport.Message, tools []transport.Tool, bytesPerToken float64, o Overheads) int {
 	if !(bytesPerToken > 0) {
 		panic("bytesPerToken must be greater than zero")
 	}
 
 	sum := 0
 	for _, msg := range msgs {
-		bytes := len(msg.Content)
-		sum = addSat(sum, addSat(ceilDiv(bytes, bytesPerToken), o.MessageTokens))
+		sum = addSat(sum, addSat(ceilDiv(messageBytes(msg), bytesPerToken), o.MessageTokens))
 	}
+	sum = addSat(sum, ceilDiv(toolsBytes(tools), bytesPerToken))
 	return addSat(sum, o.RequestTokens)
 }
 
