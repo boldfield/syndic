@@ -82,7 +82,8 @@ CREATE TABLE observations (
 	base_sha256 TEXT REFERENCES tool_content(sha256),
 	entries_sha256 TEXT REFERENCES tool_content(sha256),
 	observed_at TEXT NOT NULL,
-	UNIQUE (turn_id, path, snapshot_version)
+	UNIQUE (turn_id, path),
+	UNIQUE (turn_id, snapshot_version)
 );
 
 CREATE INDEX observations_turn_idx ON observations(turn_id);
@@ -106,6 +107,7 @@ CREATE TABLE change_sets (
 	id TEXT PRIMARY KEY,
 	turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),
 	snapshot_hash TEXT NOT NULL REFERENCES tool_content(sha256),
+	snapshot_version INTEGER NOT NULL DEFAULT 0,
 	changes_hash TEXT NOT NULL REFERENCES tool_content(sha256),
 	created_at TEXT NOT NULL
 );
@@ -177,18 +179,29 @@ BEGIN
 END;
 
 -- Verdict evidence: A verdict's record carries the ids of the tool results
--- that the reviewer received before giving it.
+-- that the reviewer received before giving it, the snapshot version it saw
+-- and the observations it added.
 CREATE TABLE verdict_tool_results (
 	id TEXT PRIMARY KEY,
 	verdict_id TEXT NOT NULL REFERENCES verdicts(id),
-	tool_call_id TEXT NOT NULL REFERENCES tool_calls(id),
-	UNIQUE (verdict_id, tool_call_id)
+	tool_result_id TEXT NOT NULL REFERENCES tool_results(id),
+	UNIQUE (verdict_id, tool_result_id)
 );
 
 CREATE INDEX verdict_tool_results_verdict_idx ON verdict_tool_results(verdict_id);
-CREATE INDEX verdict_tool_results_tool_call_idx ON verdict_tool_results(tool_call_id);
+CREATE INDEX verdict_tool_results_tool_result_idx ON verdict_tool_results(tool_result_id);
 
--- Immutability: verdict evidence is journaled and never changes.
+CREATE TABLE verdict_snapshots (
+	verdict_id TEXT PRIMARY KEY REFERENCES verdicts(id),
+	snapshot_version INTEGER NOT NULL
+);
+
+CREATE TABLE verdict_observations (
+	verdict_id TEXT NOT NULL REFERENCES verdicts(id),
+	observation_id TEXT NOT NULL REFERENCES observations(id),
+	PRIMARY KEY (verdict_id, observation_id)
+);
+
 CREATE TRIGGER verdict_tool_results_update_prevented BEFORE UPDATE ON verdict_tool_results
 BEGIN
 	SELECT RAISE(ABORT, 'verdict_tool_results table is immutable');
@@ -199,6 +212,26 @@ BEGIN
 	SELECT RAISE(ABORT, 'verdict_tool_results table is immutable');
 END;
 
+CREATE TRIGGER verdict_snapshots_update_prevented BEFORE UPDATE ON verdict_snapshots
+BEGIN
+	SELECT RAISE(ABORT, 'verdict_snapshots table is immutable');
+END;
+
+CREATE TRIGGER verdict_snapshots_delete_prevented BEFORE DELETE ON verdict_snapshots
+BEGIN
+	SELECT RAISE(ABORT, 'verdict_snapshots table is immutable');
+END;
+
+CREATE TRIGGER verdict_observations_update_prevented BEFORE UPDATE ON verdict_observations
+BEGIN
+	SELECT RAISE(ABORT, 'verdict_observations table is immutable');
+END;
+
+CREATE TRIGGER verdict_observations_delete_prevented BEFORE DELETE ON verdict_observations
+BEGIN
+	SELECT RAISE(ABORT, 'verdict_observations table is immutable');
+END;
+
 -- Staging: The engine keeps a staging map for the turn, path to new content hash.
 -- A read in the same turn sees staged content over the snapshot.
 CREATE TABLE staging (
@@ -206,6 +239,9 @@ CREATE TABLE staging (
 	turn_id TEXT NOT NULL REFERENCES turns(id),
 	path TEXT NOT NULL,
 	new_content_hash TEXT NOT NULL REFERENCES tool_content(sha256),
+	-- base_sha256 is taken the first time the path is staged: the hash of the
+	-- stored base content, or 'absent'.
+	base_sha256 TEXT NOT NULL DEFAULT 'absent',
 	staged_at TEXT NOT NULL,
 	UNIQUE (turn_id, path)
 );

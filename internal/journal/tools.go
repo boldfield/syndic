@@ -81,8 +81,10 @@ type ChangeSet struct {
 	TurnID       string
 	State        string
 	SnapshotHash string
-	ChangesHash  string
-	CreatedAt    time.Time
+	// SnapshotVersion is the snapshot version the candidate rested on, frozen at candidate time.
+	SnapshotVersion int
+	ChangesHash     string
+	CreatedAt       time.Time
 }
 
 // ChangeSetPath represents a single path in a change set.
@@ -105,14 +107,17 @@ const (
 // Event kinds appended by the tool record methods, in the same transaction as
 // the record they describe.
 const (
-	EventToolCallAccepted   = "tool_call_accepted"
-	EventToolResultRecorded = "tool_result_recorded"
-	EventObservationStored  = "observation_stored"
-	EventChangeSetFrozen    = "change_set_frozen"
-	EventApplyOpRecorded    = "apply_op_recorded"
-	EventVerdictToolResult  = "verdict_tool_result_linked"
-	EventPathStaged         = "path_staged"
-	EventPathUnstaged       = "path_unstaged"
+	EventToolCallAccepted      = "tool_call_accepted"
+	EventToolResultRecorded    = "tool_result_recorded"
+	EventObservationStored     = "observation_stored"
+	EventChangeSetFrozen       = "change_set_frozen"
+	EventApplyOpRecorded       = "apply_op_recorded"
+	EventChangeSetPathRecorded = "change_set_path_recorded"
+	EventVerdictSnapshot       = "verdict_snapshot_recorded"
+	EventVerdictObservation    = "verdict_observation_linked"
+	EventVerdictToolResult     = "verdict_tool_result_linked"
+	EventPathStaged            = "path_staged"
+	EventPathUnstaged          = "path_unstaged"
 )
 
 // emitToolEvent appends a journal event in the caller's transaction, so the
@@ -311,9 +316,9 @@ func (tx *Tx) GetLatestObservationVersion(turnID string) (int, error) {
 // cs.State is ignored because the state is derived from apply_ops.
 func (tx *Tx) StoreChangeSet(cs ChangeSet) error {
 	_, err := tx.tx.Exec(`
-		INSERT INTO change_sets (id, turn_id, snapshot_hash, changes_hash, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, cs.ID, cs.TurnID, cs.SnapshotHash, cs.ChangesHash, cs.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO change_sets (id, turn_id, snapshot_hash, snapshot_version, changes_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, cs.ID, cs.TurnID, cs.SnapshotHash, cs.SnapshotVersion, cs.ChangesHash, cs.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("store change set: %w", err)
 	}
@@ -328,10 +333,10 @@ func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 	var cs ChangeSet
 	var createdAtStr string
 	err := tx.tx.QueryRow(`
-		SELECT id, turn_id, snapshot_hash, changes_hash, created_at
+		SELECT id, turn_id, snapshot_hash, snapshot_version, changes_hash, created_at
 		FROM change_sets
 		WHERE turn_id = ?
-	`, turnID).Scan(&cs.ID, &cs.TurnID, &cs.SnapshotHash, &cs.ChangesHash, &createdAtStr)
+	`, turnID).Scan(&cs.ID, &cs.TurnID, &cs.SnapshotHash, &cs.SnapshotVersion, &cs.ChangesHash, &createdAtStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -360,7 +365,9 @@ func (tx *Tx) StoreChangeSetPath(csp ChangeSetPath) error {
 	if err != nil {
 		return fmt.Errorf("store change set path: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventChangeSetPathRecorded, map[string]any{
+		"change_set_id": csp.ChangeSetID, "path": csp.Path, "op": csp.Op, "new_sha256": csp.NewSHA256,
+	})
 }
 
 // GetChangeSetPathsByChangeSet retrieves all paths in a change set.
@@ -391,21 +398,76 @@ func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath,
 	return paths, nil
 }
 
-// StoreVerdictToolResult links a tool call result to a verdict.
-// Uses a randomly generated ID to avoid ambiguity (paths can contain ':').
-func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) error {
+// StoreVerdictToolResult links a received tool result to a verdict, by the id
+// of the call's tool_results row. A call with no result yet is not evidence and
+// is rejected. It returns the linked tool result id. Uses a randomly generated
+// row ID to avoid ambiguity.
+func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) (string, error) {
+	var resultID string
+	err := tx.tx.QueryRow(`SELECT id FROM tool_results WHERE tool_call_id = ?`, toolCallID).Scan(&resultID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("tool call %q has no recorded result to cite as verdict evidence", toolCallID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("query tool result: %w", err)
+	}
 	id, err := generateRandomID()
 	if err != nil {
-		return fmt.Errorf("generate verdict tool result id: %w", err)
+		return "", fmt.Errorf("generate verdict tool result id: %w", err)
 	}
-	_, err = tx.tx.Exec(`
-		INSERT INTO verdict_tool_results (id, verdict_id, tool_call_id)
+	if _, err = tx.tx.Exec(`
+		INSERT INTO verdict_tool_results (id, verdict_id, tool_result_id)
 		VALUES (?, ?, ?)
-	`, id, verdictID, toolCallID)
-	if err != nil {
-		return fmt.Errorf("store verdict tool result: %w", err)
+	`, id, verdictID, resultID); err != nil {
+		return "", fmt.Errorf("store verdict tool result: %w", err)
 	}
-	return tx.emitToolEvent(EventVerdictToolResult, map[string]any{"verdict_id": verdictID, "tool_call_id": toolCallID})
+	return resultID, tx.emitToolEvent(EventVerdictToolResult, map[string]any{"verdict_id": verdictID, "tool_result_id": resultID})
+}
+
+// StoreVerdictSnapshot records the snapshot version a verdict saw.
+func (tx *Tx) StoreVerdictSnapshot(verdictID string, version int) error {
+	if _, err := tx.tx.Exec(`INSERT INTO verdict_snapshots (verdict_id, snapshot_version) VALUES (?, ?)`, verdictID, version); err != nil {
+		return fmt.Errorf("store verdict snapshot: %w", err)
+	}
+	return tx.emitToolEvent(EventVerdictSnapshot, map[string]any{"verdict_id": verdictID, "snapshot_version": version})
+}
+
+// GetVerdictSnapshot returns the snapshot version a verdict saw; ok is false when none was recorded.
+func (tx *Tx) GetVerdictSnapshot(verdictID string) (version int, ok bool, err error) {
+	err = tx.tx.QueryRow(`SELECT snapshot_version FROM verdict_snapshots WHERE verdict_id = ?`, verdictID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("query verdict snapshot: %w", err)
+	}
+	return version, true, nil
+}
+
+// StoreVerdictObservation records an observation the verdict's reviewer added.
+func (tx *Tx) StoreVerdictObservation(verdictID, observationID string) error {
+	if _, err := tx.tx.Exec(`INSERT INTO verdict_observations (verdict_id, observation_id) VALUES (?, ?)`, verdictID, observationID); err != nil {
+		return fmt.Errorf("store verdict observation: %w", err)
+	}
+	return tx.emitToolEvent(EventVerdictObservation, map[string]any{"verdict_id": verdictID, "observation_id": observationID})
+}
+
+// GetVerdictObservations returns the ids of the observations a verdict added.
+func (tx *Tx) GetVerdictObservations(verdictID string) ([]string, error) {
+	rows, err := tx.tx.Query(`SELECT observation_id FROM verdict_observations WHERE verdict_id = ? ORDER BY rowid`, verdictID)
+	if err != nil {
+		return nil, fmt.Errorf("query verdict observations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan verdict observation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // generateRandomID generates a unique random ID.
@@ -418,10 +480,10 @@ func generateRandomID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// GetVerdictToolResults retrieves all tool result IDs for a verdict.
+// GetVerdictToolResults returns the tool result IDs for a verdict.
 func (tx *Tx) GetVerdictToolResults(verdictID string) ([]string, error) {
 	rows, err := tx.tx.Query(`
-		SELECT tool_call_id FROM verdict_tool_results
+		SELECT tool_result_id FROM verdict_tool_results
 		WHERE verdict_id = ?
 		ORDER BY rowid
 	`, verdictID)
@@ -430,24 +492,29 @@ func (tx *Tx) GetVerdictToolResults(verdictID string) ([]string, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var toolCallIDs []string
+	var toolResultIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan tool call id: %w", err)
+			return nil, fmt.Errorf("scan tool result id: %w", err)
 		}
-		toolCallIDs = append(toolCallIDs, id)
+		toolResultIDs = append(toolResultIDs, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate verdict tool results: %w", err)
 	}
-	return toolCallIDs, nil
+	return toolResultIDs, nil
 }
 
 // StoreStaging records a staged write in the turn's staging map.
-// If the path is already staged, updates both the content hash and staged_at timestamp.
+// The base is taken the first time a path is staged (a content hash, or
+// StagingBaseAbsent) and kept on restage; restaging updates the content hash
+// and staged_at timestamp.
 // Uses a generated ID to avoid ambiguity when paths contain ':'.
-func (tx *Tx) StoreStaging(turnID, path, contentHash string) error {
+func (tx *Tx) StoreStaging(turnID, path, contentHash, baseSHA256 string) error {
+	if baseSHA256 == "" {
+		baseSHA256 = StagingBaseAbsent
+	}
 	now := time.Now().Format(time.RFC3339Nano)
 
 	// Check if this path is already staged
@@ -472,9 +539,9 @@ func (tx *Tx) StoreStaging(turnID, path, contentHash string) error {
 			return fmt.Errorf("generate staging id: %w", genErr)
 		}
 		_, insertErr := tx.tx.Exec(`
-			INSERT INTO staging (id, turn_id, path, new_content_hash, staged_at)
-			VALUES (?, ?, ?, ?, ?)
-		`, id, turnID, path, contentHash, now)
+			INSERT INTO staging (id, turn_id, path, new_content_hash, base_sha256, staged_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, id, turnID, path, contentHash, baseSHA256, now)
 		if insertErr != nil {
 			return fmt.Errorf("insert staging: %w", insertErr)
 		}
@@ -518,6 +585,9 @@ func (tx *Tx) UnstageFile(turnID, path string) error {
 	}
 	return tx.emitToolEvent(EventPathUnstaged, map[string]any{"turn_id": turnID, "path": path})
 }
+
+// StagingBaseAbsent is the base of a staged path that did not exist.
+const StagingBaseAbsent = "absent"
 
 // ApplyOp op types.
 const (
@@ -598,9 +668,11 @@ const (
 
 // ComputeApplyState derives the change set state and per-path outcomes from
 // the change set's paths and its append-only apply_ops. Every path starts
-// pending; a file op moves it to applied or conflict. The state is discarded
-// once a discarded op exists; otherwise the finished op's final state; with no
-// finished op it is partial if any path was applied, else appliable.
+// pending; a file op moves it to applied or conflict. A discarded op makes the
+// state discarded. Otherwise the state comes from the latest started/finished
+// pair: a started with no finished after it is partial (a crash mid-apply,
+// even before the first file), a later finished gives its final state, and a
+// change set never started is appliable.
 func (tx *Tx) ComputeApplyState(changeSetID string) (string, map[string]string, error) {
 	ops, err := tx.GetApplyOps(changeSetID)
 	if err != nil {
@@ -616,38 +688,28 @@ func (tx *Tx) ComputeApplyState(changeSetID string) (string, map[string]string, 
 		outcomes[p.Path] = ChangeSetPathOutcomePending
 	}
 	discarded := false
-	finalState := ""
-	anyApplied := false
+	state := ChangeSetStateAppliable
 	for _, op := range ops {
 		switch op.OpType {
+		case ApplyOpStarted:
+			state = ChangeSetStatePartial
 		case ApplyOpFile:
 			if op.Path == nil || op.Outcome == nil {
 				continue
 			}
-			if _, ok := outcomes[*op.Path]; !ok {
-				continue
-			}
-			outcomes[*op.Path] = *op.Outcome
-			if *op.Outcome == ChangeSetPathOutcomeApplied {
-				anyApplied = true
+			if _, ok := outcomes[*op.Path]; ok {
+				outcomes[*op.Path] = *op.Outcome
 			}
 		case ApplyOpFinished:
 			if op.FinalState != nil {
-				finalState = *op.FinalState
+				state = *op.FinalState
 			}
 		case ApplyOpDiscarded:
 			discarded = true
 		}
 	}
-
-	switch {
-	case discarded:
-		return ChangeSetStateDiscarded, outcomes, nil
-	case finalState != "":
-		return finalState, outcomes, nil
-	case anyApplied:
-		return ChangeSetStatePartial, outcomes, nil
-	default:
-		return ChangeSetStateAppliable, outcomes, nil
+	if discarded {
+		state = ChangeSetStateDiscarded
 	}
+	return state, outcomes, nil
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
@@ -108,7 +109,7 @@ func TestMigration014(t *testing.T) {
 
 	// Verify verdict_tool_results columns
 	verdictToolResultsCols := tableColumns(t, conn, "verdict_tool_results")
-	requiredVerdictToolCols := []string{"id", "verdict_id", "tool_call_id"}
+	requiredVerdictToolCols := []string{"id", "verdict_id", "tool_result_id"}
 	for _, col := range requiredVerdictToolCols {
 		if !verdictToolResultsCols[col] {
 			t.Errorf("verdict_tool_results.%s not found", col)
@@ -206,7 +207,7 @@ func TestMigration014UpgradeFromV13(t *testing.T) {
 		if err := tx.StoreToolCall(journal.ToolCall{ID: "tc1", AttemptID: "a1", Name: "read_file", ArgsSHA256: sum}); err != nil {
 			return err
 		}
-		return tx.StoreVerdictToolResult("v1", "tc1")
+		return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "tc1", Status: journal.ToolCallStatusExecuted, RecordedAt: time.Now()})
 	})
 	if err != nil {
 		t.Fatalf("tool records on upgraded db: %v", err)

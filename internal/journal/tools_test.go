@@ -266,7 +266,7 @@ func TestEveryRecordMethodEmitsAnEvent(t *testing.T) {
 			func() error {
 				return tx.StoreApplyOp(journal.ApplyOp{ID: "ao1", ChangeSetID: "cs1", OpType: journal.ApplyOpStarted, AppliedAt: now})
 			},
-			func() error { return tx.StoreStaging("turn1", "a", h) },
+			func() error { return tx.StoreStaging("turn1", "a", h, "") },
 			func() error { return tx.UnstageFile("turn1", "a") },
 		}
 		for i, step := range steps {
@@ -473,19 +473,31 @@ func TestVerdictEvidenceAndStagingSurviveRestart(t *testing.T) {
 		if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h1}); err != nil {
 			return err
 		}
-		if err := tx.StoreVerdictToolResult("v1", "c1"); err != nil {
+		if _, err := tx.StoreVerdictToolResult("v1", "c1"); err == nil {
+			t.Error("unfinished call must not be verdict evidence")
+		}
+		if err := tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, RecordedAt: time.Now()}); err != nil {
 			return err
 		}
-		if err := tx.StoreStaging("turn1", "dir/a:b", h1); err != nil {
+		if rid, err := tx.StoreVerdictToolResult("v1", "c1"); err != nil || rid != "r1" {
+			t.Errorf("verdict evidence link = %q, %v", rid, err)
+		}
+		if err := tx.StoreVerdictSnapshot("v1", 3); err != nil {
 			return err
 		}
-		return tx.StoreStaging("turn1", "dir/a:b", h2) // restage replaces
+		if err := tx.StoreStaging("turn1", "dir/a:b", h1, ""); err != nil {
+			return err
+		}
+		return tx.StoreStaging("turn1", "dir/a:b", h2, "") // restage replaces
 	})
 	f.restart()
 	f.tx(func(tx *journal.Tx) error {
 		ids, err := tx.GetVerdictToolResults("v1")
-		if err != nil || len(ids) != 1 || ids[0] != "c1" {
+		if err != nil || len(ids) != 1 || ids[0] != "r1" {
 			t.Errorf("verdict evidence = %v, %v", ids, err)
+		}
+		if v, ok, err := tx.GetVerdictSnapshot("v1"); err != nil || !ok || v != 3 {
+			t.Errorf("verdict snapshot = %d, %v, %v", v, ok, err)
 		}
 		st, err := tx.GetStagingByTurn("turn1")
 		if err != nil || len(st) != 1 || st["dir/a:b"] != h2 {
@@ -522,4 +534,88 @@ func createTestAttempt(t *testing.T, conn *sql.DB, attemptID, turnID, participan
 func computeSHA256(t *testing.T, content string) string {
 	h := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(h[:])
+}
+
+func TestApplyStateCrashBoundaries(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("x")
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreChangeSet(journal.ChangeSet{ID: "cs1", TurnID: "turn1", SnapshotHash: h, SnapshotVersion: 2, ChangesHash: h, CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+		return tx.StoreChangeSetPath(journal.ChangeSetPath{ID: "p1", ChangeSetID: "cs1", Path: "a", Op: "create", NewSHA256: h, NewLen: 1})
+	})
+	op := func(id, typ, final string) {
+		f.tx(func(tx *journal.Tx) error {
+			o := journal.ApplyOp{ID: id, ChangeSetID: "cs1", OpType: typ, AppliedAt: time.Now()}
+			if final != "" {
+				o.FinalState = &final
+			}
+			return tx.StoreApplyOp(o)
+		})
+	}
+	state := func() string {
+		var st string
+		f.tx(func(tx *journal.Tx) error {
+			var err error
+			st, _, err = tx.ComputeApplyState("cs1")
+			return err
+		})
+		return st
+	}
+	if got := state(); got != journal.ChangeSetStateAppliable {
+		t.Fatalf("fresh = %s", got)
+	}
+	op("o1", journal.ApplyOpStarted, "")
+	if got := state(); got != journal.ChangeSetStatePartial {
+		t.Fatalf("started only = %s, want partial", got)
+	}
+	op("o2", journal.ApplyOpFinished, journal.ChangeSetStateConflict)
+	if got := state(); got != journal.ChangeSetStateConflict {
+		t.Fatalf("finished conflict = %s", got)
+	}
+	op("o3", journal.ApplyOpStarted, "")
+	if got := state(); got != journal.ChangeSetStatePartial {
+		t.Fatalf("retry started after conflict = %s, want partial", got)
+	}
+	op("o4", journal.ApplyOpFinished, journal.ChangeSetStateApplied)
+	if got := state(); got != journal.ChangeSetStateApplied {
+		t.Fatalf("finished applied = %s", got)
+	}
+}
+
+func TestObservationSnapshotInvariants(t *testing.T) {
+	f := newToolFixture(t)
+	obs := func(id, path string, v int) error {
+		return f.s.Tx(func(tx *journal.Tx) error {
+			return tx.StoreObservation(journal.Observation{ID: id, TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: v, Path: path, Kind: journal.ObservationKindAbsent, ObservedAt: time.Now()})
+		})
+	}
+	if err := obs("o1", "a", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := obs("o2", "b", 1); err == nil {
+		t.Error("two paths must not share a snapshot version")
+	}
+	if err := obs("o3", "a", 2); err == nil {
+		t.Error("a path must not be observed twice in a turn")
+	}
+	if err := obs("o4", "b", 2); err != nil {
+		t.Errorf("distinct path and version: %v", err)
+	}
+}
+
+func TestStagingKeepsFirstBase(t *testing.T) {
+	f := newToolFixture(t)
+	h1, h2 := f.put("one"), f.put("two")
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreStaging("turn1", "a", h1, "basehash"); err != nil {
+			return err
+		}
+		return tx.StoreStaging("turn1", "a", h2, "other")
+	})
+	var base string
+	if err := f.db.Conn().QueryRow(`SELECT base_sha256 FROM staging WHERE path = 'a'`).Scan(&base); err != nil || base != "basehash" {
+		t.Errorf("base = %q, %v", base, err)
+	}
 }
