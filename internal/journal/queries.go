@@ -546,3 +546,15 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 	}
 	return append([]byte{}, body[offset:end]...), total, sum, nil
 }
+
+// GetContent retrieves content from the tool_content store by its SHA-256 hash.
+func (s *Store) GetContent(sha256 string) ([]byte, error) {
+	var content []byte
+	err := s.Tx(func(tx *Tx) error {
+		return tx.tx.QueryRow(`SELECT body FROM tool_content WHERE sha256 = ?`, sha256).Scan(&content)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("content %q not found: %w", sha256, ErrNoSuchContent)
+	}
+	return content, err
+}
