@@ -730,14 +730,26 @@ func TestSubmitReviewerToolsDoNotGateAuthor(t *testing.T) {
 // TestSubmitRefereeExemptFromToolGate verifies the referee is never held to
 // the tool-capability gate: web tools route through the endpoint's referee
 // model, which is not a participant, so only author and reviewers are gated.
+// A real probe record is seeded for the referee model, recorded no and unknown.
 func TestSubmitRefereeExemptFromToolGate(t *testing.T) {
-	roster := strings.ReplaceAll(rosterWithToolPresets(), "[\"read\"]", "[\"web\"]")
-	roster = strings.Replace(roster, "models = [\"llama2\", \"llama3\"]", "models = [\"llama2\", \"llama3\", \"refmodel\"]\nreferee_model = \"refmodel\"", 1)
-	h := enginetest.New(t, roster, map[string][]fake.Step{
-		"author":   {enginetest.Reply("test answer")},
-		"reviewer": {approveStep()},
-	}, enginetest.WithToolCalls("author", transport.TriYes),
-		enginetest.WithToolCalls("reviewer", transport.TriYes),
-		enginetest.WithToolCalls("referee", transport.TriNo))
-	submitToolsReview(t, h)
+	for _, tri := range []transport.Tri{transport.TriNo, transport.TriUnknown} {
+		t.Run(string(tri), func(t *testing.T) {
+			roster := strings.ReplaceAll(rosterWithToolPresets(), "[\"read\"]", "[\"web\"]")
+			roster = strings.Replace(roster, "models = [\"llama2\", \"llama3\"]", "models = [\"llama2\", \"llama3\", \"refmodel\"]\nreferee_model = \"refmodel\"", 1)
+			h := enginetest.New(t, roster, map[string][]fake.Step{
+				"author":   {enginetest.Reply("test answer")},
+				"reviewer": {approveStep()},
+			}, enginetest.WithToolCalls("author", transport.TriYes),
+				enginetest.WithToolCalls("reviewer", transport.TriYes),
+				enginetest.WithModelToolCalls("local", "refmodel", tri))
+			rec, found, err := h.Store.LatestProbeRecord("local", "refmodel")
+			if err != nil || !found {
+				t.Fatalf("referee probe record not seeded: found=%v err=%v", found, err)
+			}
+			if !strings.Contains(string(rec.Manifest), `"tool_calls":"`+string(tri)+`"`) {
+				t.Fatalf("referee record lacks tool_calls %s: %s", tri, rec.Manifest)
+			}
+			submitToolsReview(t, h)
+		})
+	}
 }

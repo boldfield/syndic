@@ -112,6 +112,7 @@ type options struct {
 	outputBound    map[string]int
 	eligible       map[string]transport.Tri
 	toolCalls      map[string]transport.Tri
+	modelToolCalls map[[2]string]transport.Tri
 	contextBound   map[string]int
 	calibration    map[string]float64
 	noStart        bool
@@ -155,6 +156,13 @@ func WithEligibleRequiredReviewer(id string, v transport.Tri) Option {
 // WithToolCalls seeds the participant's export with the given tool capability.
 func WithToolCalls(id string, v transport.Tri) Option {
 	return func(o *options) { o.toolCalls[id] = v }
+}
+
+// WithModelToolCalls seeds a probe record for a model that is not a roster
+// participant (such as an endpoint's referee model) with the given tool
+// capability.
+func WithModelToolCalls(endpoint, model string, v transport.Tri) Option {
+	return func(o *options) { o.modelToolCalls[[2]string{endpoint, model}] = v }
 }
 
 // ClockStart sets the fake clock's initial reading. A test that needs a
@@ -233,13 +241,14 @@ func ReplyFunc(build func(req transport.CompleteRequest) string) fake.Step {
 func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts ...Option) *Harness {
 	t.Helper()
 	o := &options{
-		skip:         map[string]bool{},
-		outputBound:  map[string]int{},
-		eligible:     map[string]transport.Tri{},
-		toolCalls:    map[string]transport.Tri{},
-		contextBound: map[string]int{},
-		calibration:  map[string]float64{},
-		clockStart:   time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
+		skip:           map[string]bool{},
+		outputBound:    map[string]int{},
+		eligible:       map[string]transport.Tri{},
+		toolCalls:      map[string]transport.Tri{},
+		modelToolCalls: map[[2]string]transport.Tri{},
+		contextBound:   map[string]int{},
+		calibration:    map[string]float64{},
+		clockStart:     time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -326,16 +335,27 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster, o *options) {
 	t.Helper()
 	seeded := map[[2]string]bool{}
+	type target struct{ id, endpoint, model string }
+	var targets []target
 	for _, p := range roster.Participants {
-		key := [2]string{p.Endpoint, p.Model}
-		if o.skip[p.ID] || seeded[key] {
+		if o.skip[p.ID] {
+			continue
+		}
+		targets = append(targets, target{p.ID, p.Endpoint, p.Model})
+	}
+	for key := range o.modelToolCalls {
+		targets = append(targets, target{"", key[0], key[1]})
+	}
+	for _, p := range targets {
+		key := [2]string{p.endpoint, p.model}
+		if seeded[key] {
 			continue
 		}
 		seeded[key] = true
 
 		var profile config.EndpointProfile
 		for _, ep := range roster.Endpoints {
-			if ep.Name == p.Endpoint {
+			if ep.Name == p.endpoint {
 				profile = ep
 			}
 		}
@@ -347,7 +367,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 			DeclaredExecution:        profile.DeclaredExecution,
 			DeclaredBilling:          profile.DeclaredBilling,
 			NetworkDependency:        profile.NetworkDependency,
-			Model:                    p.Model,
+			Model:                    p.model,
 			AuthMode:                 "none",
 			Identity:                 transport.NewUnknownIdentity(),
 			ReportedModel:            DefaultReportedModel,
@@ -363,39 +383,42 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 			ObservedAt:               o.clockStart,
 		}
 		bound := DefaultContextBound
-		if v, ok := o.contextBound[p.ID]; ok {
+		if v, ok := o.contextBound[p.id]; ok {
 			bound = v
 		}
 		if bound > 0 {
 			export.ContextBound = &bound
 		}
-		if v, ok := o.outputBound[p.ID]; ok {
+		if v, ok := o.outputBound[p.id]; ok {
 			export.OutputBound = &v
 		}
-		if v, ok := o.eligible[p.ID]; ok {
+		if v, ok := o.eligible[p.id]; ok {
 			export.EligibleRequiredReviewer = v
 		}
-		if v, ok := o.toolCalls[p.ID]; ok {
+		if v, ok := o.toolCalls[p.id]; ok {
+			export.ToolCalls = v
+		}
+		if v, ok := o.modelToolCalls[key]; ok {
 			export.ToolCalls = v
 		}
 		bytesPerToken := DefaultCalibration
-		if v, ok := o.calibration[p.ID]; ok {
+		if v, ok := o.calibration[p.id]; ok {
 			bytesPerToken = v
 		}
 		calibration := transport.Calibration{}
 		if bytesPerToken > 0 {
 			calibration = transport.Calibration{Available: true, BytesPerToken: bytesPerToken}
 		}
-		pm, err := evidence.NewProbeManifest(export, profile, p.Model, AdapterVersion, calibration)
+		pm, err := evidence.NewProbeManifest(export, profile, p.model, AdapterVersion, calibration)
 		if err != nil {
-			t.Fatalf("probe manifest for %s: %v", p.ID, err)
+			t.Fatalf("probe manifest for %s: %v", p.id, err)
 		}
 		data, err := json.Marshal(pm)
 		if err != nil {
 			t.Fatalf("marshal probe manifest: %v", err)
 		}
 		if _, _, err := store.CreateProbeRun(data); err != nil {
-			t.Fatalf("seed probe record for %s: %v", p.ID, err)
+			t.Fatalf("seed probe record for %s: %v", p.id, err)
 		}
 	}
 }

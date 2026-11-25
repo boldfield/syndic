@@ -2592,3 +2592,63 @@ func TestAssistantMessageWithToolCalls(t *testing.T) {
 		t.Errorf("unexpected text: %q, want 'Response'", result.Text)
 	}
 }
+
+// TestCompleteScrubsToolCallFields verifies the resolved secret is removed
+// from every response-derived tool-call string, not only the arguments.
+func TestCompleteScrubsToolCallFields(t *testing.T) {
+	const secret = "super-secret-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{{
+				Message: ChoiceMessage{
+					Role: "assistant",
+					ToolCalls: []ResponseToolCall{{
+						ID:   "id_" + secret,
+						Type: "function_" + secret,
+						Function: ResponseToolCallFunction{
+							Name:      "name_" + secret,
+							Arguments: `{"k":"` + secret + `"}`,
+						},
+					}},
+				},
+				FinishReason: "tool_calls",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+	adapter := New(profile, &mockResolver{secret: secret})
+	res, err := adapter.Complete(context.Background(), transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant: "test", TurnID: "turn1", Phase: "phase1", Epoch: 1,
+			AttemptID: "attempt1", CandidateHash: "hash1",
+		},
+		Model:           "test-model",
+		Messages:        []transport.Message{{Role: "user", Content: "go"}},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("got %d tool calls, want 1", len(res.ToolCalls))
+	}
+	tc := res.ToolCalls[0]
+	for name, v := range map[string]string{"id": tc.ID, "type": tc.Type, "name": tc.Function.Name, "arguments": tc.Function.Arguments} {
+		if strings.Contains(v, secret) {
+			t.Errorf("tool call %s retains the secret: %q", name, v)
+		}
+	}
+}

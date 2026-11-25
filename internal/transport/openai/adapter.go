@@ -703,11 +703,14 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		result.ToolCalls = make([]transport.ToolCall, len(respData.Choices[0].Message.ToolCalls))
 		for i, toolCall := range respData.Choices[0].Message.ToolCalls {
 			scrubbedArgs, _ := transport.Scrub(toolCall.Function.Arguments, resolvedSecrets)
+			scrubbedID, _ := transport.Scrub(toolCall.ID, resolvedSecrets)
+			scrubbedType, _ := transport.Scrub(toolCall.Type, resolvedSecrets)
+			scrubbedName, _ := transport.Scrub(toolCall.Function.Name, resolvedSecrets)
 			result.ToolCalls[i] = transport.ToolCall{
-				ID:   toolCall.ID,
-				Type: toolCall.Type,
+				ID:   scrubbedID,
+				Type: scrubbedType,
 				Function: transport.ToolCallFunction{
-					Name:      toolCall.Function.Name,
+					Name:      scrubbedName,
 					Arguments: scrubbedArgs,
 				},
 			}
@@ -1491,13 +1494,16 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 		finishReasons[choice.FinishReason] = mapFinishReason(choice.FinishReason)
 	}
 
-	// Since tool_choice forced a call, if we got tool_calls with tool_calls finish reason, it's yes.
-	// Any other response (content, refusal, etc.) with finish_reason != tool_calls is no.
+	// The call is forced by name, and some servers (vLLM) finish such a call
+	// with "stop", so a returned probe_tool call is yes whatever the finish
+	// reason. A reply without that call is no.
 	// A 400 rejecting tools entirely would have been caught as a 4xx error above and returns unknown.
-	if len(choice.Message.ToolCalls) > 0 && choice.FinishReason == "tool_calls" {
-		record.ToolCalls = transport.TriYes
-	} else {
-		record.ToolCalls = transport.TriNo
+	record.ToolCalls = transport.TriNo
+	for _, call := range choice.Message.ToolCalls {
+		if call.Function.Name == "probe_tool" {
+			record.ToolCalls = transport.TriYes
+			break
+		}
 	}
 
 	return nil

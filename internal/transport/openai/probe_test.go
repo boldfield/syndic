@@ -46,7 +46,8 @@ type probeServer struct {
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
 	// tool_calls probe control
-	toolCallsSupport string // "yes", "no", or "unknown"; controls tool_calls probe response
+	toolCallsRequest map[string]any // body of the last tool_calls probe request
+	toolCallsSupport string         // "yes", "no", or "unknown"; controls tool_calls probe response
 }
 
 func (p *probeServer) count(k string) int {
@@ -99,6 +100,11 @@ func (p *probeServer) handler() http.Handler {
 		isCalibration := user == ""            // empty = baseline calibration request
 		isCalibrationText := len(user) == 4096 // calibration text is exactly 4096 bytes
 		isToolCallsProbe := strings.Contains(user, "Call the probe tool") && strings.Contains(user, "PROBE")
+		if isToolCallsProbe {
+			p.mu.Lock()
+			p.toolCallsRequest = req
+			p.mu.Unlock()
+		}
 
 		if isCalibration || isCalibrationText {
 			p.mu.Lock()
@@ -131,6 +137,19 @@ func (p *probeServer) handler() http.Handler {
 		finishReason := "stop"
 		var toolCalls []any
 		switch {
+		case isToolCallsProbe && p.toolCallsSupport == "yes_stop":
+			// A forced named call finished with "stop", as vLLM does.
+			finishReason = "stop"
+			toolCalls = []any{
+				map[string]any{
+					"id":   "call_probe",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "probe_tool",
+						"arguments": `{"message":"PROBE"}`,
+					},
+				},
+			}
 		case isToolCallsProbe && p.toolCallsSupport == "yes":
 			// Return tool_calls to indicate yes
 			answer = "Using tool"
@@ -327,6 +346,38 @@ func TestProbeToolCallsYes(t *testing.T) {
 	}
 	if rec.ToolCalls != transport.TriYes {
 		t.Errorf("ToolCalls: got %v, want TriYes", rec.ToolCalls)
+	}
+}
+
+// TestProbeToolCallsForcedStop verifies a forced probe_tool call finished with
+// "stop" counts as yes, and that the probe request carries the tool and choice.
+func TestProbeToolCallsForcedStop(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "yes_stop"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want TriYes", rec.ToolCalls)
+	}
+	p.mu.Lock()
+	req := p.toolCallsRequest
+	p.mu.Unlock()
+	tools, _ := req["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools: got %v, want one definition", req["tools"])
+	}
+	fn, _ := tools[0].(map[string]any)["function"].(map[string]any)
+	if tools[0].(map[string]any)["type"] != "function" || fn["name"] != "probe_tool" {
+		t.Errorf("tool definition: got %v", tools[0])
+	}
+	choice, _ := req["tool_choice"].(map[string]any)
+	cfn, _ := choice["function"].(map[string]any)
+	if choice["type"] != "function" || cfn["name"] != "probe_tool" {
+		t.Errorf("tool_choice: got %v", req["tool_choice"])
 	}
 }
 
