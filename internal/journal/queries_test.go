@@ -162,8 +162,8 @@ func TestMigration005OverV004ProbeRows(t *testing.T) {
 	conn := db.Conn()
 
 	var v int
-	if err := conn.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 13 {
-		t.Fatalf("version = %d, err %v; want 13", v, err)
+	if err := conn.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 14 {
+		t.Fatalf("version = %d, err %v; want 14", v, err)
 	}
 
 	var kind, manifest, mh string

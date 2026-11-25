@@ -1,9 +1,12 @@
 package journal
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -230,20 +233,12 @@ func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 	return &cs, nil
 }
 
-// UpdateChangeSetState updates the state of a change set.
+// UpdateChangeSetState is not used. Change set state transitions are recorded as apply_ops.
+// This function is deprecated and kept only for compatibility during migration.
+// See design section 6: "per-path outcomes kept separately from change-set state;
+// discard after a partial apply must not conceal applied paths".
 func (tx *Tx) UpdateChangeSetState(changeSetID, newState string) error {
-	result, err := tx.tx.Exec(`UPDATE change_sets SET state = ? WHERE id = ?`, newState, changeSetID)
-	if err != nil {
-		return fmt.Errorf("update change set state: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("change set %q not found", changeSetID)
-	}
-	return nil
+	return fmt.Errorf("UpdateChangeSetState is not permitted; use StoreApplyOp instead")
 }
 
 // StoreChangeSetPath records a single path in a change set.
@@ -286,28 +281,21 @@ func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath,
 	return paths, nil
 }
 
-// UpdateChangeSetPathOutcome updates the outcome of a path in a change set.
+// UpdateChangeSetPathOutcome is not permitted. Per-path outcomes are recorded append-only via apply_ops.
+// This function is deprecated. See design section 6: "per-path outcomes kept separately from
+// change-set state" and "apply_ops record each applied path".
 func (tx *Tx) UpdateChangeSetPathOutcome(changeSetID, path, newOutcome string) error {
-	result, err := tx.tx.Exec(
-		`UPDATE change_set_paths SET outcome = ? WHERE change_set_id = ? AND path = ?`,
-		newOutcome, changeSetID, path)
-	if err != nil {
-		return fmt.Errorf("update change set path outcome: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("path %q in change set %q not found", path, changeSetID)
-	}
-	return nil
+	return fmt.Errorf("UpdateChangeSetPathOutcome is not permitted; use StoreApplyOp to record outcomes")
 }
 
 // StoreVerdictToolResult links a tool call result to a verdict.
+// Uses a randomly generated ID to avoid ambiguity (paths can contain ':').
 func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) error {
-	id := verdictID + ":" + toolCallID
-	_, err := tx.tx.Exec(`
+	id, err := generateRandomID()
+	if err != nil {
+		return fmt.Errorf("generate verdict tool result id: %w", err)
+	}
+	_, err = tx.tx.Exec(`
 		INSERT INTO verdict_tool_results (id, verdict_id, tool_call_id)
 		VALUES (?, ?, ?)
 	`, id, verdictID, toolCallID)
@@ -315,6 +303,16 @@ func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) error {
 		return fmt.Errorf("store verdict tool result: %w", err)
 	}
 	return nil
+}
+
+// generateRandomID generates a unique random ID.
+func generateRandomID() (string, error) {
+	const idLen = 16
+	b := make([]byte, idLen)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("generate random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // GetVerdictToolResults retrieves all tool result IDs for a verdict.
@@ -344,16 +342,43 @@ func (tx *Tx) GetVerdictToolResults(verdictID string) ([]string, error) {
 }
 
 // StoreStaging records a staged write in the turn's staging map.
+// If the path is already staged, updates both the content hash and staged_at timestamp.
+// Uses a generated ID to avoid ambiguity when paths contain ':'.
 func (tx *Tx) StoreStaging(turnID, path, contentHash string) error {
-	_, err := tx.tx.Exec(`
-		INSERT INTO staging (id, turn_id, path, new_content_hash, staged_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(turn_id, path) DO UPDATE SET new_content_hash = excluded.new_content_hash
-	`, turnID+":"+path, turnID, path, contentHash, time.Now().Format(time.RFC3339Nano))
-	if err != nil {
-		return fmt.Errorf("store staging: %w", err)
+	now := time.Now().Format(time.RFC3339Nano)
+
+	// Check if this path is already staged
+	var existingID string
+	err := tx.tx.QueryRow(`SELECT id FROM staging WHERE turn_id = ? AND path = ?`, turnID, path).Scan(&existingID)
+
+	switch {
+	case err == nil:
+		// Path already staged, update it
+		_, updateErr := tx.tx.Exec(`
+			UPDATE staging SET new_content_hash = ?, staged_at = ?
+			WHERE turn_id = ? AND path = ?
+		`, contentHash, now, turnID, path)
+		if updateErr != nil {
+			return fmt.Errorf("update staging: %w", updateErr)
+		}
+		return nil
+	case errors.Is(err, sql.ErrNoRows):
+		// Path not staged yet, insert it with new ID
+		id, genErr := generateRandomID()
+		if genErr != nil {
+			return fmt.Errorf("generate staging id: %w", genErr)
+		}
+		_, insertErr := tx.tx.Exec(`
+			INSERT INTO staging (id, turn_id, path, new_content_hash, staged_at)
+			VALUES (?, ?, ?, ?, ?)
+		`, id, turnID, path, contentHash, now)
+		if insertErr != nil {
+			return fmt.Errorf("insert staging: %w", insertErr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("query staging: %w", err)
 	}
-	return nil
 }
 
 // GetStagingByTurn retrieves all staged paths for a turn.
@@ -389,4 +414,60 @@ func (tx *Tx) UnstageFile(turnID, path string) error {
 		return fmt.Errorf("unstage file: %w", err)
 	}
 	return nil
+}
+
+// ApplyOp represents an apply operation in the journal.
+type ApplyOp struct {
+	ID          string
+	ChangeSetID string
+	OpType      string // "started", "file", or "finished"
+	Path        *string
+	NewSHA256   *string
+	AppliedAt   time.Time
+}
+
+// StoreApplyOp records an apply operation (started, file, or finished).
+// This is an append-only record of apply state transitions.
+func (tx *Tx) StoreApplyOp(op ApplyOp) error {
+	_, err := tx.tx.Exec(`
+		INSERT INTO apply_ops (id, change_set_id, op_type, path, new_sha256, applied_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, op.ID, op.ChangeSetID, op.OpType, op.Path, op.NewSHA256, op.AppliedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("store apply op: %w", err)
+	}
+	return nil
+}
+
+// GetApplyOps retrieves all apply operations for a change set, in order.
+func (tx *Tx) GetApplyOps(changeSetID string) ([]ApplyOp, error) {
+	rows, err := tx.tx.Query(`
+		SELECT id, change_set_id, op_type, path, new_sha256, applied_at
+		FROM apply_ops
+		WHERE change_set_id = ?
+		ORDER BY rowid
+	`, changeSetID)
+	if err != nil {
+		return nil, fmt.Errorf("query apply ops: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ops []ApplyOp
+	for rows.Next() {
+		var op ApplyOp
+		var appliedAtStr string
+		if err := rows.Scan(&op.ID, &op.ChangeSetID, &op.OpType, &op.Path, &op.NewSHA256, &appliedAtStr); err != nil {
+			return nil, fmt.Errorf("scan apply op: %w", err)
+		}
+		t, err := time.Parse(time.RFC3339Nano, appliedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse apply op time: %w", err)
+		}
+		op.AppliedAt = t
+		ops = append(ops, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate apply ops: %w", err)
+	}
+	return ops, nil
 }
