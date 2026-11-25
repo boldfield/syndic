@@ -808,11 +808,11 @@ func TestToolResultRollback(t *testing.T) {
 		}
 
 		result := journal.ToolResult{
-			ID:            "result2",
-			ToolCallID:    "call2",
-			Status:        journal.ToolCallStatusExecuted,
-			ResultSHA256:  strPtr("rhash2"),
-			RecordedAt:    time.Now(),
+			ID:           "result2",
+			ToolCallID:   "call2",
+			Status:       journal.ToolCallStatusExecuted,
+			ResultSHA256: strPtr("rhash2"),
+			RecordedAt:   time.Now(),
 		}
 		if err := tx.StoreToolResult(result); err != nil {
 			return err
