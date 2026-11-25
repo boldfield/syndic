@@ -14,6 +14,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
@@ -302,6 +303,9 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		endpoints[i] = eMap
 	}
 	roMap["endpoints"] = endpoints
+	// Present whatever the presets enable, so a change to any definition
+	// changes the roster hash.
+	roMap["tool_definitions_hash"] = tools.DefinitionsHash()
 
 	presets := make(map[string]map[string]interface{})
 	for name, preset := range roster.Presets {

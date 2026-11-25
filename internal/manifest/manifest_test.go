@@ -14,6 +14,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
@@ -277,6 +278,70 @@ func TestBuild_ManifestJSON_TopLevelKeys(t *testing.T) {
 
 	if manifest_out["kind"] != "engine" {
 		t.Errorf("expected kind=engine, got %v", manifest_out["kind"])
+	}
+}
+
+func TestBuild_ToolDefinitionsHashPresentAndHashed(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+
+	// No preset enables any tool and the roster has no tools table.
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Budgets:       config.Budgets{},
+		Pools:         map[string]config.Pool{},
+	}
+
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+
+	built, err := Build(Input{
+		Store:          store,
+		Roster:         roster,
+		RosterPath:     "/path/to/roster.toml",
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	var manifest_out map[string]interface{}
+	if err := json.Unmarshal(built.JSON, &manifest_out); err != nil {
+		t.Fatalf("failed to unmarshal manifest: %v", err)
+	}
+	rosterObj := manifest_out["roster"].(map[string]interface{})
+	if rosterObj["tool_definitions_hash"] != tools.DefinitionsHash() {
+		t.Errorf("tool_definitions_hash = %v, want %s", rosterObj["tool_definitions_hash"], tools.DefinitionsHash())
+	}
+
+	// A change to any definition changes the definitions hash, and so the roster hash.
+	rosterMap, err := rosterToMap(roster)
+	if err != nil {
+		t.Fatalf("rosterToMap: %v", err)
+	}
+	hash, err := computeRosterHash(rosterMap)
+	if err != nil {
+		t.Fatalf("computeRosterHash: %v", err)
+	}
+	if hash != built.RosterHash {
+		t.Fatalf("roster hash = %s, want %s", hash, built.RosterHash)
+	}
+	h := []byte(tools.DefinitionsHash())
+	h[0] ^= 1
+	rosterMap["tool_definitions_hash"] = string(h)
+	changed, err := computeRosterHash(rosterMap)
+	if err != nil {
+		t.Fatalf("computeRosterHash: %v", err)
+	}
+	if changed == built.RosterHash {
+		t.Error("a different tool_definitions_hash should produce a different roster hash")
 	}
 }
 
@@ -1599,6 +1664,9 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 
 	if endpointDefault["referee_template_hash"] != referee.TemplateHash() {
 		t.Errorf("referee_template_hash should be frozen in manifest, got %v", endpointDefault["referee_template_hash"])
+	}
+	if rosterObj["tool_definitions_hash"] != tools.DefinitionsHash() {
+		t.Errorf("tool_definitions_hash should be frozen in manifest, got %v", rosterObj["tool_definitions_hash"])
 	}
 	if endpointDefault["referee_model"] != "referee-model" {
 		t.Errorf("referee_model should be frozen in manifest, got %v", endpointDefault["referee_model"])
