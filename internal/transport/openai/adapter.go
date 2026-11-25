@@ -506,6 +506,10 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		if msg.Role != "system" && msg.Role != "user" && msg.Role != "assistant" && msg.Role != "tool" {
 			return result, fmt.Errorf("%w: invalid message role: %s", transport.ErrNotSent, msg.Role)
 		}
+		// Tool messages must have a non-empty ToolCallID
+		if msg.Role == "tool" && msg.ToolCallID == "" {
+			return result, fmt.Errorf("%w: tool message with empty ToolCallID", transport.ErrNotSent)
+		}
 	}
 
 	var resolvedSecrets []string
@@ -805,13 +809,9 @@ func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointPro
 			"role": msg.Role,
 		}
 
-		// Content is included for user, assistant, and tool messages
-		if msg.Content != "" {
-			msgMap["content"] = msg.Content
-		}
-
 		// Add tool_calls for assistant messages that have them
-		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		hasToolCalls := msg.Role == "assistant" && len(msg.ToolCalls) > 0
+		if hasToolCalls {
 			toolCalls := make([]map[string]any, len(msg.ToolCalls))
 			for j, call := range msg.ToolCalls {
 				toolCalls[j] = map[string]any{
@@ -824,6 +824,16 @@ func buildRequestBody(req transport.CompleteRequest, profile *config.EndpointPro
 				}
 			}
 			msgMap["tool_calls"] = toolCalls
+		}
+
+		// Content is included for user, system, and tool messages.
+		// For assistant messages without tool_calls, content is also included.
+		// For assistant messages with tool_calls, content is optional and may be omitted.
+		if msg.Role != "assistant" || !hasToolCalls {
+			msgMap["content"] = msg.Content
+		} else if msg.Content != "" {
+			// For assistant messages with tool_calls, only include content if non-empty
+			msgMap["content"] = msg.Content
 		}
 
 		// Add tool_call_id for tool messages

@@ -2020,6 +2020,142 @@ func TestToolRoundtrip(t *testing.T) {
 	}
 }
 
+// TestToolMessageEmptyCallID verifies that tool messages with empty ToolCallID are rejected with ErrNotSent.
+func TestToolMessageEmptyCallID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Should not reach here
+		t.Errorf("request should not be sent for tool message with empty ToolCallID")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "tool", Content: "tool response", ToolCallID: ""}, // Empty ToolCallID
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if err == nil {
+		t.Errorf("expected error for empty ToolCallID, got nil")
+	} else if !errors.Is(err, transport.ErrNotSent) {
+		t.Errorf("expected ErrNotSent, got %T: %v", err, err)
+	}
+}
+
+// TestEmptyContentPreserved verifies that empty content is preserved for user/system/tool messages.
+func TestEmptyContentPreserved(t *testing.T) {
+	requestReceived := false
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Response",
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           nil,
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: ""})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: ""}, // Empty user content
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+
+	// Verify empty content was preserved
+	if capturedBody != nil {
+		messages, ok := capturedBody["messages"].([]any)
+		if !ok || len(messages) == 0 {
+			t.Errorf("no messages in request body")
+		} else {
+			firstMsg := messages[0].(map[string]any)
+			content, hasContent := firstMsg["content"]
+			if !hasContent {
+				t.Errorf("empty content was omitted from user message")
+			}
+			if content != "" {
+				t.Errorf("empty content was not preserved; got: %q", content)
+			}
+		}
+	}
+}
+
 // TestAdapterVersionEqualsProbeVersion verifies adapter.AdapterVersion matches probe record.
 func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
