@@ -8,7 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // ApplyIntent holds the parsed state of a change set's apply, used to execute
@@ -126,9 +127,9 @@ func ClassifyPaths(wsDir string, intent ApplyIntent, getContent func(sha256 stri
 			}
 		} else {
 			// File exists; check hash against base and new.
-			defer func() { _ = f.Close() }()
-
 			actualHash, _, err := fileHash(f)
+			_ = f.Close()
+
 			if err != nil {
 				outcome.Outcome = PathConflict
 			} else if actualHash == p.NewSHA256 {
@@ -185,45 +186,45 @@ func openAtNoFollow(wsRoot *os.File, relPath string) (*os.File, error) {
 
 	for i, part := range cleanParts {
 		// Use openat(2) with O_NOFOLLOW to avoid symlink following
-		newFd, err := syscall.Openat(currentFd, part, syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+		newFd, err := unix.Openat(currentFd, part, unix.O_NOFOLLOW|unix.O_RDONLY, 0)
 		if err != nil {
 			if closePrevious {
-				_ = syscall.Close(currentFd)
+				_ = unix.Close(currentFd)
 			}
-			return nil, err
+			return nil, fmt.Errorf("openat %q: %w", part, err)
 		}
 
 		// Stat to verify not a symlink and check type
-		var stat syscall.Stat_t
-		if err := syscall.Fstat(newFd, &stat); err != nil {
-			_ = syscall.Close(newFd)
+		var stat unix.Stat_t
+		if err := unix.Fstat(newFd, &stat); err != nil {
+			_ = unix.Close(newFd)
 			if closePrevious {
-				_ = syscall.Close(currentFd)
+				_ = unix.Close(currentFd)
 			}
 			return nil, fmt.Errorf("fstat %q: %w", part, err)
 		}
 
 		// Check it's not a symlink
-		if (stat.Mode & syscall.S_IFMT) == syscall.S_IFLNK {
-			_ = syscall.Close(newFd)
+		if (stat.Mode & unix.S_IFMT) == unix.S_IFLNK {
+			_ = unix.Close(newFd)
 			if closePrevious {
-				_ = syscall.Close(currentFd)
+				_ = unix.Close(currentFd)
 			}
 			return nil, fmt.Errorf("path component is a symlink: %q", part)
 		}
 
 		// If not last component, it must be a directory
-		if i < len(cleanParts)-1 && (stat.Mode&syscall.S_IFMT) != syscall.S_IFDIR {
-			_ = syscall.Close(newFd)
+		if i < len(cleanParts)-1 && (stat.Mode&unix.S_IFMT) != unix.S_IFDIR {
+			_ = unix.Close(newFd)
 			if closePrevious {
-				_ = syscall.Close(currentFd)
+				_ = unix.Close(currentFd)
 			}
 			return nil, fmt.Errorf("path component must be a directory: %q", part)
 		}
 
 		// Close the previous fd if it wasn't wsRoot
 		if closePrevious {
-			_ = syscall.Close(currentFd)
+			_ = unix.Close(currentFd)
 		}
 
 		currentFd = newFd
@@ -273,7 +274,10 @@ func (tx *Tx) ApplyPendingPaths(wsDir string, intent ApplyIntent, getContent fun
 		path := intent.Paths[outcome.Path]
 
 		if outcome.Outcome == PathApplied {
-			// Already applied; skip but journal it if not already recorded.
+			// Already applied; journal it if not already recorded.
+			if err := tx.RecordApplyFile(intent.ChangeSetID, path.Path, PathApplied); err != nil {
+				return nil, fmt.Errorf("record apply file (already applied): %w", err)
+			}
 			continue
 		}
 
@@ -289,7 +293,7 @@ func (tx *Tx) ApplyPendingPaths(wsDir string, intent ApplyIntent, getContent fun
 			}
 
 			// Write to temporary file.
-			tmpFile, err := writeTempFile(wsRoot, path.Path, newContent)
+			tmpFd, tmpPath, err := writeTempFile(newContent)
 			if err != nil {
 				// Write failed; mark as conflict.
 				if err := tx.RecordApplyFile(intent.ChangeSetID, path.Path, PathConflict); err != nil {
@@ -297,18 +301,9 @@ func (tx *Tx) ApplyPendingPaths(wsDir string, intent ApplyIntent, getContent fun
 				}
 				continue
 			}
-			// Don't use defer for temp file; delete after each write
-			defer func(f string) { _ = os.Remove(f) }(tmpFile)
 
 			// Pre-verify: re-open and check hash against base, then apply.
-			fileOutcome, err := verifyAndApplyFile(wsRoot, path.Path, path.BaseSHA256, path.Op, tmpFile)
-			if err != nil {
-				// Verification failed; mark as conflict.
-				if err := tx.RecordApplyFile(intent.ChangeSetID, path.Path, PathConflict); err != nil {
-					return nil, fmt.Errorf("record apply file error: %w", err)
-				}
-				continue
-			}
+			fileOutcome := verifyAndApplyFile(wsRoot, path.Path, path.BaseSHA256, path.Op, tmpFd, tmpPath)
 
 			// Record the outcome in the journal.
 			if err := tx.RecordApplyFile(intent.ChangeSetID, path.Path, fileOutcome); err != nil {
@@ -320,113 +315,128 @@ func (tx *Tx) ApplyPendingPaths(wsDir string, intent ApplyIntent, getContent fun
 	return outcomes, nil
 }
 
-// writeTempFile writes newContent to a temporary file and returns its path.
-// The temp file is created in a directory relative to wsRoot.
-func writeTempFile(wsRoot *os.File, path string, newContent []byte) (string, error) {
-	// Create a temporary file in wsRoot/.syndic_tmp
-	tmpDir := filepath.Join(wsRoot.Name(), ".syndic_tmp")
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
-		return "", fmt.Errorf("create temp dir: %w", err)
-	}
-	tmpFile, err := os.CreateTemp(tmpDir, "apply_*.tmp")
+// writeTempFile writes newContent to a temporary file outside the workspace.
+// Returns the file descriptor and the basename for use in confined operations.
+func writeTempFile(newContent []byte) (int, string, error) {
+	// Create a temporary file in the system temp directory
+	tmpFile, err := os.CreateTemp("", "syndic_apply_*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
+		return -1, "", fmt.Errorf("create temp file: %w", err)
 	}
-	defer func() { _ = tmpFile.Close() }()
+	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(newContent); err != nil {
-		_ = os.Remove(tmpFile.Name())
-		return "", fmt.Errorf("write temp file: %w", err)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return -1, "", fmt.Errorf("write temp file: %w", err)
 	}
 
-	// Sync before returning to ensure data is durable
+	// Sync before closing to ensure data is durable
 	if err := tmpFile.Sync(); err != nil {
-		_ = os.Remove(tmpFile.Name())
-		return "", fmt.Errorf("sync temp file: %w", err)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return -1, "", fmt.Errorf("sync temp file: %w", err)
 	}
 
-	return tmpFile.Name(), nil
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return -1, "", fmt.Errorf("close temp file: %w", err)
+	}
+
+	// Open the temp file for reading and linking
+	fd, err := unix.Open(tmpPath, unix.O_RDONLY, 0)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return -1, "", fmt.Errorf("reopen temp file: %w", err)
+	}
+
+	return fd, tmpPath, nil
 }
 
-// verifyAndApplyFile re-opens the target path, verifies its hash matches the base,
-// then renames/links the temp file over it. For creates (baseSHA256 == ""), uses linkat
-// with no replace. For modifies, uses a re-verified rename.
-// It returns the outcome (applied or conflict) and an error only on unexpected failures.
-func verifyAndApplyFile(wsRoot *os.File, path string, baseSHA256 string, op string, tmpFile string) (string, error) {
-	fullPath := filepath.Join(wsRoot.Name(), path)
-	targetDir := filepath.Dir(fullPath)
+// verifyAndApplyFile verifies the target path and applies the temp file.
+// For creates (baseSHA256 == ""), ensures the file doesn't exist then renames it.
+// For modifies, re-verifies the hash matches the base, then renames.
+// Returns the outcome (applied or conflict).
+func verifyAndApplyFile(wsRoot *os.File, path string, baseSHA256 string, op string, tmpFd int, tmpPath string) string {
+	defer func() { _ = unix.Close(tmpFd) }()
+	defer func() { _ = os.Remove(tmpPath) }()
 
-	// Re-open and verify (design section 6).
+	fullPath := filepath.Join(wsRoot.Name(), path)
+
+	// Handle create vs modify
 	if baseSHA256 == "" && op == "create" {
-		// Create: file must not exist. Use RENAME_NOREPLACE to fail if it exists.
+		// Create: file must not exist. Check before renaming.
 		if _, err := os.Stat(fullPath); err == nil {
 			// File exists; conflict.
-			return PathConflict, nil
+			return PathConflict
 		} else if !errors.Is(err, os.ErrNotExist) {
 			// Other error; conflict.
-			return PathConflict, nil
+			return PathConflict
 		}
 
-		// Use renameat2 with RENAME_NOREPLACE for atomic create-or-fail.
-		// If not supported, fall back to checking and renaming.
-		oldDirFd, err := syscall.Open(targetDir, syscall.O_RDONLY, 0)
-		if err != nil {
-			return PathConflict, nil
-		}
-		defer func() { _ = syscall.Close(oldDirFd) }()
-
-		baseName := filepath.Base(fullPath)
-		newDirFd, err := syscall.Open(targetDir, syscall.O_RDONLY, 0)
-		if err != nil {
-			return PathConflict, nil
-		}
-		defer func() { _ = syscall.Close(newDirFd) }()
-
-		tmpBaseName := filepath.Base(tmpFile)
-		// Try renameat2 with RENAME_NOREPLACE (Linux only, may fail on other platforms)
-		if err := renameAtNoreplace(newDirFd, tmpBaseName, newDirFd, baseName); err == nil {
-			return PathApplied, nil
+		// File doesn't exist; safe to rename. Try renameat2 first for atomicity.
+		if err := tryRenameAtNoreplace(tmpPath, fullPath); err == nil {
+			return PathApplied
 		}
 
-		// Fall back to verify non-existence and os.Rename
-		if _, err := os.Stat(fullPath); err == nil {
-			return PathConflict, nil
+		// Fall back to os.Rename (less safe, but works on more systems)
+		if err := os.Rename(tmpPath, fullPath); err == nil {
+			return PathApplied
 		}
-		if err := os.Rename(tmpFile, fullPath); err != nil {
-			return PathConflict, nil
-		}
-		return PathApplied, nil
+		return PathConflict
 
 	} else if op == "modify" {
 		// Modify: file must exist and hash to base.
+		// Re-open by name to catch atomic-save replacements (new inode, new content)
 		f, err := openAtNoFollow(wsRoot, path)
 		if err != nil {
 			// Cannot open (not found, symlink, etc.); conflict.
-			return PathConflict, nil
+			return PathConflict
 		}
 		defer func() { _ = f.Close() }()
 
 		actualHash, _, err := fileHash(f)
 		if err != nil || actualHash != baseSHA256 {
 			// Hash mismatch; conflict.
-			return PathConflict, nil
+			return PathConflict
 		}
+
+		// Hash matches; safe to rename over it using os.Rename
+		if err := os.Rename(tmpPath, fullPath); err != nil {
+			return PathConflict
+		}
+		return PathApplied
 	}
 
-	// Rename temp file over target (atomic per file).
-	if err := os.Rename(tmpFile, fullPath); err != nil {
-		return PathConflict, nil
-	}
-
-	return PathApplied, nil
+	return PathConflict
 }
 
-// renameAtNoreplace attempts to use renameat2 with RENAME_NOREPLACE.
-// It's a no-op on systems that don't support it.
-func renameAtNoreplace(oldDirFd int, oldName string, newDirFd int, newName string) error {
-	// renameat2 is Linux-specific; other systems will get an error
-	// For now, just return an error so we fall back to the safer path
-	return fmt.Errorf("renameat2 not available")
+// tryRenameAtNoreplace attempts to use renameat2 with RENAME_NOREPLACE
+// to atomically replace oldPath with newPath only if newPath doesn't exist.
+func tryRenameAtNoreplace(oldPath, newPath string) error {
+	// renameat2 with RENAME_NOREPLACE
+	const RENAME_NOREPLACE = 1
+	// Split paths into directory and name
+	oldDir := filepath.Dir(oldPath)
+	oldName := filepath.Base(oldPath)
+	newDir := filepath.Dir(newPath)
+	newName := filepath.Base(newPath)
+
+	// Open directories
+	oldDirFd, err := unix.Open(oldDir, unix.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open old dir: %w", err)
+	}
+	defer func() { _ = unix.Close(oldDirFd) }()
+
+	newDirFd, err := unix.Open(newDir, unix.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open new dir: %w", err)
+	}
+	defer func() { _ = unix.Close(newDirFd) }()
+
+	// Use Renameat2 to atomically rename with no replace
+	return unix.Renameat2(oldDirFd, oldName, newDirFd, newName, RENAME_NOREPLACE)
 }
 
 // RecoverApplyState queries the change set's apply state after a crash,
@@ -440,11 +450,13 @@ func (tx *Tx) RecoverApplyState(wsDir string, intent ApplyIntent, getContent fun
 	// Classify all paths without writing.
 	outcomes, err := ClassifyPaths(wsDir, intent, getContent)
 	if err != nil {
-		// If workspace is missing, we cannot recover; leave the apply partial.
+		// Check if workspace is missing (unwrap the error first)
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("workspace missing: %w", err)
 		}
 		// Other classification errors; still record recovery with current outcomes.
+		// If we can't classify, we can't recover reliably.
+		return fmt.Errorf("classify paths during recovery: %w", err)
 	}
 
 	// Update intent outcomes from classification and journal only applied/conflict ones.
