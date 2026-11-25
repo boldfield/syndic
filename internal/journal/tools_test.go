@@ -872,14 +872,20 @@ func TestHashAddressedReconstruction(t *testing.T) {
 		t.Fatalf("store tool call: %v", err)
 	}
 
-	db1.Close()
+	if err := db1.Close(); err != nil {
+		t.Logf("close db1: %v", err)
+	}
 
 	// Second session: Reopen and retrieve the tool call
 	db2, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db session 2: %v", err)
 	}
-	defer db2.Close()
+	defer func() {
+		if err := db2.Close(); err != nil {
+			t.Logf("close db2: %v", err)
+		}
+	}()
 
 	s2 := journal.NewStore(db2)
 	var calls []journal.ToolCall
@@ -919,14 +925,20 @@ func TestHashAddressedReconstruction(t *testing.T) {
 		t.Fatalf("store tool result: %v", err)
 	}
 
-	db2.Close()
+	if err := db2.Close(); err != nil {
+		t.Logf("close db2: %v", err)
+	}
 
 	// Third session: Verify both call and result persist
 	db3, err := journal.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open db session 3: %v", err)
 	}
-	defer db3.Close()
+	defer func() {
+		if err := db3.Close(); err != nil {
+			t.Logf("close db3: %v", err)
+		}
+	}()
 
 	s3 := journal.NewStore(db3)
 	var results []journal.ToolResult
