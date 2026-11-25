@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"errors"
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/hub"
+	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 	"os"
@@ -83,4 +86,30 @@ func SetAuthorChangeLines(f func(transport.CompleteResult) []string) (restore fu
 	old := authorChangeLines
 	authorChangeLines = f
 	return func() { authorChangeLines = old }
+}
+
+// ReserveOpen runs the dispatch check of the open turn for participant id
+// with the request's messages, tool definitions and output bound, and
+// returns the request's estimate and the turn's charge after it.
+func (e *Engine) ReserveOpen(id string, msgs []transport.Message, defs []transport.Tool, maxOut int) (est, charged int, err error) {
+	e.mu.Lock()
+	t := e.open
+	e.mu.Unlock()
+	if t == nil {
+		return 0, 0, errors.New("no open turn")
+	}
+	err = e.tx(func(tx *journal.Tx, _ hub.Emit) error {
+		var err error
+		if est, err = e.reserve(tx, t, id, msgs, defs, maxOut); err != nil {
+			return err
+		}
+		turn, err := tx.GetTurn(t.id)
+		if err != nil {
+			return err
+		}
+		rec, _, err := readBudget(turn)
+		charged = rec.Charged
+		return err
+	})
+	return est, charged, err
 }
