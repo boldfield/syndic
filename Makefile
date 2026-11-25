@@ -2,7 +2,9 @@
 
 # GOLANGCI_LINT_VERSION must match the version: given to golangci-lint-action in .github/workflows/ci.yml
 GOLANGCI_LINT_VERSION := v2.15.0
-GO_TEST_TIMEOUT ?= 5m
+# Per-package go test timeout. The internal/engine suite runs for several minutes on a
+# loaded machine while make check runs every package in parallel, so 5m was intermittently exceeded.
+GO_TEST_TIMEOUT ?= 15m
 
 build:
 	go build ./...
