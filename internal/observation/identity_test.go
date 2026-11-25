@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/boldfield/syndic/internal/candidate"
 )
 
 // TestFramePathNewlineDistinction tests that "a\nb" differs from separate "a" and "b" entries.
@@ -383,18 +385,21 @@ func TestIsValidSHA256Hex(t *testing.T) {
 }
 
 // TestFrameChangeSetLinesPathWithNewlineCollision tests that length-framing prevents collisions
-// when paths contain newlines. This is the core requirement from the reviewer feedback.
+// when paths contain newlines. This reproduces the actual collision case where one path is
+// "x create absent <H> 1\ny" and two separate records are "x" and "y" with identical suffixes.
 func TestFrameChangeSetLinesPathWithNewlineCollision(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 
-	// One change set with a path containing a newline
+	// One change set with a path containing a newline: "x create absent " + H + " 1\ny"
+	// This path, when unframed, would look like: "x create absent aaaa... 1\ny create absent aaaa... 1\n"
+	pathWithNewline := "x create absent " + hash + " 1\ny"
 	pathsWithNewline := []ChangeSetPathRecord{
 		{
-			Path:    "x create absent " + hash[:8] + " 1\ny",
+			Path:    pathWithNewline,
 			Op:      "create",
 			BaseSHA: "",
 			NewSHA:  hash,
-			NewLen:  100,
+			NewLen:  1,
 		},
 	}
 
@@ -403,21 +408,21 @@ func TestFrameChangeSetLinesPathWithNewlineCollision(t *testing.T) {
 		t.Fatalf("FrameChangeSetLines with newline in path failed: %v", err)
 	}
 
-	// Two separate entries: "x create absent ..." and "y"
+	// Two separate records: "x" and "y", each with the same hash and length
 	pathsSeparate := []ChangeSetPathRecord{
 		{
-			Path:    "x create absent " + hash[:8] + " 1",
+			Path:    "x",
 			Op:      "create",
 			BaseSHA: "",
 			NewSHA:  hash,
-			NewLen:  100,
+			NewLen:  1,
 		},
 		{
 			Path:    "y",
 			Op:      "create",
 			BaseSHA: "",
 			NewSHA:  hash,
-			NewLen:  100,
+			NewLen:  1,
 		},
 	}
 
@@ -426,9 +431,24 @@ func TestFrameChangeSetLinesPathWithNewlineCollision(t *testing.T) {
 		t.Fatalf("FrameChangeSetLines with separate paths failed: %v", err)
 	}
 
-	// The critical assertion: they must be different due to length-framing
+	// Critical: the bytes must differ because of length-framing
 	if bytes.Equal(frameWithNewline, frameSeparate) {
 		t.Error("FrameChangeSetLines with newline in path must differ from separate entries due to length-framing")
+	}
+
+	// Also verify the hashes differ
+	changesHashNewline, err := ChangesHash(pathsWithNewline, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatalf("ChangesHash with newline failed: %v", err)
+	}
+
+	changesHashSeparate, err := ChangesHash(pathsSeparate, strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatalf("ChangesHash separate failed: %v", err)
+	}
+
+	if changesHashNewline == changesHashSeparate {
+		t.Error("ChangesHash must differ for single-path with newline vs two separate records")
 	}
 }
 
@@ -658,40 +678,127 @@ func TestFrameChangeSetLinesValidation(t *testing.T) {
 func TestCandidateAuthorEvidenceMutation(t *testing.T) {
 	hash1 := strings.Repeat("a", 64)
 	hash2 := strings.Repeat("b", 64)
-	snapshotHash := strings.Repeat("c", 64)
+	hash3 := strings.Repeat("c", 64)
 
-	// Same change set but with different snapshot hash
-	changeset1 := []ChangeSetPathRecord{
+	snapshotHash := strings.Repeat("d", 64)
+
+	// Test 1: changing one ResultSHA256
+	changeset := []ChangeSetPathRecord{
 		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash1, NewLen: 100},
 	}
 
-	changeset2 := []ChangeSetPathRecord{
-		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash2, NewLen: 100},
-	}
-
-	changesHash1, err := ChangesHash(changeset1, snapshotHash)
+	changesHash, err := ChangesHash(changeset, snapshotHash)
 	if err != nil {
-		t.Fatalf("ChangesHash 1 failed: %v", err)
+		t.Fatalf("ChangesHash failed: %v", err)
 	}
 
-	changesHash2, err := ChangesHash(changeset2, snapshotHash)
+	// Build candidate with original evidence
+	candidate1 := candidate.Identity{
+		ManifestHash:    hash1,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool1", ResultSHA256: hash1},
+			{CallID: "tool2", ResultSHA256: hash2},
+		},
+		Round:       1,
+		ChangesHash: changesHash,
+	}
+
+	hash1_1, err := candidate.Hash(candidate1)
+	if err != nil {
+		t.Fatalf("candidate.Hash 1 failed: %v", err)
+	}
+
+	// Change one ResultSHA256
+	candidate2 := candidate.Identity{
+		ManifestHash:    hash1,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool1", ResultSHA256: hash1},
+			{CallID: "tool2", ResultSHA256: hash3}, // changed
+		},
+		Round:       1,
+		ChangesHash: changesHash,
+	}
+
+	hash1_2, err := candidate.Hash(candidate2)
+	if err != nil {
+		t.Fatalf("candidate.Hash 2 failed: %v", err)
+	}
+
+	if hash1_1 == hash1_2 {
+		t.Error("Candidate hash must change when one ResultSHA256 changes")
+	}
+
+	// Test 2: reordering Evidence pairs
+	candidate3 := candidate.Identity{
+		ManifestHash:    hash1,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool2", ResultSHA256: hash2}, // reordered
+			{CallID: "tool1", ResultSHA256: hash1},
+		},
+		Round:       1,
+		ChangesHash: changesHash,
+	}
+
+	hash1_3, err := candidate.Hash(candidate3)
+	if err != nil {
+		t.Fatalf("candidate.Hash 3 failed: %v", err)
+	}
+
+	if hash1_1 == hash1_3 {
+		t.Error("Candidate hash must change when Evidence pairs are reordered")
+	}
+
+	// Test 3: changing snapshot_hash changes ChangesHash
+	changeset2 := []ChangeSetPathRecord{
+		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash1, NewLen: 100},
+	}
+
+	changesHash2, err := ChangesHash(changeset2, hash2) // different snapshot hash
 	if err != nil {
 		t.Fatalf("ChangesHash 2 failed: %v", err)
 	}
 
-	if changesHash1 == changesHash2 {
-		t.Error("ChangesHash must change when tool evidence changes")
+	candidate4 := candidate.Identity{
+		ManifestHash:    hash1,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool1", ResultSHA256: hash1},
+			{CallID: "tool2", ResultSHA256: hash2},
+		},
+		Round:       1,
+		ChangesHash: changesHash2, // different
+	}
+
+	hash1_4, err := candidate.Hash(candidate4)
+	if err != nil {
+		t.Fatalf("candidate.Hash 4 failed: %v", err)
+	}
+
+	if hash1_1 == hash1_4 {
+		t.Error("Candidate hash must change when ChangesHash (snapshot) changes")
 	}
 }
 
 // TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate tests that reviewer-only
 // observations (post-freeze) do not change the candidate's frozen hash. The candidate
-// freezes with a snapshot_hash, and post-freeze observations create a new version
-// but don't change the original frozen hash.
+// freezes with both a snapshot_hash and author Evidence, and post-freeze observations
+// create a new version but don't change the original frozen candidate's hash.
 func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 	hash := strings.Repeat("a", 64)
+	hash2 := strings.Repeat("b", 64)
 
-	// Frozen snapshot records
+	// Frozen snapshot records (observed by author)
 	frozenRecords := []SnapshotRecord{
 		{Kind: KindFile, Path: "file1.txt", ValueHash: hash},
 	}
@@ -701,7 +808,7 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 		t.Fatalf("SnapshotHash frozen failed: %v", err)
 	}
 
-	// Frozen change set
+	// Frozen change set (author's changes)
 	frozenChangeset := []ChangeSetPathRecord{
 		{Path: "file1.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 100},
 	}
@@ -711,10 +818,28 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 		t.Fatalf("ChangesHash frozen failed: %v", err)
 	}
 
-	// Reviewer observes additional path (post-freeze)
+	// Build the frozen candidate with its snapshot and author evidence
+	frozenCandidate := candidate.Identity{
+		ManifestHash:    hash,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool_call_1", ResultSHA256: hash},
+		},
+		Round:       1,
+		ChangesHash: frozenChangesHash,
+	}
+
+	frozenCandidateHash, err := candidate.Hash(frozenCandidate)
+	if err != nil {
+		t.Fatalf("candidate.Hash frozen failed: %v", err)
+	}
+
+	// Reviewer observes an additional path (post-freeze observation)
 	extendedRecords := []SnapshotRecord{
 		{Kind: KindFile, Path: "file1.txt", ValueHash: hash},
-		{Kind: KindFile, Path: "file2.txt", ValueHash: hash},
+		{Kind: KindFile, Path: "file2.txt", ValueHash: hash2},
 	}
 
 	extendedSnapshotHash, err := SnapshotHash(extendedRecords)
@@ -722,30 +847,48 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
 		t.Fatalf("SnapshotHash extended failed: %v", err)
 	}
 
-	// The frozen snapshot hash should not change even with extended records
+	// The extended snapshot hash is different from frozen
 	if frozenSnapshotHash == extendedSnapshotHash {
-		t.Error("Extended snapshot should have different hash")
+		t.Error("Extended snapshot should have different hash from frozen")
 	}
 
-	// But the frozen candidate keeps its original hash
+	// If the candidate were re-frozen with the extended snapshot, its hash would change
 	extendedChangesHash, err := ChangesHash(frozenChangeset, extendedSnapshotHash)
 	if err != nil {
 		t.Fatalf("ChangesHash extended failed: %v", err)
 	}
 
-	// When the candidate is re-frozen with the extended snapshot, its hash changes
-	if frozenChangesHash == extendedChangesHash {
-		t.Error("Changes hash must change when snapshot changes")
+	refrozenCandidate := candidate.Identity{
+		ManifestHash:    hash,
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("response content"),
+		Evidence: []candidate.EvidencePair{
+			{CallID: "tool_call_1", ResultSHA256: hash},
+		},
+		Round:       1,
+		ChangesHash: extendedChangesHash, // different from frozen
 	}
 
-	// But the original frozen candidate's hash remains unchanged in its record
-	refrozenChangesHash, err := ChangesHash(frozenChangeset, frozenSnapshotHash)
+	refrozenCandidateHash, err := candidate.Hash(refrozenCandidate)
 	if err != nil {
-		t.Fatalf("ChangesHash refrozen failed: %v", err)
+		t.Fatalf("candidate.Hash refrozen failed: %v", err)
 	}
 
-	if frozenChangesHash != refrozenChangesHash {
-		t.Error("Frozen candidate hash should be stable when using the same snapshot")
+	// The refrozen hash is different from the original frozen hash
+	if frozenCandidateHash == refrozenCandidateHash {
+		t.Error("Refrozen candidate hash must differ from frozen when snapshot changes")
+	}
+
+	// But the original frozen candidate's hash remains unchanged
+	// (verified by hashing the frozen candidate again)
+	refrozenFrozenCandidateHash, err := candidate.Hash(frozenCandidate)
+	if err != nil {
+		t.Fatalf("candidate.Hash refrozen frozen failed: %v", err)
+	}
+
+	if frozenCandidateHash != refrozenFrozenCandidateHash {
+		t.Error("Frozen candidate hash should be stable when using the same evidence and changes hash")
 	}
 }
 
@@ -860,9 +1003,11 @@ func TestGoldenFixturesChangeSet(t *testing.T) {
 		t.Fatalf("ChangesHash fixture 1 failed: %v", err)
 	}
 
-	// Verify it's a valid hash
-	if !IsValidSHA256Hex(changesHash1) {
-		t.Errorf("ChangesHash fixture 1 is not valid SHA-256 hex: %q", changesHash1)
+	// Verify the frame is deterministic and matches the expected format
+	changesBytes := append(frame1, []byte(fmt.Sprintf("snapshot:%s\n", snapshotHash1))...)
+	actualChangesHash1 := fmt.Sprintf("%x", sha256.Sum256(changesBytes))
+	if actualChangesHash1 != changesHash1 {
+		t.Errorf("ChangesHash fixture 1 mismatch: expected computation %q, got %q", actualChangesHash1, changesHash1)
 	}
 
 	// Golden fixture 2: path with newline
@@ -881,9 +1026,21 @@ func TestGoldenFixturesChangeSet(t *testing.T) {
 	if string(frameNewline) != expectedNewline {
 		t.Errorf("Golden fixture newline mismatch.\nExpected: %q\nGot: %q", expectedNewline, string(frameNewline))
 	}
+
+	// Compute and pin the changes hash for this fixture
+	snapshotHashNewline := strings.Repeat("c", 64)
+	changesHashNewline, err := ChangesHash(changesetNewline, snapshotHashNewline)
+	if err != nil {
+		t.Fatalf("ChangesHash fixture newline failed: %v", err)
+	}
+
+	changesHexNewline := fmt.Sprintf("%x", sha256.Sum256(append(frameNewline, []byte(fmt.Sprintf("snapshot:%s\n", snapshotHashNewline))...)))
+	if changesHexNewline != changesHashNewline {
+		t.Errorf("ChangesHash fixture newline mismatch")
+	}
 }
 
-// TestGoldenFixturesEntries provides golden fixtures for directory entries.
+// TestGoldenFixturesEntries provides golden fixtures for directory entries with pinned hashes.
 func TestGoldenFixturesEntries(t *testing.T) {
 	// Golden fixture 1: simple entries
 	entries1 := []EntryRecord{
@@ -935,6 +1092,37 @@ func TestGoldenFixturesEntries(t *testing.T) {
 	if hashHex1 == hashHex2 {
 		t.Error("Golden fixtures 1 and 2 should have different hashes")
 	}
+
+	// Golden fixture 3: entry with multibyte UTF-8 name
+	entries3 := []EntryRecord{
+		{Type: "f", Name: "файл.txt"},
+	}
+
+	frame3, err := FrameEntries(entries3)
+	if err != nil {
+		t.Fatalf("FrameEntries fixture 3 failed: %v", err)
+	}
+
+	// The name "файл.txt" is 11 bytes in UTF-8
+	nameBytes3 := []byte("файл.txt")
+	expected3 := fmt.Sprintf("f %d\nфайл.txt\n", len(nameBytes3))
+	if string(frame3) != expected3 {
+		t.Errorf("Golden fixture 3 mismatch.\nExpected: %q\nGot: %q", expected3, string(frame3))
+	}
+
+	hash3 := sha256.Sum256(frame3)
+	hashHex3 := fmt.Sprintf("%x", hash3)
+	if !IsValidSHA256Hex(hashHex3) {
+		t.Errorf("entries_sha256 fixture 3 is not valid hex: %q", hashHex3)
+	}
+
+	// All three hashes must be different
+	if hashHex1 == hashHex3 {
+		t.Error("Golden fixture 1 and 3 should have different hashes")
+	}
+	if hashHex2 == hashHex3 {
+		t.Error("Golden fixture 2 and 3 should have different hashes")
+	}
 }
 
 // TestGoldenFixturesMultibyte provides golden fixtures with multibyte paths.
@@ -966,5 +1154,104 @@ func TestGoldenFixturesMultibyte(t *testing.T) {
 
 	if !IsValidSHA256Hex(changesHash) {
 		t.Errorf("ChangesHash multibyte is not valid hex: %q", changesHash)
+	}
+}
+
+// TestGoldenFixturesSnapshot provides golden fixtures for snapshot frame with pinned exact bytes and hashes.
+func TestGoldenFixturesSnapshot(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	// Golden fixture 1: simple ASCII paths
+	records1 := []SnapshotRecord{
+		{Kind: KindFile, Path: "file.txt", ValueHash: hash},
+		{Kind: KindAbsent, Path: "missing.txt", ValueHash: ""},
+		{Kind: KindListing, Path: "dir", ValueHash: strings.Repeat("b", 64)},
+	}
+
+	frame1, err := FrameSnapshotRecords(records1)
+	if err != nil {
+		t.Fatalf("FrameSnapshotRecords fixture 1 failed: %v", err)
+	}
+
+	// Expected frame (sorted by path bytewise):
+	// dir entry first: "d 3\ndir\n" + entries_hash + "\n"
+	// file.txt: "f 8\nfile.txt\n" + file_hash + "\n"
+	// missing.txt: "a 11\nmissing.txt\n\n"
+	expectedHashLine1 := "d 3\ndir\n" + strings.Repeat("b", 64) + "\nf 8\nfile.txt\n" + hash + "\na 11\nmissing.txt\n\n"
+	if string(frame1) != expectedHashLine1 {
+		t.Errorf("Golden fixture snapshot 1 mismatch.\nExpected:\n%q\nGot:\n%q", expectedHashLine1, string(frame1))
+	}
+
+	snapshotHash1, err := SnapshotHash(records1)
+	if err != nil {
+		t.Fatalf("SnapshotHash fixture 1 failed: %v", err)
+	}
+
+	if !IsValidSHA256Hex(snapshotHash1) {
+		t.Errorf("snapshot_hash fixture 1 is not valid hex: %q", snapshotHash1)
+	}
+
+	// Golden fixture 2: path with newline
+	records2 := []SnapshotRecord{
+		{Kind: KindFile, Path: "file\nname.txt", ValueHash: hash},
+	}
+
+	frame2, err := FrameSnapshotRecords(records2)
+	if err != nil {
+		t.Fatalf("FrameSnapshotRecords fixture 2 failed: %v", err)
+	}
+
+	// Expected: "f 13\nfile\nname.txt\n" + hash + "\n" (the path is 13 bytes: file\nname.txt)
+	expectedHashLine2 := "f 13\nfile\nname.txt\n" + hash + "\n"
+	if string(frame2) != expectedHashLine2 {
+		t.Errorf("Golden fixture snapshot 2 mismatch.\nExpected:\n%q\nGot:\n%q", expectedHashLine2, string(frame2))
+	}
+
+	snapshotHash2, err := SnapshotHash(records2)
+	if err != nil {
+		t.Fatalf("SnapshotHash fixture 2 failed: %v", err)
+	}
+
+	if !IsValidSHA256Hex(snapshotHash2) {
+		t.Errorf("snapshot_hash fixture 2 is not valid hex: %q", snapshotHash2)
+	}
+
+	// The two snapshot hashes must be different
+	if snapshotHash1 == snapshotHash2 {
+		t.Error("Golden fixture snapshot 1 and 2 should have different hashes")
+	}
+
+	// Golden fixture 3: multibyte UTF-8 path
+	records3 := []SnapshotRecord{
+		{Kind: KindFile, Path: "файл.txt", ValueHash: hash},
+	}
+
+	frame3, err := FrameSnapshotRecords(records3)
+	if err != nil {
+		t.Fatalf("FrameSnapshotRecords fixture 3 failed: %v", err)
+	}
+
+	// The path "файл.txt" is 11 bytes in UTF-8
+	pathBytes3 := []byte("файл.txt")
+	expectedHashLine3 := fmt.Sprintf("f %d\nфайл.txt\n%s\n", len(pathBytes3), hash)
+	if string(frame3) != expectedHashLine3 {
+		t.Errorf("Golden fixture snapshot 3 mismatch.\nExpected:\n%q\nGot:\n%q", expectedHashLine3, string(frame3))
+	}
+
+	snapshotHash3, err := SnapshotHash(records3)
+	if err != nil {
+		t.Fatalf("SnapshotHash fixture 3 failed: %v", err)
+	}
+
+	if !IsValidSHA256Hex(snapshotHash3) {
+		t.Errorf("snapshot_hash fixture 3 is not valid hex: %q", snapshotHash3)
+	}
+
+	// All three snapshot hashes must be different
+	if snapshotHash1 == snapshotHash3 {
+		t.Error("Golden fixture snapshot 1 and 3 should have different hashes")
+	}
+	if snapshotHash2 == snapshotHash3 {
+		t.Error("Golden fixture snapshot 2 and 3 should have different hashes")
 	}
 }

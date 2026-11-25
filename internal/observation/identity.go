@@ -37,7 +37,7 @@ type EntryRecord struct {
 }
 
 // FramePath returns the canonical frame for a path and kind, ready to be part of a snapshot.
-// The result is: `<kind> <path-len>\n<path><value>\n` where value is the value hash or empty.
+// The result is: `<kind> <path-len>\n<path>\n<value>\n` where value is the value hash or empty.
 // The frame is unambiguous even when paths contain newlines or multiple consecutive separators.
 func FramePath(kind, path, valueHash string) ([]byte, error) {
 	if path == "" {
