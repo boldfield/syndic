@@ -14,6 +14,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
@@ -216,6 +217,10 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 		"roster_file_sha256": rosterFileSHA256,
 		"probe_records":      probeRecords,
 		"expected":           expectedMap,
+		// The definitions hash is recorded whenever the manifest is built,
+		// whatever the presets enable, so a change to any tool definition
+		// changes the manifest.
+		"tool_definitions_hash": tools.DefinitionsHash(),
 	}
 
 	manifestJSON, err := canonicalJSON(manifest)

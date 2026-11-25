@@ -715,8 +715,10 @@ func TestRunsManifest_SubscribeSinceZeroIgnoresProbeCompleted(t *testing.T) {
 	}
 }
 
-// runsAllowedTop is the list of manifest members in section 1a.
-var runsAllowedTop = []string{"kind", "engine_version", "started_at", "roster", "roster_path", "roster_file_sha256", "probe_records", "expected"}
+// runsAllowedTop is the list of manifest members in section 1a, with the
+// tool_definitions_hash the v5 delta's section 6 adds beside the referee
+// template hash: the hash of the canonical tool definitions.
+var runsAllowedTop = []string{"kind", "engine_version", "started_at", "roster", "roster_path", "roster_file_sha256", "probe_records", "expected", "tool_definitions_hash"}
 
 // runsAllowedRoster is the list of roster members in section 1a, with the
 // two members section 2b adds to the roster file: the [engine] table and

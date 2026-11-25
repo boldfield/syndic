@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/boldfield/syndic/internal/referee"
+	"github.com/boldfield/syndic/internal/tools"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,14 +253,15 @@ func TestBuild_ManifestJSON_TopLevelKeys(t *testing.T) {
 	}
 
 	expectedKeys := map[string]bool{
-		"kind":               true,
-		"engine_version":     true,
-		"started_at":         true,
-		"roster":             true,
-		"roster_path":        true,
-		"roster_file_sha256": true,
-		"probe_records":      true,
-		"expected":           true,
+		"kind":                  true,
+		"engine_version":        true,
+		"started_at":            true,
+		"roster":                true,
+		"roster_path":           true,
+		"roster_file_sha256":    true,
+		"probe_records":         true,
+		"expected":              true,
+		"tool_definitions_hash": true,
 	}
 
 	for key := range manifest_out {
@@ -1599,6 +1601,12 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 
 	if endpointDefault["referee_template_hash"] != referee.TemplateHash() {
 		t.Errorf("referee_template_hash should be frozen in manifest, got %v", endpointDefault["referee_template_hash"])
+	}
+	// The tool definitions hash is frozen at the top level, whatever the
+	// presets enable; it equals the hash of the canonical definitions, so a
+	// change of one byte in any definition changes the manifest.
+	if manifest_out["tool_definitions_hash"] != tools.DefinitionsHash() {
+		t.Errorf("tool_definitions_hash should be frozen in manifest, got %v", manifest_out["tool_definitions_hash"])
 	}
 	if endpointDefault["referee_model"] != "referee-model" {
 		t.Errorf("referee_model should be frozen in manifest, got %v", endpointDefault["referee_model"])
