@@ -1,6 +1,7 @@
 package budget
 
 import (
+	"encoding/json"
 	"math"
 	"math/big"
 	"strconv"
@@ -186,4 +187,103 @@ func StandInBytes(maxOutputTokens int, bytesPerToken float64) int {
 	}
 
 	return ceilMul(maxOutputTokens, bytesPerToken)
+}
+
+// toolDefinitionBytes calculates the total byte size of tool definitions and their schemas.
+// It serializes each tool's JSON representation and returns the sum.
+func toolDefinitionBytes(tools []transport.Tool) int {
+	sum := 0
+	for _, tool := range tools {
+		data, err := json.Marshal(tool)
+		if err != nil {
+			continue
+		}
+		sum = addSat(sum, len(data))
+	}
+	return sum
+}
+
+// toolCallArgumentsBytes calculates the total byte size of tool call arguments from messages.
+// It extracts arguments from assistant messages that contain tool calls.
+func toolCallArgumentsBytes(msgs []transport.Message) int {
+	sum := 0
+	for _, msg := range msgs {
+		if msg.Role == "assistant" {
+			for _, call := range msg.ToolCalls {
+				data, err := json.Marshal(call)
+				if err != nil {
+					continue
+				}
+				sum = addSat(sum, len(data))
+			}
+		}
+	}
+	return sum
+}
+
+// toolMessageFramingBytes estimates the framing overhead for tool messages.
+// Tool messages include role labels, delimiters, and an untrusted-content notice.
+// This provides a conservative estimate of the fixed overhead per tool message.
+const toolMessageFramingOverhead = 50
+
+func toolMessageFramingBytes(msgs []transport.Message) int {
+	sum := 0
+	for _, msg := range msgs {
+		if msg.Role == "tool" {
+			sum = addSat(sum, toolMessageFramingOverhead)
+		}
+	}
+	return sum
+}
+
+// AdmissionTokensWithTools computes the token count for messages with tool definitions and calls.
+// It extends AdmissionTokens to include tool definitions, their schemas, tool call arguments,
+// and tool message framing. The formula includes all tool-related bytes in addition to message content.
+func AdmissionTokensWithTools(msgs []transport.Message, tools []transport.Tool, tokensPerByteMax float64, o Overheads) int {
+	if !(tokensPerByteMax > 0) {
+		panic("tokensPerByteMax must be greater than zero")
+	}
+
+	sum := 0
+	for _, msg := range msgs {
+		bytes := len(msg.Content)
+		sum = addSat(sum, addSat(ceilMul(bytes, tokensPerByteMax), o.MessageTokens))
+	}
+
+	toolDefBytes := toolDefinitionBytes(tools)
+	sum = addSat(sum, ceilMul(toolDefBytes, tokensPerByteMax))
+
+	toolCallBytes := toolCallArgumentsBytes(msgs)
+	sum = addSat(sum, ceilMul(toolCallBytes, tokensPerByteMax))
+
+	toolFramingBytes := toolMessageFramingBytes(msgs)
+	sum = addSat(sum, ceilMul(toolFramingBytes, tokensPerByteMax))
+
+	return addSat(sum, o.RequestTokens)
+}
+
+// EstimateTokensWithTools computes an estimate of token count for messages with tool definitions and calls.
+// It extends EstimateTokens to include tool definitions, their schemas, tool call arguments,
+// and tool message framing.
+func EstimateTokensWithTools(msgs []transport.Message, tools []transport.Tool, bytesPerToken float64, o Overheads) int {
+	if !(bytesPerToken > 0) {
+		panic("bytesPerToken must be greater than zero")
+	}
+
+	sum := 0
+	for _, msg := range msgs {
+		bytes := len(msg.Content)
+		sum = addSat(sum, addSat(ceilDiv(bytes, bytesPerToken), o.MessageTokens))
+	}
+
+	toolDefBytes := toolDefinitionBytes(tools)
+	sum = addSat(sum, ceilDiv(toolDefBytes, bytesPerToken))
+
+	toolCallBytes := toolCallArgumentsBytes(msgs)
+	sum = addSat(sum, ceilDiv(toolCallBytes, bytesPerToken))
+
+	toolFramingBytes := toolMessageFramingBytes(msgs)
+	sum = addSat(sum, ceilDiv(toolFramingBytes, bytesPerToken))
+
+	return addSat(sum, o.RequestTokens)
 }

@@ -159,8 +159,16 @@ func (pb partBudget) admission(msgs []transport.Message) int {
 	return budget.AdmissionTokens(msgs, pb.tokensPerByteMax, pb.overheads)
 }
 
+func (pb partBudget) admissionWithTools(msgs []transport.Message, tools []transport.Tool) int { // nolint:unused
+	return budget.AdmissionTokensWithTools(msgs, tools, pb.tokensPerByteMax, pb.overheads)
+}
+
 func (pb partBudget) estimate(msgs []transport.Message) int {
 	return budget.EstimateTokens(msgs, pb.bytesPerToken, pb.overheads)
+}
+
+func (pb partBudget) estimateWithTools(msgs []transport.Message, tools []transport.Tool) int { // nolint:unused
+	return budget.EstimateTokensWithTools(msgs, tools, pb.bytesPerToken, pb.overheads)
 }
 
 // maxOutput is the MaxOutputTokens a request of this participant carries.

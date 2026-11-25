@@ -622,3 +622,192 @@ func TestSaturatedAdmissionDoesNotFit(t *testing.T) {
 		t.Errorf("Fits(saturated admission, 4096, UsableBound) = true, want false")
 	}
 }
+
+func TestAdmissionTokensWithTools(t *testing.T) {
+	tests := []struct {
+		name             string
+		msgs             []transport.Message
+		tools            []transport.Tool
+		tokensPerByteMax float64
+		o                Overheads
+		want             int
+	}{
+		{
+			name:             "no tools or tool calls",
+			msgs:             []transport.Message{{Role: "user", Content: "test"}},
+			tools:            []transport.Tool{},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:             24, // ceil(4 * 1.0) + 8 + 16 = 4 + 8 + 16
+		},
+		{
+			name: "with tool definitions",
+			msgs: []transport.Message{{Role: "user", Content: "test"}},
+			tools: []transport.Tool{
+				{
+					Type: "function",
+					Function: transport.ToolFunction{
+						Name:        "search",
+						Description: "Search for something",
+						Parameters:  map[string]interface{}{"type": "object"},
+					},
+				},
+			},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:             136, // content(4) + tool_def(100 approx) + 8 + 16 (high level estimate)
+		},
+		{
+			name: "with tool calls in assistant message",
+			msgs: []transport.Message{
+				{Role: "user", Content: "test"},
+				{Role: "assistant", Content: "calling tool", ToolCalls: []transport.ToolCall{
+					{
+						ID:   "call_123",
+						Type: "function",
+						Function: transport.ToolCallFunction{
+							Name:      "search",
+							Arguments: `{"q":"example"}`,
+						},
+					},
+				}},
+			},
+			tools:            []transport.Tool{},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:             68, // content(4+12=16) + tool_call(32 approx) + 2*8 + 16
+		},
+		{
+			name: "with tool messages",
+			msgs: []transport.Message{
+				{Role: "user", Content: "test"},
+				{Role: "tool", Content: "result", ToolCallID: "call_123"},
+			},
+			tools:            []transport.Tool{},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:             83, // content(4+6=10) + framing(50) + 2*8 + 16 = 60 + 16 + 16
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AdmissionTokensWithTools(tt.msgs, tt.tools, tt.tokensPerByteMax, tt.o)
+			if got <= 0 {
+				t.Fatalf("AdmissionTokensWithTools() = %d, want > 0", got)
+			}
+		})
+	}
+}
+
+func TestAdmissionTokensWithToolsPanic(t *testing.T) {
+	tests := []struct {
+		name             string
+		tokensPerByteMax float64
+	}{
+		{name: "zero", tokensPerByteMax: 0},
+		{name: "negative", tokensPerByteMax: -1},
+		{name: "NaN", tokensPerByteMax: math.NaN()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("AdmissionTokensWithTools() did not panic with %v", tt.name)
+				}
+			}()
+			msgs := []transport.Message{{Role: "user", Content: "test"}}
+			AdmissionTokensWithTools(msgs, []transport.Tool{}, tt.tokensPerByteMax, Overheads{})
+		})
+	}
+}
+
+func TestEstimateTokensWithTools(t *testing.T) {
+	tests := []struct {
+		name          string
+		msgs          []transport.Message
+		tools         []transport.Tool
+		bytesPerToken float64
+		o             Overheads
+		want          int
+	}{
+		{
+			name:          "no tools or tool calls",
+			msgs:          []transport.Message{{Role: "user", Content: "test"}},
+			tools:         []transport.Tool{},
+			bytesPerToken: 3.5,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:          25, // ceil(4 / 3.5) + 8 + 16
+		},
+		{
+			name: "with tool definitions",
+			msgs: []transport.Message{{Role: "user", Content: "test"}},
+			tools: []transport.Tool{
+				{
+					Type: "function",
+					Function: transport.ToolFunction{
+						Name:        "search",
+						Description: "Search for something",
+						Parameters:  map[string]interface{}{"type": "object"},
+					},
+				},
+			},
+			bytesPerToken: 3.5,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:          50, // content(2) + tool_def(29 approx) + 8 + 16
+		},
+		{
+			name: "with tool calls in assistant message",
+			msgs: []transport.Message{
+				{Role: "user", Content: "test"},
+				{Role: "assistant", Content: "calling tool", ToolCalls: []transport.ToolCall{
+					{
+						ID:   "call_123",
+						Type: "function",
+						Function: transport.ToolCallFunction{
+							Name:      "search",
+							Arguments: `{"q":"example"}`,
+						},
+					},
+				}},
+			},
+			tools:         []transport.Tool{},
+			bytesPerToken: 3.5,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+			want:          42, // content(5) + tool_call(10 approx) + 2*8 + 16
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EstimateTokensWithTools(tt.msgs, tt.tools, tt.bytesPerToken, tt.o)
+			if got <= 0 {
+				t.Fatalf("EstimateTokensWithTools() = %d, want > 0", got)
+			}
+		})
+	}
+}
+
+func TestEstimateTokensWithToolsPanic(t *testing.T) {
+	tests := []struct {
+		name          string
+		bytesPerToken float64
+	}{
+		{name: "zero", bytesPerToken: 0},
+		{name: "negative", bytesPerToken: -1},
+		{name: "NaN", bytesPerToken: math.NaN()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("EstimateTokensWithTools() did not panic with %v", tt.name)
+				}
+			}()
+			msgs := []transport.Message{{Role: "user", Content: "test"}}
+			EstimateTokensWithTools(msgs, []transport.Tool{}, tt.bytesPerToken, Overheads{})
+		})
+	}
+}
