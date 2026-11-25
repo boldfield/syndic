@@ -156,18 +156,18 @@ func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string)
 func (pb partBudget) usable() int { return budget.UsableBound(pb.contextBound, pb.margin) }
 
 func (pb partBudget) admission(msgs []transport.Message) int {
-	return budget.AdmissionTokens(msgs, pb.tokensPerByteMax, pb.overheads)
+	return pb.admissionWithTools(msgs, nil)
 }
 
-func (pb partBudget) admissionWithTools(msgs []transport.Message, tools []transport.Tool) int { // nolint:unused
+func (pb partBudget) admissionWithTools(msgs []transport.Message, tools []transport.Tool) int {
 	return budget.AdmissionTokensWithTools(msgs, tools, pb.tokensPerByteMax, pb.overheads)
 }
 
 func (pb partBudget) estimate(msgs []transport.Message) int {
-	return budget.EstimateTokens(msgs, pb.bytesPerToken, pb.overheads)
+	return pb.estimateWithTools(msgs, nil)
 }
 
-func (pb partBudget) estimateWithTools(msgs []transport.Message, tools []transport.Tool) int { // nolint:unused
+func (pb partBudget) estimateWithTools(msgs []transport.Message, tools []transport.Tool) int {
 	return budget.EstimateTokensWithTools(msgs, tools, pb.bytesPerToken, pb.overheads)
 }
 

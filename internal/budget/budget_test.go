@@ -638,7 +638,7 @@ func TestAdmissionTokensWithTools(t *testing.T) {
 			tools:            []transport.Tool{},
 			tokensPerByteMax: 1.0,
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:             24, // ceil(4 * 1.0) + 8 + 16 = 4 + 8 + 16
+			want:             28, // ceil(4 * 1.0) + 8 + 16 = 4 + 8 + 16
 		},
 		{
 			name: "with tool definitions",
@@ -655,7 +655,7 @@ func TestAdmissionTokensWithTools(t *testing.T) {
 			},
 			tokensPerByteMax: 1.0,
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:             136, // content(4) + tool_def(100 approx) + 8 + 16 (high level estimate)
+			want:             144, // content(4) + msg_tokens(8) + tool_def(116) + request_tokens(16)
 		},
 		{
 			name: "with tool calls in assistant message",
@@ -675,7 +675,7 @@ func TestAdmissionTokensWithTools(t *testing.T) {
 			tools:            []transport.Tool{},
 			tokensPerByteMax: 1.0,
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:             68, // content(4+12=16) + tool_call(32 approx) + 2*8 + 16
+			want:             146, // msg1(4+8) + msg2(12+8) + tool_call(98) + request(16)
 		},
 		{
 			name: "with tool messages",
@@ -686,15 +686,15 @@ func TestAdmissionTokensWithTools(t *testing.T) {
 			tools:            []transport.Tool{},
 			tokensPerByteMax: 1.0,
 			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:             83, // content(4+6=10) + framing(50) + 2*8 + 16 = 60 + 16 + 16
+			want:             92, // msg1(4+8) + msg2(6+8) + framing(50) + request(16)
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := AdmissionTokensWithTools(tt.msgs, tt.tools, tt.tokensPerByteMax, tt.o)
-			if got <= 0 {
-				t.Fatalf("AdmissionTokensWithTools() = %d, want > 0", got)
+			if got != tt.want {
+				t.Errorf("AdmissionTokensWithTools() = %d, want %d", got, tt.want)
 			}
 		})
 	}
@@ -738,7 +738,7 @@ func TestEstimateTokensWithTools(t *testing.T) {
 			tools:         []transport.Tool{},
 			bytesPerToken: 3.5,
 			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:          25, // ceil(4 / 3.5) + 8 + 16
+			want:          26, // ceil(4 / 3.5) + 8 + 16 = 2 + 8 + 16
 		},
 		{
 			name: "with tool definitions",
@@ -755,7 +755,7 @@ func TestEstimateTokensWithTools(t *testing.T) {
 			},
 			bytesPerToken: 3.5,
 			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:          50, // content(2) + tool_def(29 approx) + 8 + 16
+			want:          60, // msg(2+8) + tool_def(ceil(116/3.5)=34) + request(16)
 		},
 		{
 			name: "with tool calls in assistant message",
@@ -775,15 +775,15 @@ func TestEstimateTokensWithTools(t *testing.T) {
 			tools:         []transport.Tool{},
 			bytesPerToken: 3.5,
 			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
-			want:          42, // content(5) + tool_call(10 approx) + 2*8 + 16
+			want:          66, // msg1(2+8) + msg2(4+8) + tool_call(ceil(98/3.5)=28) + request(16)
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := EstimateTokensWithTools(tt.msgs, tt.tools, tt.bytesPerToken, tt.o)
-			if got <= 0 {
-				t.Fatalf("EstimateTokensWithTools() = %d, want > 0", got)
+			if got != tt.want {
+				t.Errorf("EstimateTokensWithTools() = %d, want %d", got, tt.want)
 			}
 		})
 	}

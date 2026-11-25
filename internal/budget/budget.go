@@ -2,6 +2,7 @@ package budget
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -191,34 +192,36 @@ func StandInBytes(maxOutputTokens int, bytesPerToken float64) int {
 
 // toolDefinitionBytes calculates the total byte size of tool definitions and their schemas.
 // It serializes each tool's JSON representation and returns the sum.
-func toolDefinitionBytes(tools []transport.Tool) int {
+// Under-counting is unsafe for an admission upper bound, so errors are fatal.
+func toolDefinitionBytes(tools []transport.Tool) (int, error) {
 	sum := 0
 	for _, tool := range tools {
 		data, err := json.Marshal(tool)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("cannot marshal tool definition: %w", err)
 		}
 		sum = addSat(sum, len(data))
 	}
-	return sum
+	return sum, nil
 }
 
 // toolCallArgumentsBytes calculates the total byte size of tool call arguments from messages.
 // It extracts arguments from assistant messages that contain tool calls.
-func toolCallArgumentsBytes(msgs []transport.Message) int {
+// Under-counting is unsafe for an admission upper bound, so errors are fatal.
+func toolCallArgumentsBytes(msgs []transport.Message) (int, error) {
 	sum := 0
 	for _, msg := range msgs {
 		if msg.Role == "assistant" {
 			for _, call := range msg.ToolCalls {
 				data, err := json.Marshal(call)
 				if err != nil {
-					continue
+					return 0, fmt.Errorf("cannot marshal tool call: %w", err)
 				}
 				sum = addSat(sum, len(data))
 			}
 		}
 	}
-	return sum
+	return sum, nil
 }
 
 // toolMessageFramingBytes estimates the framing overhead for tool messages.
@@ -239,6 +242,7 @@ func toolMessageFramingBytes(msgs []transport.Message) int {
 // AdmissionTokensWithTools computes the token count for messages with tool definitions and calls.
 // It extends AdmissionTokens to include tool definitions, their schemas, tool call arguments,
 // and tool message framing. The formula includes all tool-related bytes in addition to message content.
+// Panics if tokensPerByteMax is not greater than zero (including NaN).
 func AdmissionTokensWithTools(msgs []transport.Message, tools []transport.Tool, tokensPerByteMax float64, o Overheads) int {
 	if !(tokensPerByteMax > 0) {
 		panic("tokensPerByteMax must be greater than zero")
@@ -250,10 +254,16 @@ func AdmissionTokensWithTools(msgs []transport.Message, tools []transport.Tool, 
 		sum = addSat(sum, addSat(ceilMul(bytes, tokensPerByteMax), o.MessageTokens))
 	}
 
-	toolDefBytes := toolDefinitionBytes(tools)
+	toolDefBytes, err := toolDefinitionBytes(tools)
+	if err != nil {
+		panic(err)
+	}
 	sum = addSat(sum, ceilMul(toolDefBytes, tokensPerByteMax))
 
-	toolCallBytes := toolCallArgumentsBytes(msgs)
+	toolCallBytes, err := toolCallArgumentsBytes(msgs)
+	if err != nil {
+		panic(err)
+	}
 	sum = addSat(sum, ceilMul(toolCallBytes, tokensPerByteMax))
 
 	toolFramingBytes := toolMessageFramingBytes(msgs)
@@ -265,6 +275,7 @@ func AdmissionTokensWithTools(msgs []transport.Message, tools []transport.Tool, 
 // EstimateTokensWithTools computes an estimate of token count for messages with tool definitions and calls.
 // It extends EstimateTokens to include tool definitions, their schemas, tool call arguments,
 // and tool message framing.
+// Panics if bytesPerToken is not greater than zero (including NaN).
 func EstimateTokensWithTools(msgs []transport.Message, tools []transport.Tool, bytesPerToken float64, o Overheads) int {
 	if !(bytesPerToken > 0) {
 		panic("bytesPerToken must be greater than zero")
@@ -276,10 +287,16 @@ func EstimateTokensWithTools(msgs []transport.Message, tools []transport.Tool, b
 		sum = addSat(sum, addSat(ceilDiv(bytes, bytesPerToken), o.MessageTokens))
 	}
 
-	toolDefBytes := toolDefinitionBytes(tools)
+	toolDefBytes, err := toolDefinitionBytes(tools)
+	if err != nil {
+		panic(err)
+	}
 	sum = addSat(sum, ceilDiv(toolDefBytes, bytesPerToken))
 
-	toolCallBytes := toolCallArgumentsBytes(msgs)
+	toolCallBytes, err := toolCallArgumentsBytes(msgs)
+	if err != nil {
+		panic(err)
+	}
 	sum = addSat(sum, ceilDiv(toolCallBytes, bytesPerToken))
 
 	toolFramingBytes := toolMessageFramingBytes(msgs)
