@@ -53,6 +53,7 @@ type Export struct {
 	OverLengthDetail         string                                `json:"over_length_detail,omitempty"`
 	Latency                  *int                                  `json:"latency_millis,omitempty"`
 	ToolRestrictions         []string                              `json:"tool_restrictions,omitempty"`
+	ToolCalls                transport.Tri                         `json:"tool_calls"`
 	AdapterVersion           string                                `json:"adapter_version"`
 	ObservedAt               time.Time                             `json:"observed_at"`
 	ExtraHeaders             map[string]string                     `json:"extra_headers,omitempty"`
@@ -93,6 +94,7 @@ func Redact(record transport.CapabilityRecord, profile config.EndpointProfile) (
 		OverLengthDetail:         record.OverLengthDetail,
 		Latency:                  record.LatencyMillis,
 		ToolRestrictions:         slices.Clone(record.ToolRestrictions),
+		ToolCalls:                record.ToolCalls,
 		AdapterVersion:           record.AdapterVersion,
 		ObservedAt:               record.ObservedAt,
 	}

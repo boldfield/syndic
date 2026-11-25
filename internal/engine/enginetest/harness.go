@@ -111,6 +111,7 @@ type options struct {
 	skip           map[string]bool
 	outputBound    map[string]int
 	eligible       map[string]transport.Tri
+	toolCalls      map[string]transport.Tri
 	contextBound   map[string]int
 	calibration    map[string]float64
 	noStart        bool
@@ -149,6 +150,11 @@ func WithCalibration(id string, bytesPerToken float64) Option {
 // required-reviewer eligibility.
 func WithEligibleRequiredReviewer(id string, v transport.Tri) Option {
 	return func(o *options) { o.eligible[id] = v }
+}
+
+// WithToolCalls seeds the participant's export with the given tool capability.
+func WithToolCalls(id string, v transport.Tri) Option {
+	return func(o *options) { o.toolCalls[id] = v }
 }
 
 // ClockStart sets the fake clock's initial reading. A test that needs a
@@ -230,6 +236,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		skip:         map[string]bool{},
 		outputBound:  map[string]int{},
 		eligible:     map[string]transport.Tri{},
+		toolCalls:    map[string]transport.Tri{},
 		contextBound: map[string]int{},
 		calibration:  map[string]float64{},
 		clockStart:   time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
@@ -351,6 +358,7 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 			ModelListed:              transport.TriUnknown,
 			SystemRoleHonored:        transport.TriUnknown,
 			EligibleRequiredReviewer: transport.TriUnknown,
+			ToolCalls:                transport.TriYes,
 			AdapterVersion:           AdapterVersion,
 			ObservedAt:               o.clockStart,
 		}
@@ -366,6 +374,9 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 		}
 		if v, ok := o.eligible[p.ID]; ok {
 			export.EligibleRequiredReviewer = v
+		}
+		if v, ok := o.toolCalls[p.ID]; ok {
+			export.ToolCalls = v
 		}
 		bytesPerToken := DefaultCalibration
 		if v, ok := o.calibration[p.ID]; ok {

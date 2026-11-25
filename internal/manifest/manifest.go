@@ -34,6 +34,7 @@ type Participant struct {
 	Detail                   string
 	Expected                 transport.Expected
 	EligibleRequiredReviewer transport.Tri
+	ToolCalls                transport.Tri
 	ProbeObservedAt          *time.Time
 	ContextBound             *int
 	ContextSource            string
@@ -132,6 +133,7 @@ func buildParticipant(in Input, rosterParticipant config.Participant) (Participa
 		ReportedModel: probeManifest.Export.ReportedModel,
 	}
 	p.EligibleRequiredReviewer = probeManifest.Export.EligibleRequiredReviewer
+	p.ToolCalls = probeManifest.Export.ToolCalls
 	p.ProbeObservedAt = &probeManifest.Export.ObservedAt
 
 	if probeManifest.Export.ContextBound != nil {
