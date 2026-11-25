@@ -693,3 +693,51 @@ allowed_destinations = []
 		t.Fatalf("expected turn to be created, got empty TurnID")
 	}
 }
+
+// submitToolsReview submits the "review" preset and fails the test unless it
+// is admitted.
+func submitToolsReview(t *testing.T, h *enginetest.Harness) {
+	t.Helper()
+	reply, err := h.Engine.Submit(wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "test",
+		Workspace:    "/work",
+		Preset:       ptrStr("review"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply.TurnID == "" {
+		t.Fatalf("expected turn to be created, got empty TurnID")
+	}
+}
+
+// TestSubmitReviewerToolsDoNotGateAuthor is the inverse boundary: with only
+// reviewer_tools set, an author recorded tool_calls: no is still admitted.
+func TestSubmitReviewerToolsDoNotGateAuthor(t *testing.T) {
+	roster := strings.Replace(rosterWithToolPresets(), "tools = [\"read\"]\nreviewer_tools", "reviewer_tools", 1)
+	if roster == rosterWithToolPresets() {
+		t.Fatal("roster edit did not apply")
+	}
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test answer")},
+		"reviewer": {approveStep()},
+	}, enginetest.WithToolCalls("author", transport.TriNo),
+		enginetest.WithToolCalls("reviewer", transport.TriYes))
+	submitToolsReview(t, h)
+}
+
+// TestSubmitRefereeExemptFromToolGate verifies the referee is never held to
+// the tool-capability gate: web tools route through the endpoint's referee
+// model, which is not a participant, so only author and reviewers are gated.
+func TestSubmitRefereeExemptFromToolGate(t *testing.T) {
+	roster := strings.ReplaceAll(rosterWithToolPresets(), "[\"read\"]", "[\"web\"]")
+	roster = strings.Replace(roster, "models = [\"llama2\", \"llama3\"]", "models = [\"llama2\", \"llama3\", \"refmodel\"]\nreferee_model = \"refmodel\"", 1)
+	h := enginetest.New(t, roster, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test answer")},
+		"reviewer": {approveStep()},
+	}, enginetest.WithToolCalls("author", transport.TriYes),
+		enginetest.WithToolCalls("reviewer", transport.TriYes),
+		enginetest.WithToolCalls("referee", transport.TriNo))
+	submitToolsReview(t, h)
+}
