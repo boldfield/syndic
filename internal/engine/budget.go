@@ -12,6 +12,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -155,12 +156,33 @@ func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string)
 
 func (pb partBudget) usable() int { return budget.UsableBound(pb.contextBound, pb.margin) }
 
-func (pb partBudget) admission(msgs []transport.Message) int {
+func (pb partBudget) admission(msgs []transport.Message) int { // nolint:unused
 	return budget.AdmissionTokens(msgs, pb.tokensPerByteMax, pb.overheads)
 }
 
-func (pb partBudget) estimate(msgs []transport.Message) int {
+func (pb partBudget) estimate(msgs []transport.Message) int { // nolint:unused
 	return budget.EstimateTokens(msgs, pb.bytesPerToken, pb.overheads)
+}
+
+func (pb partBudget) admissionWithTools(msgs []transport.Message, toolDefs []transport.Tool) int {
+	return budget.AdmissionTokensWithTools(msgs, toolDefs, pb.tokensPerByteMax, pb.overheads)
+}
+
+func (pb partBudget) estimateWithTools(msgs []transport.Message, toolDefs []transport.Tool) int {
+	return budget.EstimateTokensWithTools(msgs, toolDefs, pb.bytesPerToken, pb.overheads)
+}
+
+// getToolsForGroups returns the canonical tool definitions for the given group names.
+// It uses the canonical definitions from internal/tools, not invented stubs.
+func getToolsForGroups(groups []string) []transport.Tool {
+	if len(groups) == 0 {
+		return nil
+	}
+	defs, err := tools.ForGroups(groups, false)
+	if err != nil {
+		panic(fmt.Sprintf("internal: invalid tool groups: %v", err))
+	}
+	return defs
 }
 
 // maxOutput is the MaxOutputTokens a request of this participant carries.
@@ -212,9 +234,13 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	total := 0
 
 	// fits checks the recipient's admission bound and adds the request's
-	// estimate and output bound to the aggregate.
-	fits := func(pb partBudget, msgs []transport.Message, maxOut int) error {
-		adm := pb.admission(msgs)
+	// estimate and output bound to the aggregate. It includes tool definitions
+	// for the recipient's role in the admission calculation.
+	authorTools := getToolsForGroups(eff.Preset.Tools)
+	reviewerTools := getToolsForGroups(eff.Preset.ReviewerTools)
+
+	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
+		adm := pb.admissionWithTools(msgs, toolDefs)
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)
@@ -222,7 +248,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			err.Limit = i64Ptr(pb.usable())
 			return err
 		}
-		total = satAdd(total, satAdd(pb.estimate(msgs), maxOut))
+		total = satAdd(total, satAdd(pb.estimateWithTools(msgs, toolDefs), maxOut))
 		return nil
 	}
 
@@ -231,7 +257,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.AuthorWithHistory(doc, input), authorOut); err != nil {
+	if err := fits(author, prompt.AuthorWithHistory(doc, input), authorTools, authorOut); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -258,14 +284,14 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, msgs, out); err != nil {
+			if err := fits(rv, msgs, reviewerTools, out); err != nil {
 				return budgetRecord{}, err
 			}
 			repair, err := prompt.Repair(review, output, standInToken)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, repair, out); err != nil {
+			if err := fits(rv, repair, reviewerTools, out); err != nil {
 				return budgetRecord{}, err
 			}
 			delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
@@ -327,11 +353,22 @@ func deliveryRecipientsCost(eff config.Effective, consts map[string]partBudget, 
 		}
 	}
 	msgs := prompt.Delivery(delivery)
+
+	authorTools := getToolsForGroups(eff.Preset.Tools)
+	reviewerTools := getToolsForGroups(eff.Preset.ReviewerTools)
+
 	total := 0
 	for _, id := range ids {
 		pb := consts[id]
 		out := pb.maxOutput(*eff.Budgets.DeliveryMaxTokens)
-		total = satAdd(total, satAdd(pb.estimate(msgs), out))
+
+		var toolDefs []transport.Tool
+		if id == eff.Preset.Author {
+			toolDefs = authorTools
+		} else {
+			toolDefs = reviewerTools
+		}
+		total = satAdd(total, satAdd(pb.estimateWithTools(msgs, toolDefs), out))
 	}
 	return total
 }
@@ -361,6 +398,8 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input
 	}
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
+	authorTools := getToolsForGroups(eff.Preset.Tools)
+	reviewerTools := getToolsForGroups(eff.Preset.ReviewerTools)
 	candidate := author.standIn(authorOut)
 
 	feedback := make([]prompt.RevisionFeedback, len(eff.Preset.RequiredReviewers))
@@ -378,7 +417,7 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input
 	if err != nil {
 		return 0, err
 	}
-	total := satAdd(author.estimate(msgs), authorOut)
+	total := satAdd(author.estimateWithTools(msgs, authorTools), authorOut)
 
 	for _, id := range eff.Preset.RequiredReviewers {
 		rv := consts[id]
@@ -406,12 +445,12 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, input
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(review), out))
+		total = satAdd(total, satAdd(rv.estimateWithTools(review, reviewerTools), out))
 		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(repair), out))
+		total = satAdd(total, satAdd(rv.estimateWithTools(repair, reviewerTools), out))
 	}
 	return total, nil
 }
@@ -430,14 +469,21 @@ func satAdd(a, b int) int {
 // writes it, or returns a *budgetRefusal. It returns the request's estimate.
 func (e *Engine) reserve(tx *journal.Tx, t *openTurn, id string, msgs []transport.Message, maxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, id)
+
+	var toolDefs []transport.Tool
+	if id == t.eff.Preset.Author {
+		toolDefs = getToolsForGroups(t.eff.Preset.Tools)
+	} else {
+		toolDefs = getToolsForGroups(t.eff.Preset.ReviewerTools)
+	}
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 	}
-	adm := pb.admission(msgs)
+	adm := pb.admissionWithTools(msgs, toolDefs)
 	if !budget.Fits(adm, maxOut, pb.usable()) {
 		return 0, &budgetRefusal{kind: budgetContext, participant: id, admission: satAdd(adm, maxOut), limit: pb.usable()}
 	}
-	est := pb.estimate(msgs)
+	est := pb.estimateWithTools(msgs, toolDefs)
 
 	turn, err := tx.GetTurn(t.id)
 	if err != nil {

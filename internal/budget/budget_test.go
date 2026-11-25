@@ -622,3 +622,134 @@ func TestSaturatedAdmissionDoesNotFit(t *testing.T) {
 		t.Errorf("Fits(saturated admission, 4096, UsableBound) = true, want false")
 	}
 }
+
+func TestAdmissionTokensWithTools(t *testing.T) {
+	readFileTool := transport.Tool{
+		Type: "function",
+		Function: transport.ToolFunction{
+			Name:        "read_file",
+			Description: "Read a file",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Path to file",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name             string
+		msgs             []transport.Message
+		tools            []transport.Tool
+		tokensPerByteMax float64
+		o                Overheads
+	}{
+		{
+			name:             "no messages, no tools",
+			msgs:             []transport.Message{},
+			tools:            []transport.Tool{},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+		},
+		{
+			name:             "messages with tool definitions",
+			msgs:             []transport.Message{{Role: "user", Content: string(make([]byte, 100))}},
+			tools:            []transport.Tool{readFileTool},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+		},
+		{
+			name: "messages with tool calls",
+			msgs: []transport.Message{
+				{Role: "user", Content: string(make([]byte, 100))},
+				{
+					Role:    "assistant",
+					Content: "Let me read a file",
+					ToolCalls: []transport.ToolCall{
+						{ID: "call_1", Type: "function", Function: transport.ToolCallFunction{Name: "read_file", Arguments: `{"path": "test.txt"}`}},
+					},
+				},
+				{Role: "tool", Content: "file contents here", ToolCallID: "call_1"},
+			},
+			tools:            []transport.Tool{readFileTool},
+			tokensPerByteMax: 1.0,
+			o:                Overheads{MessageTokens: 8, RequestTokens: 16},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adm := AdmissionTokensWithTools(tt.msgs, tt.tools, tt.tokensPerByteMax, tt.o)
+			if adm <= 0 {
+				t.Errorf("AdmissionTokensWithTools() = %d, want > 0", adm)
+			}
+			// Verify it includes message bytes
+			msgOnly := AdmissionTokens(tt.msgs, tt.tokensPerByteMax, tt.o)
+			if adm < msgOnly {
+				t.Errorf("AdmissionTokensWithTools() = %d, want >= message-only %d", adm, msgOnly)
+			}
+		})
+	}
+}
+
+func TestEstimateTokensWithTools(t *testing.T) {
+	readFileTool := transport.Tool{
+		Type: "function",
+		Function: transport.ToolFunction{
+			Name:        "read_file",
+			Description: "Read a file",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Path to file",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		msgs          []transport.Message
+		tools         []transport.Tool
+		bytesPerToken float64
+		o             Overheads
+	}{
+		{
+			name:          "no messages, no tools",
+			msgs:          []transport.Message{},
+			tools:         []transport.Tool{},
+			bytesPerToken: 1.0,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+		},
+		{
+			name:          "messages with tool definitions",
+			msgs:          []transport.Message{{Role: "user", Content: string(make([]byte, 100))}},
+			tools:         []transport.Tool{readFileTool},
+			bytesPerToken: 1.0,
+			o:             Overheads{MessageTokens: 8, RequestTokens: 16},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			est := EstimateTokensWithTools(tt.msgs, tt.tools, tt.bytesPerToken, tt.o)
+			if est <= 0 {
+				t.Errorf("EstimateTokensWithTools() = %d, want > 0", est)
+			}
+			// Verify it's consistent with EstimateTokens for messages alone
+			msgOnly := EstimateTokens(tt.msgs, tt.bytesPerToken, tt.o)
+			if est < msgOnly {
+				t.Errorf("EstimateTokensWithTools() = %d, want >= message-only %d", est, msgOnly)
+			}
+		})
+	}
+}
