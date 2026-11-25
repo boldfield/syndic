@@ -487,7 +487,137 @@ func TestCandidateIdentityBindsFrozenContextHash(t *testing.T) {
 // TestSubmitRefusesAuthorWithoutToolCalls verifies that submit refuses when
 // author has tools but lacks tool capability (ToolCalls: yes).
 func TestSubmitRefusesAuthorWithoutToolCalls(t *testing.T) {
-	rosterWithTools := `
+	// Author has ToolCalls: no
+	h := enginetest.New(t, rosterWithToolPresets(), map[string][]fake.Step{},
+		enginetest.WithToolCalls("author", transport.TriNo))
+
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "test",
+		Workspace:    "/work",
+		Preset:       ptrStr("review"),
+	}
+	_, err := h.Engine.Submit(req)
+	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
+	if we.Detail == nil || !strings.Contains(*we.Detail, "no_tool_calls:author") {
+		t.Fatalf("expected no_tool_calls:author, got %+v", we)
+	}
+}
+
+// TestSubmitRefusesReviewerWithoutToolCalls verifies that submit refuses when
+// reviewers have reviewer_tools but lack tool capability (ToolCalls: yes).
+func TestSubmitRefusesReviewerWithoutToolCalls(t *testing.T) {
+	// Reviewer has ToolCalls: unknown
+	h := enginetest.New(t, rosterWithToolPresets(), map[string][]fake.Step{},
+		enginetest.WithToolCalls("reviewer", transport.TriUnknown))
+
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "test",
+		Workspace:    "/work",
+		Preset:       ptrStr("review"),
+	}
+	_, err := h.Engine.Submit(req)
+	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
+	if we.Detail == nil || !strings.Contains(*we.Detail, "no_tool_calls:reviewer") {
+		t.Fatalf("expected no_tool_calls:reviewer, got %+v", we)
+	}
+}
+
+func ptrStr(s string) *string {
+	return &s
+}
+
+// rosterWithToolPresets is a shared TOML roster for tool capability tests.
+func rosterWithToolPresets() string {
+	return `
+default_preset = "review"
+
+[deadlines]
+attempt     = "300s"
+turn        = "900s"
+delivery    = "60s"
+provisional = false
+
+[revision]
+max_rounds = 0
+
+[[participants]]
+id = "author"
+model = "llama2"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+pool = "default"
+
+[[participants]]
+id = "reviewer"
+model = "llama3"
+route = "api"
+endpoint = "local"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = true
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read"]
+reviewer_tools = ["read"]
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
+
+[policy]
+local_only = true
+allowed_destinations = []
+`
+}
+
+// TestSubmitAllowsAuthorAndReviewerWithToolCalls verifies that submit succeeds
+// when author and reviewers have tool capability (ToolCalls: yes).
+func TestSubmitAllowsAuthorAndReviewerWithToolCalls(t *testing.T) {
+	h := enginetest.New(t, rosterWithToolPresets(), map[string][]fake.Step{
+		"author":   {enginetest.Reply("test answer")},
+		"reviewer": {approveStep()},
+	}, enginetest.WithToolCalls("author", transport.TriYes),
+		enginetest.WithToolCalls("reviewer", transport.TriYes))
+
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "test",
+		Workspace:    "/work",
+		Preset:       ptrStr("review"),
+	}
+	reply, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reply.TurnID == "" {
+		t.Fatalf("expected turn to be created, got empty TurnID")
+	}
+}
+
+// TestSubmitRefusesOnlyWhenToolsRequired verifies that submit only refuses
+// when tools are required but not supported, allowing mixed tool/no-tool roles.
+func TestSubmitRefusesOnlyWhenToolsRequired(t *testing.T) {
+	// Author has tools: yes, but reviewer has tools: no, and no reviewer_tools set.
+	// This should succeed because reviewer_tools is empty, so no gate applies to reviewer.
+	rosterNoReviewerTools := `
 default_preset = "review"
 
 [deadlines]
@@ -543,9 +673,11 @@ local_only = true
 allowed_destinations = []
 `
 
-	// Author has ToolCalls: no
-	h := enginetest.New(t, rosterWithTools, map[string][]fake.Step{},
-		enginetest.WithToolCalls("author", transport.TriNo))
+	h := enginetest.New(t, rosterNoReviewerTools, map[string][]fake.Step{
+		"author":   {enginetest.Reply("test answer")},
+		"reviewer": {approveStep()},
+	}, enginetest.WithToolCalls("author", transport.TriYes),
+		enginetest.WithToolCalls("reviewer", transport.TriNo))
 
 	req := wire.SubmitRequest{
 		SubmissionID: "s1",
@@ -553,89 +685,11 @@ allowed_destinations = []
 		Workspace:    "/work",
 		Preset:       ptrStr("review"),
 	}
-	_, err := h.Engine.Submit(req)
-	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
-	if we.Detail == nil || !strings.Contains(*we.Detail, "no_tool_calls:author") {
-		t.Fatalf("expected no_tool_calls:author, got %+v", we)
+	reply, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-// TestSubmitRefusesReviewerWithoutToolCalls verifies that submit refuses when
-// reviewers have reviewer_tools but lack tool capability (ToolCalls: yes).
-func TestSubmitRefusesReviewerWithoutToolCalls(t *testing.T) {
-	rosterWithTools := `
-default_preset = "review"
-
-[deadlines]
-attempt     = "300s"
-turn        = "900s"
-delivery    = "60s"
-provisional = false
-
-[revision]
-max_rounds = 0
-
-[[participants]]
-id = "author"
-model = "llama2"
-route = "api"
-endpoint = "local"
-eligible_roles = ["author"]
-pool = "default"
-
-[[participants]]
-id = "reviewer"
-model = "llama3"
-route = "api"
-endpoint = "local"
-eligible_roles = ["reviewer"]
-pool = "default"
-accept_unknown_truncation = true
-
-[[endpoints]]
-name = "local"
-base_url = "http://localhost:11434/v1"
-declared_location = "local"
-declared_execution = "local"
-declared_billing = "none"
-network_dependency = "none"
-dialect = "chat_completions_v1"
-models = ["llama2", "llama3"]
-tokens_per_byte_max = 1.0
-
-[presets.review]
-mode = "review"
-author = "author"
-required_reviewers = ["reviewer"]
-reviewer_tools = ["read"]
-
-[presets.solo]
-mode = "solo"
-author = "author"
-required_reviewers = []
-
-[policy]
-local_only = true
-allowed_destinations = []
-`
-
-	// Reviewer has ToolCalls: unknown
-	h := enginetest.New(t, rosterWithTools, map[string][]fake.Step{},
-		enginetest.WithToolCalls("reviewer", transport.TriUnknown))
-
-	req := wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "test",
-		Workspace:    "/work",
-		Preset:       ptrStr("review"),
+	if reply.TurnID == "" {
+		t.Fatalf("expected turn to be created, got empty TurnID")
 	}
-	_, err := h.Engine.Submit(req)
-	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
-	if we.Detail == nil || !strings.Contains(*we.Detail, "no_tool_calls:reviewer") {
-		t.Fatalf("expected no_tool_calls:reviewer, got %+v", we)
-	}
-}
-
-func ptrStr(s string) *string {
-	return &s
 }

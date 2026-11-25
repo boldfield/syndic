@@ -2247,8 +2247,8 @@ func TestAdapterVersionEqualsProbeVersion(t *testing.T) {
 		t.Errorf("probe record AdapterVersion: %q, want %q", record.AdapterVersion, AdapterVersion)
 	}
 
-	if AdapterVersion != "openai-v1" {
-		t.Errorf("AdapterVersion: %q, want openai-v1", AdapterVersion)
+	if AdapterVersion != "openai-v2" {
+		t.Errorf("AdapterVersion: %q, want openai-v2", AdapterVersion)
 	}
 }
 

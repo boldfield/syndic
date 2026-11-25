@@ -41,7 +41,7 @@ type Adapter struct {
 }
 
 // AdapterVersion identifies this adapter in capability records.
-const AdapterVersion = "openai-v1"
+const AdapterVersion = "openai-v2"
 
 const defaultMaxBodySize = 16 * 1024 * 1024
 
