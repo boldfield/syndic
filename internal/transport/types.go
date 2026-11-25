@@ -12,6 +12,7 @@ type CompletionStatus string
 
 const (
 	StatusComplete    CompletionStatus = "complete"
+	StatusToolCalls   CompletionStatus = "tool_calls"
 	StatusTruncated   CompletionStatus = "truncated"
 	StatusRefused     CompletionStatus = "refused"
 	StatusInterrupted CompletionStatus = "interrupted"
@@ -106,8 +107,36 @@ func NewRevisionIdentity(value, requestedModel string) (ModelIdentity, error) {
 
 // Message represents a single message in the conversation.
 type Message struct {
-	Role    string // "system", "user", or "assistant"
-	Content string
+	Role       string // "system", "user", "assistant", or "tool"
+	Content    string
+	ToolCalls  []ToolCall // Set on assistant messages carrying tool calls
+	ToolCallID string     // Set on tool messages to reference the tool_call_id being answered
+}
+
+// Tool represents a tool definition sent in a request.
+type Tool struct {
+	Type     string
+	Function ToolFunction
+}
+
+// ToolFunction represents a function tool's definition.
+type ToolFunction struct {
+	Name        string
+	Description string
+	Parameters  map[string]interface{} // JSON schema for parameters
+}
+
+// ToolCall represents a tool call in a response.
+type ToolCall struct {
+	ID       string
+	Type     string
+	Function ToolCallFunction
+}
+
+// ToolCallFunction represents the function being called.
+type ToolCallFunction struct {
+	Name      string
+	Arguments string // JSON string of arguments
 }
 
 // AttemptEnvelope contains attempt-specific metadata.
@@ -128,6 +157,7 @@ type CompleteRequest struct {
 	Model           string
 	Messages        []Message
 	MaxOutputTokens int
+	Tools           []Tool
 	Deadline        time.Time
 	// BeforeSend is an optional callback invoked before the HTTP request is sent.
 	// It allows the engine to journal the attempt before dispatch and distinguish
@@ -147,8 +177,15 @@ type CompleteResult struct {
 	ReportedModel   string
 	Status          CompletionStatus
 	NativeFinish    string
+	ToolCalls       []ToolCall
 	Usage           *Usage
 	TransportStatus string
+}
+
+// RefereeResult is the output of a referee decision on a tool call.
+type RefereeResult struct {
+	Verdict string // "allow" or "deny"
+	Reason  string
 }
 
 // Usage records token usage information.

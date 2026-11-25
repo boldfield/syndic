@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ const (
 	StepKindEcho
 	StepKindError
 	StepKindNotSent
+	StepKindReferee
 )
 
 // Step represents a single step in a script that determines what Complete returns.
@@ -34,10 +36,14 @@ type Step struct {
 	EchoedString       string
 	Err                error
 	Usage              *transport.Usage
+	ToolCalls          []transport.ToolCall
 	// Build, when set on a reply step, computes Text from the request, so a
 	// reply can carry values that exist only after dispatch (an attempt id
 	// or a candidate hash).
 	Build func(req transport.CompleteRequest) string
+	// Referee fields: for scripting referee decisions
+	RefereeVerdict string // "allow" or "deny"
+	RefereeReason  string // reason for the decision
 }
 
 // CompleteCall records a single Complete call with all its details.
@@ -155,9 +161,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	a.mu.Lock()
 
 	// Record the call with a deep copy of the entire request including messages.
-	msgCopy := make([]transport.Message, len(req.Messages))
-	copy(msgCopy, req.Messages)
-	req.Messages = msgCopy
+	req = cloneRequest(req)
 	a.calls = append(a.calls, CompleteCall{
 		Request: req,
 	})
@@ -228,6 +232,25 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		if text != "" {
 			text, _ = transport.Scrub(text, a.resolvedSecrets)
 		}
+
+		// Copy and scrub tool calls from step, if any
+		var toolCalls []transport.ToolCall
+		if len(step.ToolCalls) > 0 {
+			toolCalls = make([]transport.ToolCall, len(step.ToolCalls))
+			for i, call := range step.ToolCalls {
+				scrubbedArgs, argScrubCount := transport.Scrub(call.Function.Arguments, a.resolvedSecrets)
+				toolCalls[i] = transport.ToolCall{
+					ID:   call.ID,
+					Type: call.Type,
+					Function: transport.ToolCallFunction{
+						Name:      call.Function.Name,
+						Arguments: scrubbedArgs,
+					},
+				}
+				count += argScrubCount
+			}
+		}
+
 		return transport.CompleteResult{
 			Envelope:        req.Envelope,
 			RawOutput:       scrubbed,
@@ -237,6 +260,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 			ReportedModel:   reportedModel,
 			Status:          step.Status,
 			NativeFinish:    step.NativeFinishReason,
+			ToolCalls:       toolCalls,
 			TransportStatus: step.TransportStatus,
 			Usage:           step.Usage,
 		}, nil
@@ -365,6 +389,136 @@ func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.Cance
 	}, nil
 }
 
+// Referee consumes the next scripted step as a referee decision. It fails
+// closed: a referee step yields its verdict (anything but "allow" is deny);
+// an error, refusal, truncation, tool-call or otherwise malformed reply is a
+// deny, and an exhausted script is a deny.
+func (a *Adapter) Referee(ctx context.Context) (transport.RefereeResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.current >= len(a.script) {
+		return transport.RefereeResult{Verdict: "deny", Reason: "script exhausted"}, nil
+	}
+	step := a.script[a.current]
+	a.current++
+
+	switch step.Kind {
+	case StepKindReferee:
+		switch step.RefereeVerdict {
+		case "allow", "deny":
+			return transport.RefereeResult{Verdict: step.RefereeVerdict, Reason: step.RefereeReason}, nil
+		}
+		return transport.RefereeResult{Verdict: "deny", Reason: "malformed verdict"}, nil
+	case StepKindError:
+		return transport.RefereeResult{Verdict: "deny", Reason: "adapter error"}, nil
+	case StepKindReply:
+		switch {
+		case len(step.ToolCalls) > 0:
+			return transport.RefereeResult{Verdict: "deny", Reason: "tool-call reply"}, nil
+		case step.Status == transport.StatusRefused:
+			return transport.RefereeResult{Verdict: "deny", Reason: "refusal"}, nil
+		case step.Status == transport.StatusTruncated:
+			return transport.RefereeResult{Verdict: "deny", Reason: "truncation"}, nil
+		}
+	}
+	return transport.RefereeResult{Verdict: "deny", Reason: "unexpected step"}, nil
+}
+
+// cloneRequest deep-copies every slice and map a request carries.
+func cloneRequest(req transport.CompleteRequest) transport.CompleteRequest {
+	req.Messages = append([]transport.Message(nil), req.Messages...)
+	for i, m := range req.Messages {
+		if m.ToolCalls != nil {
+			req.Messages[i].ToolCalls = append([]transport.ToolCall(nil), m.ToolCalls...)
+		}
+	}
+	if req.Tools != nil {
+		tools := make([]transport.Tool, len(req.Tools))
+		for i, t := range req.Tools {
+			t.Function.Parameters = cloneMap(t.Function.Parameters)
+			tools[i] = t
+		}
+		req.Tools = tools
+	}
+	return req
+}
+
+func cloneValue(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(v)).Interface()
+}
+
+// cloneReflect deep-copies maps, slices, arrays, structs, pointers and
+// interfaces so typed JSON-schema values ([]string, map[string]string, ...)
+// are not aliased. Unexported struct fields cannot be set and are never
+// marshaled, so they keep a shallow copy.
+func cloneReflect(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for _, k := range v.MapKeys() {
+			out.SetMapIndex(k, cloneReflect(v.MapIndex(k)))
+		}
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if out.Field(i).CanSet() {
+				out.Field(i).Set(cloneReflect(v.Field(i)))
+			}
+		}
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(cloneReflect(v.Elem()))
+		return out
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type().Elem())
+		out.Elem().Set(cloneReflect(v.Elem()))
+		return out
+	}
+	return v
+}
+
+func cloneMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = cloneValue(v)
+	}
+	return out
+}
+
 // Usage returns usage information if available.
 func (a *Adapter) Usage(ctx context.Context) (*transport.Usage, error) {
 	if !a.usageAvailable {
@@ -389,12 +543,8 @@ func (a *Adapter) Calls() []CompleteCall {
 
 	result := make([]CompleteCall, len(a.calls))
 	for i, call := range a.calls {
-		msgCopy := make([]transport.Message, len(call.Request.Messages))
-		copy(msgCopy, call.Request.Messages)
-		requestCopy := call.Request
-		requestCopy.Messages = msgCopy
 		result[i] = CompleteCall{
-			Request: requestCopy,
+			Request: cloneRequest(call.Request),
 		}
 	}
 	return result

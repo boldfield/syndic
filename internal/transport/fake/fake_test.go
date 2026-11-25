@@ -1638,3 +1638,524 @@ func TestProbeMissingModelIsIncomplete(t *testing.T) {
 		t.Fatalf("err = %v, want ErrIncompleteProbe", err)
 	}
 }
+
+func TestCompleteWithToolCalls(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd"}`,
+			},
+		},
+		{
+			ID:   "call_2",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "web_fetch",
+				Arguments: `{"url":"https://example.com"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read file contents",
+					Parameters:  map[string]interface{}{"path": "string"},
+				},
+			},
+		},
+		Deadline: time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	if result.Status != transport.StatusToolCalls {
+		t.Errorf("result status: %q, want tool_calls", result.Status)
+	}
+
+	if len(result.ToolCalls) != 2 {
+		t.Fatalf("result ToolCalls length: %d, want 2", len(result.ToolCalls))
+	}
+
+	if result.ToolCalls[0].ID != "call_1" {
+		t.Errorf("first call ID: %q, want call_1", result.ToolCalls[0].ID)
+	}
+
+	if result.ToolCalls[1].Function.Name != "web_fetch" {
+		t.Errorf("second call name: %q, want web_fetch", result.ToolCalls[1].Function.Name)
+	}
+
+	if result.NativeFinish != "tool_calls" {
+		t.Errorf("native finish: %q, want tool_calls", result.NativeFinish)
+	}
+}
+
+// TestCompleteWithToolCallsSecretScrubbing verifies tool call arguments are scrubbed.
+func TestCompleteWithToolCallsSecretScrubbing(t *testing.T) {
+	secret := "my-secret-api-key"
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd","key":"` + secret + `"}`,
+			},
+		},
+		{
+			ID:   "call_2",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "web_fetch",
+				Arguments: `{"url":"https://example.com","auth":"` + secret + `"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+		ResolvedSecrets:      []string{secret},
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read file contents",
+					Parameters:  map[string]interface{}{"path": "string"},
+				},
+			},
+		},
+		Deadline: time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	if result.ScrubCount != 2 {
+		t.Errorf("scrub count: %d, want 2 (one per tool call argument)", result.ScrubCount)
+	}
+
+	for i, call := range result.ToolCalls {
+		if strings.Contains(call.Function.Arguments, secret) {
+			t.Errorf("tool call %d arguments contain secret: %q", i, call.Function.Arguments)
+		}
+		if !strings.Contains(call.Function.Arguments, transport.ScrubMarker) {
+			t.Errorf("tool call %d arguments missing scrub marker: %q", i, call.Function.Arguments)
+		}
+	}
+}
+
+// TestToolStepIsClassified verifies that tool steps (StatusToolCalls with ToolCalls) are classified correctly.
+func TestToolStepIsClassified(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	envelope := transport.AttemptEnvelope{
+		Participant:   "participant",
+		TurnID:        "turn1",
+		Phase:         "author",
+		Epoch:         1,
+		AttemptID:     "attempt1",
+		CandidateHash: "",
+	}
+	toolCalls := []transport.ToolCall{
+		{
+			ID:   "call_1",
+			Type: "function",
+			Function: transport.ToolCallFunction{
+				Name:      "read_file",
+				Arguments: `{"path":"/etc/passwd"}`,
+			},
+		},
+	}
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Status:             transport.StatusToolCalls,
+			NativeFinishReason: "tool_calls",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          toolCalls,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: envelope,
+		Model:    "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "read a file"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete with tool calls: %v", err)
+	}
+
+	// Verify it's a tool step
+	if !transport.IsToolStep(result) {
+		t.Errorf("IsToolStep returned false for a StatusToolCalls result with calls")
+	}
+
+	// Verify the gate would pass (CheckResult returns nil for valid tool steps)
+	req.Envelope.Participant = "participant"
+	expected := transport.Expected{Identity: identity, ReportedModel: "test-model"}
+	gate := transport.CheckResult(req, result, expected)
+	if gate != nil {
+		t.Errorf("CheckResult failed for valid tool step: %v", gate)
+	}
+}
+
+// TestPlainReplyNilToolCalls verifies that plain replies have nil ToolCalls, not empty slice.
+func TestPlainReplyNilToolCalls(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:               StepKindReply,
+			Text:               "Plain response",
+			Status:             transport.StatusComplete,
+			NativeFinishReason: "stop",
+			TransportStatus:    transport.TransportStatusOK,
+			ToolCalls:          nil,
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "participant",
+			TurnID:        "turn1",
+			Phase:         "author",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "hello"},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	// Plain reply should have nil ToolCalls, not empty slice
+	if result.ToolCalls != nil {
+		t.Errorf("ToolCalls for plain reply: %v, want nil", result.ToolCalls)
+	}
+	// IsToolStep should return false for a plain reply
+	if transport.IsToolStep(result) {
+		t.Errorf("IsToolStep returned true for plain reply with nil ToolCalls")
+	}
+}
+
+// TestRefereeScriptingAllow verifies referee decision allow is scripted correctly.
+func TestRefereeScriptingAllow(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "allow",
+			RefereeReason:  "URL matches policy",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "allow" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "allow")
+	}
+	if result.Reason != "URL matches policy" {
+		t.Errorf("Reason: %q, want %q", result.Reason, "URL matches policy")
+	}
+}
+
+// TestRefereeScriptingDeny verifies referee decision deny is scripted correctly.
+func TestRefereeScriptingDeny(t *testing.T) {
+	identity := transport.NewUnknownIdentity()
+	script := []Step{
+		{
+			Kind:           StepKindReferee,
+			RefereeVerdict: "deny",
+			RefereeReason:  "URL contains sensitive data",
+		},
+	}
+	adapter := New(script, Options{
+		DefaultIdentity:      identity,
+		DefaultReportedModel: "test-model",
+	})
+
+	result, err := adapter.Referee(context.Background())
+	if err != nil {
+		t.Fatalf("Referee: %v", err)
+	}
+
+	if result.Verdict != "deny" {
+		t.Errorf("Verdict: %q, want %q", result.Verdict, "deny")
+	}
+	if result.Reason != "URL contains sensitive data" {
+		t.Errorf("Reason: %q, want %q", result.Reason, "URL contains sensitive data")
+	}
+}
+
+// TestRefereeFailsClosed verifies every non-verdict shape yields a deny.
+func TestRefereeFailsClosed(t *testing.T) {
+	reply := func(st transport.CompletionStatus) Step {
+		return Step{Kind: StepKindReply, Text: "allow", Status: st, TransportStatus: transport.TransportStatusOK}
+	}
+	toolReply := reply(transport.StatusToolCalls)
+	toolReply.ToolCalls = []transport.ToolCall{{ID: "c"}}
+	cases := []struct {
+		name   string
+		step   Step
+		reason string
+	}{
+		{"refusal", reply(transport.StatusRefused), "refusal"},
+		{"truncation", reply(transport.StatusTruncated), "truncation"},
+		{"tool call", toolReply, "tool-call reply"},
+		{"adapter error", Step{Kind: StepKindError, Err: errors.New("boom")}, "adapter error"},
+		{"malformed verdict", Step{Kind: StepKindReferee, RefereeVerdict: "maybe"}, "malformed verdict"},
+		{"plain reply", reply(transport.StatusComplete), "unexpected step"},
+		{"not sent", Step{Kind: StepKindNotSent}, "unexpected step"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			adapter := New([]Step{c.step}, Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+			res, err := adapter.Referee(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Verdict != "deny" || res.Reason != c.reason {
+				t.Fatalf("got %+v, want deny %q", res, c.reason)
+			}
+		})
+	}
+	adapter := New(nil, Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	if res, _ := adapter.Referee(context.Background()); res.Verdict != "deny" {
+		t.Fatalf("exhausted script: %+v", res)
+	}
+}
+
+// TestRequestDeepCopyIsolation verifies recorded requests share no
+// tool-bearing slices or maps with the caller or with Calls results.
+func TestRequestDeepCopyIsolation(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Messages: []transport.Message{{Role: "assistant", ToolCalls: []transport.ToolCall{{ID: "c1"}}}},
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name:       "f",
+			Parameters: map[string]interface{}{"properties": map[string]interface{}{"a": "string"}},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.Messages[0].ToolCalls[0].ID = "mutated"
+	req.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] = "mutated"
+	got := adapter.Calls()
+	if got[0].Request.Messages[0].ToolCalls[0].ID != "c1" ||
+		got[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] != "string" {
+		t.Fatalf("caller mutation leaked into history: %+v", got[0].Request)
+	}
+	got[0].Request.Messages[0].ToolCalls[0].ID = "mutated2"
+	got[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] = "mutated2"
+	again := adapter.Calls()
+	if again[0].Request.Messages[0].ToolCalls[0].ID != "c1" ||
+		again[0].Request.Tools[0].Function.Parameters["properties"].(map[string]interface{})["a"] != "string" {
+		t.Fatalf("Calls result mutation leaked into history: %+v", again[0].Request)
+	}
+}
+
+// TestRequestDeepCopyTypedSchemaValues covers typed nested slices and maps in
+// tool parameter schemas, which are common in JSON-schema values.
+func TestRequestDeepCopyTypedSchemaValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name: "f",
+			Parameters: map[string]interface{}{
+				"required": []string{"path"},
+				"raw":      []byte("abc"),
+				"typed":    map[string]string{"k": "v"},
+			},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.Tools[0].Function.Parameters["required"].([]string)[0] = "mutated"
+	req.Tools[0].Function.Parameters["raw"].([]byte)[0] = 'z'
+	req.Tools[0].Function.Parameters["typed"].(map[string]string)["k"] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if got["required"].([]string)[0] != "path" || got["raw"].([]byte)[0] != 'a' || got["typed"].(map[string]string)["k"] != "v" {
+		t.Fatalf("typed value aliased: %+v", got)
+	}
+	got["required"].([]string)[0] = "mutated2"
+	if adapter.Calls()[0].Request.Tools[0].Function.Parameters["required"].([]string)[0] != "path" {
+		t.Fatal("Calls result aliases history")
+	}
+}
+
+// TestRequestDeepCopyArrayValues covers arrays holding reference values.
+func TestRequestDeepCopyArrayValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name:       "f",
+			Parameters: map[string]interface{}{"arr": [1][]string{{"a"}}},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	req.Tools[0].Function.Parameters["arr"].([1][]string)[0][0] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if got["arr"].([1][]string)[0][0] != "a" {
+		t.Fatalf("array aliased: %+v", got)
+	}
+	got["arr"].([1][]string)[0][0] = "mutated2"
+	if adapter.Calls()[0].Request.Tools[0].Function.Parameters["arr"].([1][]string)[0][0] != "a" {
+		t.Fatal("Calls result aliases history")
+	}
+}
+
+type schemaNode struct {
+	Required []string
+	Props    map[string]interface{}
+}
+
+func TestRequestDeepCopyStructValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name: "f",
+			Parameters: map[string]interface{}{
+				"s":   schemaNode{Required: []string{"a"}, Props: map[string]interface{}{"p": []string{"x"}}},
+				"ptr": &schemaNode{Required: []string{"b"}},
+			},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	orig := req.Tools[0].Function.Parameters
+	orig["s"].(schemaNode).Required[0] = "mutated"
+	orig["s"].(schemaNode).Props["p"].([]string)[0] = "mutated"
+	orig["ptr"].(*schemaNode).Required[0] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if s := got["s"].(schemaNode); s.Required[0] != "a" || s.Props["p"].([]string)[0] != "x" {
+		t.Fatalf("struct aliased caller: %+v", s)
+	}
+	if got["ptr"].(*schemaNode).Required[0] != "b" {
+		t.Fatalf("struct pointer aliased caller: %+v", got["ptr"])
+	}
+	got["s"].(schemaNode).Required[0] = "mutated2"
+	got["s"].(schemaNode).Props["p"].([]string)[0] = "mutated2"
+	got["ptr"].(*schemaNode).Required[0] = "mutated2"
+	again := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if s := again["s"].(schemaNode); s.Required[0] != "a" || s.Props["p"].([]string)[0] != "x" {
+		t.Fatalf("Calls result aliases history: %+v", s)
+	}
+	if again["ptr"].(*schemaNode).Required[0] != "b" {
+		t.Fatal("Calls result aliases history through struct pointer")
+	}
+}

@@ -51,6 +51,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 
 	expected := e.built.Participants[t.author].Expected
 	gate := transport.CheckResult(req, res, expected)
+	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var hash, candidateID string
 	var round int
@@ -79,6 +80,17 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			return err
 		}
 		if held, err = e.failedIn(tx, emit, t.author, attemptID, fail); err != nil {
+			return err
+		}
+		if isToolStep {
+			// Tool step accepted but not frozen as a candidate; text is journaled.
+			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
+				return err
+			}
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			ended = true
+			endReason = reasonToolStepUnsupported
+			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
 		if gate != nil {
@@ -486,6 +498,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 
 	expected := e.built.Participants[d.participant].Expected
 	gate := transport.CheckResult(d.req, res, expected)
+	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var quarantined, approvedNow, exceeded, revise bool
 	var endState, endReason, kind string
@@ -520,6 +533,16 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 		if held, err = e.failedIn(tx, emit, d.participant, d.attemptID, fail); err != nil {
+			return err
+		}
+		if isToolStep {
+			// Reviewer tool step accepted but not parsed as a verdict; text is journaled.
+			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
+				return err
+			}
+			// Tool step execution is not yet supported; end the turn with an explicit reason.
+			endState, endReason = StateIncomplete, reasonToolStepUnsupported
+			term, err = e.endIn(tx, emit, t, endState, endReason)
 			return err
 		}
 		if gate != nil {
