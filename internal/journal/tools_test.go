@@ -4,1037 +4,499 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
 
-// TestToolCallStorage tests storing and retrieving tool calls.
-func TestToolCallStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
+var errForcedRollback = errors.New("forced rollback")
 
-	// Create test data
-	turnID := "turn1"
-	attemptID := "attempt1"
-	setupTestData(t, conn, "run1", turnID)
-	createTestAttempt(t, conn, attemptID, turnID, "author")
+// toolFixture is a database with one run, turn and attempt, opened at a path
+// the test can close and reopen to simulate a restart.
+type toolFixture struct {
+	t    *testing.T
+	path string
+	db   *journal.DB
+	s    *journal.Store
+}
 
-	call := journal.ToolCall{
-		ID:         "call1",
-		AttemptID:  attemptID,
-		Name:       "read_file",
-		ArgsSHA256: "abcd1234",
-		Class:      "read",
-		Status:     journal.ToolCallStatusAccepted,
-	}
+func newToolFixture(t *testing.T) *toolFixture {
+	t.Helper()
+	f := &toolFixture{t: t, path: filepath.Join(t.TempDir(), "tools.db")}
+	f.open()
+	setupTestData(t, f.db.Conn(), "run1", "turn1")
+	createTestAttempt(t, f.db.Conn(), "attempt1", "turn1", "author")
+	return f
+}
 
-	// Create a Store instance and store the tool call
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreToolCall(call)
-	})
+func (f *toolFixture) open() {
+	f.t.Helper()
+	db, err := journal.Open(f.path)
 	if err != nil {
-		t.Fatalf("store tool call: %v", err)
+		f.t.Fatalf("open: %v", err)
 	}
+	f.db = db
+	f.s = journal.NewStore(db)
+	f.t.Cleanup(func() { _ = f.db.Close() })
+}
 
-	// Retrieve the tool call
-	var retrieved []journal.ToolCall
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		retrieved, err = tx.GetToolCallsByAttempt(attemptID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get tool calls: %v", err)
+// restart closes the database and reopens it from disk with a new Store.
+func (f *toolFixture) restart() {
+	f.t.Helper()
+	if err := f.db.Close(); err != nil {
+		f.t.Fatalf("close: %v", err)
 	}
+	f.open()
+}
 
-	if len(retrieved) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(retrieved))
-	}
-
-	if retrieved[0].ID != call.ID {
-		t.Errorf("ID mismatch: expected %s, got %s", call.ID, retrieved[0].ID)
-	}
-	if retrieved[0].Name != call.Name {
-		t.Errorf("Name mismatch: expected %s, got %s", call.Name, retrieved[0].Name)
-	}
-	if retrieved[0].Status != call.Status {
-		t.Errorf("Status mismatch: expected %s, got %s", call.Status, retrieved[0].Status)
+func (f *toolFixture) tx(fn func(tx *journal.Tx) error) {
+	f.t.Helper()
+	if err := f.s.Tx(fn); err != nil {
+		f.t.Fatalf("tx: %v", err)
 	}
 }
 
-// TestObservationStorage tests storing and retrieving observations.
-func TestObservationStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	// Create test data
-	turnID := "turn1"
-	attemptID := "attempt1"
-	setupTestData(t, conn, "run1", turnID)
-	createTestAttempt(t, conn, attemptID, turnID, "author")
-
-	now := time.Now()
-	obs := journal.Observation{
-		ID:              "obs1",
-		TurnID:          turnID,
-		AttemptID:       attemptID,
-		SnapshotVersion: 1,
-		Path:            "file.txt",
-		Kind:            journal.ObservationKindFile,
-		BaseSHA256:      strPtr("deadbeef"),
-		ObservedAt:      now,
-	}
-
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreObservation(obs)
-	})
-	if err != nil {
-		t.Fatalf("store observation: %v", err)
-	}
-
-	var retrieved []journal.Observation
-	err = s.Tx(func(tx *journal.Tx) error {
+func (f *toolFixture) put(body string) string {
+	f.t.Helper()
+	var sum string
+	f.tx(func(tx *journal.Tx) error {
 		var err error
-		retrieved, err = tx.GetObservationsByTurn(turnID)
+		sum, err = tx.PutToolContent([]byte(body))
 		return err
 	})
-	if err != nil {
-		t.Fatalf("get observations: %v", err)
-	}
+	return sum
+}
 
-	if len(retrieved) != 1 {
-		t.Fatalf("expected 1 observation, got %d", len(retrieved))
+func (f *toolFixture) count(query string, args ...any) int {
+	f.t.Helper()
+	var n int
+	if err := f.db.Conn().QueryRow(query, args...).Scan(&n); err != nil {
+		f.t.Fatalf("count: %v", err)
 	}
+	return n
+}
 
-	if retrieved[0].Path != obs.Path {
-		t.Errorf("Path mismatch: expected %s, got %s", obs.Path, retrieved[0].Path)
+func TestToolContentIsHashAddressed(t *testing.T) {
+	f := newToolFixture(t)
+	sum := f.put("hello")
+	if sum != computeSHA256(t, "hello") {
+		t.Fatalf("hash = %s", sum)
 	}
-	if retrieved[0].Kind != obs.Kind {
-		t.Errorf("Kind mismatch: expected %s, got %s", obs.Kind, retrieved[0].Kind)
+	if again := f.put("hello"); again != sum {
+		t.Fatalf("second put = %s, want %s", again, sum)
 	}
-	if retrieved[0].SnapshotVersion != obs.SnapshotVersion {
-		t.Errorf("SnapshotVersion mismatch: expected %d, got %d", obs.SnapshotVersion, retrieved[0].SnapshotVersion)
+	f.restart()
+	var got []byte
+	f.tx(func(tx *journal.Tx) error {
+		var err error
+		got, err = tx.GetToolContent(sum)
+		return err
+	})
+	if string(got) != "hello" {
+		t.Fatalf("content = %q", got)
+	}
+	data, total, hash, err := f.s.ContentRange("tool:"+sum, 1, 3)
+	if err != nil || string(data) != "ell" || total != 5 || hash != sum {
+		t.Fatalf("ContentRange = %q %d %s %v", data, total, hash, err)
+	}
+	err = f.s.Tx(func(tx *journal.Tx) error {
+		_, err := tx.GetToolContent("nope")
+		return err
+	})
+	if !errors.Is(err, journal.ErrNoSuchContent) {
+		t.Fatalf("missing content err = %v", err)
+	}
+	if _, err := f.db.Conn().Exec(`DELETE FROM tool_content`); err == nil {
+		t.Fatal("tool_content must be immutable")
 	}
 }
 
-// TestChangeSetStorage tests storing and retrieving change sets.
-func TestChangeSetStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	now := time.Now()
-	cs := journal.ChangeSet{
-		ID:           "cs1",
-		TurnID:       turnID,
-		State:        journal.ChangeSetStateAppliable,
-		SnapshotHash: "snap123",
-		ChangesHash:  "changes456",
-		CreatedAt:    now,
-	}
-
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreChangeSet(cs)
+func TestToolCallRejectsUncitedContent(t *testing.T) {
+	f := newToolFixture(t)
+	err := f.s.Tx(func(tx *journal.Tx) error {
+		return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "read_file", ArgsSHA256: "missing"})
 	})
-	if err != nil {
-		t.Fatalf("store change set: %v", err)
-	}
-
-	var retrieved *journal.ChangeSet
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		retrieved, err = tx.GetChangeSetByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get change set: %v", err)
-	}
-
-	if retrieved == nil {
-		t.Fatal("change set not found")
-	}
-
-	if retrieved.State != cs.State {
-		t.Errorf("State mismatch: expected %s, got %s", cs.State, retrieved.State)
-	}
-	if retrieved.SnapshotHash != cs.SnapshotHash {
-		t.Errorf("SnapshotHash mismatch: expected %s, got %s", cs.SnapshotHash, retrieved.SnapshotHash)
-	}
-}
-
-// TestChangeSetPathStorage tests storing and retrieving change set paths.
-func TestChangeSetPathStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	// First create a change set
-	cs := journal.ChangeSet{
-		ID:           "cs1",
-		TurnID:       turnID,
-		State:        journal.ChangeSetStateAppliable,
-		SnapshotHash: "snap123",
-		ChangesHash:  "changes456",
-		CreatedAt:    time.Now(),
-	}
-
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		if err := tx.StoreChangeSet(cs); err != nil {
-			return err
-		}
-
-		// Add paths to the change set
-		paths := []journal.ChangeSetPath{
-			{
-				ID:          "path1",
-				ChangeSetID: cs.ID,
-				Path:        "file1.txt",
-				Op:          journal.ChangeSetOpModify,
-				BaseSHA256:  strPtr("old1"),
-				NewSHA256:   "new1",
-				NewLen:      100,
-			},
-			{
-				ID:          "path2",
-				ChangeSetID: cs.ID,
-				Path:        "file2.txt",
-				Op:          journal.ChangeSetOpCreate,
-				NewSHA256:   "new2",
-				NewLen:      200,
-			},
-		}
-		for _, p := range paths {
-			if err := tx.StoreChangeSetPath(p); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("store change set and paths: %v", err)
-	}
-
-	var retrieved []journal.ChangeSetPath
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		retrieved, err = tx.GetChangeSetPathsByChangeSet(cs.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get change set paths: %v", err)
-	}
-
-	if len(retrieved) != 2 {
-		t.Fatalf("expected 2 paths, got %d", len(retrieved))
-	}
-
-	if retrieved[0].Path != "file1.txt" {
-		t.Errorf("first path mismatch: expected file1.txt, got %s", retrieved[0].Path)
-	}
-	if retrieved[1].Path != "file2.txt" {
-		t.Errorf("second path mismatch: expected file2.txt, got %s", retrieved[1].Path)
-	}
-}
-
-// TestStagingStorage tests storing and retrieving staged files.
-func TestStagingStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		if err := tx.StoreStaging(turnID, "file1.txt", "hash1"); err != nil {
-			return err
-		}
-		if err := tx.StoreStaging(turnID, "file2.txt", "hash2"); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("store staging: %v", err)
-	}
-
-	var staging map[string]string
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		staging, err = tx.GetStagingByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get staging: %v", err)
-	}
-
-	if len(staging) != 2 {
-		t.Fatalf("expected 2 staged files, got %d", len(staging))
-	}
-
-	if staging["file1.txt"] != "hash1" {
-		t.Errorf("file1.txt hash mismatch: expected hash1, got %s", staging["file1.txt"])
-	}
-	if staging["file2.txt"] != "hash2" {
-		t.Errorf("file2.txt hash mismatch: expected hash2, got %s", staging["file2.txt"])
-	}
-
-	// Test unstaging
-	err = s.Tx(func(tx *journal.Tx) error {
-		return tx.UnstageFile(turnID, "file1.txt")
-	})
-	if err != nil {
-		t.Fatalf("unstage file: %v", err)
-	}
-
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		staging, err = tx.GetStagingByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get staging after unstage: %v", err)
-	}
-
-	if len(staging) != 1 {
-		t.Fatalf("expected 1 staged file after unstage, got %d", len(staging))
-	}
-	if _, exists := staging["file1.txt"]; exists {
-		t.Error("file1.txt should be unstaged")
-	}
-}
-
-// TestApplyOpsStorage tests storing and retrieving apply operations.
-func TestApplyOpsStorage(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	// First create a change set
-	cs := journal.ChangeSet{
-		ID:           "cs1",
-		TurnID:       turnID,
-		State:        journal.ChangeSetStateAppliable,
-		SnapshotHash: "snap123",
-		ChangesHash:  "changes456",
-		CreatedAt:    time.Now(),
-	}
-
-	s := journal.NewStore(db)
-	now := time.Now()
-
-	// Store apply operations: started, file, finished
-	err := s.Tx(func(tx *journal.Tx) error {
-		if err := tx.StoreChangeSet(cs); err != nil {
-			return err
-		}
-
-		// Record the sequence of apply operations
-		ops := []journal.ApplyOp{
-			{
-				ID:          "op1",
-				ChangeSetID: cs.ID,
-				OpType:      "started",
-				AppliedAt:   now,
-			},
-			{
-				ID:          "op2",
-				ChangeSetID: cs.ID,
-				OpType:      "file",
-				Path:        strPtr("file1.txt"),
-				NewSHA256:   strPtr("newsha1"),
-				AppliedAt:   now.Add(time.Second),
-			},
-			{
-				ID:          "op3",
-				ChangeSetID: cs.ID,
-				OpType:      "file",
-				Path:        strPtr("file2.txt"),
-				NewSHA256:   strPtr("newsha2"),
-				AppliedAt:   now.Add(2 * time.Second),
-			},
-			{
-				ID:          "op4",
-				ChangeSetID: cs.ID,
-				OpType:      "finished",
-				AppliedAt:   now.Add(3 * time.Second),
-			},
-		}
-
-		for _, op := range ops {
-			if err := tx.StoreApplyOp(op); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("store change set and apply ops: %v", err)
-	}
-
-	// Retrieve and verify apply operations
-	var retrieved []journal.ApplyOp
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		retrieved, err = tx.GetApplyOps(cs.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get apply ops: %v", err)
-	}
-
-	if len(retrieved) != 4 {
-		t.Fatalf("expected 4 apply ops, got %d", len(retrieved))
-	}
-
-	if retrieved[0].OpType != "started" {
-		t.Errorf("first op should be started, got %s", retrieved[0].OpType)
-	}
-	if retrieved[1].OpType != "file" || *retrieved[1].Path != "file1.txt" {
-		t.Errorf("second op should be file for file1.txt, got %s for %v", retrieved[1].OpType, retrieved[1].Path)
-	}
-	if retrieved[3].OpType != "finished" {
-		t.Errorf("last op should be finished, got %s", retrieved[3].OpType)
-	}
-}
-
-// TestPerPathApplyOutcomes tests that per-path outcomes are recorded correctly.
-func TestPerPathApplyOutcomes(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	// Create a change set with paths
-	cs := journal.ChangeSet{
-		ID:           "cs1",
-		TurnID:       turnID,
-		State:        journal.ChangeSetStateAppliable,
-		SnapshotHash: "snap123",
-		ChangesHash:  "changes456",
-		CreatedAt:    time.Now(),
-	}
-
-	s := journal.NewStore(db)
-	now := time.Now()
-
-	err := s.Tx(func(tx *journal.Tx) error {
-		if err := tx.StoreChangeSet(cs); err != nil {
-			return err
-		}
-
-		// Store paths
-		paths := []journal.ChangeSetPath{
-			{
-				ID:          "path1",
-				ChangeSetID: cs.ID,
-				Path:        "file1.txt",
-				Op:          journal.ChangeSetOpModify,
-				BaseSHA256:  strPtr("oldsha1"),
-				NewSHA256:   "newsha1",
-				NewLen:      100,
-			},
-			{
-				ID:          "path2",
-				ChangeSetID: cs.ID,
-				Path:        "file2.txt",
-				Op:          journal.ChangeSetOpModify,
-				BaseSHA256:  strPtr("oldsha2"),
-				NewSHA256:   "newsha2",
-				NewLen:      200,
-			},
-		}
-
-		for _, p := range paths {
-			if err := tx.StoreChangeSetPath(p); err != nil {
-				return err
-			}
-		}
-
-		// Record apply operations that transition outcomes
-		ops := []journal.ApplyOp{
-			{
-				ID:          "op1",
-				ChangeSetID: cs.ID,
-				OpType:      "started",
-				AppliedAt:   now,
-			},
-			{
-				ID:          "op2",
-				ChangeSetID: cs.ID,
-				OpType:      "file",
-				Path:        strPtr("file1.txt"),
-				NewSHA256:   strPtr("newsha1"),
-				AppliedAt:   now.Add(time.Second),
-			},
-			{
-				ID:          "op3",
-				ChangeSetID: cs.ID,
-				OpType:      "file",
-				Path:        strPtr("file2.txt"),
-				NewSHA256:   strPtr("newsha2"),
-				AppliedAt:   now.Add(2 * time.Second),
-			},
-			{
-				ID:          "op4",
-				ChangeSetID: cs.ID,
-				OpType:      "finished",
-				AppliedAt:   now.Add(3 * time.Second),
-			},
-		}
-
-		for _, op := range ops {
-			if err := tx.StoreApplyOp(op); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("store data: %v", err)
-	}
-
-	// Verify paths are stored correctly
-	var retrievedPaths []journal.ChangeSetPath
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		retrievedPaths, err = tx.GetChangeSetPathsByChangeSet(cs.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get paths: %v", err)
-	}
-
-	if len(retrievedPaths) != 2 {
-		t.Errorf("expected 2 paths, got %d", len(retrievedPaths))
-	}
-
-	// Verify that apply_ops record the transitions
-	var ops []journal.ApplyOp
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		ops, err = tx.GetApplyOps(cs.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get apply ops: %v", err)
-	}
-
-	fileOps := 0
-	for _, op := range ops {
-		if op.OpType == "file" {
-			fileOps++
-			if op.Path == nil {
-				t.Errorf("file op should have a path")
-			}
-		}
-	}
-
-	if fileOps != 2 {
-		t.Errorf("expected 2 file ops, got %d", fileOps)
-	}
-}
-
-// TestStagingWithPathsContainingColons tests that staging works with paths containing ':'.
-func TestStagingWithPathsContainingColons(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-
-	s := journal.NewStore(db)
-
-	// Test staging a path with colons
-	pathWithColon := "dir:subdir/file::name.txt"
-	err := s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreStaging(turnID, pathWithColon, "hash1")
-	})
-	if err != nil {
-		t.Fatalf("store staging: %v", err)
-	}
-
-	// Retrieve and verify
-	var staging map[string]string
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		staging, err = tx.GetStagingByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get staging: %v", err)
-	}
-
-	if val, exists := staging[pathWithColon]; !exists {
-		t.Error("path with colons not found in staging")
-	} else if val != "hash1" {
-		t.Errorf("path hash mismatch: expected hash1, got %s", val)
-	}
-}
-
-// TestAtomicRecordAndEventRollback tests that records and events are journaled atomically,
-// and that a failed transaction rolls back both records and events.
-// This demonstrates: "Atomic record plus event rollback" (design section 6).
-func TestAtomicRecordAndEventRollback(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	setupTestData(t, conn, "run1", turnID)
-	createTestAttempt(t, conn, "attempt1", turnID, "author")
-
-	s := journal.NewStore(db)
-
-	// First, store a record and event successfully
-	err := s.Tx(func(tx *journal.Tx) error {
-		obs := journal.Observation{
-			ID:              "obs1",
-			TurnID:          turnID,
-			AttemptID:       "attempt1",
-			SnapshotVersion: 1,
-			Path:            "file.txt",
-			Kind:            journal.ObservationKindFile,
-			BaseSHA256:      strPtr("hash1"),
-			ObservedAt:      time.Now(),
-		}
-		if err := tx.StoreObservation(obs); err != nil {
-			return err
-		}
-		// Append event in same transaction
-		if err := tx.AppendEvent("observation_recorded", json.RawMessage(`{"path":"file.txt"}`)); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("store observation with event: %v", err)
-	}
-
-	// Verify record and event were stored
-	var obs []journal.Observation
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		obs, err = tx.GetObservationsByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get observations: %v", err)
-	}
-
-	if len(obs) != 1 {
-		t.Fatalf("expected 1 observation, got %d", len(obs))
-	}
-
-	// Now test that a failed transaction with both record and event is rolled back
-	attemptID2 := "attempt2"
-	createTestAttempt(t, conn, attemptID2, turnID, "author")
-
-	// Get event count before failed transaction
-	var eventCountBefore int
-	err = s.Tx(func(tx *journal.Tx) error {
-		return conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCountBefore)
-	})
-	if err != nil {
-		t.Fatalf("count events before: %v", err)
-	}
-
-	err = s.Tx(func(tx *journal.Tx) error {
-		// Store a tool call
-		call := journal.ToolCall{
-			ID:         "call2",
-			AttemptID:  attemptID2,
-			Name:       "web_fetch",
-			ArgsSHA256: "hash2",
-			Class:      "web",
-			Status:     journal.ToolCallStatusAccepted,
-		}
-		if err := tx.StoreToolCall(call); err != nil {
-			return err
-		}
-		// Append event in same transaction
-		if err := tx.AppendEvent("tool_call_recorded", json.RawMessage(`{"name":"web_fetch"}`)); err != nil {
-			return err
-		}
-		// Simulate transaction failure by returning an error
-		return sql.ErrNoRows // any error will cause rollback
-	})
-
-	// Error expected from failed transaction
 	if err == nil {
-		t.Fatal("expected transaction to fail")
+		t.Fatal("tool call citing hash absent from the content store must fail")
 	}
+}
 
-	// Verify that the failed record was not stored
+// TestToolCallLifecycleReconstructsAfterRestart journals intent before
+// dispatch, records the result later, then rebuilds args and result bytes
+// from their hashes in a reopened database.
+func TestToolCallLifecycleReconstructsAfterRestart(t *testing.T) {
+	f := newToolFixture(t)
+	args := `{"path":"a.go"}`
+	result := "package a\n"
+
+	f.tx(func(tx *journal.Tx) error {
+		sum, err := tx.PutToolContent([]byte(args))
+		if err != nil {
+			return err
+		}
+		return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "read_file", ArgsSHA256: sum, Class: "read"})
+	})
+
 	var calls []journal.ToolCall
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		calls, err = tx.GetToolCallsByAttempt(attemptID2)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get tool calls: %v", err)
+	f.tx(func(tx *journal.Tx) (err error) { calls, err = tx.GetToolCallsByAttempt("attempt1"); return })
+	if len(calls) != 1 || calls[0].Status != journal.ToolCallStatusAccepted || calls[0].ResultSHA256 != nil {
+		t.Fatalf("before result: %+v", calls)
 	}
 
-	if len(calls) != 0 {
-		t.Fatalf("expected 0 tool calls after rollback, got %d", len(calls))
-	}
+	f.restart() // intent survives; the result arrives after the restart
 
-	// Verify that the event was also rolled back (atomicity)
-	var eventCountAfter int
-	err = s.Tx(func(tx *journal.Tx) error {
-		return conn.QueryRow("SELECT COUNT(*) FROM events").Scan(&eventCountAfter)
-	})
-	if err != nil {
-		t.Fatalf("count events after: %v", err)
-	}
-
-	if eventCountAfter != eventCountBefore {
-		t.Errorf("event count changed after rollback: before %d, after %d (expected no change)", eventCountBefore, eventCountAfter)
-	}
-}
-
-// TestToolCallLifecycle tests tool call lifecycle from accepted to executed with result.
-func TestToolCallLifecycle(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	attemptID := "attempt1"
-	setupTestData(t, conn, "run1", turnID)
-	createTestAttempt(t, conn, attemptID, turnID, "author")
-
-	// Record a tool call in accepted status
-	call := journal.ToolCall{
-		ID:         "call1",
-		AttemptID:  attemptID,
-		Name:       "read_file",
-		ArgsSHA256: "args123",
-		Class:      "read",
-		Status:     journal.ToolCallStatusAccepted,
-	}
-
-	s := journal.NewStore(db)
-	err := s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreToolCall(call)
-	})
-	if err != nil {
-		t.Fatalf("store tool call: %v", err)
-	}
-
-	// Store result after execution
-	result := journal.ToolResult{
-		ID:            "result1",
-		ToolCallID:    "call1",
-		Status:        journal.ToolCallStatusExecuted,
-		ResultSHA256:  strPtr("result123"),
-		ResultByteLen: int64Ptr(42),
-		RecordedAt:    time.Now(),
-	}
-
-	err = s.Tx(func(tx *journal.Tx) error {
-		return tx.StoreToolResult(result)
-	})
-	if err != nil {
-		t.Fatalf("store tool result: %v", err)
-	}
-
-	// Verify result was stored
-	var results []journal.ToolResult
-	err = s.Tx(func(tx *journal.Tx) error {
-		var err error
-		results, err = tx.GetToolResultsByToolCall("call1")
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get tool results: %v", err)
-	}
-
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-
-	if results[0].Status != journal.ToolCallStatusExecuted {
-		t.Errorf("expected executed status, got %s", results[0].Status)
-	}
-
-	if results[0].ResultSHA256 == nil || *results[0].ResultSHA256 != "result123" {
-		t.Errorf("expected result hash 'result123', got %v", results[0].ResultSHA256)
-	}
-}
-
-// TestToolResultRollback tests that failed transactions roll back both tool call and result.
-func TestToolResultRollback(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	conn := db.Conn()
-
-	turnID := "turn1"
-	attemptID := "attempt1"
-	setupTestData(t, conn, "run1", turnID)
-	createTestAttempt(t, conn, attemptID, turnID, "author")
-
-	s := journal.NewStore(db)
-
-	// Get record counts before failed transaction
-	var callCountBefore, resultCountBefore int
-	err := s.Tx(func(tx *journal.Tx) error {
-		if err := conn.QueryRow("SELECT COUNT(*) FROM tool_calls").Scan(&callCountBefore); err != nil {
+	f.tx(func(tx *journal.Tx) error {
+		sum, err := tx.PutToolContent([]byte(result))
+		if err != nil {
 			return err
 		}
-		return conn.QueryRow("SELECT COUNT(*) FROM tool_results").Scan(&resultCountBefore)
-	})
-	if err != nil {
-		t.Fatalf("count records before: %v", err)
-	}
-
-	// Attempt to store call and result, but fail the transaction
-	err = s.Tx(func(tx *journal.Tx) error {
-		call := journal.ToolCall{
-			ID:         "call2",
-			AttemptID:  attemptID,
-			Name:       "web_fetch",
-			ArgsSHA256: "hash2",
-			Status:     journal.ToolCallStatusAccepted,
-		}
-		if err := tx.StoreToolCall(call); err != nil {
-			return err
-		}
-
-		result := journal.ToolResult{
-			ID:           "result2",
-			ToolCallID:   "call2",
-			Status:       journal.ToolCallStatusExecuted,
-			ResultSHA256: strPtr("rhash2"),
-			RecordedAt:   time.Now(),
-		}
-		if err := tx.StoreToolResult(result); err != nil {
-			return err
-		}
-
-		return sql.ErrNoRows // Simulate failure
+		return tx.StoreToolResult(journal.ToolResult{
+			ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted,
+			ResultSHA256: &sum, ResultByteLen: int64Ptr(int64(len(result))), RecordedAt: time.Now(),
+		})
 	})
 
+	// A second terminal record for the same call is refused.
+	err := f.s.Tx(func(tx *journal.Tx) error {
+		return tx.StoreToolResult(journal.ToolResult{ID: "r2", ToolCallID: "c1", Status: journal.ToolCallStatusError, RecordedAt: time.Now()})
+	})
 	if err == nil {
-		t.Fatal("expected transaction to fail")
+		t.Fatal("second terminal result for one call must fail")
 	}
 
-	// Verify record counts unchanged (atomic rollback)
-	var callCountAfter, resultCountAfter int
-	err = s.Tx(func(tx *journal.Tx) error {
-		if err := conn.QueryRow("SELECT COUNT(*) FROM tool_calls").Scan(&callCountAfter); err != nil {
-			return err
+	f.restart()
+	f.tx(func(tx *journal.Tx) (err error) { calls, err = tx.GetToolCallsByAttempt("attempt1"); return })
+	if len(calls) != 1 || calls[0].Status != journal.ToolCallStatusExecuted || calls[0].ResultSHA256 == nil {
+		t.Fatalf("after result: %+v", calls)
+	}
+	f.tx(func(tx *journal.Tx) error {
+		gotArgs, err := tx.GetToolContent(calls[0].ArgsSHA256)
+		if err != nil || string(gotArgs) != args {
+			t.Errorf("args = %q, %v", gotArgs, err)
 		}
-		return conn.QueryRow("SELECT COUNT(*) FROM tool_results").Scan(&resultCountAfter)
+		gotResult, err := tx.GetToolContent(*calls[0].ResultSHA256)
+		if err != nil || string(gotResult) != result {
+			t.Errorf("result = %q, %v", gotResult, err)
+		}
+		return nil
 	})
-	if err != nil {
-		t.Fatalf("count records after: %v", err)
-	}
-
-	if callCountAfter != callCountBefore {
-		t.Errorf("tool_calls count changed: before %d, after %d", callCountBefore, callCountAfter)
-	}
-	if resultCountAfter != resultCountBefore {
-		t.Errorf("tool_results count changed: before %d, after %d", resultCountBefore, resultCountAfter)
+	var results []journal.ToolResult
+	f.tx(func(tx *journal.Tx) (err error) { results, err = tx.GetToolResultsByToolCall("c1"); return })
+	if len(results) != 1 || results[0].ID != "r1" {
+		t.Fatalf("results = %+v", results)
 	}
 }
 
-// TestHashAddressedReconstruction tests that tool data can be reconstructed from hashes after restart.
-func TestHashAddressedReconstruction(t *testing.T) {
-	dbPath := t.TempDir() + "/test.db"
-
-	// First session: Store tool call and observation with computed hashes
-	db1, err := journal.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open db session 1: %v", err)
-	}
-
-	conn1 := db1.Conn()
-	turnID := "turn1"
-	attemptID := "attempt1"
-	setupTestData(t, conn1, "run1", turnID)
-	createTestAttempt(t, conn1, attemptID, turnID, "author")
-
-	callID := "call1"
-	// Use real content and compute its SHA256
-	argsContent := "read_file{\"path\": \"/etc/hosts\"}"
-	argsSHA256 := computeSHA256(t, argsContent)
-
-	s1 := journal.NewStore(db1)
-	err = s1.Tx(func(tx *journal.Tx) error {
-		call := journal.ToolCall{
-			ID:         callID,
-			AttemptID:  attemptID,
-			Name:       "read_file",
-			ArgsSHA256: argsSHA256,
-			Status:     journal.ToolCallStatusAccepted,
+func TestToolResultCannotBeChanged(t *testing.T) {
+	f := newToolFixture(t)
+	args := f.put("{}")
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: args}); err != nil {
+			return err
 		}
-		return tx.StoreToolCall(call)
+		return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusAbandoned, RecordedAt: time.Now()})
 	})
-	if err != nil {
-		t.Fatalf("store tool call: %v", err)
-	}
-
-	// Store an observation with computed hash
-	obsContent := "127.0.0.1\tlocalhost\n::1\tlocalhost"
-	obsSHA256 := computeSHA256(t, obsContent)
-
-	err = s1.Tx(func(tx *journal.Tx) error {
-		obs := journal.Observation{
-			ID:              "obs1",
-			TurnID:          turnID,
-			AttemptID:       attemptID,
-			SnapshotVersion: 1,
-			Path:            "file.txt",
-			Kind:            journal.ObservationKindFile,
-			BaseSHA256:      &obsSHA256,
-			ObservedAt:      time.Now(),
+	for _, q := range []string{
+		`UPDATE tool_calls SET name = 'y'`, `DELETE FROM tool_calls`,
+		`UPDATE tool_results SET status = 'executed'`, `DELETE FROM tool_results`,
+	} {
+		if _, err := f.db.Conn().Exec(q); err == nil {
+			t.Errorf("%s must be refused", q)
 		}
-		return tx.StoreObservation(obs)
-	})
-	if err != nil {
-		t.Fatalf("store observation: %v", err)
+	}
+}
+
+// TestRecordAndEventRollBackTogether checks that each record method appends
+// its event in the same transaction, so a failed transaction leaves neither.
+func TestRecordAndEventRollBackTogether(t *testing.T) {
+	f := newToolFixture(t)
+	args := f.put("{}")
+	events := func() int {
+		return f.count(`SELECT COUNT(*) FROM events WHERE event_type = ?`, journal.EventToolCallAccepted)
 	}
 
-	if err := db1.Close(); err != nil {
-		t.Logf("close db1: %v", err)
-	}
-
-	// Second session: Verify hashes persist and can be used to identify content
-	db2, err := journal.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open db session 2: %v", err)
-	}
-	defer func() {
-		if err := db2.Close(); err != nil {
-			t.Logf("close db2: %v", err)
+	err := f.s.Tx(func(tx *journal.Tx) error {
+		if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: args}); err != nil {
+			return err
 		}
-	}()
-
-	s2 := journal.NewStore(db2)
-
-	// Verify call hash matches what we computed
-	var calls []journal.ToolCall
-	err = s2.Tx(func(tx *journal.Tx) error {
-		var err error
-		calls, err = tx.GetToolCallsByAttempt(attemptID)
-		return err
+		return errForcedRollback
 	})
-	if err != nil {
-		t.Fatalf("get tool calls: %v", err)
+	if !errors.Is(err, errForcedRollback) {
+		t.Fatalf("err = %v", err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM tool_calls`); n != 0 {
+		t.Errorf("tool_calls rows after rollback = %d", n)
+	}
+	if n := events(); n != 0 {
+		t.Errorf("events after rollback = %d", n)
 	}
 
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 call after restart, got %d", len(calls))
+	f.tx(func(tx *journal.Tx) error {
+		return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: args})
+	})
+	if n := f.count(`SELECT COUNT(*) FROM tool_calls`); n != 1 {
+		t.Errorf("tool_calls rows after commit = %d", n)
 	}
-
-	if calls[0].ArgsSHA256 != argsSHA256 {
-		t.Errorf("expected args hash %s, got %s", argsSHA256, calls[0].ArgsSHA256)
+	if n := events(); n != 1 {
+		t.Errorf("events after commit = %d", n)
 	}
+}
 
-	// Store result with computed hash
-	resultContent := `{"status": "success", "content": "file contents here"}`
-	resultSHA256 := computeSHA256(t, resultContent)
-
-	resultID := "result1"
-	err = s2.Tx(func(tx *journal.Tx) error {
-		result := journal.ToolResult{
-			ID:            resultID,
-			ToolCallID:    callID,
-			Status:        journal.ToolCallStatusExecuted,
-			ResultSHA256:  &resultSHA256,
-			ResultByteLen: int64Ptr(int64(len(resultContent))),
-			RecordedAt:    time.Now(),
+func TestEveryRecordMethodEmitsAnEvent(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("body")
+	now := time.Now()
+	f.tx(func(tx *journal.Tx) error {
+		steps := []func() error{
+			func() error {
+				return tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h})
+			},
+			func() error {
+				return tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: "executed", ResultSHA256: &h, RecordedAt: now})
+			},
+			func() error {
+				return tx.StoreObservation(journal.Observation{ID: "o1", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a", Kind: "f", BaseSHA256: &h, ObservedAt: now})
+			},
+			func() error {
+				return tx.StoreChangeSet(journal.ChangeSet{ID: "cs1", TurnID: "turn1", SnapshotHash: h, ChangesHash: h, CreatedAt: now})
+			},
+			func() error {
+				return tx.StoreApplyOp(journal.ApplyOp{ID: "ao1", ChangeSetID: "cs1", OpType: journal.ApplyOpStarted, AppliedAt: now})
+			},
+			func() error { return tx.StoreStaging("turn1", "a", h) },
+			func() error { return tx.UnstageFile("turn1", "a") },
 		}
-		return tx.StoreToolResult(result)
-	})
-	if err != nil {
-		t.Fatalf("store tool result: %v", err)
-	}
-
-	// Verify observation hash matches
-	var obss []journal.Observation
-	err = s2.Tx(func(tx *journal.Tx) error {
-		var err error
-		obss, err = tx.GetObservationsByTurn(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("get observations: %v", err)
-	}
-
-	if len(obss) != 1 {
-		t.Fatalf("expected 1 observation, got %d", len(obss))
-	}
-
-	if obss[0].BaseSHA256 == nil || *obss[0].BaseSHA256 != obsSHA256 {
-		t.Errorf("observation hash mismatch: expected %s, got %v", obsSHA256, obss[0].BaseSHA256)
-	}
-
-	if err := db2.Close(); err != nil {
-		t.Logf("close db2: %v", err)
-	}
-
-	// Third session: Verify all hashes persist and are consistent
-	db3, err := journal.Open(dbPath)
-	if err != nil {
-		t.Fatalf("open db session 3: %v", err)
-	}
-	defer func() {
-		if err := db3.Close(); err != nil {
-			t.Logf("close db3: %v", err)
+		for i, step := range steps {
+			if err := step(); err != nil {
+				t.Fatalf("step %d: %v", i, err)
+			}
 		}
-	}()
-
-	s3 := journal.NewStore(db3)
-
-	// Verify call, result, and observation hashes all persist
-	var results []journal.ToolResult
-	err = s3.Tx(func(tx *journal.Tx) error {
-		var err error
-		results, err = tx.GetToolResultsByToolCall(callID)
-		return err
+		return nil
 	})
-	if err != nil {
-		t.Fatalf("get tool results: %v", err)
+	for _, kind := range []string{
+		journal.EventToolCallAccepted, journal.EventToolResultRecorded, journal.EventObservationStored,
+		journal.EventChangeSetFrozen, journal.EventApplyOpRecorded, journal.EventPathStaged, journal.EventPathUnstaged,
+	} {
+		if n := f.count(`SELECT COUNT(*) FROM events WHERE event_type = ?`, kind); n != 1 {
+			t.Errorf("%s events = %d, want 1", kind, n)
+		}
+	}
+}
+
+func TestObservationEvidenceReconstructsAfterRestart(t *testing.T) {
+	f := newToolFixture(t)
+	file := f.put("package a\n")
+	listing := f.put("a.go\nb.go\n")
+	f.tx(func(tx *journal.Tx) error {
+		now := time.Now()
+		for _, o := range []journal.Observation{
+			{ID: "o1", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a.go", Kind: journal.ObservationKindFile, BaseSHA256: &file, ObservedAt: now},
+			{ID: "o2", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 2, Path: "dir", Kind: journal.ObservationKindDirectory, EntriesSHA256: &listing, ObservedAt: now},
+			{ID: "o3", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 3, Path: "gone", Kind: journal.ObservationKindAbsent, ObservedAt: now},
+		} {
+			if err := tx.StoreObservation(o); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	f.restart()
+	f.tx(func(tx *journal.Tx) error {
+		obs, err := tx.GetObservationsByTurn("turn1")
+		if err != nil || len(obs) != 3 {
+			t.Fatalf("observations = %+v, %v", obs, err)
+		}
+		if v, _ := tx.GetLatestObservationVersion("turn1"); v != 3 {
+			t.Errorf("latest version = %d", v)
+		}
+		if b, err := tx.GetToolContent(*obs[0].BaseSHA256); err != nil || string(b) != "package a\n" {
+			t.Errorf("file content = %q, %v", b, err)
+		}
+		if b, err := tx.GetToolContent(*obs[1].EntriesSHA256); err != nil || string(b) != "a.go\nb.go\n" {
+			t.Errorf("listing = %q, %v", b, err)
+		}
+		if obs[2].BaseSHA256 != nil || obs[2].EntriesSHA256 != nil {
+			t.Errorf("absence observation carries content: %+v", obs[2])
+		}
+		return nil
+	})
+	// Observation versions are unique per turn and path.
+	err := f.s.Tx(func(tx *journal.Tx) error {
+		return tx.StoreObservation(journal.Observation{ID: "o4", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a.go", Kind: "a", ObservedAt: time.Now()})
+	})
+	if err == nil {
+		t.Fatal("duplicate (turn, path, version) must fail")
+	}
+}
+
+// TestChangeSetApplyStateIsDerivedAndDurable drives a change set through
+// appliable, partial, conflict, applied and discarded using only append-only
+// apply ops, restarting between steps.
+func TestChangeSetApplyStateIsDerivedAndDurable(t *testing.T) {
+	f := newToolFixture(t)
+	base := f.put("old")
+	newA := f.put("new a")
+	newB := f.put("new b")
+	snap := f.put("snapshot")
+	changes := f.put("changes")
+	now := time.Now()
+
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreChangeSet(journal.ChangeSet{ID: "cs1", TurnID: "turn1", SnapshotHash: snap, ChangesHash: changes, CreatedAt: now}); err != nil {
+			return err
+		}
+		if err := tx.StoreChangeSetPath(journal.ChangeSetPath{ID: "p1", ChangeSetID: "cs1", Path: "a:b.go", Op: journal.ChangeSetOpModify, BaseSHA256: &base, NewSHA256: newA, NewLen: 5}); err != nil {
+			return err
+		}
+		return tx.StoreChangeSetPath(journal.ChangeSetPath{ID: "p2", ChangeSetID: "cs1", Path: "b.go", Op: journal.ChangeSetOpCreate, NewSHA256: newB, NewLen: 5})
+	})
+
+	state := func(want string, wantOutcomes map[string]string) {
+		t.Helper()
+		f.restart()
+		f.tx(func(tx *journal.Tx) error {
+			got, outcomes, err := tx.ComputeApplyState("cs1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Errorf("state = %s, want %s", got, want)
+			}
+			for p, o := range wantOutcomes {
+				if outcomes[p] != o {
+					t.Errorf("outcome[%s] = %s, want %s", p, outcomes[p], o)
+				}
+			}
+			cs, err := tx.GetChangeSetByTurn("turn1")
+			if err != nil || cs == nil || cs.State != want {
+				t.Errorf("GetChangeSetByTurn state = %+v, %v; want %s", cs, err, want)
+			}
+			return nil
+		})
+	}
+	op := func(o journal.ApplyOp) {
+		t.Helper()
+		o.ID = o.OpType + "-" + time.Now().Format(time.RFC3339Nano) + func() string {
+			if o.Path != nil {
+				return *o.Path
+			}
+			return ""
+		}()
+		o.ChangeSetID = "cs1"
+		o.AppliedAt = time.Now()
+		f.tx(func(tx *journal.Tx) error { return tx.StoreApplyOp(o) })
 	}
 
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result after restart, got %d", len(results))
-	}
+	state(journal.ChangeSetStateAppliable, map[string]string{"a:b.go": "pending", "b.go": "pending"})
 
-	if results[0].ResultSHA256 == nil || *results[0].ResultSHA256 != resultSHA256 {
-		t.Errorf("expected result hash %s, got %v", resultSHA256, results[0].ResultSHA256)
-	}
+	op(journal.ApplyOp{OpType: journal.ApplyOpStarted})
+	op(journal.ApplyOp{OpType: journal.ApplyOpFile, Path: strPtr("a:b.go"), NewSHA256: &newA, Outcome: strPtr("applied")})
+	state(journal.ChangeSetStatePartial, map[string]string{"a:b.go": "applied", "b.go": "pending"})
 
-	// Verify byte lengths are correct
-	if results[0].ResultByteLen == nil || *results[0].ResultByteLen != int64(len(resultContent)) {
-		t.Errorf("expected result byte len %d, got %v", len(resultContent), results[0].ResultByteLen)
+	op(journal.ApplyOp{OpType: journal.ApplyOpFile, Path: strPtr("b.go"), Outcome: strPtr("conflict")})
+	op(journal.ApplyOp{OpType: journal.ApplyOpFinished, FinalState: strPtr("partial")})
+	state(journal.ChangeSetStatePartial, map[string]string{"a:b.go": "applied", "b.go": "conflict"})
+
+	op(journal.ApplyOp{OpType: journal.ApplyOpDiscarded})
+	state(journal.ChangeSetStateDiscarded, map[string]string{"a:b.go": "applied", "b.go": "conflict"})
+}
+
+func TestChangeSetFinishedStates(t *testing.T) {
+	for _, final := range []string{"applied", "conflict"} {
+		t.Run(final, func(t *testing.T) {
+			f := newToolFixture(t)
+			h := f.put("x")
+			f.tx(func(tx *journal.Tx) error {
+				if err := tx.StoreChangeSet(journal.ChangeSet{ID: "cs1", TurnID: "turn1", SnapshotHash: h, ChangesHash: h, CreatedAt: time.Now()}); err != nil {
+					return err
+				}
+				if err := tx.StoreChangeSetPath(journal.ChangeSetPath{ID: "p1", ChangeSetID: "cs1", Path: "a", Op: "create", NewSHA256: h, NewLen: 1}); err != nil {
+					return err
+				}
+				outcome := "applied"
+				if final == "conflict" {
+					outcome = "conflict"
+				}
+				for _, o := range []journal.ApplyOp{
+					{ID: "1", OpType: journal.ApplyOpStarted},
+					{ID: "2", OpType: journal.ApplyOpFile, Path: strPtr("a"), Outcome: &outcome},
+					{ID: "3", OpType: journal.ApplyOpFinished, FinalState: &final},
+				} {
+					o.ChangeSetID, o.AppliedAt = "cs1", time.Now()
+					if err := tx.StoreApplyOp(o); err != nil {
+						return err
+					}
+				}
+				state, outcomes, err := tx.ComputeApplyState("cs1")
+				if err != nil || state != final || outcomes["a"] != outcome {
+					t.Errorf("state=%s outcomes=%v err=%v", state, outcomes, err)
+				}
+				return nil
+			})
+		})
 	}
+}
+
+func TestChangeSetRecordsAreImmutable(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("x")
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreChangeSet(journal.ChangeSet{ID: "cs1", TurnID: "turn1", SnapshotHash: h, ChangesHash: h, CreatedAt: time.Now()}); err != nil {
+			return err
+		}
+		if err := tx.StoreChangeSetPath(journal.ChangeSetPath{ID: "p1", ChangeSetID: "cs1", Path: "a", Op: "create", NewSHA256: h, NewLen: 1}); err != nil {
+			return err
+		}
+		return tx.StoreApplyOp(journal.ApplyOp{ID: "ao", ChangeSetID: "cs1", OpType: journal.ApplyOpStarted, AppliedAt: time.Now()})
+	})
+	for _, q := range []string{
+		`UPDATE change_sets SET snapshot_hash = 'z'`, `DELETE FROM change_sets`,
+		`UPDATE change_set_paths SET path = 'z'`, `DELETE FROM change_set_paths`,
+		`UPDATE apply_ops SET op_type = 'finished'`, `DELETE FROM apply_ops`,
+	} {
+		if _, err := f.db.Conn().Exec(q); err == nil {
+			t.Errorf("%s must be refused", q)
+		}
+	}
+}
+
+func TestVerdictEvidenceAndStagingSurviveRestart(t *testing.T) {
+	f := newToolFixture(t)
+	h1, h2 := f.put("v1"), f.put("v2")
+	if _, err := f.db.Conn().Exec(`INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status) VALUES ('v1', 'attempt1', 'h', 'valid')`); err != nil {
+		t.Fatalf("insert verdict: %v", err)
+	}
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h1}); err != nil {
+			return err
+		}
+		if err := tx.StoreVerdictToolResult("v1", "c1"); err != nil {
+			return err
+		}
+		if err := tx.StoreStaging("turn1", "dir/a:b", h1); err != nil {
+			return err
+		}
+		return tx.StoreStaging("turn1", "dir/a:b", h2) // restage replaces
+	})
+	f.restart()
+	f.tx(func(tx *journal.Tx) error {
+		ids, err := tx.GetVerdictToolResults("v1")
+		if err != nil || len(ids) != 1 || ids[0] != "c1" {
+			t.Errorf("verdict evidence = %v, %v", ids, err)
+		}
+		st, err := tx.GetStagingByTurn("turn1")
+		if err != nil || len(st) != 1 || st["dir/a:b"] != h2 {
+			t.Errorf("staging = %v, %v", st, err)
+		}
+		body, err := tx.GetToolContent(st["dir/a:b"])
+		if err != nil || string(body) != "v2" {
+			t.Errorf("staged content = %q, %v", body, err)
+		}
+		return nil
+	})
 }
 
 // Helper functions

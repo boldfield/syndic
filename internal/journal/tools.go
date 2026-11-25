@@ -4,13 +4,16 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"time"
 )
 
-// ToolCall represents a tool call and its result stored in the journal.
+// ToolCall represents a tool call and, once recorded, its result. The row is
+// the durable intent journaled before dispatch; Status is derived: accepted
+// until a ToolResult exists, then the result's status.
 type ToolCall struct {
 	ID               string
 	AttemptID        string
@@ -99,26 +102,79 @@ const (
 	ChangeSetOpModify = "modify"
 )
 
-// StoreToolCall records a tool call in the journal.
+// Event kinds appended by the tool record methods, in the same transaction as
+// the record they describe.
+const (
+	EventToolCallAccepted   = "tool_call_accepted"
+	EventToolResultRecorded = "tool_result_recorded"
+	EventObservationStored  = "observation_stored"
+	EventChangeSetFrozen    = "change_set_frozen"
+	EventApplyOpRecorded    = "apply_op_recorded"
+	EventVerdictToolResult  = "verdict_tool_result_linked"
+	EventPathStaged         = "path_staged"
+	EventPathUnstaged       = "path_unstaged"
+)
+
+// emitToolEvent appends a journal event in the caller's transaction, so the
+// record and its event commit or roll back together.
+func (tx *Tx) emitToolEvent(kind string, payload map[string]any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal %s event: %w", kind, err)
+	}
+	return tx.AppendEvent(kind, data)
+}
+
+// PutToolContent stores body in the content store under its sha256 and returns
+// the hash. Storing the same bytes again is a no-op. Every hash a tool record
+// cites must be stored first (the schema enforces it), so the evidence can be
+// rebuilt from the hashes after a restart.
+func (tx *Tx) PutToolContent(body []byte) (string, error) {
+	sum := computeSHA256(body)
+	if _, err := tx.tx.Exec(`INSERT OR IGNORE INTO tool_content (sha256, body) VALUES (?, ?)`, sum, body); err != nil {
+		return "", fmt.Errorf("store tool content: %w", err)
+	}
+	return sum, nil
+}
+
+// GetToolContent returns the bytes stored under sha256, or ErrNoSuchContent.
+func (tx *Tx) GetToolContent(sha256 string) ([]byte, error) {
+	var body []byte
+	err := tx.tx.QueryRow(`SELECT body FROM tool_content WHERE sha256 = ?`, sha256).Scan(&body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("tool content %q: %w", sha256, ErrNoSuchContent)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query tool content: %w", err)
+	}
+	return body, nil
+}
+
+// StoreToolCall records the durable intent of a tool call, before dispatch.
+// The call's Status, result and error fields are ignored: a result is recorded
+// separately with StoreToolResult. ArgsSHA256 must already be in the content store.
 func (tx *Tx) StoreToolCall(call ToolCall) error {
 	_, err := tx.tx.Exec(`
-		INSERT INTO tool_calls (id, attempt_id, name, args_sha256, class, status, result_sha256, result_byte_len, observed_identity, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, call.ID, call.AttemptID, call.Name, call.ArgsSHA256, call.Class, call.Status,
-		call.ResultSHA256, call.ResultByteLen, call.ObservedIdentity, call.ErrorMessage)
+		INSERT INTO tool_calls (id, attempt_id, name, args_sha256, class, observed_identity)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, call.ID, call.AttemptID, call.Name, call.ArgsSHA256, call.Class, call.ObservedIdentity)
 	if err != nil {
 		return fmt.Errorf("store tool call: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventToolCallAccepted, map[string]any{
+		"tool_call_id": call.ID, "attempt_id": call.AttemptID, "name": call.Name, "args_sha256": call.ArgsSHA256,
+	})
 }
 
 // GetToolCallsByAttempt retrieves all tool calls for an attempt.
 func (tx *Tx) GetToolCallsByAttempt(attemptID string) ([]ToolCall, error) {
 	rows, err := tx.tx.Query(`
-		SELECT id, attempt_id, name, args_sha256, class, status, result_sha256, result_byte_len, observed_identity, error_message
-		FROM tool_calls
-		WHERE attempt_id = ?
-		ORDER BY rowid
+		SELECT c.id, c.attempt_id, c.name, c.args_sha256, c.class, COALESCE(r.status, 'accepted'),
+			r.result_sha256, r.result_byte_len, c.observed_identity, r.error_message
+		FROM tool_calls c
+		LEFT JOIN tool_results r ON r.tool_call_id = c.id
+		WHERE c.attempt_id = ?
+		ORDER BY c.rowid
 	`, attemptID)
 	if err != nil {
 		return nil, fmt.Errorf("query tool calls: %w", err)
@@ -149,7 +205,9 @@ func (tx *Tx) StoreToolResult(result ToolResult) error {
 	if err != nil {
 		return fmt.Errorf("store tool result: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventToolResultRecorded, map[string]any{
+		"tool_call_id": result.ToolCallID, "status": result.Status, "result_sha256": result.ResultSHA256,
+	})
 }
 
 // GetToolResultsByToolCall retrieves all results for a tool call.
@@ -195,7 +253,10 @@ func (tx *Tx) StoreObservation(obs Observation) error {
 	if err != nil {
 		return fmt.Errorf("store observation: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventObservationStored, map[string]any{
+		"observation_id": obs.ID, "turn_id": obs.TurnID, "attempt_id": obs.AttemptID,
+		"snapshot_version": obs.SnapshotVersion, "path": obs.Path, "kind": obs.Kind,
+	})
 }
 
 // GetObservationsByTurn retrieves all observations for a turn, ordered by snapshot version.
@@ -246,27 +307,31 @@ func (tx *Tx) GetLatestObservationVersion(turnID string) (int, error) {
 	return version, nil
 }
 
-// StoreChangeSet records a change set at candidate freeze.
+// StoreChangeSet records a change set at candidate freeze. It starts appliable;
+// cs.State is ignored because the state is derived from apply_ops.
 func (tx *Tx) StoreChangeSet(cs ChangeSet) error {
 	_, err := tx.tx.Exec(`
-		INSERT INTO change_sets (id, turn_id, state, snapshot_hash, changes_hash, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, cs.ID, cs.TurnID, cs.State, cs.SnapshotHash, cs.ChangesHash, cs.CreatedAt.Format(time.RFC3339Nano))
+		INSERT INTO change_sets (id, turn_id, snapshot_hash, changes_hash, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, cs.ID, cs.TurnID, cs.SnapshotHash, cs.ChangesHash, cs.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("store change set: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventChangeSetFrozen, map[string]any{
+		"change_set_id": cs.ID, "turn_id": cs.TurnID, "changes_hash": cs.ChangesHash,
+	})
 }
 
 // GetChangeSetByTurn retrieves the change set for a turn, or nil if not found.
+// State is derived from the change set's apply operations.
 func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 	var cs ChangeSet
 	var createdAtStr string
 	err := tx.tx.QueryRow(`
-		SELECT id, turn_id, state, snapshot_hash, changes_hash, created_at
+		SELECT id, turn_id, snapshot_hash, changes_hash, created_at
 		FROM change_sets
 		WHERE turn_id = ?
-	`, turnID).Scan(&cs.ID, &cs.TurnID, &cs.State, &cs.SnapshotHash, &cs.ChangesHash, &createdAtStr)
+	`, turnID).Scan(&cs.ID, &cs.TurnID, &cs.SnapshotHash, &cs.ChangesHash, &createdAtStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -278,6 +343,11 @@ func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 		return nil, fmt.Errorf("parse change set time: %w", err)
 	}
 	cs.CreatedAt = t
+	state, _, err := tx.ComputeApplyState(cs.ID)
+	if err != nil {
+		return nil, err
+	}
+	cs.State = state
 	return &cs, nil
 }
 
@@ -335,7 +405,7 @@ func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) error {
 	if err != nil {
 		return fmt.Errorf("store verdict tool result: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventVerdictToolResult, map[string]any{"verdict_id": verdictID, "tool_call_id": toolCallID})
 }
 
 // generateRandomID generates a unique random ID.
@@ -394,7 +464,7 @@ func (tx *Tx) StoreStaging(turnID, path, contentHash string) error {
 		if updateErr != nil {
 			return fmt.Errorf("update staging: %w", updateErr)
 		}
-		return nil
+		return tx.emitToolEvent(EventPathStaged, map[string]any{"turn_id": turnID, "path": path, "content_hash": contentHash})
 	case errors.Is(err, sql.ErrNoRows):
 		// Path not staged yet, insert it with new ID
 		id, genErr := generateRandomID()
@@ -408,7 +478,7 @@ func (tx *Tx) StoreStaging(turnID, path, contentHash string) error {
 		if insertErr != nil {
 			return fmt.Errorf("insert staging: %w", insertErr)
 		}
-		return nil
+		return tx.emitToolEvent(EventPathStaged, map[string]any{"turn_id": turnID, "path": path, "content_hash": contentHash})
 	default:
 		return fmt.Errorf("query staging: %w", err)
 	}
@@ -446,36 +516,50 @@ func (tx *Tx) UnstageFile(turnID, path string) error {
 	if err != nil {
 		return fmt.Errorf("unstage file: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventPathUnstaged, map[string]any{"turn_id": turnID, "path": path})
 }
 
+// ApplyOp op types.
+const (
+	ApplyOpStarted   = "started"
+	ApplyOpFile      = "file"
+	ApplyOpFinished  = "finished"
+	ApplyOpDiscarded = "discarded"
+)
+
 // ApplyOp represents an apply operation in the journal.
+// File ops carry Path and Outcome (applied or conflict); NewSHA256 is the
+// content written for an applied path. Finished ops carry FinalState.
 type ApplyOp struct {
 	ID          string
 	ChangeSetID string
-	OpType      string // "started", "file", or "finished"
+	OpType      string
 	Path        *string
 	NewSHA256   *string
+	Outcome     *string
+	FinalState  *string
 	AppliedAt   time.Time
 }
 
-// StoreApplyOp records an apply operation (started, file, or finished).
-// This is an append-only record of apply state transitions.
+// StoreApplyOp records an apply operation. Apply operations are append-only;
+// per-path outcomes and the change set state are derived from them.
 func (tx *Tx) StoreApplyOp(op ApplyOp) error {
 	_, err := tx.tx.Exec(`
-		INSERT INTO apply_ops (id, change_set_id, op_type, path, new_sha256, applied_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, op.ID, op.ChangeSetID, op.OpType, op.Path, op.NewSHA256, op.AppliedAt.Format(time.RFC3339Nano))
+		INSERT INTO apply_ops (id, change_set_id, op_type, path, new_sha256, outcome, final_state, applied_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, op.ID, op.ChangeSetID, op.OpType, op.Path, op.NewSHA256, op.Outcome, op.FinalState, op.AppliedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("store apply op: %w", err)
 	}
-	return nil
+	return tx.emitToolEvent(EventApplyOpRecorded, map[string]any{
+		"change_set_id": op.ChangeSetID, "op_type": op.OpType, "path": op.Path, "outcome": op.Outcome, "final_state": op.FinalState,
+	})
 }
 
 // GetApplyOps retrieves all apply operations for a change set, in order.
 func (tx *Tx) GetApplyOps(changeSetID string) ([]ApplyOp, error) {
 	rows, err := tx.tx.Query(`
-		SELECT id, change_set_id, op_type, path, new_sha256, applied_at
+		SELECT id, change_set_id, op_type, path, new_sha256, outcome, final_state, applied_at
 		FROM apply_ops
 		WHERE change_set_id = ?
 		ORDER BY rowid
@@ -489,7 +573,7 @@ func (tx *Tx) GetApplyOps(changeSetID string) ([]ApplyOp, error) {
 	for rows.Next() {
 		var op ApplyOp
 		var appliedAtStr string
-		if err := rows.Scan(&op.ID, &op.ChangeSetID, &op.OpType, &op.Path, &op.NewSHA256, &appliedAtStr); err != nil {
+		if err := rows.Scan(&op.ID, &op.ChangeSetID, &op.OpType, &op.Path, &op.NewSHA256, &op.Outcome, &op.FinalState, &appliedAtStr); err != nil {
 			return nil, fmt.Errorf("scan apply op: %w", err)
 		}
 		t, err := time.Parse(time.RFC3339Nano, appliedAtStr)
@@ -505,83 +589,65 @@ func (tx *Tx) GetApplyOps(changeSetID string) ([]ApplyOp, error) {
 	return ops, nil
 }
 
-// ComputeApplyState derives the final apply state and per-path outcomes from apply_ops and change_set_paths.
-// Returns the final change set state and a map of path -> outcome.
-func (tx *Tx) ComputeApplyState(changeSetID string) (string, map[string]string, error) {
-	ops, err := tx.GetApplyOps(changeSetID)
-	if err != nil {
-		return "", nil, fmt.Errorf("get apply ops: %w", err)
-	}
-
-	paths, err := tx.GetChangeSetPathsByChangeSet(changeSetID)
-	if err != nil {
-		return "", nil, fmt.Errorf("get change set paths: %w", err)
-	}
-
-	// Build set of originally pending paths
-	pendingPaths := make(map[string]bool)
-	for _, p := range paths {
-		pendingPaths[p.Path] = true
-	}
-
-	// Track applied paths from apply_file ops
-	appliedPaths := make(map[string]bool)
-	hasApplyStarted := false
-	hasApplyFinished := false
-
-	for _, op := range ops {
-		switch op.OpType {
-		case "started":
-			hasApplyStarted = true
-		case "file":
-			if op.Path != nil {
-				appliedPaths[*op.Path] = true
-			}
-		case "finished":
-			hasApplyFinished = true
-		}
-	}
-
-	// Determine state: if no apply_ops, stay appliable; if unfinished, partial; if finished, check for conflicts
-	var finalState string
-	if !hasApplyStarted {
-		finalState = ChangeSetStateAppliable
-	} else if !hasApplyFinished {
-		finalState = ChangeSetStatePartial
-	} else {
-		// All paths applied -> applied; some paths not applied -> conflict
-		allApplied := true
-		for path := range pendingPaths {
-			if !appliedPaths[path] {
-				allApplied = false
-				break
-			}
-		}
-		if allApplied {
-			finalState = ChangeSetStateApplied
-		} else {
-			finalState = ChangeSetStateConflict
-		}
-	}
-
-	// Build per-path outcome map
-	outcomes := make(map[string]string)
-	for path := range pendingPaths {
-		if appliedPaths[path] {
-			outcomes[path] = ChangeSetPathOutcomeApplied
-		} else if finalState == ChangeSetStatePartial {
-			outcomes[path] = ChangeSetPathOutcomePending
-		} else {
-			outcomes[path] = ChangeSetPathOutcomeConflict
-		}
-	}
-
-	return finalState, outcomes, nil
-}
-
 // ChangeSetPathOutcome values derived from apply_ops.
 const (
 	ChangeSetPathOutcomePending  = "pending"
 	ChangeSetPathOutcomeApplied  = "applied"
 	ChangeSetPathOutcomeConflict = "conflict"
 )
+
+// ComputeApplyState derives the change set state and per-path outcomes from
+// the change set's paths and its append-only apply_ops. Every path starts
+// pending; a file op moves it to applied or conflict. The state is discarded
+// once a discarded op exists; otherwise the finished op's final state; with no
+// finished op it is partial if any path was applied, else appliable.
+func (tx *Tx) ComputeApplyState(changeSetID string) (string, map[string]string, error) {
+	ops, err := tx.GetApplyOps(changeSetID)
+	if err != nil {
+		return "", nil, fmt.Errorf("get apply ops: %w", err)
+	}
+	paths, err := tx.GetChangeSetPathsByChangeSet(changeSetID)
+	if err != nil {
+		return "", nil, fmt.Errorf("get change set paths: %w", err)
+	}
+
+	outcomes := make(map[string]string, len(paths))
+	for _, p := range paths {
+		outcomes[p.Path] = ChangeSetPathOutcomePending
+	}
+	discarded := false
+	finalState := ""
+	anyApplied := false
+	for _, op := range ops {
+		switch op.OpType {
+		case ApplyOpFile:
+			if op.Path == nil || op.Outcome == nil {
+				continue
+			}
+			if _, ok := outcomes[*op.Path]; !ok {
+				continue
+			}
+			outcomes[*op.Path] = *op.Outcome
+			if *op.Outcome == ChangeSetPathOutcomeApplied {
+				anyApplied = true
+			}
+		case ApplyOpFinished:
+			if op.FinalState != nil {
+				finalState = *op.FinalState
+			}
+		case ApplyOpDiscarded:
+			discarded = true
+		}
+	}
+
+	switch {
+	case discarded:
+		return ChangeSetStateDiscarded, outcomes, nil
+	case finalState != "":
+		return finalState, outcomes, nil
+	case anyApplied:
+		return ChangeSetStatePartial, outcomes, nil
+	default:
+		return ChangeSetStateAppliable, outcomes, nil
+	}
+}

@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
+
+	"github.com/boldfield/syndic/internal/journal"
 )
 
 // TestMigration014 verifies that migration 014 creates the tools schema correctly.
@@ -42,7 +43,7 @@ func TestMigration014(t *testing.T) {
 	}
 
 	// Now verify the tables exist
-	tables := []string{"tool_calls", "tool_results", "observations", "change_sets", "change_set_paths", "apply_ops", "verdict_tool_results", "staging"}
+	tables := []string{"tool_content", "tool_calls", "tool_results", "observations", "change_sets", "change_set_paths", "apply_ops", "verdict_tool_results", "staging"}
 	for _, table := range tables {
 		var exists int
 		err := conn.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists)
@@ -53,7 +54,7 @@ func TestMigration014(t *testing.T) {
 
 	// Verify tool_calls columns
 	toolCallsCols := tableColumns(t, conn, "tool_calls")
-	requiredToolCallsCols := []string{"id", "attempt_id", "name", "args_sha256", "class", "status", "result_sha256", "result_byte_len", "observed_identity", "error_message"}
+	requiredToolCallsCols := []string{"id", "attempt_id", "name", "args_sha256", "class", "observed_identity"}
 	for _, col := range requiredToolCallsCols {
 		if !toolCallsCols[col] {
 			t.Errorf("tool_calls.%s not found", col)
@@ -80,7 +81,7 @@ func TestMigration014(t *testing.T) {
 
 	// Verify change_sets columns
 	changeSetsCols := tableColumns(t, conn, "change_sets")
-	requiredChangeSetsCols := []string{"id", "turn_id", "state", "snapshot_hash", "changes_hash", "created_at"}
+	requiredChangeSetsCols := []string{"id", "turn_id", "snapshot_hash", "changes_hash", "created_at"}
 	for _, col := range requiredChangeSetsCols {
 		if !changeSetsCols[col] {
 			t.Errorf("change_sets.%s not found", col)
@@ -89,7 +90,7 @@ func TestMigration014(t *testing.T) {
 
 	// Verify change_set_paths columns
 	changeSetPathsCols := tableColumns(t, conn, "change_set_paths")
-	requiredPathCols := []string{"id", "change_set_id", "path", "op", "base_sha256", "new_sha256", "new_len", "outcome"}
+	requiredPathCols := []string{"id", "change_set_id", "path", "op", "base_sha256", "new_sha256", "new_len"}
 	for _, col := range requiredPathCols {
 		if !changeSetPathsCols[col] {
 			t.Errorf("change_set_paths.%s not found", col)
@@ -98,7 +99,7 @@ func TestMigration014(t *testing.T) {
 
 	// Verify apply_ops columns
 	applyOpsCols := tableColumns(t, conn, "apply_ops")
-	requiredApplyOpsCols := []string{"id", "change_set_id", "op_type", "path", "new_sha256", "applied_at"}
+	requiredApplyOpsCols := []string{"id", "change_set_id", "op_type", "path", "new_sha256", "outcome", "final_state", "applied_at"}
 	for _, col := range requiredApplyOpsCols {
 		if !applyOpsCols[col] {
 			t.Errorf("apply_ops.%s not found", col)
@@ -124,26 +125,22 @@ func TestMigration014(t *testing.T) {
 	}
 }
 
-// TestMigration014UpgradeFromV13 tests that data at v13 is retained after upgrading to v14.
+// TestMigration014UpgradeFromV13 seeds a populated version-13 database and
+// upgrades it through journal.Open, the real migration runner, then checks the
+// v13 data survived and the new tables work against it.
 func TestMigration014UpgradeFromV13(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "test.db")
+	path := filepath.Join(t.TempDir(), "v13.db")
 	conn, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
-
-	// Create schema_version table
 	if _, err := conn.Exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
 		t.Fatal(err)
 	}
-
-	// Apply migrations 001-013
 	files, err := filepath.Glob("migrations/0*.sql")
-	if err != nil || len(files) < 13 {
-		t.Fatalf("migration files = %v, %v (need at least 13 migrations)", files, err)
+	if err != nil || len(files) < 14 {
+		t.Fatalf("migration files = %v, %v", files, err)
 	}
-
 	for i, f := range files[:13] {
 		content, err := os.ReadFile(f)
 		if err != nil {
@@ -156,75 +153,62 @@ func TestMigration014UpgradeFromV13(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-
-	// Insert D data at v13
-	runID := "run-upgrade-test"
-	turnID := "turn-1"
-	attemptID := "attempt-1"
-
-	if _, err := conn.Exec(`INSERT INTO runs (id, manifest, manifest_hash) VALUES (?, ?, ?)`,
-		runID, "{}", "hash123"); err != nil {
-		t.Fatalf("insert run: %v", err)
+	for _, stmt := range []string{
+		`INSERT INTO runs (id, manifest, manifest_hash) VALUES ('r1', '{}', 'h1')`,
+		`INSERT INTO conversations (id) VALUES ('c1')`,
+		`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES ('t1', 'r1', 'review', 'c1')`,
+		`INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state, text)
+			VALUES ('a1', 't1', 'p1', 'author', 1, '2026-01-01T00:00:00Z', 'completed', 'hello')`,
+		`INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, validation_status) VALUES ('v1', 'a1', 'ch', 'approve', 'valid')`,
+		`INSERT INTO review_content (ref, body) VALUES ('commentary:a1', 'frozen commentary')`,
+		`INSERT INTO events (turn_id, event_type, data) VALUES ('t1', 'old_event', '{}')`,
+	} {
+		if _, err := conn.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	// Create conversation for the turn
-	convID := "conv-" + turnID
-	if _, err := conn.Exec(`INSERT INTO conversations (id) VALUES (?)`, convID); err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
-
-	if _, err := conn.Exec(`INSERT INTO turns (id, run_id, mode, conversation_id) VALUES (?, ?, ?, ?)`,
-		turnID, runID, "review", convID); err != nil {
-		t.Fatalf("insert turn: %v", err)
-	}
-
-	now := time.Now().Format(time.RFC3339Nano)
-	if _, err := conn.Exec(`INSERT INTO attempts (id, turn_id, participant, phase, epoch, dispatched_at, state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		attemptID, turnID, "participant1", "author", 1, now, "completed"); err != nil {
-		t.Fatalf("insert attempt: %v", err)
-	}
-
-	// Now apply migration 014
-	content, err := os.ReadFile("migrations/014_tools.sql")
+	db, err := journal.Open(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("upgrade via Open: %v", err)
 	}
-	if _, err := conn.Exec(string(content)); err != nil {
-		t.Fatalf("apply migration 014: %v", err)
-	}
-	if _, err := conn.Exec(`INSERT INTO schema_version (version) VALUES (14)`); err != nil {
-		t.Fatal(err)
-	}
+	defer func() { _ = db.Close() }()
+	c := db.Conn()
 
-	// Verify the D data still exists
-	var count int
-	if err := conn.QueryRow("SELECT COUNT(*) FROM runs WHERE id = ?", runID).Scan(&count); err != nil {
-		t.Fatalf("query runs: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 run after upgrade, got %d", count)
-	}
-
-	if err := conn.QueryRow("SELECT COUNT(*) FROM turns WHERE id = ?", turnID).Scan(&count); err != nil {
-		t.Fatalf("query turns: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 turn after upgrade, got %d", count)
-	}
-
-	if err := conn.QueryRow("SELECT COUNT(*) FROM attempts WHERE id = ?", attemptID).Scan(&count); err != nil {
-		t.Fatalf("query attempts: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 attempt after upgrade, got %d", count)
-	}
-
-	// Verify schema version is 14
 	var version int
-	if err := conn.QueryRow("SELECT MAX(version) FROM schema_version").Scan(&version); err != nil {
-		t.Fatal(err)
+	if err := c.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != len(files) {
+		t.Fatalf("schema version = %d, %v; want %d", version, err, len(files))
 	}
-	if version != 14 {
-		t.Errorf("expected schema version 14 after upgrade, got %d", version)
+	for _, q := range []string{
+		`SELECT COUNT(*) FROM runs WHERE id = 'r1'`,
+		`SELECT COUNT(*) FROM turns WHERE id = 't1'`,
+		`SELECT COUNT(*) FROM attempts WHERE id = 'a1' AND text = 'hello'`,
+		`SELECT COUNT(*) FROM verdicts WHERE id = 'v1'`,
+		`SELECT COUNT(*) FROM review_content WHERE ref = 'commentary:a1'`,
+		`SELECT COUNT(*) FROM events WHERE event_type = 'old_event'`,
+	} {
+		var n int
+		if err := c.QueryRow(q).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s = %d, %v; want 1", q, n, err)
+		}
+	}
+
+	// The upgraded database accepts tool records tied to the old rows.
+	s := journal.NewStore(db)
+	err = s.Tx(func(tx *journal.Tx) error {
+		sum, err := tx.PutToolContent([]byte("args"))
+		if err != nil {
+			return err
+		}
+		if err := tx.StoreToolCall(journal.ToolCall{ID: "tc1", AttemptID: "a1", Name: "read_file", ArgsSHA256: sum}); err != nil {
+			return err
+		}
+		return tx.StoreVerdictToolResult("v1", "tc1")
+	})
+	if err != nil {
+		t.Fatalf("tool records on upgraded db: %v", err)
 	}
 }
