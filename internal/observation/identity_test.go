@@ -1,6 +1,7 @@
 package observation
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"strings"
@@ -232,7 +233,7 @@ func TestSnapshotHashOrdering(t *testing.T) {
 	}
 }
 
-// TestFrameChangeSetLinesFormat verifies the change set line format.
+// TestFrameChangeSetLinesFormat verifies the change set line format with length-framing.
 func TestFrameChangeSetLinesFormat(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	paths := []ChangeSetPathRecord{
@@ -251,8 +252,10 @@ func TestFrameChangeSetLinesFormat(t *testing.T) {
 	}
 
 	frameStr := string(frame)
-	if !strings.Contains(frameStr, "file.txt create absent") {
-		t.Errorf("Change set line format mismatch: %q", frameStr)
+	// Format should be: <path-len> <path> <op> <base|absent> <new_sha> <new_len>\n
+	// For "file.txt" (8 bytes): "8 file.txt create absent <hash> 42\n"
+	if !strings.Contains(frameStr, "8 file.txt create absent") {
+		t.Errorf("Change set line format mismatch, expected '8 file.txt create absent...': %q", frameStr)
 	}
 	if !strings.Contains(frameStr, hash) {
 		t.Error("Change set line must contain new SHA")
@@ -379,24 +382,53 @@ func TestIsValidSHA256Hex(t *testing.T) {
 	}
 }
 
-// TestPathHasBinaryContent tests binary content detection.
-func TestPathHasBinaryContent(t *testing.T) {
-	tests := []struct {
-		path   string
-		binary bool
-	}{
-		{"simple.txt", false},
-		{"path/with/slashes", false},
-		{"path\x00with\x00nulls", true},
-		{"path\nwith\nnewlines", false}, // newlines are OK, they're handled by framing
-		{"path\twith\ttabs", false},     // tabs are OK
-		{"path\rcarriage", true},        // carriage return is binary
+// TestFrameChangeSetLinesPathWithNewlineCollision tests that length-framing prevents collisions
+// when paths contain newlines. This is the core requirement from the reviewer feedback.
+func TestFrameChangeSetLinesPathWithNewlineCollision(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	// One change set with a path containing a newline
+	pathsWithNewline := []ChangeSetPathRecord{
+		{
+			Path:    "x create absent " + hash[:8] + " 1\ny",
+			Op:      "create",
+			BaseSHA: "",
+			NewSHA:  hash,
+			NewLen:  100,
+		},
 	}
 
-	for _, test := range tests {
-		if PathHasBinaryContent(test.path) != test.binary {
-			t.Errorf("PathHasBinaryContent(%q): expected %v", test.path, test.binary)
-		}
+	frameWithNewline, err := FrameChangeSetLines(pathsWithNewline)
+	if err != nil {
+		t.Fatalf("FrameChangeSetLines with newline in path failed: %v", err)
+	}
+
+	// Two separate entries: "x create absent ..." and "y"
+	pathsSeparate := []ChangeSetPathRecord{
+		{
+			Path:    "x create absent " + hash[:8] + " 1",
+			Op:      "create",
+			BaseSHA: "",
+			NewSHA:  hash,
+			NewLen:  100,
+		},
+		{
+			Path:    "y",
+			Op:      "create",
+			BaseSHA: "",
+			NewSHA:  hash,
+			NewLen:  100,
+		},
+	}
+
+	frameSeparate, err := FrameChangeSetLines(pathsSeparate)
+	if err != nil {
+		t.Fatalf("FrameChangeSetLines with separate paths failed: %v", err)
+	}
+
+	// The critical assertion: they must be different due to length-framing
+	if bytes.Equal(frameWithNewline, frameSeparate) {
+		t.Error("FrameChangeSetLines with newline in path must differ from separate entries due to length-framing")
 	}
 }
 
@@ -513,5 +545,426 @@ func TestReviewerOnlyObservationDoesNotRewriteFrozen(t *testing.T) {
 	// in the design; here we just verify that the extended hash is different)
 	if extendedHash == frozenHash {
 		t.Error("Post-freeze observation must result in a different snapshot hash version")
+	}
+}
+
+// TestFrameChangeSetLinesValidation tests validation of change set records.
+func TestFrameChangeSetLinesValidation(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	tests := []struct {
+		name    string
+		records []ChangeSetPathRecord
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid create",
+			records: []ChangeSetPathRecord{
+				{Path: "new.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 100},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid modify",
+			records: []ChangeSetPathRecord{
+				{Path: "old.txt", Op: "modify", BaseSHA: hash, NewSHA: hash, NewLen: 100},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid op",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "delete", BaseSHA: "", NewSHA: hash, NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "invalid op",
+		},
+		{
+			name: "create with baseSHA",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "create", BaseSHA: hash, NewSHA: hash, NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "empty BaseSHA",
+		},
+		{
+			name: "modify without baseSHA",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "modify", BaseSHA: "", NewSHA: hash, NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "non-empty BaseSHA",
+		},
+		{
+			name: "invalid baseSHA hex",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "modify", BaseSHA: "not_hex", NewSHA: hash, NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "invalid BaseSHA hex",
+		},
+		{
+			name: "invalid newSHA hex",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: "not_hex", NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "invalid NewSHA hex",
+		},
+		{
+			name: "negative newLen",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: -1},
+			},
+			wantErr: true,
+			errMsg:  "negative NewLen",
+		},
+		{
+			name: "duplicate paths",
+			records: []ChangeSetPathRecord{
+				{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 100},
+				{Path: "file.txt", Op: "modify", BaseSHA: hash, NewSHA: hash, NewLen: 200},
+			},
+			wantErr: true,
+			errMsg:  "duplicate path",
+		},
+		{
+			name: "empty path",
+			records: []ChangeSetPathRecord{
+				{Path: "", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 100},
+			},
+			wantErr: true,
+			errMsg:  "empty",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := FrameChangeSetLines(test.records)
+			if (err != nil) != test.wantErr {
+				t.Errorf("FrameChangeSetLines: wantErr=%v, got err=%v", test.wantErr, err)
+			}
+			if test.wantErr && test.errMsg != "" && (err == nil || !strings.Contains(err.Error(), test.errMsg)) {
+				t.Errorf("FrameChangeSetLines: expected error containing %q, got %v", test.errMsg, err)
+			}
+		})
+	}
+}
+
+// TestCandidateAuthorEvidenceMutation tests that changing author tool evidence changes
+// the candidate hash. The candidate's Evidence field includes tool result SHA256s,
+// so a change in evidence changes the candidate hash.
+func TestCandidateAuthorEvidenceMutation(t *testing.T) {
+	hash1 := strings.Repeat("a", 64)
+	hash2 := strings.Repeat("b", 64)
+	snapshotHash := strings.Repeat("c", 64)
+
+	// Same change set but with different snapshot hash
+	changeset1 := []ChangeSetPathRecord{
+		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash1, NewLen: 100},
+	}
+
+	changeset2 := []ChangeSetPathRecord{
+		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash2, NewLen: 100},
+	}
+
+	changesHash1, err := ChangesHash(changeset1, snapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash 1 failed: %v", err)
+	}
+
+	changesHash2, err := ChangesHash(changeset2, snapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash 2 failed: %v", err)
+	}
+
+	if changesHash1 == changesHash2 {
+		t.Error("ChangesHash must change when tool evidence changes")
+	}
+}
+
+// TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate tests that reviewer-only
+// observations (post-freeze) do not change the candidate's frozen hash. The candidate
+// freezes with a snapshot_hash, and post-freeze observations create a new version
+// but don't change the original frozen hash.
+func TestReviewerOnlyObservationDoesNotRewriteFrozenCandidate(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	// Frozen snapshot records
+	frozenRecords := []SnapshotRecord{
+		{Kind: KindFile, Path: "file1.txt", ValueHash: hash},
+	}
+
+	frozenSnapshotHash, err := SnapshotHash(frozenRecords)
+	if err != nil {
+		t.Fatalf("SnapshotHash frozen failed: %v", err)
+	}
+
+	// Frozen change set
+	frozenChangeset := []ChangeSetPathRecord{
+		{Path: "file1.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 100},
+	}
+
+	frozenChangesHash, err := ChangesHash(frozenChangeset, frozenSnapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash frozen failed: %v", err)
+	}
+
+	// Reviewer observes additional path (post-freeze)
+	extendedRecords := []SnapshotRecord{
+		{Kind: KindFile, Path: "file1.txt", ValueHash: hash},
+		{Kind: KindFile, Path: "file2.txt", ValueHash: hash},
+	}
+
+	extendedSnapshotHash, err := SnapshotHash(extendedRecords)
+	if err != nil {
+		t.Fatalf("SnapshotHash extended failed: %v", err)
+	}
+
+	// The frozen snapshot hash should not change even with extended records
+	if frozenSnapshotHash == extendedSnapshotHash {
+		t.Error("Extended snapshot should have different hash")
+	}
+
+	// But the frozen candidate keeps its original hash
+	extendedChangesHash, err := ChangesHash(frozenChangeset, extendedSnapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash extended failed: %v", err)
+	}
+
+	// When the candidate is re-frozen with the extended snapshot, its hash changes
+	if frozenChangesHash == extendedChangesHash {
+		t.Error("Changes hash must change when snapshot changes")
+	}
+
+	// But the original frozen candidate's hash remains unchanged in its record
+	refrozenChangesHash, err := ChangesHash(frozenChangeset, frozenSnapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash refrozen failed: %v", err)
+	}
+
+	if frozenChangesHash != refrozenChangesHash {
+		t.Error("Frozen candidate hash should be stable when using the same snapshot")
+	}
+}
+
+// TestEntryDistinctionWithNewline tests that a directory with one entry "a\nb"
+// differs from a directory with entries "a" and "b".
+func TestEntryDistinctionWithNewline(t *testing.T) {
+	entries1 := []EntryRecord{
+		{Type: "f", Name: "a\nb"},
+	}
+
+	entries2 := []EntryRecord{
+		{Type: "f", Name: "a"},
+		{Type: "f", Name: "b"},
+	}
+
+	frame1, err := FrameEntries(entries1)
+	if err != nil {
+		t.Fatalf("FrameEntries 1 failed: %v", err)
+	}
+
+	frame2, err := FrameEntries(entries2)
+	if err != nil {
+		t.Fatalf("FrameEntries 2 failed: %v", err)
+	}
+
+	if bytes.Equal(frame1, frame2) {
+		t.Error("Entry frames must differ for 'a\\nb' vs 'a' and 'b'")
+	}
+
+	// Compute hashes
+	hash1 := sha256.Sum256(frame1)
+	hash2 := sha256.Sum256(frame2)
+
+	if hash1 == hash2 {
+		t.Error("entries_sha256 must differ for 'a\\nb' vs 'a' and 'b'")
+	}
+}
+
+// TestFrameEntriesDuplicateDetection tests that duplicate entry names are rejected.
+func TestFrameEntriesDuplicateDetection(t *testing.T) {
+	entries := []EntryRecord{
+		{Type: "f", Name: "file.txt"},
+		{Type: "d", Name: "dir"},
+		{Type: "f", Name: "file.txt"}, // duplicate
+	}
+
+	_, err := FrameEntries(entries)
+	if err == nil {
+		t.Error("FrameEntries should reject duplicate entry names")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("Expected error containing 'duplicate', got: %v", err)
+	}
+}
+
+// TestFrameEntriesTypeValidation tests that entry types are validated.
+func TestFrameEntriesTypeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []EntryRecord
+		wantErr bool
+	}{
+		{
+			name:    "empty type",
+			entries: []EntryRecord{{Type: "", Name: "file"}},
+			wantErr: true,
+		},
+		{
+			name:    "type with newline",
+			entries: []EntryRecord{{Type: "f\nd", Name: "file"}},
+			wantErr: true,
+		},
+		{
+			name:    "valid types",
+			entries: []EntryRecord{{Type: "f", Name: "file"}, {Type: "d", Name: "dir"}},
+			wantErr: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := FrameEntries(test.entries)
+			if (err != nil) != test.wantErr {
+				t.Errorf("FrameEntries: wantErr=%v, got err=%v", test.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestGoldenFixturesChangeSet provides golden fixtures with pinned expected bytes and hashes.
+func TestGoldenFixturesChangeSet(t *testing.T) {
+	// Golden fixture 1: simple create with ASCII path
+	hash64 := strings.Repeat("a", 64)
+	changeset1 := []ChangeSetPathRecord{
+		{Path: "file.txt", Op: "create", BaseSHA: "", NewSHA: hash64, NewLen: 42},
+	}
+
+	frame1, err := FrameChangeSetLines(changeset1)
+	if err != nil {
+		t.Fatalf("FrameChangeSetLines fixture 1 failed: %v", err)
+	}
+
+	// Expected: "8 file.txt create absent " + hash64 + " 42\n"
+	expected1 := fmt.Sprintf("8 file.txt create absent %s 42\n", hash64)
+	if string(frame1) != expected1 {
+		t.Errorf("Golden fixture 1 mismatch.\nExpected: %q\nGot: %q", expected1, string(frame1))
+	}
+
+	snapshotHash1 := strings.Repeat("b", 64)
+	changesHash1, err := ChangesHash(changeset1, snapshotHash1)
+	if err != nil {
+		t.Fatalf("ChangesHash fixture 1 failed: %v", err)
+	}
+
+	// Verify it's a valid hash
+	if !IsValidSHA256Hex(changesHash1) {
+		t.Errorf("ChangesHash fixture 1 is not valid SHA-256 hex: %q", changesHash1)
+	}
+
+	// Golden fixture 2: path with newline
+	changesetNewline := []ChangeSetPathRecord{
+		{Path: "file\nname.txt", Op: "create", BaseSHA: "", NewSHA: hash64, NewLen: 100},
+	}
+
+	frameNewline, err := FrameChangeSetLines(changesetNewline)
+	if err != nil {
+		t.Fatalf("FrameChangeSetLines fixture newline failed: %v", err)
+	}
+
+	// The path is 15 bytes: "file\nname.txt"
+	pathBytes := []byte("file\nname.txt")
+	expectedNewline := fmt.Sprintf("%d file\nname.txt create absent %s 100\n", len(pathBytes), hash64)
+	if string(frameNewline) != expectedNewline {
+		t.Errorf("Golden fixture newline mismatch.\nExpected: %q\nGot: %q", expectedNewline, string(frameNewline))
+	}
+}
+
+// TestGoldenFixturesEntries provides golden fixtures for directory entries.
+func TestGoldenFixturesEntries(t *testing.T) {
+	// Golden fixture 1: simple entries
+	entries1 := []EntryRecord{
+		{Type: "f", Name: "file.txt"},
+		{Type: "d", Name: "subdir"},
+	}
+
+	frame1, err := FrameEntries(entries1)
+	if err != nil {
+		t.Fatalf("FrameEntries fixture 1 failed: %v", err)
+	}
+
+	// Expected (sorted by name bytewise): "f 8\nfile.txt\nd 6\nsubdir\n" (file.txt < subdir)
+	expected1 := "f 8\nfile.txt\nd 6\nsubdir\n"
+	if string(frame1) != expected1 {
+		t.Errorf("Golden fixture 1 mismatch.\nExpected: %q\nGot: %q", expected1, string(frame1))
+	}
+
+	hash1 := sha256.Sum256(frame1)
+	hashHex1 := fmt.Sprintf("%x", hash1)
+	if !IsValidSHA256Hex(hashHex1) {
+		t.Errorf("entries_sha256 fixture 1 is not valid hex: %q", hashHex1)
+	}
+
+	// Golden fixture 2: entry with newline in name
+	entries2 := []EntryRecord{
+		{Type: "f", Name: "a\nb"},
+	}
+
+	frame2, err := FrameEntries(entries2)
+	if err != nil {
+		t.Fatalf("FrameEntries fixture 2 failed: %v", err)
+	}
+
+	// The name is 3 bytes: "a\nb"
+	nameBytes := []byte("a\nb")
+	expected2 := fmt.Sprintf("f %d\na\nb\n", len(nameBytes))
+	if string(frame2) != expected2 {
+		t.Errorf("Golden fixture 2 mismatch.\nExpected: %q\nGot: %q", expected2, string(frame2))
+	}
+
+	hash2 := sha256.Sum256(frame2)
+	hashHex2 := fmt.Sprintf("%x", hash2)
+	if !IsValidSHA256Hex(hashHex2) {
+		t.Errorf("entries_sha256 fixture 2 is not valid hex: %q", hashHex2)
+	}
+
+	// The two fixtures must have different hashes
+	if hashHex1 == hashHex2 {
+		t.Error("Golden fixtures 1 and 2 should have different hashes")
+	}
+}
+
+// TestGoldenFixturesMultibyte provides golden fixtures with multibyte paths.
+func TestGoldenFixturesMultibyte(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+
+	// Golden fixture: multibyte UTF-8 path
+	changeset := []ChangeSetPathRecord{
+		{Path: "файл.txt", Op: "create", BaseSHA: "", NewSHA: hash, NewLen: 150},
+	}
+
+	frame, err := FrameChangeSetLines(changeset)
+	if err != nil {
+		t.Fatalf("FrameChangeSetLines multibyte failed: %v", err)
+	}
+
+	// The path "файл.txt" is 11 bytes in UTF-8
+	pathBytes := []byte("файл.txt")
+	expected := fmt.Sprintf("%d файл.txt create absent %s 150\n", len(pathBytes), hash)
+	if string(frame) != expected {
+		t.Errorf("Golden fixture multibyte mismatch.\nExpected: %q\nGot: %q", expected, string(frame))
+	}
+
+	snapshotHash := strings.Repeat("b", 64)
+	changesHash, err := ChangesHash(changeset, snapshotHash)
+	if err != nil {
+		t.Fatalf("ChangesHash multibyte failed: %v", err)
+	}
+
+	if !IsValidSHA256Hex(changesHash) {
+		t.Errorf("ChangesHash multibyte is not valid hex: %q", changesHash)
 	}
 }

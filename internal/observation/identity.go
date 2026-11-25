@@ -49,11 +49,17 @@ func FramePath(kind, path, valueHash string) ([]byte, error) {
 	if kind == KindFile && valueHash == "" {
 		return nil, fmt.Errorf("kind f requires non-empty value hash")
 	}
+	if kind == KindFile && !IsValidSHA256Hex(valueHash) {
+		return nil, fmt.Errorf("kind f requires valid SHA-256 hex, got %q", valueHash)
+	}
 	if kind == KindAbsent && valueHash != "" {
 		return nil, fmt.Errorf("kind a must have empty value hash")
 	}
 	if kind == KindListing && valueHash == "" {
 		return nil, fmt.Errorf("kind d requires non-empty value hash")
+	}
+	if kind == KindListing && !IsValidSHA256Hex(valueHash) {
+		return nil, fmt.Errorf("kind d requires valid SHA-256 hex, got %q", valueHash)
 	}
 
 	pathBytes := []byte(path)
@@ -91,6 +97,24 @@ func FrameEntries(entries []EntryRecord) ([]byte, error) {
 		return []byte{}, nil
 	}
 
+	// Validate all entries for duplicates
+	seen := make(map[string]bool)
+	for _, entry := range entries {
+		if entry.Name == "" {
+			return nil, fmt.Errorf("entry name must not be empty")
+		}
+		if seen[entry.Name] {
+			return nil, fmt.Errorf("duplicate entry name: %q", entry.Name)
+		}
+		seen[entry.Name] = true
+		if entry.Type == "" {
+			return nil, fmt.Errorf("entry type must not be empty for name %q", entry.Name)
+		}
+		if bytes.Contains([]byte(entry.Type), []byte{'\n'}) {
+			return nil, fmt.Errorf("entry type must not contain newlines for name %q", entry.Name)
+		}
+	}
+
 	// Sort entries by name (bytewise)
 	sortedEntries := make([]EntryRecord, len(entries))
 	copy(sortedEntries, entries)
@@ -116,6 +140,22 @@ func FrameEntries(entries []EntryRecord) ([]byte, error) {
 func FrameSnapshotRecords(records []SnapshotRecord) ([]byte, error) {
 	if len(records) == 0 {
 		return []byte{}, nil
+	}
+
+	// Validate all records for duplicates and validity
+	seen := make(map[string]bool)
+	for _, record := range records {
+		if record.Path == "" {
+			return nil, fmt.Errorf("path must not be empty")
+		}
+		if seen[record.Path] {
+			return nil, fmt.Errorf("duplicate path in snapshot records: %q", record.Path)
+		}
+		seen[record.Path] = true
+
+		if err := ValidateRecord(record); err != nil {
+			return nil, err
+		}
 	}
 
 	// Sort records by path (bytewise)
@@ -161,10 +201,46 @@ type ChangeSetPathRecord struct {
 
 // FrameChangeSetLines returns the canonical frame for change-set lines (without snapshot line).
 // Lines are sorted bytewise by path.
-// Each line is: `<path> <op> <base_sha256> <new_sha256> <new_len>\n`
+// Each line is: `<path-byte-length> <path><op> <base_sha256|absent> <new_sha256> <new_len>\n`
+// The path is length-framed to avoid collisions with newlines and spaces in path names.
 func FrameChangeSetLines(paths []ChangeSetPathRecord) ([]byte, error) {
 	if len(paths) == 0 {
 		return []byte{}, nil
+	}
+
+	// Validate all records before processing
+	seen := make(map[string]bool)
+	for _, p := range paths {
+		if p.Path == "" {
+			return nil, fmt.Errorf("path must not be empty")
+		}
+		if seen[p.Path] {
+			return nil, fmt.Errorf("duplicate path in change set: %q", p.Path)
+		}
+		seen[p.Path] = true
+
+		if p.Op != "create" && p.Op != "modify" {
+			return nil, fmt.Errorf("invalid op for path %q: %q (must be 'create' or 'modify')", p.Path, p.Op)
+		}
+
+		if p.Op == "create" && p.BaseSHA != "" {
+			return nil, fmt.Errorf("create op for path %q must have empty BaseSHA", p.Path)
+		}
+		if p.Op == "modify" && p.BaseSHA == "" {
+			return nil, fmt.Errorf("modify op for path %q must have non-empty BaseSHA", p.Path)
+		}
+
+		if p.BaseSHA != "" && !IsValidSHA256Hex(p.BaseSHA) {
+			return nil, fmt.Errorf("invalid BaseSHA hex for path %q: %q", p.Path, p.BaseSHA)
+		}
+
+		if !IsValidSHA256Hex(p.NewSHA) {
+			return nil, fmt.Errorf("invalid NewSHA hex for path %q: %q", p.Path, p.NewSHA)
+		}
+
+		if p.NewLen < 0 {
+			return nil, fmt.Errorf("negative NewLen for path %q: %d", p.Path, p.NewLen)
+		}
 	}
 
 	// Sort by path (bytewise)
@@ -176,10 +252,12 @@ func FrameChangeSetLines(paths []ChangeSetPathRecord) ([]byte, error) {
 
 	var buf bytes.Buffer
 	for _, p := range sortedPaths {
-		if p.BaseSHA == "" {
-			p.BaseSHA = "absent"
+		pathBytes := []byte(p.Path)
+		baseSHA := p.BaseSHA
+		if baseSHA == "" {
+			baseSHA = "absent"
 		}
-		fmt.Fprintf(&buf, "%s %s %s %s %d\n", p.Path, p.Op, p.BaseSHA, p.NewSHA, p.NewLen)
+		fmt.Fprintf(&buf, "%d %s %s %s %s %d\n", len(pathBytes), p.Path, p.Op, baseSHA, p.NewSHA, p.NewLen)
 	}
 
 	return buf.Bytes(), nil
@@ -203,20 +281,6 @@ func ChangesHash(paths []ChangeSetPathRecord, snapshotHash string) (string, erro
 
 	hash := sha256.Sum256(buf.Bytes())
 	return fmt.Sprintf("%x", hash), nil
-}
-
-// PathHasBinaryContent checks if a path contains binary bytes that could affect framing.
-// This is primarily for testing that the length-framing correctly handles arbitrary bytes.
-// Newlines (\n) are allowed since they're handled by length-framing; carriage returns (\r)
-// are considered binary because they can cause parsing issues.
-func PathHasBinaryContent(path string) bool {
-	pathBytes := []byte(path)
-	for _, b := range pathBytes {
-		if b == 0 || (b < 32 && b != '\t' && b != '\n') || b == '\r' {
-			return true
-		}
-	}
-	return false
 }
 
 // IsValidSHA256Hex checks if a string is a valid 64-character lowercase hex SHA-256 hash.
