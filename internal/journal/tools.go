@@ -32,6 +32,17 @@ const (
 	ToolCallStatusAbandoned = "abandoned"
 )
 
+// ToolResult represents the result of a tool call recorded after execution.
+type ToolResult struct {
+	ID            string
+	ToolCallID    string
+	Status        string
+	ResultSHA256  *string
+	ResultByteLen *int64
+	ErrorMessage  *string
+	RecordedAt    time.Time
+}
+
 // Observation represents a file observation (content, absence, or directory listing).
 type Observation struct {
 	ID              string
@@ -137,6 +148,51 @@ func (tx *Tx) GetToolCallsByAttempt(attemptID string) ([]ToolCall, error) {
 	return calls, nil
 }
 
+// StoreToolResult records a tool call result in the journal.
+func (tx *Tx) StoreToolResult(result ToolResult) error {
+	_, err := tx.tx.Exec(`
+		INSERT INTO tool_results (id, tool_call_id, status, result_sha256, result_byte_len, error_message, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, result.ID, result.ToolCallID, result.Status, result.ResultSHA256, result.ResultByteLen, result.ErrorMessage, result.RecordedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("store tool result: %w", err)
+	}
+	return nil
+}
+
+// GetToolResultsByToolCall retrieves all results for a tool call.
+func (tx *Tx) GetToolResultsByToolCall(toolCallID string) ([]ToolResult, error) {
+	rows, err := tx.tx.Query(`
+		SELECT id, tool_call_id, status, result_sha256, result_byte_len, error_message, recorded_at
+		FROM tool_results
+		WHERE tool_call_id = ?
+		ORDER BY rowid
+	`, toolCallID)
+	if err != nil {
+		return nil, fmt.Errorf("query tool results: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ToolResult
+	for rows.Next() {
+		var result ToolResult
+		var recordedAtStr string
+		if err := rows.Scan(&result.ID, &result.ToolCallID, &result.Status, &result.ResultSHA256, &result.ResultByteLen, &result.ErrorMessage, &recordedAtStr); err != nil {
+			return nil, fmt.Errorf("scan tool result: %w", err)
+		}
+		recordedAt, err := time.Parse(time.RFC3339Nano, recordedAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse recorded_at: %w", err)
+		}
+		result.RecordedAt = recordedAt
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tool results: %w", err)
+	}
+	return results, nil
+}
+
 // StoreObservation records a file observation in the journal.
 func (tx *Tx) StoreObservation(obs Observation) error {
 	_, err := tx.tx.Exec(`
@@ -233,14 +289,6 @@ func (tx *Tx) GetChangeSetByTurn(turnID string) (*ChangeSet, error) {
 	return &cs, nil
 }
 
-// UpdateChangeSetState is not used. Change set state transitions are recorded as apply_ops.
-// This function is deprecated and kept only for compatibility during migration.
-// See design section 6: "per-path outcomes kept separately from change-set state;
-// discard after a partial apply must not conceal applied paths".
-func (tx *Tx) UpdateChangeSetState(changeSetID, newState string) error {
-	return fmt.Errorf("UpdateChangeSetState is not permitted; use StoreApplyOp instead")
-}
-
 // StoreChangeSetPath records a single path in a change set.
 func (tx *Tx) StoreChangeSetPath(csp ChangeSetPath) error {
 	_, err := tx.tx.Exec(`
@@ -279,13 +327,6 @@ func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath,
 		return nil, fmt.Errorf("iterate change set paths: %w", err)
 	}
 	return paths, nil
-}
-
-// UpdateChangeSetPathOutcome is not permitted. Per-path outcomes are recorded append-only via apply_ops.
-// This function is deprecated. See design section 6: "per-path outcomes kept separately from
-// change-set state" and "apply_ops record each applied path".
-func (tx *Tx) UpdateChangeSetPathOutcome(changeSetID, path, newOutcome string) error {
-	return fmt.Errorf("UpdateChangeSetPathOutcome is not permitted; use StoreApplyOp to record outcomes")
 }
 
 // StoreVerdictToolResult links a tool call result to a verdict.

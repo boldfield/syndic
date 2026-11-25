@@ -697,12 +697,268 @@ func TestAtomicRecordAndEventRollback(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("expected 0 tool calls after rollback, got %d", len(calls))
 	}
+
+	// Verify the event was also rolled back (not just the record)
+	var eventCount int
+	err = s.Tx(func(tx *journal.Tx) error {
+		return tx.tx.QueryRow("SELECT COUNT(*) FROM events WHERE data LIKE '%tool_call_recorded%'").Scan(&eventCount)
+	})
+	if err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("expected 1 event (the successful one), got %d", eventCount)
+	}
+}
+
+// TestToolCallLifecycle tests tool call lifecycle from accepted to executed with result.
+func TestToolCallLifecycle(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	turnID := "turn1"
+	attemptID := "attempt1"
+	setupTestData(t, conn, "run1", turnID)
+	createTestAttempt(t, conn, attemptID, turnID, "author")
+
+	// Record a tool call in accepted status
+	call := journal.ToolCall{
+		ID:         "call1",
+		AttemptID:  attemptID,
+		Name:       "read_file",
+		ArgsSHA256: "args123",
+		Class:      "read",
+		Status:     journal.ToolCallStatusAccepted,
+	}
+
+	s := journal.NewStore(db)
+	err := s.Tx(func(tx *journal.Tx) error {
+		return tx.StoreToolCall(call)
+	})
+	if err != nil {
+		t.Fatalf("store tool call: %v", err)
+	}
+
+	// Store result after execution
+	result := journal.ToolResult{
+		ID:            "result1",
+		ToolCallID:    "call1",
+		Status:        journal.ToolCallStatusExecuted,
+		ResultSHA256:  strPtr("result123"),
+		ResultByteLen: int64Ptr(42),
+		RecordedAt:    time.Now(),
+	}
+
+	err = s.Tx(func(tx *journal.Tx) error {
+		return tx.StoreToolResult(result)
+	})
+	if err != nil {
+		t.Fatalf("store tool result: %v", err)
+	}
+
+	// Verify result was stored
+	var results []journal.ToolResult
+	err = s.Tx(func(tx *journal.Tx) error {
+		var err error
+		results, err = tx.GetToolResultsByToolCall("call1")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get tool results: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+
+	if results[0].Status != journal.ToolCallStatusExecuted {
+		t.Errorf("expected executed status, got %s", results[0].Status)
+	}
+
+	if results[0].ResultSHA256 == nil || *results[0].ResultSHA256 != "result123" {
+		t.Errorf("expected result hash 'result123', got %v", results[0].ResultSHA256)
+	}
+}
+
+// TestToolResultRollback tests that failed transactions roll back both tool call and result.
+func TestToolResultRollback(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	conn := db.Conn()
+
+	turnID := "turn1"
+	attemptID := "attempt1"
+	setupTestData(t, conn, "run1", turnID)
+	createTestAttempt(t, conn, attemptID, turnID, "author")
+
+	s := journal.NewStore(db)
+
+	// Attempt to store call and result, but fail the transaction
+	err := s.Tx(func(tx *journal.Tx) error {
+		call := journal.ToolCall{
+			ID:         "call2",
+			AttemptID:  attemptID,
+			Name:       "web_fetch",
+			ArgsSHA256: "hash2",
+			Status:     journal.ToolCallStatusAccepted,
+		}
+		if err := tx.StoreToolCall(call); err != nil {
+			return err
+		}
+
+		result := journal.ToolResult{
+			ID:            "result2",
+			ToolCallID:    "call2",
+			Status:        journal.ToolCallStatusExecuted,
+			ResultSHA256:  strPtr("rhash2"),
+			RecordedAt:    time.Now(),
+		}
+		if err := tx.StoreToolResult(result); err != nil {
+			return err
+		}
+
+		return sql.ErrNoRows // Simulate failure
+	})
+
+	if err == nil {
+		t.Fatal("expected transaction to fail")
+	}
+
+	// Verify neither call nor result were stored
+	var calls []journal.ToolCall
+	err = s.Tx(func(tx *journal.Tx) error {
+		var err error
+		calls, err = tx.GetToolCallsByAttempt(attemptID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get tool calls: %v", err)
+	}
+
+	if len(calls) != 0 {
+		t.Fatalf("expected 0 calls after rollback, got %d", len(calls))
+	}
+}
+
+// TestHashAddressedReconstruction tests that tool data can be reconstructed from hashes after restart.
+func TestHashAddressedReconstruction(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+
+	// First session: Store tool call with known hash
+	db1, err := journal.OpenDB("file:" + dbPath)
+	if err != nil {
+		t.Fatalf("open db session 1: %v", err)
+	}
+
+	conn1 := db1.Conn()
+	turnID := "turn1"
+	attemptID := "attempt1"
+	setupTestData(t, conn1, "run1", turnID)
+	createTestAttempt(t, conn1, attemptID, turnID, "author")
+
+	callID := "call1"
+	argsSHA256 := "abc123def456"
+
+	s1 := journal.NewStore(db1)
+	err = s1.Tx(func(tx *journal.Tx) error {
+		call := journal.ToolCall{
+			ID:         callID,
+			AttemptID:  attemptID,
+			Name:       "test_tool",
+			ArgsSHA256: argsSHA256,
+			Status:     journal.ToolCallStatusAccepted,
+		}
+		return tx.StoreToolCall(call)
+	})
+	if err != nil {
+		t.Fatalf("store tool call: %v", err)
+	}
+
+	db1.Close()
+
+	// Second session: Reopen and retrieve the tool call
+	db2, err := journal.OpenDB("file:" + dbPath)
+	if err != nil {
+		t.Fatalf("open db session 2: %v", err)
+	}
+	defer db2.Close()
+
+	s2 := journal.NewStore(db2)
+	var calls []journal.ToolCall
+	err = s2.Tx(func(tx *journal.Tx) error {
+		var err error
+		calls, err = tx.GetToolCallsByAttempt(attemptID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get tool calls: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call after restart, got %d", len(calls))
+	}
+
+	if calls[0].ArgsSHA256 != argsSHA256 {
+		t.Errorf("expected args hash %s, got %s", argsSHA256, calls[0].ArgsSHA256)
+	}
+
+	// Verify tool result persists across restart
+	resultID := "result1"
+	resultSHA256 := "xyz789"
+
+	err = s2.Tx(func(tx *journal.Tx) error {
+		result := journal.ToolResult{
+			ID:            resultID,
+			ToolCallID:    callID,
+			Status:        journal.ToolCallStatusExecuted,
+			ResultSHA256:  &resultSHA256,
+			ResultByteLen: int64Ptr(100),
+			RecordedAt:    time.Now(),
+		}
+		return tx.StoreToolResult(result)
+	})
+	if err != nil {
+		t.Fatalf("store tool result: %v", err)
+	}
+
+	db2.Close()
+
+	// Third session: Verify both call and result persist
+	db3, err := journal.OpenDB("file:" + dbPath)
+	if err != nil {
+		t.Fatalf("open db session 3: %v", err)
+	}
+	defer db3.Close()
+
+	s3 := journal.NewStore(db3)
+	var results []journal.ToolResult
+	err = s3.Tx(func(tx *journal.Tx) error {
+		var err error
+		results, err = tx.GetToolResultsByToolCall(callID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get tool results: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result after restart, got %d", len(results))
+	}
+
+	if results[0].ResultSHA256 == nil || *results[0].ResultSHA256 != resultSHA256 {
+		t.Errorf("expected result hash %s, got %v", resultSHA256, results[0].ResultSHA256)
+	}
 }
 
 // Helper functions
 
 func strPtr(s string) *string {
 	return &s
+}
+
+func int64Ptr(i int64) *int64 {
+	return &i
 }
 
 func createTestAttempt(t *testing.T, conn *sql.DB, attemptID, turnID, participant string) {

@@ -26,6 +26,31 @@ BEGIN
 	SELECT RAISE(ABORT, 'tool_calls table is immutable');
 END;
 
+-- Tool results: Append-only records of tool call results and status transitions.
+-- Each result record captures the final status and outcome of a tool call after execution.
+CREATE TABLE tool_results (
+	id TEXT PRIMARY KEY,
+	tool_call_id TEXT NOT NULL REFERENCES tool_calls(id),
+	status TEXT NOT NULL CHECK (status IN ('executed', 'error', 'abandoned')),
+	result_sha256 TEXT,
+	result_byte_len INTEGER,
+	error_message TEXT,
+	recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX tool_results_tool_call_idx ON tool_results(tool_call_id);
+
+-- Immutability: tool results are journaled and never change.
+CREATE TRIGGER tool_results_update_prevented BEFORE UPDATE ON tool_results
+BEGIN
+	SELECT RAISE(ABORT, 'tool_results table is immutable');
+END;
+
+CREATE TRIGGER tool_results_delete_prevented BEFORE DELETE ON tool_results
+BEGIN
+	SELECT RAISE(ABORT, 'tool_results table is immutable');
+END;
+
 -- Observations: file observations acquired at different times during a turn.
 -- An observation is one of: a file's content (kind='f'), a path's absence (kind='a'),
 -- or a directory's entry list (kind='d'). The record is versioned: every observation
