@@ -28,7 +28,8 @@ var (
 	// ErrChangeSetState reports an apply operation the change set's state forbids.
 	ErrChangeSetState = errors.New("change set state forbids operation")
 	// ErrEvidenceScope reports verdict evidence from another turn, another
-	// participant, or recorded after the verdict's attempt was dispatched.
+	// participant, from an attempt dispatched after the verdict's, or
+	// received after the verdict was recorded.
 	ErrEvidenceScope = errors.New("evidence out of the verdict's scope")
 )
 
@@ -80,6 +81,8 @@ type ToolCall struct {
 
 // ToolResult is the one terminal outcome of a call. For executed and error it
 // carries what the model received, by hash and length; abandoned carries none.
+// JournalSeq is the journal-wide position at which the result was received;
+// it orders the result against the verdicts of the same journal.
 type ToolResult struct {
 	ID            string
 	ToolCallID    string
@@ -87,12 +90,14 @@ type ToolResult struct {
 	ResultSHA256  string
 	ResultByteLen int64
 	ErrorCode     string
+	JournalSeq    int64
 	RecordedAt    time.Time
 }
 
 // Observation is one record of the turn's snapshot. ContentSHA256 names the
 // file's base content for kind f, the canonical entry list for kind d, and is
-// empty for kind a.
+// empty for kind a. JournalSeq is the journal-wide position at which it was
+// recorded, which orders it against verdicts.
 type Observation struct {
 	ID              string
 	TurnID          string
@@ -101,6 +106,7 @@ type Observation struct {
 	Path            string
 	Kind            string
 	ContentSHA256   string
+	JournalSeq      int64
 	RecordedAt      time.Time
 }
 
@@ -357,14 +363,18 @@ func (tx *Tx) RecordToolResult(toolCallID, status string, result []byte, errorCo
 	if err != nil {
 		return ToolResult{}, err
 	}
+	seq, err := tx.nextJournalSeq()
+	if err != nil {
+		return ToolResult{}, err
+	}
 	at := nowStamp()
 	if _, err := tx.tx.Exec(`
-		INSERT INTO tool_results (id, tool_call_id, status, result_sha256, result_byte_len, error_code, recorded_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, id, toolCallID, status, resultSHA, resultLen, code, at); err != nil {
+		INSERT INTO tool_results (id, tool_call_id, status, result_sha256, result_byte_len, error_code, journal_seq, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, toolCallID, status, resultSHA, resultLen, code, seq, at); err != nil {
 		return ToolResult{}, fmt.Errorf("insert tool result: %w", err)
 	}
-	payload := map[string]any{"result_id": id, "call_id": toolCallID, "status": status}
+	payload := map[string]any{"result_id": id, "call_id": toolCallID, "status": status, "journal_seq": seq}
 	if resultSHA != nil {
 		payload["sha256"] = *resultSHA
 		payload["byte_len"] = *resultLen
@@ -375,7 +385,7 @@ func (tx *Tx) RecordToolResult(toolCallID, status string, result []byte, errorCo
 	if err := tx.emitTools(turnID, "tool_result", payload); err != nil {
 		return ToolResult{}, err
 	}
-	out := ToolResult{ID: id, ToolCallID: toolCallID, Status: status, ErrorCode: errorCode}
+	out := ToolResult{ID: id, ToolCallID: toolCallID, Status: status, ErrorCode: errorCode, JournalSeq: seq}
 	out.RecordedAt, _ = parseTime(at)
 	if resultSHA != nil {
 		out.ResultSHA256, out.ResultByteLen = *resultSHA, *resultLen
@@ -386,7 +396,7 @@ func (tx *Tx) RecordToolResult(toolCallID, status string, result []byte, errorCo
 const toolCallSelect = `
 	SELECT c.id, c.attempt_id, c.turn_id, c.participant, c.call_index, c.provider_call_id, c.name, c.class,
 	       c.args_sha256, ac.byte_len, c.recorded_at,
-	       r.id, r.status, r.result_sha256, r.result_byte_len, r.error_code, r.recorded_at
+	       r.id, r.status, r.result_sha256, r.result_byte_len, r.error_code, r.journal_seq, r.recorded_at
 	FROM tool_calls c
 	JOIN tool_content ac ON ac.sha256 = c.args_sha256
 	LEFT JOIN tool_results r ON r.tool_call_id = c.id
@@ -396,9 +406,9 @@ func scanToolCall(sc interface{ Scan(...any) error }) (ToolCall, error) {
 	var c ToolCall
 	var recordedAt string
 	var rID, rStatus, rSHA, rCode, rAt sql.NullString
-	var rLen sql.NullInt64
+	var rLen, rSeq sql.NullInt64
 	if err := sc.Scan(&c.ID, &c.AttemptID, &c.TurnID, &c.Participant, &c.CallIndex, &c.ProviderCallID, &c.Name, &c.Class,
-		&c.ArgsSHA256, &c.ArgsByteLen, &recordedAt, &rID, &rStatus, &rSHA, &rLen, &rCode, &rAt); err != nil {
+		&c.ArgsSHA256, &c.ArgsByteLen, &recordedAt, &rID, &rStatus, &rSHA, &rLen, &rCode, &rSeq, &rAt); err != nil {
 		return ToolCall{}, err
 	}
 	var err error
@@ -408,7 +418,7 @@ func scanToolCall(sc interface{ Scan(...any) error }) (ToolCall, error) {
 	c.Status = ToolCallAccepted
 	if rID.Valid {
 		r := &ToolResult{ID: rID.String, ToolCallID: c.ID, Status: rStatus.String,
-			ResultSHA256: rSHA.String, ResultByteLen: rLen.Int64, ErrorCode: rCode.String}
+			ResultSHA256: rSHA.String, ResultByteLen: rLen.Int64, ErrorCode: rCode.String, JournalSeq: rSeq.Int64}
 		if r.RecordedAt, err = parseTime(rAt.String); err != nil {
 			return ToolCall{}, fmt.Errorf("parse result recorded_at: %w", err)
 		}
@@ -535,15 +545,19 @@ func (tx *Tx) RecordObservation(turnID, attemptID, path, kind string, content []
 	if err != nil {
 		return Observation{}, err
 	}
+	seq, err := tx.nextJournalSeq()
+	if err != nil {
+		return Observation{}, err
+	}
 	at := nowStamp()
 	if _, err := tx.tx.Exec(`
-		INSERT INTO observations (id, turn_id, attempt_id, snapshot_version, path, kind, content_sha256, recorded_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, turnID, attemptID, version, []byte(path), kind, contentSHA, at); err != nil {
+		INSERT INTO observations (id, turn_id, attempt_id, snapshot_version, path, kind, content_sha256, journal_seq, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, turnID, attemptID, version, []byte(path), kind, contentSHA, seq, at); err != nil {
 		return Observation{}, fmt.Errorf("insert observation: %w", err)
 	}
 	payload := map[string]any{"observation_id": id, "attempt_id": attemptID, "participant": participant,
-		"snapshot_version": version, "kind": kind}
+		"snapshot_version": version, "kind": kind, "journal_seq": seq}
 	pathJSON(payload, path)
 	if contentSHA != nil {
 		payload["sha256"] = *contentSHA
@@ -551,7 +565,7 @@ func (tx *Tx) RecordObservation(turnID, attemptID, path, kind string, content []
 	if err := tx.emitTools(turnID, "observation", payload); err != nil {
 		return Observation{}, err
 	}
-	o := Observation{ID: id, TurnID: turnID, AttemptID: attemptID, SnapshotVersion: version, Path: path, Kind: kind}
+	o := Observation{ID: id, TurnID: turnID, AttemptID: attemptID, SnapshotVersion: version, Path: path, Kind: kind, JournalSeq: seq}
 	if contentSHA != nil {
 		o.ContentSHA256 = *contentSHA
 	}
@@ -559,14 +573,14 @@ func (tx *Tx) RecordObservation(turnID, attemptID, path, kind string, content []
 	return o, nil
 }
 
-const observationSelect = `SELECT id, turn_id, attempt_id, snapshot_version, path, kind, content_sha256, recorded_at FROM observations`
+const observationSelect = `SELECT id, turn_id, attempt_id, snapshot_version, path, kind, content_sha256, journal_seq, recorded_at FROM observations`
 
 func scanObservation(sc interface{ Scan(...any) error }) (Observation, error) {
 	var o Observation
 	var path []byte
 	var contentSHA sql.NullString
 	var at string
-	if err := sc.Scan(&o.ID, &o.TurnID, &o.AttemptID, &o.SnapshotVersion, &path, &o.Kind, &contentSHA, &at); err != nil {
+	if err := sc.Scan(&o.ID, &o.TurnID, &o.AttemptID, &o.SnapshotVersion, &path, &o.Kind, &contentSHA, &o.JournalSeq, &at); err != nil {
 		return Observation{}, err
 	}
 	o.Path = string(path)
@@ -1172,28 +1186,34 @@ func (tx *Tx) DiscardChangeSet(changeSetID string) error {
 // version its reviewer saw, the ids of the tool results that reviewer
 // received before giving it, in order, and the observations it added. Every
 // item must come from the verdict's turn and participant, from an attempt
-// dispatched no later than the verdict's; an observation must be at or below
-// the version seen and is bound to one verdict only. It emits
-// verdict_evidence in the same transaction.
+// dispatched no later than the verdict's, and must have been recorded before
+// the verdict itself (its journal_seq precedes the verdict's); an observation
+// must be at or below the version seen and is bound to one verdict only. A
+// verdict recorded before verdicts took a journal_seq takes no evidence. It
+// emits verdict_evidence in the same transaction.
 func (tx *Tx) RecordVerdictEvidence(verdictID string, snapshotVersion int, resultIDs, observationIDs []string) error {
 	if snapshotVersion < 0 {
 		return fmt.Errorf("snapshot version must be >= 0, got %d", snapshotVersion)
 	}
 	var attemptID string
-	err := tx.tx.QueryRow(`SELECT attempt_id FROM verdicts WHERE id = ?`, verdictID).Scan(&attemptID)
+	var verdictSeq sql.NullInt64
+	err := tx.tx.QueryRow(`SELECT attempt_id, journal_seq FROM verdicts WHERE id = ?`, verdictID).Scan(&attemptID, &verdictSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("verdict %q not found", verdictID)
 	}
 	if err != nil {
 		return fmt.Errorf("query verdict: %w", err)
 	}
+	if !verdictSeq.Valid {
+		return fmt.Errorf("verdict %q has no journal sequence: %w", verdictID, ErrEvidenceScope)
+	}
 	var turnID, participant string
-	var verdictSeq sql.NullInt64
+	var attemptSeq sql.NullInt64
 	if err := tx.tx.QueryRow(`SELECT turn_id, participant, journal_seq FROM attempts WHERE id = ?`, attemptID).
-		Scan(&turnID, &participant, &verdictSeq); err != nil {
+		Scan(&turnID, &participant, &attemptSeq); err != nil {
 		return fmt.Errorf("query verdict attempt: %w", err)
 	}
-	if !verdictSeq.Valid {
+	if !attemptSeq.Valid {
 		return fmt.Errorf("verdict attempt %q has no journal sequence: %w", attemptID, ErrEvidenceScope)
 	}
 	current, err := tx.SnapshotVersion(turnID)
@@ -1216,19 +1236,23 @@ func (tx *Tx) RecordVerdictEvidence(verdictID string, snapshotVersion int, resul
 	}
 	for i, rid := range resultIDs {
 		var rTurn, rParticipant string
-		var rSeq sql.NullInt64
+		var rSeq int64
+		var rAttemptSeq sql.NullInt64
 		err := tx.tx.QueryRow(`
-			SELECT c.turn_id, c.participant, a.journal_seq
+			SELECT c.turn_id, c.participant, r.journal_seq, a.journal_seq
 			FROM tool_results r JOIN tool_calls c ON c.id = r.tool_call_id JOIN attempts a ON a.id = c.attempt_id
-			WHERE r.id = ?`, rid).Scan(&rTurn, &rParticipant, &rSeq)
+			WHERE r.id = ?`, rid).Scan(&rTurn, &rParticipant, &rSeq, &rAttemptSeq)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("tool result %q not found", rid)
 		}
 		if err != nil {
 			return fmt.Errorf("query tool result: %w", err)
 		}
-		if rTurn != turnID || rParticipant != participant || !rSeq.Valid || rSeq.Int64 > verdictSeq.Int64 {
+		if rTurn != turnID || rParticipant != participant || !rAttemptSeq.Valid || rAttemptSeq.Int64 > attemptSeq.Int64 {
 			return fmt.Errorf("tool result %q for verdict %q: %w", rid, verdictID, ErrEvidenceScope)
+		}
+		if rSeq > verdictSeq.Int64 {
+			return fmt.Errorf("tool result %q was received after verdict %q: %w", rid, verdictID, ErrEvidenceScope)
 		}
 		if _, err := tx.tx.Exec(`INSERT INTO verdict_tool_results (verdict_id, result_id, position) VALUES (?, ?, ?)`,
 			verdictID, rid, i); err != nil {
@@ -1238,19 +1262,23 @@ func (tx *Tx) RecordVerdictEvidence(verdictID string, snapshotVersion int, resul
 	for _, oid := range observationIDs {
 		var oTurn, oParticipant string
 		var oVersion int
-		var oSeq sql.NullInt64
+		var oSeq int64
+		var oAttemptSeq sql.NullInt64
 		err := tx.tx.QueryRow(`
-			SELECT o.turn_id, a.participant, o.snapshot_version, a.journal_seq
+			SELECT o.turn_id, a.participant, o.snapshot_version, o.journal_seq, a.journal_seq
 			FROM observations o JOIN attempts a ON a.id = o.attempt_id WHERE o.id = ?`, oid).
-			Scan(&oTurn, &oParticipant, &oVersion, &oSeq)
+			Scan(&oTurn, &oParticipant, &oVersion, &oSeq, &oAttemptSeq)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("observation %q not found", oid)
 		}
 		if err != nil {
 			return fmt.Errorf("query observation: %w", err)
 		}
-		if oTurn != turnID || oParticipant != participant || !oSeq.Valid || oSeq.Int64 > verdictSeq.Int64 {
+		if oTurn != turnID || oParticipant != participant || !oAttemptSeq.Valid || oAttemptSeq.Int64 > attemptSeq.Int64 {
 			return fmt.Errorf("observation %q for verdict %q: %w", oid, verdictID, ErrEvidenceScope)
+		}
+		if oSeq > verdictSeq.Int64 {
+			return fmt.Errorf("observation %q was recorded after verdict %q: %w", oid, verdictID, ErrEvidenceScope)
 		}
 		if oVersion > snapshotVersion {
 			return fmt.Errorf("observation %q at version %d is beyond the version %d verdict %q saw", oid, oVersion, snapshotVersion, verdictID)
@@ -1261,9 +1289,9 @@ func (tx *Tx) RecordVerdictEvidence(verdictID string, snapshotVersion int, resul
 	}
 	return tx.emitTools(turnID, "verdict_evidence", map[string]any{
 		"verdict_id": verdictID, "attempt_id": attemptID, "participant": participant,
-		"snapshot_version": snapshotVersion,
-		"result_ids":       append([]string{}, resultIDs...),
-		"observation_ids":  append([]string{}, observationIDs...),
+		"verdict_journal_seq": verdictSeq.Int64, "snapshot_version": snapshotVersion,
+		"result_ids":      append([]string{}, resultIDs...),
+		"observation_ids": append([]string{}, observationIDs...),
 	})
 }
 

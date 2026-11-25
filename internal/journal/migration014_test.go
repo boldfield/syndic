@@ -2,6 +2,8 @@ package journal_test
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,12 +100,13 @@ func TestMigration014UpgradeRetainsData(t *testing.T) {
 		t.Fatalf("attempt = %q %q %d", status, text, seq)
 	}
 	var parsed, blockState, reviewerBlock string
-	if err := c.QueryRow(`SELECT v.parsed_verdict, b.state, b.reviewer_block_id FROM verdicts v JOIN blocks b ON b.verdict_id = v.id WHERE v.id = 'v1'`).
-		Scan(&parsed, &blockState, &reviewerBlock); err != nil {
+	var verdictSeq sql.NullInt64
+	if err := c.QueryRow(`SELECT v.parsed_verdict, v.journal_seq, b.state, b.reviewer_block_id FROM verdicts v JOIN blocks b ON b.verdict_id = v.id WHERE v.id = 'v1'`).
+		Scan(&parsed, &verdictSeq, &blockState, &reviewerBlock); err != nil {
 		t.Fatal(err)
 	}
-	if parsed != "block" || blockState != "open" || reviewerBlock != "B1" {
-		t.Fatalf("verdict = %q %q %q", parsed, blockState, reviewerBlock)
+	if parsed != "block" || blockState != "open" || reviewerBlock != "B1" || verdictSeq.Valid {
+		t.Fatalf("verdict = %q %v %q %q", parsed, verdictSeq, blockState, reviewerBlock)
 	}
 	var record, frozen, doc []byte
 	if err := c.QueryRow(`SELECT record FROM review_records WHERE verdict_id = 'v1'`).Scan(&record); err != nil || string(record) != "{}" {
@@ -140,11 +143,26 @@ func TestMigration014UpgradeRetainsData(t *testing.T) {
 		if _, err := tx.FreezeChangeSet("t1", "cand1", "snap", "changes"); err != nil {
 			return err
 		}
-		_, err = tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte("A"), "")
-		return err
+		if _, err = tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte("A"), ""); err != nil {
+			return err
+		}
+		// The pre-upgrade verdict has no journal sequence, so it takes no
+		// evidence; a verdict recorded after the upgrade does.
+		if err := tx.RecordVerdictEvidence("v1", 1, nil, nil); !errors.Is(err, journal.ErrEvidenceScope) {
+			return fmt.Errorf("evidence for pre-upgrade verdict: %v", err)
+		}
+		v, err := tx.RecordVerdict("a2", "ch", "approve", "", "valid")
+		if err != nil {
+			return err
+		}
+		return tx.RecordVerdictEvidence(v, 1, nil, nil)
 	})
 	if err != nil {
 		t.Fatalf("records against upgraded rows: %v", err)
+	}
+	var newVerdictSeq sql.NullInt64
+	if err := c.QueryRow(`SELECT journal_seq FROM verdicts WHERE id <> 'v1'`).Scan(&newVerdictSeq); err != nil || !newVerdictSeq.Valid {
+		t.Fatalf("post-upgrade verdict journal_seq = %v, %v", newVerdictSeq, err)
 	}
 	for _, table := range []string{"tool_content", "tool_calls", "tool_results", "observations", "staging", "change_sets", "change_set_paths", "apply_ops", "verdict_evidence", "verdict_tool_results", "verdict_observations"} {
 		if err := c.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&n); err != nil || n != 1 {

@@ -13,8 +13,9 @@ import (
 )
 
 // toolsFixture is one review turn with an author attempt and two reviewers,
-// each with a tool-step attempt followed by a verdict attempt, as the section
-// 6 tool loops produce.
+// each with a tool-step attempt, as the section 6 tool loops produce. The
+// reviewer's verdict attempt and verdict follow its tool step in time, so a
+// test records them with giveVerdict after the step's results.
 type toolsFixture struct {
 	run, turn string
 	author    string            // author tool-step attempt
@@ -45,12 +46,6 @@ func buildToolsTurn(t *testing.T, store *journal.Store) toolsFixture {
 			if f.step[r], err = tx.BeginAttempt(f.turn, r, "review", 1, nil, ""); err != nil {
 				return err
 			}
-			if f.verdictAt[r], err = tx.BeginAttempt(f.turn, r, "review", 1, nil, ""); err != nil {
-				return err
-			}
-			if f.verdict[r], err = tx.RecordVerdict(f.verdictAt[r], "h0", "approve", "", "valid"); err != nil {
-				return err
-			}
 		}
 		return nil
 	})
@@ -58,6 +53,33 @@ func buildToolsTurn(t *testing.T, store *journal.Store) toolsFixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// giveVerdict is the reviewer's next attempt after its tool step: it begins
+// the verdict attempt and records the verdict, in the order the loop does.
+func giveVerdict(t *testing.T, store *journal.Store, f *toolsFixture, reviewer string) {
+	t.Helper()
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		if f.verdictAt[reviewer], err = tx.BeginAttempt(f.turn, reviewer, "review", 1, nil, ""); err != nil {
+			return err
+		}
+		f.verdict[reviewer], err = tx.RecordVerdict(f.verdictAt[reviewer], "h0", "approve", "", "valid")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// verdictSeq reads the journal sequence a verdict took when it was recorded.
+func verdictSeq(t *testing.T, db *journal.DB, verdictID string) int64 {
+	t.Helper()
+	var seq int64
+	if err := db.Conn().QueryRow(`SELECT journal_seq FROM verdicts WHERE id = ?`, verdictID).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	return seq
 }
 
 func shaBytes(b []byte) string {
@@ -897,6 +919,10 @@ func describeOps(ops []journal.ApplyOp) string {
 // attempt; another reviewer's, another turn's, a later attempt's, an
 // unfinished call's, and an observation beyond the version seen are refused,
 // and an observation binds to one verdict.
+// The real sequence: each reviewer's tool step records its calls, receives
+// its results and adds its observations; the reviewer's next attempt then
+// gives the verdict. Evidence must come from the verdict's own reviewer and
+// turn, and must have been received before the verdict was recorded.
 func TestVerdictEvidenceScope(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -905,35 +931,43 @@ func TestVerdictEvidenceScope(t *testing.T) {
 	other := buildToolsTurn(t, store)
 
 	var r1Result, r1Unfinished, r2Result, otherResult string
+	var r1ResultSeq int64
 	var r1Obs, r2Obs, authorObs journal.Observation
 	err := store.Tx(func(tx *journal.Tx) error {
 		var err error
 		if authorObs, err = tx.RecordObservation(f.turn, f.author, "main.go", journal.ObservationFile, []byte("m")); err != nil {
 			return err
 		}
-		mk := func(attempt string, idx int, result bool) (string, error) {
+		mk := func(attempt string, idx int, result bool) (journal.ToolResult, error) {
 			c, err := tx.RecordToolCall(attempt, idx, fmt.Sprintf("c%d", idx), "read_file", "read", []byte(`{}`))
 			if err != nil {
-				return "", err
+				return journal.ToolResult{}, err
 			}
 			if !result {
-				return c.ID, nil
+				return journal.ToolResult{ToolCallID: c.ID}, nil
 			}
-			r, err := tx.RecordToolResult(c.ID, journal.ToolCallExecuted, []byte("r"), "")
-			return r.ID, err
+			return tx.RecordToolResult(c.ID, journal.ToolCallExecuted, []byte("r"), "")
 		}
-		if r1Result, err = mk(f.step["r1"], 0, true); err != nil {
+		r1, err := mk(f.step["r1"], 0, true)
+		if err != nil {
 			return err
 		}
-		if r1Unfinished, err = mk(f.step["r1"], 1, false); err != nil {
+		r1Result, r1ResultSeq = r1.ID, r1.JournalSeq
+		unfinished, err := mk(f.step["r1"], 1, false)
+		if err != nil {
 			return err
 		}
-		if r2Result, err = mk(f.step["r2"], 0, true); err != nil {
+		r1Unfinished = unfinished.ToolCallID
+		r2, err := mk(f.step["r2"], 0, true)
+		if err != nil {
 			return err
 		}
-		if otherResult, err = mk(other.step["r1"], 0, true); err != nil {
+		r2Result = r2.ID
+		o, err := mk(other.step["r1"], 0, true)
+		if err != nil {
 			return err
 		}
+		otherResult = o.ID
 		if r1Obs, err = tx.RecordObservation(f.turn, f.step["r1"], "lib.go", journal.ObservationFile, []byte("l")); err != nil {
 			return err
 		}
@@ -944,6 +978,17 @@ func TestVerdictEvidenceScope(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Results and observations received: the reviewers' next attempts give
+	// the verdicts, each taking a journal sequence after its evidence.
+	giveVerdict(t, store, &f, "r1")
+	giveVerdict(t, store, &f, "r2")
+	giveVerdict(t, store, &other, "r1")
+	if r1ResultSeq <= 0 || r1Obs.JournalSeq <= r1ResultSeq || verdictSeq(t, db, f.verdict["r1"]) <= r1Obs.JournalSeq {
+		t.Fatalf("sequence: result %d, observation %d, verdict %d", r1ResultSeq, r1Obs.JournalSeq, verdictSeq(t, db, f.verdict["r1"]))
+	}
+	if calls, err := store.ToolCallsByTurn(f.turn, "r1"); err != nil || len(calls) != 2 || calls[0].Result == nil || calls[0].Result.JournalSeq != r1ResultSeq {
+		t.Fatalf("calls = %+v, %v", calls, err)
 	}
 	try := func(resultIDs, obsIDs []string, version int) error {
 		return store.Tx(func(tx *journal.Tx) error {
@@ -1036,6 +1081,98 @@ func TestVerdictEvidenceScope(t *testing.T) {
 	}
 	if _, err := db.Conn().Exec(`DELETE FROM verdict_tool_results`); err == nil {
 		t.Fatal("verdict_tool_results delete succeeded")
+	}
+}
+
+// Evidence received after the verdict is refused even when its call was
+// accepted, in the reviewer's own earlier tool step, before the verdict: the
+// result's and the observation's receipt is ordered against the verdict's
+// record, not against the attempt that made the call.
+func TestVerdictEvidenceReceivedAfterVerdictRefused(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := buildToolsTurn(t, store)
+
+	// The tool step accepts two calls; only the first is answered before the
+	// reviewer gives its verdict.
+	var answered, pending journal.ToolCall
+	var early journal.ToolResult
+	err := store.Tx(func(tx *journal.Tx) error {
+		var err error
+		if answered, err = tx.RecordToolCall(f.step["r1"], 0, "c0", "read_file", "read", []byte(`{"path":"a"}`)); err != nil {
+			return err
+		}
+		if pending, err = tx.RecordToolCall(f.step["r1"], 1, "c1", "read_file", "read", []byte(`{"path":"b"}`)); err != nil {
+			return err
+		}
+		early, err = tx.RecordToolResult(answered.ID, journal.ToolCallExecuted, []byte("A"), "")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	giveVerdict(t, store, &f, "r1")
+	vSeq := verdictSeq(t, db, f.verdict["r1"])
+	if early.JournalSeq >= vSeq {
+		t.Fatalf("result seq %d not before verdict seq %d", early.JournalSeq, vSeq)
+	}
+
+	// After the verdict: the pending call's result arrives and the reviewer's
+	// tool-step attempt records an observation.
+	var late journal.ToolResult
+	var lateObs journal.Observation
+	err = store.Tx(func(tx *journal.Tx) error {
+		var err error
+		if late, err = tx.RecordToolResult(pending.ID, journal.ToolCallExecuted, []byte("B"), ""); err != nil {
+			return err
+		}
+		lateObs, err = tx.RecordObservation(f.turn, f.step["r1"], "b", journal.ObservationFile, []byte("B"))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.JournalSeq <= vSeq || lateObs.JournalSeq <= vSeq {
+		t.Fatalf("late seqs %d, %d not after verdict seq %d", late.JournalSeq, lateObs.JournalSeq, vSeq)
+	}
+	try := func(resultIDs, obsIDs []string) error {
+		return store.Tx(func(tx *journal.Tx) error {
+			return tx.RecordVerdictEvidence(f.verdict["r1"], 1, resultIDs, obsIDs)
+		})
+	}
+	if err := try([]string{early.ID, late.ID}, nil); !errors.Is(err, journal.ErrEvidenceScope) {
+		t.Fatalf("late result error = %v", err)
+	}
+	if err := try([]string{early.ID}, []string{lateObs.ID}); !errors.Is(err, journal.ErrEvidenceScope) {
+		t.Fatalf("late observation error = %v", err)
+	}
+	if ev, err := store.GetVerdictEvidence(f.verdict["r1"]); !errors.Is(err, journal.ErrNoSuchContent) {
+		t.Fatalf("evidence after refusals = %+v, %v", ev, err)
+	}
+	if n := len(eventKinds(t, store, 0)); strings.Contains(strings.Join(eventKinds(t, store, 0), ","), "verdict_evidence") {
+		t.Fatalf("verdict_evidence event after refusal among %d events", n)
+	}
+	// The result received before the verdict is evidence.
+	if err := try([]string{early.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := store.GetVerdictEvidence(f.verdict["r1"])
+	if err != nil || len(ev.ResultIDs) != 1 || ev.ResultIDs[0] != early.ID {
+		t.Fatalf("evidence = %+v, %v", ev, err)
+	}
+
+	// A verdict recorded before verdicts took a journal sequence, as rows
+	// written before migration 014 were, takes no evidence at all.
+	if _, err := db.Conn().Exec(`INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, validation_status)
+		VALUES ('legacy', ?, 'h0', 'approve', 'valid')`, f.verdictAt["r1"]); err != nil {
+		t.Fatal(err)
+	}
+	err = store.Tx(func(tx *journal.Tx) error {
+		return tx.RecordVerdictEvidence("legacy", 1, []string{early.ID}, nil)
+	})
+	if !errors.Is(err, journal.ErrEvidenceScope) {
+		t.Fatalf("unsequenced verdict error = %v", err)
 	}
 }
 

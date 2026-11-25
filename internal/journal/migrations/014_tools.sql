@@ -52,6 +52,8 @@ BEGIN
 END;
 
 -- The one terminal outcome of a call. A call with no row is still 'accepted'.
+-- journal_seq is taken from the journal-wide counter (migration 005) when the
+-- result is received, so its receipt orders against verdicts and attempts.
 CREATE TABLE tool_results (
 	id TEXT PRIMARY KEY,
 	tool_call_id TEXT NOT NULL UNIQUE REFERENCES tool_calls(id),
@@ -59,6 +61,7 @@ CREATE TABLE tool_results (
 	result_sha256 TEXT REFERENCES tool_content(sha256),
 	result_byte_len INTEGER CHECK (result_byte_len IS NULL OR result_byte_len >= 0),
 	error_code TEXT,
+	journal_seq INTEGER NOT NULL UNIQUE,
 	recorded_at TEXT NOT NULL,
 	CHECK ((status = 'abandoned') = (result_sha256 IS NULL)),
 	CHECK ((result_sha256 IS NULL) = (result_byte_len IS NULL)),
@@ -78,6 +81,7 @@ END;
 -- The turn's snapshot record: one observation per path, each at its own
 -- version, so a later observation never contradicts an earlier one. kind f
 -- stores the file's base content, d the canonical entry list, a nothing.
+-- journal_seq orders the observation against verdicts, as for tool_results.
 CREATE TABLE observations (
 	id TEXT PRIMARY KEY,
 	turn_id TEXT NOT NULL REFERENCES turns(id),
@@ -86,6 +90,7 @@ CREATE TABLE observations (
 	path BLOB NOT NULL,
 	kind TEXT NOT NULL CHECK (kind IN ('f', 'a', 'd')),
 	content_sha256 TEXT REFERENCES tool_content(sha256),
+	journal_seq INTEGER NOT NULL UNIQUE,
 	recorded_at TEXT NOT NULL,
 	UNIQUE (turn_id, snapshot_version),
 	UNIQUE (turn_id, path),
@@ -198,6 +203,13 @@ CREATE TRIGGER apply_ops_delete_prevented BEFORE DELETE ON apply_ops
 BEGIN
 	SELECT RAISE(ABORT, 'apply_ops table is immutable');
 END;
+
+-- A verdict takes a journal_seq when it is recorded, so "received before
+-- giving it" is a comparison of counters: a result or observation is evidence
+-- only when its journal_seq precedes the verdict's. Verdicts recorded before
+-- this migration have none and take no evidence.
+ALTER TABLE verdicts ADD COLUMN journal_seq INTEGER;
+CREATE UNIQUE INDEX verdicts_journal_seq_unique ON verdicts(journal_seq) WHERE journal_seq IS NOT NULL;
 
 -- What a verdict rested on: the snapshot version it saw, the tool results its
 -- reviewer received before giving it, and the observations it added.
