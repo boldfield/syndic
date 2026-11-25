@@ -451,8 +451,10 @@ func cloneValue(v interface{}) interface{} {
 	return cloneReflect(reflect.ValueOf(v)).Interface()
 }
 
-// cloneReflect deep-copies maps, slices, arrays, pointers and interfaces so
-// typed JSON-schema values ([]string, map[string]string, ...) are not aliased.
+// cloneReflect deep-copies maps, slices, arrays, structs, pointers and
+// interfaces so typed JSON-schema values ([]string, map[string]string, ...)
+// are not aliased. Unexported struct fields cannot be set and are never
+// marshaled, so they keep a shallow copy.
 func cloneReflect(v reflect.Value) reflect.Value {
 	switch v.Kind() {
 	case reflect.Map:
@@ -477,6 +479,15 @@ func cloneReflect(v reflect.Value) reflect.Value {
 		out := reflect.New(v.Type()).Elem()
 		for i := 0; i < v.Len(); i++ {
 			out.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if out.Field(i).CanSet() {
+				out.Field(i).Set(cloneReflect(v.Field(i)))
+			}
 		}
 		return out
 	case reflect.Interface:

@@ -2116,3 +2116,46 @@ func TestRequestDeepCopyArrayValues(t *testing.T) {
 		t.Fatal("Calls result aliases history")
 	}
 }
+
+type schemaNode struct {
+	Required []string
+	Props    map[string]interface{}
+}
+
+func TestRequestDeepCopyStructValues(t *testing.T) {
+	adapter := New([]Step{{Kind: StepKindReply, Text: "ok", Status: transport.StatusComplete, TransportStatus: transport.TransportStatusOK}},
+		Options{DefaultIdentity: transport.NewUnknownIdentity(), DefaultReportedModel: "m"})
+	req := transport.CompleteRequest{
+		Tools: []transport.Tool{{Type: "function", Function: transport.ToolFunction{
+			Name: "f",
+			Parameters: map[string]interface{}{
+				"s":   schemaNode{Required: []string{"a"}, Props: map[string]interface{}{"p": []string{"x"}}},
+				"ptr": &schemaNode{Required: []string{"b"}},
+			},
+		}}},
+	}
+	if _, err := adapter.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	orig := req.Tools[0].Function.Parameters
+	orig["s"].(schemaNode).Required[0] = "mutated"
+	orig["s"].(schemaNode).Props["p"].([]string)[0] = "mutated"
+	orig["ptr"].(*schemaNode).Required[0] = "mutated"
+	got := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if s := got["s"].(schemaNode); s.Required[0] != "a" || s.Props["p"].([]string)[0] != "x" {
+		t.Fatalf("struct aliased caller: %+v", s)
+	}
+	if got["ptr"].(*schemaNode).Required[0] != "b" {
+		t.Fatalf("struct pointer aliased caller: %+v", got["ptr"])
+	}
+	got["s"].(schemaNode).Required[0] = "mutated2"
+	got["s"].(schemaNode).Props["p"].([]string)[0] = "mutated2"
+	got["ptr"].(*schemaNode).Required[0] = "mutated2"
+	again := adapter.Calls()[0].Request.Tools[0].Function.Parameters
+	if s := again["s"].(schemaNode); s.Required[0] != "a" || s.Props["p"].([]string)[0] != "x" {
+		t.Fatalf("Calls result aliases history: %+v", s)
+	}
+	if again["ptr"].(*schemaNode).Required[0] != "b" {
+		t.Fatal("Calls result aliases history through struct pointer")
+	}
+}
