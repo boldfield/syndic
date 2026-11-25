@@ -607,15 +607,79 @@ func TestObservationSnapshotInvariants(t *testing.T) {
 
 func TestStagingKeepsFirstBase(t *testing.T) {
 	f := newToolFixture(t)
-	h1, h2 := f.put("one"), f.put("two")
+	h1, h2, base, other := f.put("one"), f.put("two"), f.put("base"), f.put("other")
 	f.tx(func(tx *journal.Tx) error {
-		if err := tx.StoreStaging("turn1", "a", h1, "basehash"); err != nil {
+		if err := tx.StoreStaging("turn1", "a", h1, base); err != nil {
 			return err
 		}
-		return tx.StoreStaging("turn1", "a", h2, "other")
+		if err := tx.StoreStaging("turn1", "a", h2, other); err != nil {
+			return err
+		}
+		return tx.StoreStaging("turn1", "new", h1, "")
 	})
-	var base string
-	if err := f.db.Conn().QueryRow(`SELECT base_sha256 FROM staging WHERE path = 'a'`).Scan(&base); err != nil || base != "basehash" {
-		t.Errorf("base = %q, %v", base, err)
+	f.restart()
+	f.tx(func(tx *journal.Tx) error {
+		entries, err := tx.GetStagingEntriesByTurn("turn1")
+		if err != nil || len(entries) != 2 {
+			t.Fatalf("entries = %v, %v", entries, err)
+		}
+		if entries[0].Path != "a" || entries[0].BaseSHA256 != base || entries[0].NewSHA256 != h2 {
+			t.Errorf("entry a = %+v", entries[0])
+		}
+		if b, err := tx.GetToolContent(entries[0].BaseSHA256); err != nil || string(b) != "base" {
+			t.Errorf("base bytes = %q, %v", b, err)
+		}
+		if b, err := tx.GetToolContent(entries[0].NewSHA256); err != nil || string(b) != "two" {
+			t.Errorf("staged bytes = %q, %v", b, err)
+		}
+		if entries[1].BaseSHA256 != journal.StagingBaseAbsent {
+			t.Errorf("new path base = %q", entries[1].BaseSHA256)
+		}
+		return nil
+	})
+}
+
+func TestStagingRejectsUnstoredBase(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("one")
+	err := f.s.Tx(func(tx *journal.Tx) error { return tx.StoreStaging("turn1", "a", h, "basehash") })
+	if err == nil {
+		t.Error("a base that is not stored content must be refused")
 	}
+}
+
+func TestVerdictEvidenceIsScopedToVerdictAttempt(t *testing.T) {
+	f := newToolFixture(t)
+	h := f.put("args")
+	createTestAttempt(t, f.db.Conn(), "attempt2", "turn1", "other")
+	for _, id := range []string{"v1", "v2"} {
+		a := "attempt1"
+		if id == "v2" {
+			a = "attempt2"
+		}
+		if _, err := f.db.Conn().Exec(`INSERT INTO verdicts (id, attempt_id, candidate_hash, validation_status) VALUES (?, ?, 'h', 'valid')`, id, a); err != nil {
+			t.Fatalf("insert verdict: %v", err)
+		}
+	}
+	f.tx(func(tx *journal.Tx) error {
+		if err := tx.StoreToolCall(journal.ToolCall{ID: "c1", AttemptID: "attempt1", Name: "x", ArgsSHA256: h}); err != nil {
+			return err
+		}
+		if err := tx.StoreToolResult(journal.ToolResult{ID: "r1", ToolCallID: "c1", Status: journal.ToolCallStatusExecuted, RecordedAt: time.Now()}); err != nil {
+			return err
+		}
+		return tx.StoreObservation(journal.Observation{ID: "o1", TurnID: "turn1", AttemptID: "attempt1", SnapshotVersion: 1, Path: "a", Kind: journal.ObservationKindAbsent, ObservedAt: time.Now()})
+	})
+	if err := f.s.Tx(func(tx *journal.Tx) error { _, err := tx.StoreVerdictToolResult("v2", "c1"); return err }); err == nil {
+		t.Error("another reviewer's tool result must not be evidence")
+	}
+	if err := f.s.Tx(func(tx *journal.Tx) error { return tx.StoreVerdictObservation("v2", "o1") }); err == nil {
+		t.Error("another reviewer's observation must not be evidence")
+	}
+	f.tx(func(tx *journal.Tx) error {
+		if _, err := tx.StoreVerdictToolResult("v1", "c1"); err != nil {
+			return err
+		}
+		return tx.StoreVerdictObservation("v1", "o1")
+	})
 }

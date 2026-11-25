@@ -404,9 +404,15 @@ func (tx *Tx) GetChangeSetPathsByChangeSet(changeSetID string) ([]ChangeSetPath,
 // row ID to avoid ambiguity.
 func (tx *Tx) StoreVerdictToolResult(verdictID, toolCallID string) (string, error) {
 	var resultID string
-	err := tx.tx.QueryRow(`SELECT id FROM tool_results WHERE tool_call_id = ?`, toolCallID).Scan(&resultID)
+	// The call must belong to the verdict's own attempt (turn and reviewer).
+	err := tx.tx.QueryRow(`
+		SELECT r.id FROM tool_results r
+		JOIN tool_calls c ON c.id = r.tool_call_id
+		JOIN verdicts v ON v.attempt_id = c.attempt_id
+		WHERE r.tool_call_id = ? AND v.id = ?
+	`, toolCallID, verdictID).Scan(&resultID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("tool call %q has no recorded result to cite as verdict evidence", toolCallID)
+		return "", fmt.Errorf("tool call %q has no recorded result in the attempt of verdict %q to cite as evidence", toolCallID, verdictID)
 	}
 	if err != nil {
 		return "", fmt.Errorf("query tool result: %w", err)
@@ -445,7 +451,19 @@ func (tx *Tx) GetVerdictSnapshot(verdictID string) (version int, ok bool, err er
 }
 
 // StoreVerdictObservation records an observation the verdict's reviewer added.
+// The observation must have been made in the verdict's own attempt.
 func (tx *Tx) StoreVerdictObservation(verdictID, observationID string) error {
+	var n int
+	if err := tx.tx.QueryRow(`
+		SELECT COUNT(*) FROM observations o
+		JOIN verdicts v ON v.attempt_id = o.attempt_id
+		WHERE o.id = ? AND v.id = ?
+	`, observationID, verdictID).Scan(&n); err != nil {
+		return fmt.Errorf("query verdict observation scope: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("observation %q was not made in the attempt of verdict %q", observationID, verdictID)
+	}
 	if _, err := tx.tx.Exec(`INSERT INTO verdict_observations (verdict_id, observation_id) VALUES (?, ?)`, verdictID, observationID); err != nil {
 		return fmt.Errorf("store verdict observation: %w", err)
 	}
@@ -516,6 +534,15 @@ func (tx *Tx) StoreStaging(turnID, path, contentHash, baseSHA256 string) error {
 		baseSHA256 = StagingBaseAbsent
 	}
 	now := time.Now().Format(time.RFC3339Nano)
+	if baseSHA256 != StagingBaseAbsent {
+		var n int
+		if err := tx.tx.QueryRow(`SELECT COUNT(*) FROM tool_content WHERE sha256 = ?`, baseSHA256).Scan(&n); err != nil {
+			return fmt.Errorf("query staging base content: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("staging base %q is not stored content", baseSHA256)
+		}
+	}
 
 	// Check if this path is already staged
 	var existingID string
@@ -575,6 +602,36 @@ func (tx *Tx) GetStagingByTurn(turnID string) (map[string]string, error) {
 		return nil, fmt.Errorf("iterate staging: %w", err)
 	}
 	return staging, nil
+}
+
+// StagedPath is one entry of a turn's staging map: the staged content hash and
+// the base taken when the path was first staged (a content hash or StagingBaseAbsent).
+type StagedPath struct {
+	Path       string
+	NewSHA256  string
+	BaseSHA256 string
+}
+
+// GetStagingEntriesByTurn retrieves every staged path for a turn with its base,
+// so base and staged bytes can be fetched with GetToolContent after a restart.
+func (tx *Tx) GetStagingEntriesByTurn(turnID string) ([]StagedPath, error) {
+	rows, err := tx.tx.Query(`
+		SELECT path, new_content_hash, base_sha256 FROM staging
+		WHERE turn_id = ? ORDER BY path
+	`, turnID)
+	if err != nil {
+		return nil, fmt.Errorf("query staging entries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []StagedPath
+	for rows.Next() {
+		var sp StagedPath
+		if err := rows.Scan(&sp.Path, &sp.NewSHA256, &sp.BaseSHA256); err != nil {
+			return nil, fmt.Errorf("scan staging entry: %w", err)
+		}
+		out = append(out, sp)
+	}
+	return out, rows.Err()
 }
 
 // UnstageFile removes a path from a turn's staging map.
