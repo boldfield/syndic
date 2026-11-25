@@ -521,7 +521,9 @@ func (tx *Tx) CreateCandidateWithRound(turnID, content, hash string, round int, 
 	return candidateID, nil
 }
 
-// RecordVerdict stores a verdict from an attempt.
+// RecordVerdict stores a verdict from an attempt. The verdict takes the next
+// journal sequence number, which orders it against the tool results and
+// observations its reviewer received (see RecordVerdictEvidence).
 func (tx *Tx) RecordVerdict(attemptID, echoedCandidateHash, parsed, reason, validationStatus string) (verdictID string, err error) {
 	verdictID, err = generateID()
 	if err != nil {
@@ -533,10 +535,15 @@ func (tx *Tx) RecordVerdict(attemptID, echoedCandidateHash, parsed, reason, vali
 		parsedVerdict = &parsed
 	}
 
+	journalSeq, err := tx.nextJournalSeq()
+	if err != nil {
+		return "", err
+	}
+
 	if _, err := tx.tx.Exec(`
-		INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, reason, validation_status)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, verdictID, attemptID, echoedCandidateHash, parsedVerdict, reason, validationStatus); err != nil {
+		INSERT INTO verdicts (id, attempt_id, candidate_hash, parsed_verdict, reason, validation_status, journal_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, verdictID, attemptID, echoedCandidateHash, parsedVerdict, reason, validationStatus, journalSeq); err != nil {
 		return "", fmt.Errorf("insert verdict: %w", err)
 	}
 

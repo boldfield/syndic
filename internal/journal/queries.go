@@ -465,7 +465,8 @@ func (tx *Tx) transcriptItem(r transcriptRef) (TranscriptItem, error) {
 
 // ContentRange returns a byte range of content from a message, attempt output, or candidate.
 // ref is "msg:<id>", "attempt:<id>", "candidate:<id>", or a review content ref:
-// "commentary:<attempt id>", "evidence:<block id>", "remedy:<block id>", "record:<verdict id>".
+// "commentary:<attempt id>", "evidence:<block id>", "remedy:<block id>", "record:<verdict id>",
+// or "content:<sha256>" for tool evidence in the content-addressed store.
 // offset and limit are in raw bytes. limit is clamped to 262144.
 // total and sha256 describe the whole body, not the returned range.
 func (s *Store) ContentRange(ref string, offset, limit int64) (data []byte, total int64, sha256 string, err error) {
@@ -506,6 +507,8 @@ func (tx *Tx) ContentRange(ref string, offset, limit int64) ([]byte, int64, stri
 		query = `SELECT remedy FROM blocks WHERE id = ?`
 	case "record":
 		query = `SELECT record FROM review_records WHERE verdict_id = ?`
+	case "content":
+		query = `SELECT body FROM tool_content WHERE sha256 = ?`
 	default:
 		return nil, 0, "", fmt.Errorf("unknown content ref %q: %w", ref, ErrNoSuchContent)
 	}
