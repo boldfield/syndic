@@ -720,8 +720,9 @@ var runsAllowedTop = []string{"kind", "engine_version", "started_at", "roster", 
 
 // runsAllowedRoster is the list of roster members in section 1a, with the
 // two members section 2b adds to the roster file: the [engine] table and
-// default_preset, and the [tools] table from the design spec.
-var runsAllowedRoster = []string{"participants", "endpoints", "presets", "policy", "pools", "deadlines", "budgets", "quick", "tools", "engine", "default_preset"}
+// default_preset, the [tools] table from the design spec, and the hash of the
+// canonical tool definitions (E-38).
+var runsAllowedRoster = []string{"participants", "endpoints", "presets", "policy", "pools", "deadlines", "budgets", "quick", "tools", "engine", "default_preset", "tool_definitions_hash"}
 
 // runsUnexpected returns the members of an object that are not in allowed.
 func runsUnexpected(t *testing.T, raw json.RawMessage, allowed []string) []string {
