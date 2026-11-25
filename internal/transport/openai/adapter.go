@@ -698,12 +698,13 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	if len(respData.Choices[0].Message.ToolCalls) > 0 {
 		result.ToolCalls = make([]transport.ToolCall, len(respData.Choices[0].Message.ToolCalls))
 		for i, toolCall := range respData.Choices[0].Message.ToolCalls {
+			scrubbedArgs, _ := transport.Scrub(toolCall.Function.Arguments, resolvedSecrets)
 			result.ToolCalls[i] = transport.ToolCall{
 				ID:   toolCall.ID,
 				Type: toolCall.Type,
 				Function: transport.ToolCallFunction{
 					Name:      toolCall.Function.Name,
-					Arguments: toolCall.Function.Arguments,
+					Arguments: scrubbedArgs,
 				},
 			}
 		}
@@ -1363,9 +1364,12 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	// Use a simple harmless tool for the probe
+	// Use a simple harmless tool for the probe.
+	// The request forces the model to call the tool by setting
+	// tool_choice to require a call, ensuring we get definitive yes/no results
+	// rather than a model that skips optional tool calls.
 	messages := []MessageInput{
-		{Role: "user", Content: "Reply with PING and optionally call the probe tool"},
+		{Role: "user", Content: "Call the probe tool with the message PROBE."},
 	}
 
 	maxTokensField := record.MaxTokensField
@@ -1398,6 +1402,7 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 		"messages":     messages,
 		"stream":       false,
 		"tools":        tools,
+		"tool_choice":  map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}},
 		maxTokensField: 50,
 	}
 
@@ -1476,7 +1481,9 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 		finishReasons[choice.FinishReason] = mapFinishReason(choice.FinishReason)
 	}
 
-	// Check if the response has tool_calls
+	// Since tool_choice forced a call, if we got tool_calls with tool_calls finish reason, it's yes.
+	// Any other response (content, refusal, etc.) with finish_reason != tool_calls is no.
+	// A 400 rejecting tools entirely would have been caught as a 4xx error above and returns unknown.
 	if len(choice.Message.ToolCalls) > 0 && choice.FinishReason == "tool_calls" {
 		record.ToolCalls = transport.TriYes
 	} else {

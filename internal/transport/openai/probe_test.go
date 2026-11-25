@@ -45,6 +45,8 @@ type probeServer struct {
 	truncateCalibrationText  bool // when true, the calibration text response is cut short after its headers
 	// calibration request tracking
 	calibrationRequests []*map[string]any // captured request bodies for calibration requests
+	// tool_calls probe control
+	toolCallsSupport string // "yes", "no", or "unknown"; controls tool_calls probe response
 }
 
 func (p *probeServer) count(k string) int {
@@ -96,6 +98,7 @@ func (p *probeServer) handler() http.Handler {
 
 		isCalibration := user == ""            // empty = baseline calibration request
 		isCalibrationText := len(user) == 4096 // calibration text is exactly 4096 bytes
+		isToolCallsProbe := strings.Contains(user, "Call the probe tool") && strings.Contains(user, "PROBE")
 
 		if isCalibration || isCalibrationText {
 			p.mu.Lock()
@@ -125,7 +128,32 @@ func (p *probeServer) handler() http.Handler {
 
 		answer := "ok"
 		promptTokens := 1
+		finishReason := "stop"
+		var toolCalls []any
 		switch {
+		case isToolCallsProbe && p.toolCallsSupport == "yes":
+			// Return tool_calls to indicate yes
+			answer = "Using tool"
+			finishReason = "tool_calls"
+			toolCalls = []any{
+				map[string]any{
+					"id":   "call_probe",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "probe_tool",
+						"arguments": `{"message":"PROBE"}`,
+					},
+				},
+			}
+		case isToolCallsProbe && p.toolCallsSupport == "unknown":
+			// Return 400 to indicate unknown
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"tools not supported"}`))
+			return
+		case isToolCallsProbe && p.toolCallsSupport == "no":
+			// Return plain stop to indicate no
+			answer = "Cannot use tools"
+			finishReason = "stop"
 		case system != "":
 			answer = "PING"
 		case isCalibration:
@@ -178,11 +206,15 @@ func (p *probeServer) handler() http.Handler {
 				}
 			}
 		}
+		msgContent := map[string]any{"role": "assistant", "content": answer}
+		if len(toolCalls) > 0 {
+			msgContent["tool_calls"] = toolCalls
+		}
 		resp := map[string]any{
 			"model": "m1-reported",
 			"choices": []any{map[string]any{
-				"message":       map[string]any{"role": "assistant", "content": answer},
-				"finish_reason": "stop",
+				"message":       msgContent,
+				"finish_reason": finishReason,
 			}},
 		}
 		if !p.noUsage {
@@ -280,6 +312,51 @@ func TestProbeCooperativeEveryField(t *testing.T) {
 	}
 	if p.count("models") != 1 || p.count("chat") != 6 {
 		t.Errorf("request counts: models=%d chat=%d, want 1 and 6", p.count("models"), p.count("chat"))
+	}
+}
+
+// TestProbeToolCallsYes verifies that tool_calls probe returns TriYes when the model responds with tool_calls.
+func TestProbeToolCallsYes(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "yes"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want TriYes", rec.ToolCalls)
+	}
+}
+
+// TestProbeToolCallsNo verifies that tool_calls probe returns TriNo when the model responds with stop (no tool_calls).
+func TestProbeToolCallsNo(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "no"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriNo {
+		t.Errorf("ToolCalls: got %v, want TriNo", rec.ToolCalls)
+	}
+}
+
+// TestProbeToolCallsUnknown verifies that tool_calls probe returns TriUnknown when the server rejects the request.
+func TestProbeToolCallsUnknown(t *testing.T) {
+	p := &probeServer{toolCallsSupport: "unknown"}
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ToolCalls != transport.TriUnknown {
+		t.Errorf("ToolCalls: got %v, want TriUnknown", rec.ToolCalls)
 	}
 }
 

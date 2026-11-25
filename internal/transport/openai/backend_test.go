@@ -1759,7 +1759,7 @@ func TestUnresolvableAuthSecret(t *testing.T) {
 }
 
 // TestToolRoleAllowed verifies tool role messages are allowed and sent correctly.
-func TestToolRoleNotAllowed(t *testing.T) {
+func TestToolRoleAllowed(t *testing.T) {
 	requestReceived := false
 	var capturedBody map[string]any
 
@@ -1843,6 +1843,179 @@ func TestToolRoleNotAllowed(t *testing.T) {
 			if lastMsg["tool_call_id"] != "call123" {
 				t.Errorf("tool_call_id not sent correctly: %v", lastMsg["tool_call_id"])
 			}
+		}
+	}
+}
+
+// TestToolRoundtrip verifies tool definitions are sent, tool_calls are decoded with correct
+// IDs and arguments (scrubbed), multiple calls are ordered, and tool_call_id is sent correctly.
+func TestToolRoundtrip(t *testing.T) {
+	requestReceived := false
+	var capturedBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Verify tool definitions were sent with correct schema
+		tools, ok := capturedBody["tools"].([]any)
+		if !ok || len(tools) != 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, "expected 2 tools, got %d", len(tools))
+			return
+		}
+
+		resp := ResponseBody{
+			Model: "test-model",
+			Choices: []ChoiceBody{
+				{
+					Message: ChoiceMessage{
+						Role:    "assistant",
+						Content: "Using tools",
+						ToolCalls: []ResponseToolCall{
+							{
+								ID:   "call_1",
+								Type: "function",
+								Function: ResponseToolCallFunction{
+									Name:      "read_file",
+									Arguments: `{"path":"/etc/passwd","secret":"super-secret-token"}`,
+								},
+							},
+							{
+								ID:   "call_2",
+								Type: "function",
+								Function: ResponseToolCallFunction{
+									Name:      "web_fetch",
+									Arguments: `{"url":"https://example.com","auth":"super-secret-token"}`,
+								},
+							},
+						},
+					},
+					FinishReason: "tool_calls",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(server.Close)
+
+	profile := config.EndpointProfile{
+		Name:           "test",
+		BaseURL:        server.URL,
+		Auth:           &config.SecretRef{Source: "env", Name: "test-secret"},
+		ExtraHeaders:   map[string]config.SecretRef{},
+		Dialect:        "chat_completions_v1",
+		MaxTokensField: "max_tokens",
+	}
+
+	adapter := New(profile, &mockResolver{secret: "super-secret-token"})
+
+	req := transport.CompleteRequest{
+		Envelope: transport.AttemptEnvelope{
+			Participant:   "test",
+			TurnID:        "turn1",
+			Phase:         "phase1",
+			Epoch:         1,
+			AttemptID:     "attempt1",
+			CandidateHash: "hash1",
+		},
+		Model: "test-model",
+		Messages: []transport.Message{
+			{Role: "user", Content: "Use these tools"},
+		},
+		Tools: []transport.Tool{
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "read_file",
+					Description: "Read a file",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+			{
+				Type: "function",
+				Function: transport.ToolFunction{
+					Name:        "web_fetch",
+					Description: "Fetch a URL",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"url": map[string]string{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+		MaxOutputTokens: 100,
+		Deadline:        time.Now().Add(2 * time.Second),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := adapter.Complete(ctx, req)
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !requestReceived {
+		t.Errorf("request was not sent")
+	}
+	if result.Status != transport.StatusToolCalls {
+		t.Errorf("unexpected status: %v, want %v", result.Status, transport.StatusToolCalls)
+	}
+
+	// Verify tool definitions were sent
+	if capturedBody != nil {
+		tools, ok := capturedBody["tools"].([]any)
+		if !ok || len(tools) != 2 {
+			t.Errorf("tool definitions not sent correctly")
+		}
+	}
+
+	// Verify tool_calls are decoded with correct IDs and order
+	if len(result.ToolCalls) != 2 {
+		t.Errorf("expected 2 tool calls, got %d", len(result.ToolCalls))
+	} else {
+		// Check first call
+		if result.ToolCalls[0].ID != "call_1" {
+			t.Errorf("first call ID: %q, want call_1", result.ToolCalls[0].ID)
+		}
+		if result.ToolCalls[0].Function.Name != "read_file" {
+			t.Errorf("first call name: %q, want read_file", result.ToolCalls[0].Function.Name)
+		}
+		// Verify arguments are scrubbed: secret should be replaced
+		if strings.Contains(result.ToolCalls[0].Function.Arguments, "super-secret-token") {
+			t.Errorf("first call arguments contain unredacted secret")
+		}
+		// But the structure should be preserved
+		if !strings.Contains(result.ToolCalls[0].Function.Arguments, "path") {
+			t.Errorf("first call arguments missing 'path' field")
+		}
+
+		// Check second call
+		if result.ToolCalls[1].ID != "call_2" {
+			t.Errorf("second call ID: %q, want call_2", result.ToolCalls[1].ID)
+		}
+		if result.ToolCalls[1].Function.Name != "web_fetch" {
+			t.Errorf("second call name: %q, want web_fetch", result.ToolCalls[1].Function.Name)
+		}
+		// Verify arguments are scrubbed
+		if strings.Contains(result.ToolCalls[1].Function.Arguments, "super-secret-token") {
+			t.Errorf("second call arguments contain unredacted secret")
+		}
+		// But the structure should be preserved
+		if !strings.Contains(result.ToolCalls[1].Function.Arguments, "url") {
+			t.Errorf("second call arguments missing 'url' field")
 		}
 	}
 }
