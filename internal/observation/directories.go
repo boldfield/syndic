@@ -76,6 +76,7 @@ func ParseEntries(data []byte) ([]Entry, error) {
 type namespace struct {
 	path        string
 	absent      bool   // an ancestor listing or observation puts path outside the tree
+	viaSymlink  bool   // an ancestor listing records a component of path as a symbolic link
 	parentType  string // type in the parent's recorded listing; "" if unlisted
 	descendants []journal.Observation
 }
@@ -134,6 +135,10 @@ func loadNamespace(tx *journal.Tx, turnID, path string) (namespace, error) {
 					}
 				}
 				last := i == len(comps)-1
+				if !last && typ == "l" {
+					ns.viaSymlink = true
+					return ns, nil
+				}
 				if typ == "" || (!last && typ != "d") {
 					ns.absent = true
 					return ns, nil
@@ -170,7 +175,7 @@ func (ns namespace) conflict(kind string) string {
 		switch kind {
 		case journal.ObservationAbsent:
 			return ConflictDeleted
-		case journal.ObservationFile:
+		case journal.ObservationFile, KindSymlink, KindSpecial:
 			return ConflictTypeChanged
 		}
 	}
@@ -182,6 +187,10 @@ func (ns namespace) conflict(kind string) string {
 		want = journal.ObservationFile
 	case "d":
 		want = journal.ObservationListing
+	case "l":
+		want = KindSymlink
+	case "o":
+		want = KindSpecial
 	}
 	switch {
 	case kind == journal.ObservationAbsent:

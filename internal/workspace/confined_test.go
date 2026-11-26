@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -900,5 +901,90 @@ func TestConfinedOpenFile_RootRelocationIdentity(t *testing.T) {
 	}
 	if string(readBack) != writeData {
 		t.Errorf("Read back content mismatch: %q != %q", string(readBack), writeData)
+	}
+}
+
+func TestExamineFileDirAndRoot(t *testing.T) {
+	root := t.TempDir()
+	for name, body := range map[string]string{"a.txt": "A", "sub/b.txt": "B", ".env": "S"} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("a.txt", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := OpenConfined(root, []string{".env*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ex, err := c.Examine("a.txt")
+	if err != nil || ex.IsDir || string(ex.Content) != "A" {
+		t.Fatalf("file: %+v, %v", ex, err)
+	}
+	ex, err = c.Examine(".")
+	if err != nil || !ex.IsDir {
+		t.Fatalf("root: %+v, %v", ex, err)
+	}
+	types := map[string]string{}
+	for _, e := range ex.Entries {
+		types[e.Name] = e.Type
+	}
+	if len(types) != 3 || types["a.txt"] != "f" || types["sub"] != "d" || types["link"] != "l" {
+		t.Fatalf("entries %v (protected .env must be left out)", types)
+	}
+	if _, err := c.Examine("nope"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing: %v", err)
+	}
+	if _, err := c.Examine("link"); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("symlink must be refused with ErrSymlink: %v", err)
+	}
+	if _, err := c.Examine(".env"); err == nil {
+		t.Fatal("protected path must be refused")
+	}
+	if _, err := c.Examine("../x"); err == nil {
+		t.Fatal("escape must be refused")
+	}
+	if !c.IsProtected(".env") || c.IsProtected("a.txt") {
+		t.Fatal("IsProtected")
+	}
+}
+
+func TestExamineSymlinkOnPathIsRefusedNotMissing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"real/x.txt": "X", "a.txt": "A"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("real", filepath.Join(root, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := OpenConfined(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	for _, p := range []string{"linkdir/x.txt", "linkdir/missing/y"} {
+		if _, err := c.Examine(p); !errors.Is(err, ErrSymlinkOnPath) || errors.Is(err, ErrSymlink) {
+			t.Fatalf("%s: want ErrSymlinkOnPath, got %v", p, err)
+		}
+	}
+	if _, err := c.ReadFile("linkdir/x.txt"); !errors.Is(err, ErrSymlinkOnPath) {
+		t.Fatalf("ReadFile: want ErrSymlinkOnPath, got %v", err)
+	}
+	// A regular file on the path is not a link: nothing is beneath it.
+	if _, err := c.Examine("a.txt/x"); errors.Is(err, ErrSymlinkOnPath) || !errors.Is(err, unix.ENOTDIR) {
+		t.Fatalf("a.txt/x: want ENOTDIR only, got %v", err)
 	}
 }

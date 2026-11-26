@@ -68,35 +68,65 @@ func (c *Confined) Close() error {
 // It walks the path component by component using openat(2) with O_NOFOLLOW.
 // Returns an error if the path contains symlinks, absolute components, or ".." traversals.
 func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File, error) {
-	if err := c.validatePath(path); err != nil {
+	fd, path, err := c.openWalk(path, flags, perm, false)
+	if err != nil {
 		return nil, err
 	}
 
+	// Validate that the opened file is a regular file (not directory, FIFO, device, etc.)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("fstat opened file: %w", err)
+	}
+
+	// Check that it's a regular file
+	if (stat.Mode & unix.S_IFMT) != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o", stat.Mode)
+	}
+
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+// openWalk checks path and opens its last component relative to the root,
+// walking one component at a time with O_NOFOLLOW. The last component is
+// opened with flags and whatever file type it has; callers check the type. It
+// returns the descriptor and the normalized path. With allowRoot, a path that
+// names the root itself opens the root directory.
+func (c *Confined) openWalk(path string, flags int, perm fs.FileMode, allowRoot bool) (int, string, error) {
+	if err := c.validatePath(path); err != nil {
+		return -1, "", err
+	}
+
 	if err := c.checkProtectedPaths(path); err != nil {
-		return nil, err
+		return -1, "", err
 	}
 
 	// Normalize and split the path
 	path = strings.TrimPrefix(path, "/")
-	if path == "" || path == "." {
-		return nil, errors.New("cannot open empty or root path")
+	if !allowRoot && (path == "" || path == ".") {
+		return -1, "", errors.New("cannot open empty or root path")
 	}
 
-	components := strings.Split(path, "/")
-
 	// Filter out empty and "." components
-	var filteredComponents []string
-	for _, component := range components {
+	var components []string
+	for _, component := range strings.Split(path, "/") {
 		if component != "" && component != "." {
-			filteredComponents = append(filteredComponents, component)
+			components = append(components, component)
 		}
 	}
 
-	if len(filteredComponents) == 0 {
-		return nil, errors.New("path contains only empty or dot components")
+	if len(components) == 0 {
+		if !allowRoot {
+			return -1, "", errors.New("path contains only empty or dot components")
+		}
+		fd, err := unix.Openat(c.rootfd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return -1, "", fmt.Errorf("open workspace root: %w", err)
+		}
+		return fd, ".", nil
 	}
-
-	components = filteredComponents
 
 	// Walk the path component by component using openat with O_NOFOLLOW
 	currentfd := c.rootfd
@@ -104,10 +134,10 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 
 	for i, component := range components {
 		if component == ".." {
-			if openedfd >= 0 && openedfd != c.rootfd {
+			if openedfd >= 0 {
 				_ = unix.Close(openedfd)
 			}
-			return nil, fmt.Errorf("path traversal with ..: %q", path)
+			return -1, "", fmt.Errorf("path traversal with ..: %q", path)
 		}
 
 		isLast := i == len(components)-1
@@ -125,14 +155,15 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 
 		fd, err := unix.Openat(currentfd, component, openFlags, uint32(perm))
 		if err != nil {
-			if openedfd >= 0 && openedfd != c.rootfd {
+			err = c.walkError(currentfd, component, isLast, err)
+			if openedfd >= 0 {
 				_ = unix.Close(openedfd)
 			}
-			return nil, fmt.Errorf("open component %q: %w", component, err)
+			return -1, "", err
 		}
 
 		// Close the previous fd if it's not the root
-		if openedfd >= 0 && openedfd != c.rootfd {
+		if openedfd >= 0 {
 			_ = unix.Close(openedfd)
 		}
 
@@ -144,24 +175,24 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 		}
 	}
 
-	if openedfd < 0 {
-		return nil, errors.New("failed to open file")
-	}
+	return openedfd, strings.Join(components, "/"), nil
+}
 
-	// Validate that the opened file is a regular file (not directory, FIFO, device, etc.)
-	var stat unix.Stat_t
-	if err := unix.Fstat(openedfd, &stat); err != nil {
-		_ = unix.Close(openedfd)
-		return nil, fmt.Errorf("fstat opened file: %w", err)
+// walkError describes the failure to open component relative to dirfd.
+func (c *Confined) walkError(dirfd int, component string, isLast bool, err error) error {
+	if isLast && errors.Is(err, unix.ELOOP) {
+		// O_NOFOLLOW refused the last component: it is a symbolic link.
+		return fmt.Errorf("open component %q: %w: %w", component, ErrSymlink, err)
 	}
-
-	// Check that it's a regular file
-	if (stat.Mode & unix.S_IFMT) != unix.S_IFREG {
-		_ = unix.Close(openedfd)
-		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o", stat.Mode)
+	if !isLast && (errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP)) {
+		// O_DIRECTORY|O_NOFOLLOW refuses a symbolic link with ENOTDIR, as it
+		// does a regular file; only the link is a refusal.
+		var st unix.Stat_t
+		if unix.Fstatat(dirfd, component, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+			return fmt.Errorf("open component %q: %w: %w", component, ErrSymlinkOnPath, err)
+		}
 	}
-
-	return os.NewFile(uintptr(openedfd), path), nil
+	return fmt.Errorf("open component %q: %w", component, err)
 }
 
 // ReadFile reads the entire contents of a file, checking confinement and protected paths.
@@ -272,4 +303,98 @@ func compileProtectionPattern(pattern string) (*regexp.Regexp, error) {
 	}
 
 	return regexp.Compile(escaped)
+}
+
+// DirEntry is one name in a directory. Type is "f" for a regular file, "d" for
+// a directory, "l" for a symbolic link and "o" for anything else.
+type DirEntry struct {
+	Name string
+	Type string
+}
+
+// Examination is what a path holds right now: a directory's entries, or a
+// regular file's content.
+type Examination struct {
+	IsDir   bool
+	Entries []DirEntry
+	Content []byte
+}
+
+// ErrNotRegular is returned by Examine for a path that is neither a regular
+// file nor a directory.
+var ErrNotRegular = errors.New("not a regular file or directory")
+
+// ErrSymlink is returned (wrapping ELOOP) when the last component of a path is
+// a symbolic link, which the confined walk never follows.
+var ErrSymlink = errors.New("path is a symbolic link")
+
+// ErrSymlinkOnPath is returned (wrapping the open error) when a component
+// before the last is a symbolic link: the walk refuses to follow it, and the
+// path is neither present nor absent.
+var ErrSymlinkOnPath = errors.New("path has a symbolic link on it")
+
+// IsProtected reports whether path matches a protected pattern.
+func (c *Confined) IsProtected(path string) bool {
+	return c.checkProtectedPaths(path) != nil
+}
+
+// Examine opens path through the same confined walk as OpenFile and returns
+// its content (regular file) or its entries (directory; "." is the root).
+// Entries that match a protected pattern are left out. A missing path matches
+// fs.ErrNotExist, and so does a path below something that is not a directory.
+func (c *Confined) Examine(path string) (Examination, error) {
+	fd, norm, err := c.openWalk(path, unix.O_RDONLY, 0, true)
+	if err != nil {
+		return Examination{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return Examination{}, fmt.Errorf("fstat %q: %w", path, err)
+	}
+	f := os.NewFile(uintptr(fd), norm)
+	defer func() { _ = f.Close() }()
+
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		content, err := io.ReadAll(f)
+		if err != nil {
+			return Examination{}, fmt.Errorf("read %q: %w", path, err)
+		}
+		return Examination{Content: content}, nil
+	case unix.S_IFDIR:
+		names, err := f.Readdirnames(-1)
+		if err != nil {
+			return Examination{}, fmt.Errorf("list %q: %w", path, err)
+		}
+		ex := Examination{IsDir: true}
+		for _, name := range names {
+			child := name
+			if norm != "." {
+				child = norm + "/" + name
+			}
+			if c.IsProtected(child) {
+				continue
+			}
+			var st unix.Stat_t
+			if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue // removed while listing
+				}
+				return Examination{}, fmt.Errorf("stat entry %q: %w", child, err)
+			}
+			typ := "o"
+			switch st.Mode & unix.S_IFMT {
+			case unix.S_IFREG:
+				typ = "f"
+			case unix.S_IFDIR:
+				typ = "d"
+			case unix.S_IFLNK:
+				typ = "l"
+			}
+			ex.Entries = append(ex.Entries, DirEntry{Name: name, Type: typ})
+		}
+		return ex, nil
+	}
+	return Examination{}, fmt.Errorf("%q: %w", path, ErrNotRegular)
 }
