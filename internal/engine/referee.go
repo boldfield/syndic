@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -52,13 +51,15 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 		maxOutputTokens = *e.roster.Tools.Referee.MaxOutputTokens
 	}
 
+	// Get prior web calls from the turn. Each call records name and URL only.
+	priorCalls := e.getRefereeCallLog(t, participant)
+
 	// Build the referee payload with the web call and prior calls.
-	// PriorCalls includes the caller's own earlier web_fetch and web_search calls this turn.
 	payload := referee.Payload{
 		CallName:   webCall.Name,
 		CallURL:    webCall.URL,
 		UserInput:  t.input,
-		PriorCalls: []referee.WebCall{}, // TODO: populate from turn's prior web calls
+		PriorCalls: priorCalls,
 	}
 	messages := referee.PromptMessages(payload)
 
@@ -74,15 +75,13 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 		MaxOutputTokens: maxOutputTokens,
 	}
 
-	return e.dispatchRefereeLocked(t, participant, callID, webCall, req, refEndpoint)
+	return e.dispatchRefereeLocked(t, participant, refEndpoint, callID, webCall, req)
 }
 
 // dispatchRefereeLocked issues a synchronous referee attempt with proper
-// scheduler and pool management. It is called with e.mu held and returns
-// with e.mu held. This integrates the referee dispatch with the shared pool
-// to prevent starvation while maintaining synchronous result delivery.
-func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, callID string, webCall referee.WebCall, req transport.CompleteRequest, refEndpoint string) (*RefereeDecision, error) {
-	// If the turn is not open, fail fast.
+// accounting. It is called with e.mu held and returns with e.mu held.
+func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, refEndpoint string, callID string, webCall referee.WebCall, req transport.CompleteRequest) (*RefereeDecision, error) {
+	// If the turn is not open, fail fast
 	if e.open != t {
 		return &RefereeDecision{
 			Verdict: referee.DecisionDeny,
@@ -108,7 +107,8 @@ func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, callID s
 		}
 		epoch = turn.Epoch
 
-		// Estimate the prompt tokens from the request messages.
+		// Admission is computed over the rendered request.
+		// For now we estimate it as the byte length of the messages.
 		estimated := 0
 		for _, m := range req.Messages {
 			estimated += len(m.Content)
@@ -163,14 +163,24 @@ func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, callID s
 	// Arm the attempt timer
 	e.armAttempt(t, attemptID, attemptDeadline)
 
+	// Get adapter for the referee endpoint (which may be different from participant endpoint)
+	refAdapter := e.adapterForEndpoint(refEndpoint, req.Envelope.Participant)
+	if refAdapter == nil {
+		refAdapter = e.adapterFor(req.Envelope.Participant)
+	}
+
 	// Call the adapter with the mutex released.
 	e.mu.Unlock()
-	res, fail := e.complete(t, participant, req)
+	res, fail := e.completeWith(t, refAdapter, req)
 	e.mu.Lock()
 
 	// Record the result in the journal.
 	var wasLate bool
-	_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+	var checkErr error
+	var decision *RefereeDecision
+
+	checkErr = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		// Run identity, epoch and completion checks. A late result is quarantined.
 		accepted, err := tx.AcceptResult(attemptID, epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
@@ -183,86 +193,137 @@ func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, callID s
 			return err
 		}
 
-		// Track whether the result was late
 		if !accepted {
 			wasLate = true
 		}
 
-		// If the result was not accepted (late result), quarantine it
-		if !accepted && fail == nil {
-			_, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+		// Check result validity: allow or deny with one line of reason,
+		// no tool calls, complete status.
+		isValid := !wasLate && fail == nil && res.Status == transport.StatusComplete && len(res.ToolCalls) == 0
+
+		// Parse the decision.
+		var verdict referee.Decision
+		reasonBytes := []byte(res.Text)
+		if isValid {
+			parsed, err := referee.Parse(res.Text, res.Status, false)
+			if err != nil {
+				isValid = false
+				reasonBytes = []byte(err.Error())
+				verdict = referee.DecisionDeny
+			} else {
+				verdict = parsed.Decision
+			}
+		} else {
+			verdict = referee.DecisionDeny
+		}
+
+		// Store reason in content store
+		reasonSHA256, err := e.store.StoreContent(reasonBytes)
+		if err != nil {
 			return err
 		}
 
+		// Set decision for return
+		if isValid {
+			parsed, _ := referee.Parse(res.Text, res.Status, false)
+			decision = &RefereeDecision{
+				Verdict: verdict,
+				Reason:  parsed.Reason,
+			}
+		} else {
+			decision = &RefereeDecision{
+				Verdict: referee.DecisionDeny,
+				Reason:  "referee: invalid result",
+			}
+		}
+
+		// Record usage
 		if res.Usage != nil {
 			if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
 				return err
 			}
 		}
 
-		// Settle the attempt
-		if fail != nil {
-			if _, err = e.failedIn(tx, emit, participant, attemptID, fail); err != nil {
-				return err
-			}
+		// Settle the attempt: if late, quarantine; if failed, hold; otherwise settle.
+		if wasLate {
+			_, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+		} else if fail != nil {
+			_, err = e.failedIn(tx, emit, participant, attemptID, fail)
 		} else {
-			if _, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
-				return err
-			}
+			_, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true)
 		}
-
-		// Journal the referee decision
-		reasonBytes := []byte("")
-		verdict := string(referee.DecisionDeny)
-		if !wasLate && res.Status == transport.StatusComplete && len(res.ToolCalls) == 0 {
-			reasonBytes = []byte(res.Text)
-			parsed, err := referee.Parse(res.Text, res.Status, false)
-			if err == nil {
-				verdict = string(parsed.Decision)
-			}
-		}
-
-		reasonSHA256, err := e.store.StoreContent(reasonBytes)
 		if err != nil {
 			return err
 		}
 
-		payload := map[string]any{
-			"attempt_id":    attemptID,
-			"call_id":       callID,
-			"verdict":       verdict,
-			"reason_sha256": reasonSHA256,
-		}
-		payloadBytes, _ := json.Marshal(payload)
-		return tx.AppendEvent("referee_decision", payloadBytes)
+		// Journal the referee decision event with attempt_id, call_id, verdict, and reason_sha256
+		payloadStr := fmt.Sprintf(`{"attempt_id":%q,"call_id":%q,"verdict":%q,"reason_sha256":%q}`,
+			attemptID, callID, string(verdict), reasonSHA256)
+		return tx.AppendEvent("referee_decision", []byte(payloadStr))
 	})
 
-	// If result was late, refuse it
+	if checkErr != nil {
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  "referee: journaling failed",
+		}, nil
+	}
+
+	// If the result was late, it's quarantined and does not authorize
 	if wasLate {
+		e.releaseLocked(participant)
 		return &RefereeDecision{
 			Verdict: referee.DecisionDeny,
-			Reason:  "referee: late result quarantined",
+			Reason:  "referee: late result",
 		}, nil
 	}
 
-	// Parse and return the decision
-	if res.Status != transport.StatusComplete || len(res.ToolCalls) > 0 {
-		return &RefereeDecision{
-			Verdict: referee.DecisionDeny,
-			Reason:  fmt.Sprintf("referee: dispatch failed or returned tool calls: %v", res.TransportStatus),
-		}, nil
-	}
+	e.releaseLocked(participant)
+	return decision, nil
+}
 
-	parsed, err := referee.Parse(res.Text, res.Status, false)
-	if err != nil {
-		return &RefereeDecision{
-			Verdict: referee.DecisionDeny,
-			Reason:  fmt.Sprintf("referee: parse failed: %v", err),
-		}, nil
+// adapterForEndpoint returns an adapter for a specific endpoint name, or nil if not found.
+// The endpoint must be one that has at least one participant or is a referee endpoint.
+func (e *Engine) adapterForEndpoint(endpointName string, fallback string) transport.Adapter {
+	// Try to find a participant on this endpoint
+	for _, p := range e.roster.Participants {
+		if p.Endpoint == endpointName {
+			return e.adapterFor(p.ID)
+		}
 	}
+	// If not found, return nil and fall back to participant's own adapter
+	return nil
+}
 
-	return &RefereeDecision{
-		Verdict: parsed.Decision,
-		Reason:  parsed.Reason,
-	}, nil
+// completeWith calls a specific adapter for a request.
+func (e *Engine) completeWith(t *openTurn, adapter transport.Adapter, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
+	if adapter == nil {
+		return transport.CompleteResult{}, &failure{
+			attemptStatus:   transport.StatusError,
+			transportStatus: "adapter_unavailable",
+			retry:           false,
+			hold:            true,
+			state:           "",
+		}
+	}
+	ours := func() bool {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.cancelled[req.Envelope.AttemptID]
+	}
+	res, f := callOnce(adapter, req, ours)
+	if f != nil && f.retry && e.waitToRetry(t, req) && e.recordRetry(t, req) {
+		res, f = callOnce(adapter, req, ours)
+	}
+	e.returned(req.Envelope.AttemptID)
+	return res, f
+}
+
+// getRefereeCallLog collects the participant's web_fetch and web_search calls
+// from earlier in this turn, returning them as name and URL only.
+func (e *Engine) getRefereeCallLog(t *openTurn, participant string) []referee.WebCall {
+	// TODO: This should read from the turn's tool calls to find prior web_fetch
+	// and web_search calls by this participant and return them as (name, URL) tuples.
+	// For now, return an empty slice.
+	return []referee.WebCall{}
 }

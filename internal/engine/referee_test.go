@@ -88,13 +88,13 @@ func TestRefereeWithFakeAdapter(t *testing.T) {
 
 	// Create a fake adapter that returns allow
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer r.Body.Close() //nolint:errcheck
 		body, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(body), "referee") {
 			// Return a simple allow response
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, `{
+			_, _ = io.WriteString(w, `{
 				"id": "test-id",
 				"content": [{"type": "text", "text": "allow: This URL seems related to the user request."}],
 				"model": "test-model",
