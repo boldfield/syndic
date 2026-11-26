@@ -451,6 +451,7 @@ func Supervise(stderr io.Writer) int {
 		exited: make(chan struct{}),
 		empty:  make(chan struct{}),
 	}
+	defer s.release()
 	if cfg.Probe {
 		_ = out.Close()
 		if err := probeContainer(cfg); err != nil {
@@ -540,13 +541,27 @@ func (s *supervisor) startCommand(cfg supervisorConfig, out *os.File) error {
 	if err := s.container.Prepare(s.cmd); err != nil {
 		return err
 	}
-	// Resolved after Prepare, which may change what the command sees.
-	path, err := lookPath(cfg.Argv[0], cfg.Env)
+	// Resolved after Prepare, which may change what the command sees and
+	// what runs first.
+	path, err := lookPath(s.cmd.Args[0], cfg.Env)
 	if err != nil {
 		return err
 	}
 	s.cmd.Path = path
 	return s.cmd.Start()
+}
+
+// releaser is a Container that holds files of its own, released once
+// nothing it contains remains.
+type releaser interface {
+	release()
+}
+
+// release releases the container's files, if it has any.
+func (s *supervisor) release() {
+	if r, ok := s.container.(releaser); ok {
+		r.release()
+	}
 }
 
 // newContainer constructs the container cfg names.
@@ -697,12 +712,19 @@ func isOpen(fd int) bool {
 // command inherits none of them: neither the control pipe nor anything the
 // engine leaked to the supervisor.
 func closeOnExecAll() error {
-	entries, err := os.ReadDir("/dev/fd")
+	// Names only: on macOS the reader's own transient descriptor is listed
+	// and cannot be stat'ed once the read ends.
+	d, err := os.Open("/dev/fd")
 	if err != nil {
 		return fmt.Errorf("list descriptors: %w", err)
 	}
-	for _, e := range entries {
-		fd, err := strconv.Atoi(e.Name())
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		return fmt.Errorf("list descriptors: %w", err)
+	}
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil || fd <= 2 {
 			continue
 		}

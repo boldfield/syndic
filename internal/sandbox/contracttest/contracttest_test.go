@@ -119,12 +119,19 @@ func TestPlainBackendContract(t *testing.T) {
 // every command, failing the descriptors clause for a reason that has
 // nothing to do with the backend.
 func closeInheritedOnExec(t *testing.T) {
-	entries, err := os.ReadDir("/dev/fd")
+	// Names only: on macOS the reader's own transient descriptor is listed
+	// and cannot be stat'ed once the read ends.
+	d, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Fatalf("list descriptors: %v", err)
 	}
-	for _, e := range entries {
-		fd, err := strconv.Atoi(e.Name())
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		t.Fatalf("list descriptors: %v", err)
+	}
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil || fd <= 2 {
 			continue
 		}

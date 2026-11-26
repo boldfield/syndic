@@ -187,8 +187,17 @@ func listDescriptorDir() (fds []int, ok bool) {
 			fds = append(fds, fd)
 		}
 	}
-	sort.Ints(fds)
-	return fds, true
+	// Reading a directory on macOS duplicates its descriptor while the read
+	// lasts, and the duplicate is listed: keep only what is still open.
+	open := fds[:0]
+	for _, fd := range fds {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil {
+			open = append(open, fd)
+		}
+	}
+	sort.Ints(open)
+	return open, true
 }
 
 // scanDescriptors probes every number below the soft open-file limit, capped
