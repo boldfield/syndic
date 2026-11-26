@@ -398,3 +398,234 @@ func TestScreenAllowsNonSTD3Hostnames(t *testing.T) {
 		t.Error("case variant should share the per-host budget")
 	}
 }
+
+// Tests for SetHostPolicy integration with Screen
+func TestScreenWithHostPolicyAllow(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com", "*.api.example.org"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	tests := []struct {
+		name  string
+		url   string
+		allow bool
+	}{
+		{
+			name:  "exact match allowed",
+			url:   "https://example.com/path",
+			allow: true,
+		},
+		{
+			name:  "wildcard subdomain allowed",
+			url:   "https://api.api.example.org/path",
+			allow: true,
+		},
+		{
+			name:  "apex not matched by *",
+			url:   "https://api.example.org/",
+			allow: false,
+		},
+		{
+			name:  "off-allowlist host refused",
+			url:   "https://notallowed.com/",
+			allow: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := s.Screen(tc.url)
+			if tc.allow && !v.Allowed {
+				t.Errorf("Screen(%q) should allow, got ruled: %s", tc.url, v.Rule)
+			}
+			if !tc.allow && v.Allowed {
+				t.Errorf("Screen(%q) should refuse", tc.url)
+			}
+		})
+	}
+}
+
+func TestScreenRefusesInvalidScheme(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	v := s.Screen("ftp://example.com/path")
+	wantRule(t, v, RuleScheme)
+	if !strings.Contains(v.Reason, "http or https") {
+		t.Errorf("unexpected reason: %q", v.Reason)
+	}
+}
+
+func TestScreenRefusesUserinfo(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	v := s.Screen("https://user:pass@example.com/path")
+	wantRule(t, v, RuleShape)
+	if !strings.Contains(v.Reason, "credentials") && !strings.Contains(v.Reason, "userinfo") {
+		t.Errorf("unexpected reason: %q", v.Reason)
+	}
+}
+
+func TestScreenRefusesIPLiteralWhenPolicySet(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	tests := []string{
+		"https://192.0.2.1/",
+		"https://[2001:db8::1]/",
+		"https://10.0.0.1/path",
+	}
+
+	for _, url := range tests {
+		t.Run(url, func(t *testing.T) {
+			v := s.Screen(url)
+			wantRule(t, v, RuleAllowlist)
+			if !strings.Contains(v.Reason, "IP") && !strings.Contains(v.Reason, "literal") {
+				t.Errorf("unexpected reason: %q", v.Reason)
+			}
+		})
+	}
+}
+
+func TestScreenRefusesOffAllowlist(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	v := s.Screen("https://notallowed.org/path")
+	wantRule(t, v, RuleAllowlist)
+}
+
+func TestScreenWithNilPolicy(t *testing.T) {
+	s := NewURLScreener(0)
+	// Don't set a policy (nil)
+
+	// IP literals should be allowed with nil policy
+	v := s.Screen("https://192.0.2.1/")
+	wantAllowed(t, v)
+
+	// Various schemes should be allowed with nil policy
+	v = s.Screen("https://example.com/")
+	wantAllowed(t, v)
+}
+
+func TestScreenDoesNotConsumeBudgetOnRefusal(t *testing.T) {
+	s := NewURLScreener(1) // max 1 fetch per turn
+	policy, err := NewHostPolicy([]string{"allowed.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	// First attempt: refused by allowlist
+	v := s.Screen("https://notallowed.com/")
+	if v.Allowed {
+		t.Fatalf("should be refused")
+	}
+
+	// Second attempt: should be allowed (refused URLs don't consume budget)
+	v = s.Screen("https://allowed.com/")
+	wantAllowed(t, v)
+
+	// Third attempt: should be refused (budget exceeded, but refusal first)
+	v = s.Screen("https://allowed.com/path")
+	if v.Allowed || v.Rule != RuleTurnCount {
+		t.Errorf("should refuse with RuleTurnCount, got %v", v)
+	}
+}
+
+func TestScreenIDNHostMatching(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"bücher.de"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	// URL with punycode should match the IDN entry
+	v := s.Screen("https://xn--bcher-kva.de/")
+	wantAllowed(t, v)
+
+	// URL with unicode IDN should also work (goes through canonicalization)
+	v = s.Screen("https://bücher.de/")
+	wantAllowed(t, v)
+}
+
+func TestScreenWildcardWithIDN(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"**.bücher.de"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	tests := []struct {
+		url   string
+		allow bool
+	}{
+		{"https://xn--bcher-kva.de/", true},
+		{"https://sub.xn--bcher-kva.de/", true},
+		{"https://other.com/", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.url, func(t *testing.T) {
+			v := s.Screen(tc.url)
+			if tc.allow && !v.Allowed {
+				t.Errorf("should allow %q", tc.url)
+			}
+			if !tc.allow && v.Allowed {
+				t.Errorf("should refuse %q", tc.url)
+			}
+		})
+	}
+}
+
+func TestScreenDefaultPorts(t *testing.T) {
+	s := NewURLScreener(0)
+	policy, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+	s.SetHostPolicy(policy)
+
+	tests := []struct {
+		url   string
+		allow bool
+	}{
+		{"https://example.com:443/", true},
+		{"https://example.com/", true},
+		{"http://example.com:80/", true},
+		{"http://example.com/", true},
+		{"https://example.com:8443/", true}, // non-default port still matches
+		{"http://example.com:8080/", true},  // non-default port still matches
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.url, func(t *testing.T) {
+			v := s.Screen(tc.url)
+			if tc.allow && !v.Allowed {
+				t.Errorf("should allow %q", tc.url)
+			}
+		})
+	}
+}

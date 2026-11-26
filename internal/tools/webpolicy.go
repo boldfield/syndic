@@ -99,6 +99,9 @@ func parseEntry(s string) (hostEntry, error) {
 			pattern: canonical,
 			kind:    kindWildSubdomain,
 		}, nil
+	case strings.Contains(s, "*"):
+		// Reject any other form of wildcard (bare *, **, etc.)
+		return hostEntry{}, fmt.Errorf("wildcard must be in the form *.domain or **.domain")
 	default:
 		canonical, err := canonicalizeEntry(s)
 		if err != nil {
@@ -116,6 +119,7 @@ func parseEntry(s string) (hostEntry, error) {
 }
 
 // canonicalizeEntry canonicalizes a hostname using IDNA punycode and lowercase.
+// Returns an error if the hostname cannot be canonicalized (e.g., invalid IDNA).
 func canonicalizeEntry(s string) (string, error) {
 	if s == "" {
 		return "", fmt.Errorf("empty hostname")
@@ -123,8 +127,7 @@ func canonicalizeEntry(s string) (string, error) {
 	// Apply IDNA to punycode IDNs
 	a, err := hostProfile.ToASCII(s)
 	if err != nil {
-		// Fall back to lowercase if IDNA fails
-		a = strings.ToLower(s)
+		return "", fmt.Errorf("cannot canonicalize hostname %q: %w", s, err)
 	}
 	// Strip trailing dot after IDNA processing
 	return strings.TrimSuffix(strings.ToLower(a), "."), nil
@@ -154,9 +157,8 @@ func (p *HostPolicy) Match(host string) bool {
 }
 
 // MatchURL validates an HTTP(S) URL against the policy, returning an error if refused.
-// It checks the scheme, canonicalizes the hostname, and matches against entries.
-// IP literals are refused only when an allowlist is set (design v5 section 6 pre-send check 5).
-// No name resolution occurs.
+// It checks the scheme first (design requirement), then validates credentials, IP literals,
+// and allowlist. No name resolution occurs.
 // A nil policy allows all hosts, including IP literals (address filtering happens in fetch execution).
 func (p *HostPolicy) MatchURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
@@ -164,9 +166,9 @@ func (p *HostPolicy) MatchURL(rawURL string) error {
 		return fmt.Errorf("URL does not parse: %w", err)
 	}
 
-	// Check HTTP(S) scheme first - must check before anything else per design
+	// Check HTTP(S) scheme first - design v5 section 6 says "first the scheme rule"
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("URL scheme must be http or https, not %q", u.Scheme)
+		return fmt.Errorf("scheme=%s", u.Scheme) // tag errors for Screen to categorize
 	}
 
 	// Extract and canonicalize hostname
@@ -175,19 +177,19 @@ func (p *HostPolicy) MatchURL(rawURL string) error {
 		return fmt.Errorf("hostname is not valid")
 	}
 
-	// Check for credentials or cookies - these are present if User is not nil
+	// Check for credentials in URL - must reject userinfo
 	if u.User != nil {
-		return fmt.Errorf("URL must not contain credentials (userinfo)")
+		return fmt.Errorf("userinfo=%s", "present")
 	}
 
 	// Check IP literals only when an allowlist is set (design v5 section 6)
 	if p != nil && isIPLiteral(host) {
-		return fmt.Errorf("IP literals are refused when an allowlist is set")
+		return fmt.Errorf("ip_literal=%s", host)
 	}
 
 	// Check if hostname matches allowlist (or if no policy, allow all)
 	if p != nil && !p.Match(host) {
-		return fmt.Errorf("hostname %q is not in the allowlist", host)
+		return fmt.Errorf("not_in_allowlist=%q", host)
 	}
 
 	return nil
@@ -237,21 +239,35 @@ func matchesEntry(host string, e hostEntry) bool {
 
 // NewHTTPRequest creates a new HTTP GET request for web_fetch with the required
 // constraints: GET method, no body, no cookies, and no credentials.
-// The request is suitable for use with a Jar-less client.
+// It validates that the URL has no userinfo and uses only http(s) schemes.
+// The request must be used with an http.Client that has Jar: nil to ensure no cookies.
 func NewHTTPRequest(rawURL string) (*http.Request, error) {
-	req, err := http.NewRequest("GET", rawURL, nil)
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("URL does not parse: %w", err)
 	}
 
-	// Explicitly ensure no Cookie header is set
-	req.Header.Del("Cookie")
+	// Reject non-http(s) schemes
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("URL scheme must be http or https, not %q", u.Scheme)
+	}
 
-	// Explicitly ensure no Authorization header is set
+	// Reject URLs with userinfo (credentials in URL)
+	if u.User != nil {
+		return nil, fmt.Errorf("URL must not contain credentials (userinfo)")
+	}
+
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create request: %w", err)
+	}
+
+	// Explicitly clear any authorization headers that might be set
+	req.Header.Del("Cookie")
 	req.Header.Del("Authorization")
 
 	// No body is set (already nil from NewRequest with nil body)
-	// No jar is used - ensured by caller using &http.Client{Jar: nil}
+	// No jar is used - must be ensured by caller using &http.Client{Jar: nil}
 
 	return req, nil
 }

@@ -42,6 +42,8 @@ const (
 	RuleShape     = "shape"
 	RuleHostCount = "host_count"
 	RuleTurnCount = "turn_count"
+	RuleScheme    = "scheme"
+	RuleAllowlist = "allowlist"
 )
 
 // Route names where a file-derived byte sequence came from. The canary treats
@@ -129,17 +131,20 @@ func (s *URLScreener) Screen(rawURL string) Verdict {
 	if err != nil {
 		return refuse(RuleShape, "URL does not parse")
 	}
+
+	// Check allowlist scheme and userinfo first (design v5 §6: "first the scheme rule on the URL string")
+	if s.policy != nil {
+		if err := s.policy.MatchURL(rawURL); err != nil {
+			return categorizeMatchURLError(err)
+		}
+	}
+
 	if s.hasCanary(rawURL, u) {
 		return refuse(RuleCanary, "URL carries bytes from a file read this turn")
 	}
 	host, v := shapeCheck(rawURL, u)
 	if v != nil {
 		return *v
-	}
-
-	// Check allowlist (pre-send check 5)
-	if err := s.policy.MatchURL(rawURL); err != nil {
-		return refuse(RuleShape, err.Error())
 	}
 
 	if s.perHost[host] >= maxFetchesPerHost {
@@ -151,6 +156,25 @@ func (s *URLScreener) Screen(rawURL string) Verdict {
 	s.perHost[host]++
 	s.totalNum++
 	return Verdict{Allowed: true}
+}
+
+// categorizeMatchURLError maps MatchURL errors to the appropriate rule constant
+func categorizeMatchURLError(err error) Verdict {
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "scheme="):
+		return refuse(RuleScheme, "URL scheme must be http or https")
+	case strings.HasPrefix(msg, "userinfo="):
+		return refuse(RuleShape, "URL must not contain credentials (userinfo)")
+	case strings.HasPrefix(msg, "ip_literal="):
+		return refuse(RuleAllowlist, "IP literals are refused when an allowlist is set")
+	case strings.HasPrefix(msg, "not_in_allowlist="):
+		// Extract the hostname from the error message for the reason
+		return refuse(RuleAllowlist, msg[len("not_in_allowlist="):])
+	default:
+		// Fallback for other shape-related errors
+		return refuse(RuleShape, msg)
+	}
 }
 
 func refuse(rule, reason string) Verdict {

@@ -599,6 +599,28 @@ func TestEntryValidation(t *testing.T) {
 	}
 }
 
+func TestRejectBareWildcard(t *testing.T) {
+	tests := []string{
+		"*",
+		"**",
+		"**.",
+		"*.example",  // wildcard but no dot in base domain
+		"**.example", // wildcard but no dot in base domain
+	}
+
+	for _, entry := range tests {
+		t.Run(entry, func(t *testing.T) {
+			p, err := NewHostPolicy([]string{entry})
+			if err == nil {
+				t.Fatalf("NewHostPolicy should reject %q", entry)
+			}
+			if p != nil {
+				t.Fatalf("NewHostPolicy should return nil for rejected entry %q", entry)
+			}
+		})
+	}
+}
+
 func TestTrailingDotHandling(t *testing.T) {
 	p, err := NewHostPolicy([]string{"example.com."})
 	if err != nil {
@@ -718,6 +740,30 @@ func TestNewHTTPRequest(t *testing.T) {
 	// Verify no Authorization header
 	if req.Header.Get("Authorization") != "" {
 		t.Fatalf("request should not have Authorization header")
+	}
+}
+
+func TestNewHTTPRequestRejectsUserinfo(t *testing.T) {
+	_, err := NewHTTPRequest("http://user:pass@example.com/path")
+	if err == nil {
+		t.Fatalf("NewHTTPRequest should reject URL with userinfo")
+	}
+	if err.Error() != "URL must not contain credentials (userinfo)" {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestNewHTTPRequestRejectsInvalidScheme(t *testing.T) {
+	_, err := NewHTTPRequest("ftp://example.com/path")
+	if err == nil {
+		t.Fatalf("NewHTTPRequest should reject non-http(s) scheme")
+	}
+}
+
+func TestNewHTTPRequestValidatesURL(t *testing.T) {
+	_, err := NewHTTPRequest("not a url at all")
+	if err == nil {
+		t.Fatalf("NewHTTPRequest should reject invalid URL")
 	}
 }
 
