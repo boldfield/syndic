@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"math"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -72,7 +73,9 @@ type Verdict struct {
 }
 
 // URLScreener applies the deterministic pre-send checks to the URLs of one
-// turn. It performs no name resolution. It is safe for concurrent use.
+// turn. One screener is shared by every role of a turn, so counts and the
+// corpus span roles. It performs no name resolution and is safe for concurrent
+// use.
 type URLScreener struct {
 	mu       sync.Mutex
 	maxTurn  int
@@ -143,15 +146,19 @@ func refuse(rule, reason string) Verdict {
 // or port. The count is keyed on the hostname alone, so a different port of the
 // same name shares its budget.
 func canonicalHost(u *url.URL) (string, bool) {
-	h := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	h := u.Hostname()
 	if h == "" {
 		return "", true
+	}
+	if ip, err := netip.ParseAddr(h); err == nil {
+		return ip.Unmap().WithZone("").String(), true
 	}
 	a, err := idna.Lookup.ToASCII(h)
 	if err != nil {
 		return "", false
 	}
-	return strings.ToLower(a), true
+	// Strip the root dot only after IDNA, which maps U+3002 and friends to ".".
+	return strings.TrimSuffix(strings.ToLower(a), "."), true
 }
 
 // shapeCheck applies the length and entropy rules and returns the canonical
@@ -170,6 +177,18 @@ func shapeCheck(rawURL string, u *url.URL) (string, *Verdict) {
 		v := refuse(RuleShape, "hostname longer than 253 bytes")
 		return "", &v
 	}
+	if u.User != nil {
+		parts := []string{u.User.Username()}
+		if p, ok := u.User.Password(); ok {
+			parts = append(parts, p)
+		}
+		for _, p := range parts {
+			if highEntropyAny(p) {
+				v := refuse(RuleShape, "userinfo is long and high-entropy")
+				return "", &v
+			}
+		}
+	}
 	for _, l := range strings.Split(host, ".") {
 		if len(l) > maxLabelBytes {
 			v := refuse(RuleShape, "hostname label longer than 63 bytes")
@@ -180,20 +199,30 @@ func shapeCheck(rawURL string, u *url.URL) (string, *Verdict) {
 			return "", &v
 		}
 	}
-	for _, seg := range strings.Split(u.EscapedPath(), "/") {
+	for _, seg := range splitAny(u.EscapedPath(), "/;") {
 		if highEntropy(percentDecode(seg)) {
 			v := refuse(RuleShape, "path segment is long and high-entropy")
 			return "", &v
 		}
 	}
-	for _, kv := range strings.Split(u.RawQuery, "&") {
-		_, val, _ := strings.Cut(kv, "=")
-		if highEntropy(percentDecode(val)) || highEntropy(formDecode(val)) {
-			v := refuse(RuleShape, "query value is long and high-entropy")
+	for _, kv := range splitAny(u.RawQuery, "&;") {
+		k, val, _ := strings.Cut(kv, "=")
+		if highEntropyAny(k) || highEntropyAny(val) {
+			v := refuse(RuleShape, "query component is long and high-entropy")
 			return "", &v
 		}
 	}
 	return host, nil
+}
+
+// splitAny splits s at every byte of seps.
+func splitAny(s, seps string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return strings.ContainsRune(seps, r) })
+}
+
+// highEntropyAny applies highEntropy to the percent and form readings of v.
+func highEntropyAny(v string) bool {
+	return highEntropy(percentDecode(v)) || highEntropy(formDecode(v))
 }
 
 // highEntropy reports whether v is longer than entropyMinBytes and has Shannon
@@ -260,33 +289,55 @@ func (s *URLScreener) hasCanary(rawURL string, u *url.URL) bool {
 	if len(s.corpus) == 0 {
 		return false
 	}
-	// Whole-URL views: raw, percent-decoded, and form-decoded.
-	for _, v := range []string{rawURL, percentDecode(rawURL), formDecode(rawURL)} {
+	// Whole-URL views: raw, percent-decoded, and with the query form-decoded.
+	// Form decoding ("+" as space) applies to the query only.
+	formURL := rawURL
+	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
+		q := rawURL[i+1:]
+		frag := ""
+		if j := strings.IndexByte(q, '#'); j >= 0 {
+			q, frag = q[:j], q[j:]
+		}
+		formURL = percentDecode(rawURL[:i+1]) + formDecode(q) + percentDecode(frag)
+	}
+	for _, v := range []string{rawURL, percentDecode(rawURL), formURL} {
 		if s.has(v) {
 			return true
 		}
 	}
-	var comps []string
+	type comp struct {
+		v          string
+		form, fold bool // form-decode as a query; case-fold as a hostname label
+	}
+	var comps []comp
 	if u.User != nil {
-		comps = append(comps, u.User.Username())
+		comps = append(comps, comp{v: u.User.Username()})
 		if p, ok := u.User.Password(); ok {
-			comps = append(comps, p)
+			comps = append(comps, comp{v: p})
 		}
 	}
-	host := strings.TrimSuffix(u.Hostname(), ".")
-	comps = append(comps, strings.Split(host, ".")...)
-	comps = append(comps, strings.Split(u.EscapedPath(), "/")...)
-	for _, kv := range strings.Split(u.RawQuery, "&") {
+	for _, l := range strings.Split(strings.TrimSuffix(u.Hostname(), "."), ".") {
+		comps = append(comps, comp{v: l, fold: true})
+	}
+	for _, seg := range splitAny(u.EscapedPath(), "/;") {
+		comps = append(comps, comp{v: seg})
+	}
+	for _, kv := range splitAny(u.RawQuery, "&;") {
 		k, v, _ := strings.Cut(kv, "=")
-		comps = append(comps, k, v)
+		comps = append(comps, comp{v: kv, form: true}, comp{v: k, form: true}, comp{v: v, form: true})
 	}
 	for _, c := range comps {
-		if c == "" {
+		if c.v == "" {
 			continue
 		}
-		views := []string{c, percentDecode(c), formDecode(c)}
-		if lc := strings.ToLower(c); lc != c {
-			views = append(views, percentDecode(lc))
+		views := []string{c.v, percentDecode(c.v)}
+		if c.form {
+			views = append(views, formDecode(c.v))
+		}
+		if c.fold {
+			if lc := strings.ToLower(c.v); lc != c.v {
+				views = append(views, lc)
+			}
 		}
 		for _, v := range views {
 			if s.hasDecoded(v) {

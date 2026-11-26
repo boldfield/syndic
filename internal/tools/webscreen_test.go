@@ -328,3 +328,55 @@ func TestRefusedFetchesConsumeNoBudget(t *testing.T) {
 func TestScreenUnparseableURLRefused(t *testing.T) {
 	wantRule(t, NewURLScreener(0).Screen("https://exa mple.com/%"), RuleShape)
 }
+
+func TestCountsIDNARootDotAndIPLiterals(t *testing.T) {
+	s := NewURLScreener(100)
+	for i := 0; i < 10; i++ {
+		wantAllowed(t, s.Screen("https://example.com/"))
+	}
+	wantRule(t, s.Screen("https://example.com。/"), RuleHostCount)
+
+	s = NewURLScreener(100)
+	wantAllowed(t, s.Screen("https://[2606:4700:4700::1111]/"))
+	wantAllowed(t, s.Screen("https://192.0.2.7:8080/"))
+	for i := 0; i < 9; i++ {
+		wantAllowed(t, s.Screen("https://[2606:4700:4700:0:0:0:0:1111]:443/"))
+	}
+	wantRule(t, s.Screen("https://[2606:4700:4700::1111]/"), RuleHostCount)
+}
+
+func TestCanaryNoFalsePositivesOutsideContext(t *testing.T) {
+	s := screenerWith(t, "my secret key 12")
+	wantAllowed(t, s.Screen("https://example.com/my+secret+key+12"))
+	wantRule(t, s.Screen("https://example.com/p?q=my+secret+key+12"), RuleCanary)
+	s = screenerWith(t, "abcdefghijklmnop")
+	wantAllowed(t, s.Screen("https://example.com/ABCDEFGHIJKLMNOP"))
+	wantRule(t, s.Screen("https://ABCDEFGHIJKLMNOP.example.com/"), RuleCanary)
+}
+
+func TestShapeEntropyKeysBareParamsAndUserinfo(t *testing.T) {
+	s := NewURLScreener(100)
+	tok := b64u(string(entropyBytes(60)))
+	wantRule(t, s.Screen("https://example.com/?"+tok), RuleShape)
+	wantRule(t, s.Screen("https://example.com/?"+tok+"=1"), RuleShape)
+	wantRule(t, s.Screen("https://"+tok+"@example.com/"), RuleShape)
+	wantRule(t, s.Screen("https://u:"+tok+"@example.com/"), RuleShape)
+	wantRule(t, s.Screen("https://example.com/?a=1;"+tok), RuleShape)
+	wantRule(t, s.Screen("https://example.com/p;"+tok), RuleShape)
+}
+
+func TestCanarySemicolonSeparators(t *testing.T) {
+	s := screenerWith(t, canaryText)
+	wantRule(t, s.Screen("https://example.com/?a=1;q="+b64u(canaryText)), RuleCanary)
+	wantRule(t, s.Screen("https://example.com/p;"+b64u(canaryText)), RuleCanary)
+}
+
+func entropyBytes(n int) []byte {
+	b := make([]byte, n)
+	x := uint32(12345)
+	for i := range b {
+		x = x*1664525 + 1013904223
+		b[i] = byte(x >> 24)
+	}
+	return b
+}
