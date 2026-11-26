@@ -199,6 +199,111 @@ func (c *Confined) Stat(path string) (fs.FileInfo, error) {
 	return f.Stat()
 }
 
+// ListDir opens a directory relative to the workspace root and returns its file descriptor
+// for safe directory listing operations. The returned file descriptor must be closed by the caller.
+// Returns an error if the path doesn't point to a directory.
+func (c *Confined) ListDir(path string) (*os.File, error) {
+	if err := c.validatePath(path); err != nil {
+		return nil, err
+	}
+
+	if err := c.checkProtectedPaths(path); err != nil {
+		return nil, err
+	}
+
+	// Normalize and split the path
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || path == "." {
+		path = "."
+	}
+
+	if path != "." {
+		components := strings.Split(path, "/")
+
+		// Filter out empty and "." components
+		var filteredComponents []string
+		for _, component := range components {
+			if component != "" && component != "." {
+				filteredComponents = append(filteredComponents, component)
+			}
+		}
+
+		if len(filteredComponents) == 0 {
+			path = "."
+		} else {
+			path = strings.Join(filteredComponents, "/")
+		}
+	}
+
+	// Walk the path component by component using openat with O_NOFOLLOW
+	currentfd := c.rootfd
+	openedfd := -1
+
+	components := strings.Split(path, "/")
+	if path != "." {
+		for i, component := range components {
+			if component == ".." {
+				if openedfd >= 0 && openedfd != c.rootfd {
+					_ = unix.Close(openedfd)
+				}
+				return nil, fmt.Errorf("path traversal with ..: %q", path)
+			}
+
+			openFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+			fd, err := unix.Openat(currentfd, component, openFlags, 0)
+			if err != nil {
+				if openedfd >= 0 && openedfd != c.rootfd {
+					_ = unix.Close(openedfd)
+				}
+				return nil, fmt.Errorf("open component %q: %w", component, err)
+			}
+
+			// Close the previous fd if it's not the root
+			if openedfd >= 0 && openedfd != c.rootfd {
+				_ = unix.Close(openedfd)
+			}
+
+			openedfd = fd
+			currentfd = fd
+
+			if c.afterComponent != nil {
+				c.afterComponent(i, component)
+			}
+		}
+	} else {
+		// For the root directory, open it using "." relative to itself.
+		// This gives us a new fd we own and can close.
+		fd, err := unix.Openat(c.rootfd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open root directory: %w", err)
+		}
+		openedfd = fd
+	}
+
+	if openedfd < 0 {
+		return nil, errors.New("failed to open directory")
+	}
+
+	// Verify that it's a directory
+	var stat unix.Stat_t
+	if err := unix.Fstat(openedfd, &stat); err != nil {
+		if openedfd != c.rootfd {
+			_ = unix.Close(openedfd)
+		}
+		return nil, fmt.Errorf("fstat opened directory: %w", err)
+	}
+
+	if (stat.Mode & unix.S_IFMT) != unix.S_IFDIR {
+		if openedfd != c.rootfd {
+			_ = unix.Close(openedfd)
+		}
+		return nil, fmt.Errorf("path is not a directory: mode=0%o", stat.Mode)
+	}
+
+	return os.NewFile(uintptr(openedfd), path), nil
+}
+
 // validatePath checks that a path is relative and doesn't contain absolute components.
 func (c *Confined) validatePath(path string) error {
 	if filepath.IsAbs(path) {
