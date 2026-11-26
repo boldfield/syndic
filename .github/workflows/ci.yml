@@ -38,3 +38,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Host-pane acceptance (tmux)
         run: SYNDIC_TMUX_TEST=1 go test -count=1 -timeout 5m -run TestTMUX_EndToEnd -v ./internal/acceptance/
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Runner
+        run: sw_vers && uname -m && csrutil status || true
+      - run: go build ./...
+      - name: Unit tests (sandbox, command)
+        run: |
+          # internal/command is tested here once it exists.
+          pkgs="./internal/sandbox/..."
+          if [ -d internal/command ]; then pkgs="$pkgs ./internal/command/..."; fi
+          go test -count=1 -timeout 5m $pkgs
+      - name: Sandbox enforcement (macos-sandbox-exec)
+        run: SYNDIC_SANDBOX_TEST=1 go test -count=1 -timeout 5m -run TestMacOSSandboxExecEnforcement -v ./internal/sandbox/
