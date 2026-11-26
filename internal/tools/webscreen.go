@@ -113,12 +113,16 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 	}
 
 	// Check entire percent-decoded URL for 16-byte sequences from corpus
-	decodedURL, err := url.QueryUnescape(urlStr)
-	if err != nil {
-		decodedURL = urlStr
-	}
+	// Use lenient percent-decoding (doesn't treat + as space like QueryUnescape does)
+	decodedURL := s.lenientPercentDecode(urlStr)
 
 	if !s.canaryCheckURL(decodedURL) {
+		return ScreenResult{Allowed: false, Reason: "canary: match in URL"}
+	}
+
+	// For standard base64, also check with spaces mapped back to + (since + in URLs becomes space after QueryUnescape)
+	decodedURLWithPlus := strings.ReplaceAll(decodedURL, " ", "+")
+	if !s.canaryCheckURL(decodedURLWithPlus) {
 		return ScreenResult{Allowed: false, Reason: "canary: match in URL"}
 	}
 
@@ -137,14 +141,16 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		}
 	}
 
-	// Check userinfo
+	// Check userinfo - parse directly from URL to get raw form
 	if u.User != nil {
-		userinfo := u.User.String()
-		if !s.canaryCheck(userinfo) {
+		userStr := u.User.String() // This includes username and password
+		// Use lenient percent-decoding for userinfo
+		decodedUserinfo := s.lenientPercentDecode(userStr)
+		if !s.canaryCheck(decodedUserinfo) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in userinfo"}
 		}
 		// Also try with spaces mapped back to + for standard base64 decoding
-		userinfoWithPlus := strings.ReplaceAll(userinfo, " ", "+")
+		userinfoWithPlus := strings.ReplaceAll(decodedUserinfo, " ", "+")
 		if !s.canaryCheck(userinfoWithPlus) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in userinfo"}
 		}
@@ -156,10 +162,8 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		if segment == "" {
 			continue
 		}
-		decodedSegment, err := url.QueryUnescape(segment)
-		if err != nil {
-			decodedSegment = segment
-		}
+		// Use lenient percent-decoding for path segments (doesn't treat + as space)
+		decodedSegment := s.lenientPercentDecode(segment)
 		if !s.canaryCheck(decodedSegment) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in path"}
 		}
@@ -183,15 +187,9 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 			if len(parts) > 1 {
 				val = parts[1]
 			}
-			// Decode both key and value
-			decodedKey, err := url.QueryUnescape(key)
-			if err != nil {
-				decodedKey = key
-			}
-			decodedVal, err := url.QueryUnescape(val)
-			if err != nil {
-				decodedVal = val
-			}
+			// Use lenient percent-decoding for key and value (doesn't treat + as space)
+			decodedKey := s.lenientPercentDecode(key)
+			decodedVal := s.lenientPercentDecode(val)
 			// For standard base64, also try with spaces mapped back to +
 			decodedValWithPlus := strings.ReplaceAll(decodedVal, " ", "+")
 
@@ -293,10 +291,10 @@ func (s *URLScreener) allDecodings(segment string) [][]byte {
 	return result
 }
 
-// tryPercentDecode attempts to percent-decode a string.
+// tryPercentDecode attempts to percent-decode a string using lenient percent-decoding.
 func (s *URLScreener) tryPercentDecode(segment string) []byte {
-	decoded, err := url.QueryUnescape(segment)
-	if err != nil || decoded == segment {
+	decoded := s.lenientPercentDecode(segment)
+	if decoded == segment {
 		return nil
 	}
 	return []byte(decoded)
@@ -305,6 +303,45 @@ func (s *URLScreener) tryPercentDecode(segment string) []byte {
 // tryPercentDecodeBytes attempts to percent-decode bytes.
 func (s *URLScreener) tryPercentDecodeBytes(b []byte) []byte {
 	return s.tryPercentDecode(string(b))
+}
+
+// lenientPercentDecode decodes valid %XX escapes and leaves invalid ones literal.
+// Unlike url.QueryUnescape, this doesn't treat + as space (percent-only decoding).
+func (s *URLScreener) lenientPercentDecode(s2 string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s2) {
+		if s2[i] == '%' && i+2 < len(s2) {
+			// Try to decode %XX
+			h1, h2 := s2[i+1], s2[i+2]
+			// Check if both characters are valid hex digits
+			v1, ok1 := hexCharToValue(h1)
+			v2, ok2 := hexCharToValue(h2)
+			if ok1 && ok2 {
+				// Valid hex escape
+				result.WriteByte(v1<<4 | v2)
+				i += 3
+				continue
+			}
+		}
+		result.WriteByte(s2[i])
+		i++
+	}
+	return result.String()
+}
+
+// hexCharToValue converts a hex character to its value (0-15) and a boolean indicating validity.
+func hexCharToValue(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 // tryBase64Decode attempts to base64-decode a string (both padded and unpadded).

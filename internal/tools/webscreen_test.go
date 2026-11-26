@@ -128,8 +128,8 @@ func TestCanaryCheckBase64Unpadded(t *testing.T) {
 
 	// 16-byte portion: "secretpassword12"
 	encoded := base64.StdEncoding.EncodeToString([]byte("secretpassword12"))
-	// Remove padding
-	unpadded := encoded[:len(encoded)-len(encoded)%4]
+	// Remove padding to get genuinely unpadded base64
+	unpadded := strings.TrimRight(encoded, "=")
 	urlStr := "https://example.com/path?data=" + unpadded
 	result := screener.Screen(urlStr)
 	if result.Allowed {
@@ -160,8 +160,8 @@ func TestCanaryCheckBase64URLUnpadded(t *testing.T) {
 
 	// 16-byte portion: "secretpassword12"
 	encoded := base64.URLEncoding.EncodeToString([]byte("secretpassword12"))
-	// Remove padding
-	unpadded := encoded[:len(encoded)-len(encoded)%4]
+	// Remove padding to get genuinely unpadded base64url
+	unpadded := strings.TrimRight(encoded, "=")
 	urlStr := "https://example.com/path?data=" + unpadded
 	result := screener.Screen(urlStr)
 	if result.Allowed {
@@ -380,14 +380,7 @@ func TestShapeCheckEntropy48vs49BytesInHostname(t *testing.T) {
 		t.Errorf("Expected 48-byte hostname label with entropy %.2f to be allowed, got rejected: %s", entropy48, result.Reason)
 	}
 
-	// 49-byte high-entropy string in hostname should be rejected (over 63 bytes, but also test entropy)
-	// Use a 49-byte label that fits within 63 bytes for entropy test
-	// Actually 49 bytes > 63 bytes so it fails on length first. Let's use a different string.
-	// For this test, we need a 49-byte value with entropy > 4.5 that's not over 63 bytes.
-	// But we can't have a 49-byte hostname label since max is 63.
-	// Actually wait - we can have up to 63 bytes. So 49 bytes < 63 bytes. Let me re-read the shape check.
-	// Looking at the code: shapeCheck checks if len > 48 AND entropy > 4.5. So a 49-byte value with high entropy should be rejected.
-	// But hostname labels can be up to 63 bytes. So we can test this.
+	// 49-byte high-entropy string in hostname should be rejected
 	str49 := highEntropyStr[:49]
 	entropy49 := screener.shannonEntropy(str49)
 
@@ -456,10 +449,14 @@ func TestRefusedFetchCountConsistency(t *testing.T) {
 		}
 	}
 
-	// Check that only b.example.com got all 10 attempts counted, but total should only be 1
-	// Actually with our fix, refused fetches shouldn't increment. Let me adjust this test.
-	// With the new logic, only allowed fetches increment. So hostFetches["b.example.com"] should be 0.
-	// Let's verify this makes sense.
+	// With our fix, only allowed fetches increment counters
+	// So hostFetches["b.example.com"] should be 0 and totalFetches should be 1
+	if screener.hostFetches["b.example.com"] != 0 {
+		t.Errorf("Expected hostFetches[b.example.com] = 0 (refused fetch), got %d", screener.hostFetches["b.example.com"])
+	}
+	if screener.totalFetches != 1 {
+		t.Errorf("Expected totalFetches = 1, got %d", screener.totalFetches)
+	}
 }
 
 // Test count state only increments on allowed fetches
@@ -475,17 +472,22 @@ func TestCountOnlyIncrementedForAllowedFetches(t *testing.T) {
 		}
 	}
 
-	// Try a 6th fetch - should be refused but NOT increment count
-	result := screener.Screen("https://hostf.com/path")
-	if result.Allowed {
-		t.Errorf("6th fetch should be refused")
+	// Try 10 refused fetches to a single new host - should all be refused but NOT increment total count
+	for i := 0; i < 10; i++ {
+		result := screener.Screen("https://hostf.com/path")
+		if result.Allowed {
+			t.Errorf("Fetch to hostf should be refused (at turn limit)")
+		}
 	}
 
-	// Now try a 7th fetch to a new host - this should ALSO be refused (at limit)
-	// because we only had 5 allowed, so the 6th refused fetch shouldn't use budget
-	result = screener.Screen("https://hostg.com/path")
-	if result.Allowed {
-		t.Errorf("7th fetch should still be refused (count is at limit)")
+	// totalFetches should still be 5 since all the hostf fetches were refused
+	if screener.totalFetches != 5 {
+		t.Errorf("Expected totalFetches = 5 (refused fetches don't count), got %d", screener.totalFetches)
+	}
+
+	// hostFetches["hostf.com"] should be 0 since all were refused
+	if screener.hostFetches["hostf.com"] != 0 {
+		t.Errorf("Expected hostFetches[hostf.com] = 0 (all refused), got %d", screener.hostFetches["hostf.com"])
 	}
 }
 
@@ -700,5 +702,66 @@ func TestValidURL(t *testing.T) {
 	result := screener.Screen("https://example.com/path?key=value")
 	if !result.Allowed {
 		t.Errorf("Valid URL should be allowed, got rejected: %s", result.Reason)
+	}
+}
+
+// Test invalid percent escapes are handled leniently and decoded bytes are still checked
+func TestCanaryCheckInvalidPercentEscapeLenient(t *testing.T) {
+	screener := NewURLScreener(20)
+	fileContent := []byte("sk-live-ABCDEFGHIJKLMNOP")
+	screener.AddFileBytes(fileContent)
+
+	// URL with invalid escape %zz followed by valid escapes should still decode the valid parts
+	// This is lenient decoding: %zz stays as literal "%zz", but the following valid escapes decode
+	encoded := "%73%6B%2D%6C%69%76%65%2D%41%42%43%44%45%46%47%48" // sk-live-ABCDEFGH in percent encoding
+	urlStr := "https://example.com/p?q=%zz" + encoded
+	result := screener.Screen(urlStr)
+	if result.Allowed {
+		t.Errorf("Expected URL with invalid escape followed by secret in valid escapes to be rejected")
+	}
+}
+
+// Test trailing incomplete percent escape is handled leniently
+func TestCanaryCheckTrailingPercentEscape(t *testing.T) {
+	screener := NewURLScreener(20)
+	fileContent := []byte("sk-live-ABCDEFGHIJKLMNOP")
+	screener.AddFileBytes(fileContent)
+
+	// URL with trailing incomplete percent escape
+	encoded := "%73%6B%2D%6C%69%76%65%2D%41%42%43%44%45%46%47%48" // sk-live-ABCDEFGH in percent encoding
+	urlStr := "https://example.com/p?q=" + encoded + "%"
+	result := screener.Screen(urlStr)
+	if result.Allowed {
+		t.Errorf("Expected URL with secret in valid escapes (even with trailing %%) to be rejected")
+	}
+}
+
+// Test literal plus in URL is preserved and checked in whole URL
+func TestCanaryCheckLiteralPlusInURL(t *testing.T) {
+	screener := NewURLScreener(20)
+	// 16-byte corpus that spans path and query
+	fileContent := []byte("ab+cdef/ghijklmn")
+	screener.AddFileBytes(fileContent)
+
+	// URL with literal + in path and literal / in query (not encoded)
+	// When percent-decoded, the literal + stays as + (not converted to space like QueryUnescape does)
+	urlStr := "https://example.com/ab+cdef/ghijklmn"
+	result := screener.Screen(urlStr)
+	if result.Allowed {
+		t.Errorf("Expected URL with 16-byte run including literal + to be rejected")
+	}
+}
+
+// Test literal plus in query key
+func TestCanaryCheckLiteralPlusInQueryKey(t *testing.T) {
+	screener := NewURLScreener(20)
+	fileContent := []byte("abcd+efghijklmno")
+	screener.AddFileBytes(fileContent)
+
+	// URL with literal + in query key
+	urlStr := "https://example.com/p?abcd+efghijklmno=1"
+	result := screener.Screen(urlStr)
+	if result.Allowed {
+		t.Errorf("Expected URL with 16-byte run including literal + in query key to be rejected")
 	}
 }
