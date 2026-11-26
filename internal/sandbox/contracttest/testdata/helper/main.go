@@ -19,17 +19,24 @@
 //	helper fds [scan]                 print descriptors above 2 open at start
 //	helper detach <dir> exit|sleep    start a detached beater in dir, then exit or sleep
 //	helper beat <dir>                 (internal) the detached beater
+//	helper procs                      start a child, then list /proc (Linux)
+//	helper pause                      (internal) the child: wait for end of input
+//	helper suid <path>                run path, report its name and user IDs (Linux)
+//	helper mounts                     list the mount points of /proc/self/mountinfo (Linux)
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -56,6 +63,10 @@ func main() {
 	openFDs := openDescriptors(mode == "fds" && len(args) > 0 && args[0] == "scan")
 	if mode == "beat" {
 		beat(args[0])
+		return
+	}
+	if mode == "pause" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
 		return
 	}
 	fmt.Println("ready")
@@ -105,6 +116,12 @@ func main() {
 		}
 	case "detach":
 		detach(args[0], args[1])
+	case "procs":
+		procs()
+	case "suid":
+		suid(args[0])
+	case "mounts":
+		mounts()
 	default:
 		fmt.Printf("denied unknown mode %q\n", mode)
 		os.Exit(2)
@@ -236,5 +253,100 @@ func beat(dir string) {
 			return
 		}
 		time.Sleep(beatEvery)
+	}
+}
+
+// procs starts a child that waits, prints "self <pid>" and "child <pid>",
+// then one "proc <pid>" line for each process directory in /proc, and ends
+// the child.
+func procs() {
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Printf("denied executable: %v\n", err)
+		return
+	}
+	cmd := exec.Command(self, "pause")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Printf("denied pipe: %v\n", err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("denied start: %v\n", err)
+		return
+	}
+	defer func() {
+		_ = in.Close()
+		_ = cmd.Wait()
+	}()
+	fmt.Printf("self %d\nchild %d\n", os.Getpid(), cmd.Process.Pid)
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		fmt.Printf("denied /proc: %v\n", err)
+		return
+	}
+	for _, e := range entries {
+		if pid, err := strconv.Atoi(e.Name()); err == nil {
+			fmt.Printf("proc %d\n", pid)
+		}
+	}
+}
+
+// suid runs path with no argument and, once it has executed, prints "exec
+// <name> <uid> <euid>" from its /proc status, read before it is reaped so
+// that a program that exits at once is still seen. A program that gained
+// privilege may be hidden from its own parent; that prints "hidden".
+func suid(path string) {
+	want := filepath.Base(path)
+	if len(want) > 15 {
+		want = want[:15]
+	}
+	cmd := exec.Command(path)
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("denied start: %v\n", err)
+		return
+	}
+	defer func() { _ = cmd.Wait() }()
+	status := filepath.Join("/proc", strconv.Itoa(cmd.Process.Pid), "status")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		f, err := os.Open(status)
+		if err != nil {
+			fmt.Printf("hidden %v\n", err)
+			return
+		}
+		var name string
+		var uids []string
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			k, v, _ := strings.Cut(sc.Text(), ":")
+			switch k {
+			case "Name":
+				name = strings.TrimSpace(v)
+			case "Uid":
+				uids = strings.Fields(v)
+			}
+		}
+		_ = f.Close()
+		if name == want && len(uids) >= 2 {
+			fmt.Printf("exec %s %s %s\n", name, uids[0], uids[1])
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	fmt.Println("denied never executed")
+}
+
+// mounts prints "mount <path>" for each mount point the process sees.
+func mounts() {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		fmt.Printf("denied mountinfo: %v\n", err)
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if f := strings.Fields(line); len(f) > 4 {
+			fmt.Printf("mount %s\n", f[4])
+		}
 	}
 }

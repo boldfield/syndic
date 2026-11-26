@@ -490,11 +490,20 @@ func checkLines(lines []string, n int, accepted ...string) error {
 	return errors.Join(errs...)
 }
 
+// The command reaches its scratch directory through its working directory,
+// by relative paths: a backend may mount the scratch directory at a fixed
+// path of its own rather than at the engine's.
+
 func testBaseline(t *testing.T, c *call) {
-	lines := c.runHelper(t, "read", filepath.Join(c.scratch, "main.go"))
+	lines := c.runHelper(t, "read", "main.go")
 	expectAll(t, lines, 1, "read in scratch", resultOK)
-	lines = c.runHelper(t, "write", filepath.Join(c.scratch, "out.txt"), filepath.Join(c.tmp, "out.txt"))
+	lines = c.runHelper(t, "write", "out.txt", filepath.Join(c.tmp, "out.txt"))
 	expectAll(t, lines, 2, "write in scratch and temporary directories", resultOK)
+	for _, p := range []string{filepath.Join(c.scratch, "out.txt"), filepath.Join(c.tmp, "out.txt")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the command's write is not in %s: %v", p, err)
+		}
+	}
 }
 
 func testReadOutside(t *testing.T, c *call) {
@@ -503,7 +512,7 @@ func testReadOutside(t *testing.T, c *call) {
 }
 
 func testProtectedAbsent(t *testing.T, c *call) {
-	lines := c.runHelper(t, "read", filepath.Join(c.workspace, protectedName), filepath.Join(c.scratch, protectedName))
+	lines := c.runHelper(t, "read", filepath.Join(c.workspace, protectedName), protectedName)
 	// Only "absent" satisfies this clause: the path must not be there. A
 	// read that fails for any other reason means the path is exposed.
 	expectAll(t, lines, 2, "read a protected path", resultAbsent)
