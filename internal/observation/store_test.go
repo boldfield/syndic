@@ -12,13 +12,13 @@ import (
 
 func testStore(tb testing.TB) (*Store, *journal.Store, string, string) {
 	tb.Helper()
-	dir := tb.(*testing.T).TempDir()
+	dir := tb.TempDir()
 	dbPath := dir + "/test.db"
 	db, err := journal.Open(dbPath)
 	if err != nil {
 		tb.Fatalf("open journal: %v", err)
 	}
-	tb.(*testing.T).Cleanup(func() { _ = db.Close() })
+	tb.Cleanup(func() { _ = db.Close() })
 
 	j := journal.NewStore(db)
 
@@ -47,8 +47,8 @@ func TestObserveFile(t *testing.T) {
 
 	// Record a file observation with content.
 	content := []byte("hello world")
-	record, err := store.Observe(turnID, attemptID, "foo.txt", KindFile, func() ([]byte, error) {
-		return content, nil
+	record, err := store.Observe(turnID, attemptID, "foo.txt", func() (byte, []byte, error) {
+		return KindFile, content, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -77,8 +77,8 @@ func TestObserveAbsence(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an absence observation with no content.
-	record, err := store.Observe(turnID, attemptID, "missing.txt", KindAbsent, func() ([]byte, error) {
-		return nil, nil
+	record, err := store.Observe(turnID, attemptID, "missing.txt", func() (byte, []byte, error) {
+		return KindAbsent, nil, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -105,8 +105,8 @@ func TestObserveDirectory(t *testing.T) {
 		{Type: "d", Name: "subdir"},
 	})
 
-	record, err := store.Observe(turnID, attemptID, "dir", KindDir, func() ([]byte, error) {
-		return entries, nil
+	record, err := store.Observe(turnID, attemptID, "dir", func() (byte, []byte, error) {
+		return KindDir, entries, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -125,16 +125,16 @@ func TestRepeatedReadIgnoresLiveEdits(t *testing.T) {
 
 	// Record a file observation.
 	content := []byte("original")
-	record1, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return content, nil
+	record1, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, content, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
 	}
 
 	// Try to observe the same path again - should return the recorded observation, not an error.
-	record2, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return []byte("modified"), nil
+	record2, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("modified"), nil
 	})
 	if err != nil {
 		t.Fatalf("repeated observe should return record, got error: %v", err)
@@ -169,8 +169,8 @@ func TestObservedAbsenceRemainsAbsent(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an absence observation.
-	record, err := store.Observe(turnID, attemptID, "missing.txt", KindAbsent, func() ([]byte, error) {
-		return nil, nil
+	record, err := store.Observe(turnID, attemptID, "missing.txt", func() (byte, []byte, error) {
+		return KindAbsent, nil, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -180,9 +180,9 @@ func TestObservedAbsenceRemainsAbsent(t *testing.T) {
 		t.Errorf("absence should have empty value")
 	}
 
-	// Try to observe the same path as a file - should return the recorded absence, not record as file.
-	record2, err := store.Observe(turnID, attemptID, "missing.txt", KindFile, func() ([]byte, error) {
-		return []byte("content"), nil
+	// Try to observe the same path with a different kind - should return the recorded absence, not record as file.
+	record2, err := store.Observe(turnID, attemptID, "missing.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content"), nil
 	})
 	if err != nil {
 		t.Fatalf("repeated observe should return record, got error: %v", err)
@@ -231,9 +231,9 @@ func TestConcurrentFirstTouches(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, attemptID string) {
 			defer wg.Done()
-			record, err := store.Observe(turnID, attemptID, "concurrent.txt", KindFile, func() ([]byte, error) {
+			record, err := store.Observe(turnID, attemptID, "concurrent.txt", func() (byte, []byte, error) {
 				readerInvoked.Add(1)
-				return []byte("content from attempt"), nil
+				return KindFile, []byte("content from attempt"), nil
 			})
 			records[idx] = record
 			errs[idx] = err
@@ -282,8 +282,8 @@ func TestSnapshotVersionIncrement(t *testing.T) {
 	}
 
 	// Record first observation - version should be 1.
-	rec1, err := store.Observe(turnID, attemptID, "file1.txt", KindFile, func() ([]byte, error) {
-		return []byte("content1"), nil
+	rec1, err := store.Observe(turnID, attemptID, "file1.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content1"), nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -300,8 +300,8 @@ func TestSnapshotVersionIncrement(t *testing.T) {
 	}
 
 	// Record second observation - version should be 2.
-	rec2, err := store.Observe(turnID, attemptID, "file2.txt", KindFile, func() ([]byte, error) {
-		return []byte("content2"), nil
+	rec2, err := store.Observe(turnID, attemptID, "file2.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content2"), nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -322,8 +322,8 @@ func TestObservationsBoundToOriginalAttempt(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an observation.
-	origRec, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return []byte("content"), nil
+	origRec, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content"), nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -361,8 +361,8 @@ func TestMultipleObservationsOrdered(t *testing.T) {
 
 	paths := []string{"c.txt", "a.txt", "b.txt"}
 	for _, path := range paths {
-		_, err := store.Observe(turnID, attemptID, path, KindFile, func() ([]byte, error) {
-			return []byte("content"), nil
+		_, err := store.Observe(turnID, attemptID, path, func() (byte, []byte, error) {
+			return KindFile, []byte("content"), nil
 		})
 		if err != nil {
 			t.Fatalf("observe: %v", err)
@@ -396,6 +396,44 @@ func TestObservationAtNotFound(t *testing.T) {
 	}
 }
 
+func TestFreshStoreReturnsRecordedObservation(t *testing.T) {
+	store1, j, turnID, attemptID := testStore(t)
+
+	// First Store records an observation.
+	content := []byte("first observation")
+	record1, err := store1.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, content, nil
+	})
+	if err != nil {
+		t.Fatalf("first store observe: %v", err)
+	}
+
+	// Create a fresh Store instance on the same journal.
+	store2 := NewStore(j)
+
+	// Track whether the reader is called on the fresh Store.
+	var readerCalled bool
+
+	// Fresh Store should return the recorded observation without calling the reader.
+	record2, err := store2.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		readerCalled = true
+		return KindFile, []byte("different content"), nil
+	})
+	if err != nil {
+		t.Fatalf("fresh store observe: %v", err)
+	}
+
+	// Fresh Store should have returned the same recorded value.
+	if record2.Value != record1.Value {
+		t.Errorf("fresh store returned different value: %q != %q", record2.Value, record1.Value)
+	}
+
+	// The reader should NOT have been called (the observation was served from the record).
+	if readerCalled {
+		t.Errorf("fresh store called the reader, but it should have used the recorded observation")
+	}
+}
+
 func TestBinaryPathsAndContent(t *testing.T) {
 	store, j, turnID, attemptID := testStore(t)
 
@@ -403,8 +441,8 @@ func TestBinaryPathsAndContent(t *testing.T) {
 	binaryPath := "file\x00with\nnulls"
 	binaryContent := []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 0xfd}
 
-	_, err := store.Observe(turnID, attemptID, binaryPath, KindFile, func() ([]byte, error) {
-		return binaryContent, nil
+	_, err := store.Observe(turnID, attemptID, binaryPath, func() (byte, []byte, error) {
+		return KindFile, binaryContent, nil
 	})
 	if err != nil {
 		t.Fatalf("observe with binary path: %v", err)
@@ -434,8 +472,8 @@ func TestContentStorage(t *testing.T) {
 	store, j, turnID, attemptID := testStore(t)
 
 	content := []byte("test file content")
-	record, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return content, nil
+	record, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, content, nil
 	})
 	if err != nil {
 		t.Fatalf("observe: %v", err)
@@ -452,13 +490,39 @@ func TestContentStorage(t *testing.T) {
 	}
 }
 
+func TestInvalidKindRejected(t *testing.T) {
+	store, _, turnID, attemptID := testStore(t)
+
+	// Test that invalid kinds are rejected.
+	record, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return 'x', []byte("content"), nil
+	})
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("unknown observation kind")) {
+		t.Errorf("expected unknown kind error, got %v", err)
+	}
+	if record.Path != "" {
+		t.Errorf("should not have created record for invalid kind, got %+v", record)
+	}
+
+	// A subsequent observe with valid kind should work normally.
+	record2, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content"), nil
+	})
+	if err != nil {
+		t.Fatalf("observe after invalid kind error: %v", err)
+	}
+	if record2.Path != "file.txt" {
+		t.Errorf("path: got %q, want file.txt", record2.Path)
+	}
+}
+
 func TestReaderErrorHandling(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Test that errors from the reader are propagated.
 	testErr := fmt.Errorf("reader error")
-	record, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return nil, testErr
+	record, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return 0, nil, testErr
 	})
 	if err != testErr {
 		t.Errorf("expected reader error %v, got %v", testErr, err)
@@ -469,8 +533,8 @@ func TestReaderErrorHandling(t *testing.T) {
 
 	// Subsequent observe with successful reader should work normally.
 	content := []byte("content")
-	record2, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return content, nil
+	record2, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, content, nil
 	})
 	if err != nil {
 		t.Fatalf("observe after reader error: %v", err)
@@ -486,8 +550,8 @@ func BenchmarkObserve(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		path := "file" + fmt.Sprintf("%03d", i%100) + ".txt"
-		_, _ = store.Observe(turnID, attemptID, path, KindFile, func() ([]byte, error) {
-			return []byte("benchmark"), nil
+		_, _ = store.Observe(turnID, attemptID, path, func() (byte, []byte, error) {
+			return KindFile, []byte("benchmark"), nil
 		})
 	}
 }
@@ -496,15 +560,15 @@ func BenchmarkObserveRepeatedly(b *testing.B) {
 	store, _, turnID, attemptID := testStore(b)
 
 	// Pre-observe a path.
-	_, _ = store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-		return []byte("content"), nil
+	_, _ = store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		return KindFile, []byte("content"), nil
 	})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Repeated observe of same path should be fast (get from cache).
-		_, _ = store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
-			return []byte("x"), nil
+		_, _ = store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+			return KindFile, []byte("x"), nil
 		})
 	}
 }
