@@ -198,6 +198,55 @@ func TestToolStepInvalidCallsAnsweredLaterStillRun(t *testing.T) {
 	}
 }
 
+// A call with no function name, or that is not a function call although it
+// names a granted tool, is answered with a malformed-call tool error and has
+// no effect; the step is still journaled and later valid calls still run.
+func TestToolStepMalformedCallsAnsweredLaterStillRun(t *testing.T) {
+	f := newStepFixture(t)
+	if !f.accept(t, f.epoch(t)) {
+		t.Fatal("tool step not accepted")
+	}
+	notFunction := call("c1", tools.NameReadFile, `{"path":"a"}`)
+	notFunction.Type = "custom"
+	untyped := call("c2", tools.NameReadFile, `{"path":"a"}`)
+	untyped.Type = ""
+	out, err := runToolStep(f.store, toolStep{
+		attemptID: f.attempt,
+		calls: []transport.ToolCall{
+			call("c0", "", `{"path":"a"}`),
+			notFunction,
+			untyped,
+			call("c3", tools.NameReadFile, `{"path":"a"}`),
+		},
+		granted:   readGrant(t),
+		effects:   f.readEffects(),
+		remaining: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.ended != "" || out.used != 1 {
+		t.Fatalf("ended %q used %d", out.ended, out.used)
+	}
+	if len(f.ran) != 1 || f.ran[0] != "c3" {
+		t.Fatalf("effects ran for %v", f.ran)
+	}
+	E, X := journal.ToolCallError, journal.ToolCallExecuted
+	got := f.calls(t)
+	wantStatuses(t, got, E, E, E, X)
+	for i, c := range got[:3] {
+		if c.Result.ErrorCode != toolErrMalformed || out.results[i].errorCode != toolErrMalformed {
+			t.Fatalf("call %d: journaled code %q, outcome %+v", i, c.Result.ErrorCode, out.results[i])
+		}
+		if c.Class != journal.ToolClassNone {
+			t.Fatalf("call %d class %s", i, c.Class)
+		}
+	}
+	if got[0].Name != "" || got[3].Class != tools.GroupRead {
+		t.Fatalf("calls %+v", got)
+	}
+}
+
 // A cancel while a call waits inside its effect (a referee decision) is seen
 // by the re-check after the wait: that call and every later one are journaled
 // abandoned and no later effect runs.

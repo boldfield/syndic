@@ -43,8 +43,9 @@ var (
 	ErrToolStepRecorded = errors.New("tool step already recorded")
 )
 
-// ToolClassNone is the class of a call naming a tool that is in no group. It
-// is journaled so that its tool error is, and is never executed.
+// ToolClassNone is the class of a call naming a tool that is in no group, or
+// naming none, or that is not a function call. It is journaled so that its
+// tool error is, and is never executed.
 const ToolClassNone = "none"
 
 // Reasons ToolStepLive gives for a step that may no longer have effects.
@@ -283,7 +284,9 @@ func (tx *Tx) RecordToolCall(attemptID string, callIndex int, providerCallID, na
 	if callIndex < 0 {
 		return ToolCall{}, fmt.Errorf("call index must be >= 0, got %d", callIndex)
 	}
-	if providerCallID == "" || name == "" {
+	// A call naming no tool is journaled as returned, so that its tool error
+	// is; it is in no group and is never executed.
+	if providerCallID == "" || (name == "" && class != ToolClassNone) {
 		return ToolCall{}, fmt.Errorf("tool call needs a provider call id and a name")
 	}
 	switch class {

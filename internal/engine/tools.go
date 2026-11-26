@@ -19,9 +19,14 @@ import (
 // before its effect (v5 delta section 6). Arguments that do not validate use
 // tools.ErrCodeBadArguments, as the tools themselves do.
 const (
-	toolErrNotOffered = "not_offered" // the caller's role is not given the tool
-	toolErrCallLimit  = "call_limit"  // the caller has no calls remaining
+	toolErrNotOffered = "not_offered"    // the caller's role is not given the tool
+	toolErrCallLimit  = "call_limit"     // the caller has no calls remaining
+	toolErrMalformed  = "malformed_call" // not a function call, or names no tool
 )
+
+// toolCallType is the only call type a tool step's call may have an effect
+// under.
+const toolCallType = "function"
 
 // errToolAbandoned is returned by a step's re-check, and so by an effect that
 // calls it after a wait, when the step may no longer have effects. An effect
@@ -74,7 +79,8 @@ type toolStepOutcome struct {
 // returned. Every call is journaled as accepted intent first, in one
 // transaction; a step that is not accepted (late, quarantined, failed by the
 // gate) is refused with journal.ErrNotToolStep and nothing runs. Each call is
-// then checked in order: the tool must be granted to the role, its arguments
+// then checked in order: it must be a function call naming a tool, the tool
+// must be granted to the role, its arguments
 // must validate against the tool's schema, and the caller must have a call
 // remaining. A call failing a check is answered with a tool error and the
 // rest are still checked. Immediately before each effect, and after any wait
@@ -98,7 +104,7 @@ func runToolStep(store *journal.Store, step toolStep) (toolStepOutcome, error) {
 		}
 		seen[c.ID] = true
 		class := journal.ToolClassNone
-		if _, group, ok := tools.Lookup(c.Function.Name); ok {
+		if _, group, ok := tools.Lookup(c.Function.Name); ok && c.Type == toolCallType {
 			class = group
 		}
 		stepCalls = append(stepCalls, journal.StepCall{
@@ -160,6 +166,12 @@ func runToolStep(store *journal.Store, step toolStep) (toolStepOutcome, error) {
 			continue
 		}
 		raw := step.calls[i].Function.Arguments
+		if typ := step.calls[i].Type; typ != toolCallType || call.Name == "" {
+			if err := fail(call, toolErrMalformed, "malformed tool call: type %q, name %q; only a function call naming a tool can run", typ, call.Name); err != nil {
+				return out, err
+			}
+			continue
+		}
 		tool, ok := granted[call.Name]
 		if !ok {
 			if err := fail(call, toolErrNotOffered, "tool %q is not available to you", call.Name); err != nil {

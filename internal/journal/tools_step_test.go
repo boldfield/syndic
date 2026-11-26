@@ -90,6 +90,31 @@ func TestRecordToolStep(t *testing.T) {
 	}
 }
 
+// A call naming no tool is journaled under class none, so that its tool
+// error can be; a call of any executable class still needs a name.
+func TestRecordToolStepNamelessCall(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := stepTurn(t, store)
+	acceptStep(t, store, f.author, "tool_calls")
+	nameless := journal.StepCall{ProviderCallID: "p9", Name: "", Class: "read", Args: []byte(`{}`)}
+	if _, err := recordStep(store, f.author, stepCalls[0], nameless); err == nil {
+		t.Fatal("nameless read call recorded")
+	}
+	if got, err := store.ToolCallsByTurn(f.turn, ""); err != nil || len(got) != 0 {
+		t.Fatalf("journaled %d calls, %v", len(got), err)
+	}
+	nameless.Class = journal.ToolClassNone
+	calls, err := recordStep(store, f.author, nameless, stepCalls[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0].Name != "" || calls[0].Class != journal.ToolClassNone || calls[1].Name != "read_file" {
+		t.Fatalf("recorded %+v", calls)
+	}
+}
+
 // Only an accepted tool step is recorded: a pending, quarantined, gate-failed
 // or non-tool result is not, and nothing of it is journaled.
 func TestRecordToolStepRefusesUnacceptedStep(t *testing.T) {
