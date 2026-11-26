@@ -713,8 +713,8 @@ func TestFreshDBSchemaVersion4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 15 {
-		t.Errorf("expected schema version 15, got %d", version)
+	if version != 16 {
+		t.Errorf("expected schema version 16, got %d", version)
 	}
 }
 
@@ -871,7 +871,7 @@ func TestUpgradePathV2ToV3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 15 {
+	if version != 16 {
 		t.Errorf("expected schema version 15 after upgrade, got %d", version)
 	}
 
@@ -1208,7 +1208,7 @@ func TestUpgradePathV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 15 {
+	if version != 16 {
 		t.Errorf("expected schema version 15 after upgrade, got %d", version)
 	}
 
