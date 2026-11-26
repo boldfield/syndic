@@ -21,6 +21,9 @@ import (
 var (
 	// ErrNotObserved reports a path the turn's snapshot record does not hold.
 	ErrNotObserved = errors.New("path not observed in this turn")
+	// ErrAlreadyObserved is returned by RecordObservation for a path the turn
+	// has already observed.
+	ErrAlreadyObserved = errors.New("path already observed in this turn")
 	// ErrNotStaged reports an unstage of a path that is not staged.
 	ErrNotStaged = errors.New("path not staged")
 	// ErrNoChangeSet reports a turn whose current candidate has no change set.
@@ -526,7 +529,7 @@ func (tx *Tx) RecordObservation(turnID, attemptID, path, kind string, content []
 		return Observation{}, fmt.Errorf("query observation: %w", err)
 	}
 	if exists {
-		return Observation{}, fmt.Errorf("path %q already observed in turn %q", path, turnID)
+		return Observation{}, fmt.Errorf("path %q in turn %q: %w", path, turnID, ErrAlreadyObserved)
 	}
 	var contentSHA *string
 	if kind != ObservationAbsent {
