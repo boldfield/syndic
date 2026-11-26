@@ -142,6 +142,15 @@ func refuse(rule, reason string) Verdict {
 	return Verdict{Rule: rule, Reason: reason}
 }
 
+// hostProfile maps and punycodes names without the STD3 or hyphen rules, so
+// names such as my_service.example.com keep a canonical key.
+var hostProfile = idna.New(
+	idna.MapForLookup(),
+	idna.Transitional(false),
+	idna.StrictDomainName(false),
+	idna.CheckHyphens(false),
+)
+
 // canonicalHost returns the lowercase punycode hostname without a trailing dot
 // or port. The count is keyed on the hostname alone, so a different port of the
 // same name shares its budget.
@@ -153,9 +162,11 @@ func canonicalHost(u *url.URL) (string, bool) {
 	if ip, err := netip.ParseAddr(h); err == nil {
 		return ip.Unmap().WithZone("").String(), true
 	}
-	a, err := idna.Lookup.ToASCII(h)
+	a, err := hostProfile.ToASCII(h)
 	if err != nil {
-		return "", false
+		// The design's shape rules do not refuse names for being invalid DNS;
+		// fall back to the lowercased raw name.
+		a = strings.ToLower(h)
 	}
 	// Strip the root dot only after IDNA, which maps U+3002 and friends to ".".
 	return strings.TrimSuffix(strings.ToLower(a), "."), true

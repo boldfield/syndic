@@ -380,3 +380,21 @@ func entropyBytes(n int) []byte {
 	}
 	return b
 }
+
+func TestScreenAllowsNonSTD3Hostnames(t *testing.T) {
+	for _, h := range []string{"my_service.example.com", "foo-.example.com", "ab--cd.example.com"} {
+		s := NewURLScreener(20)
+		if v := s.Screen("https://" + h + "/"); !v.Allowed {
+			t.Errorf("%s refused: %+v", h, v)
+		}
+	}
+	s := NewURLScreener(20)
+	for i := 0; i < 10; i++ {
+		if v := s.Screen("https://my_service.example.com/"); !v.Allowed {
+			t.Fatalf("fetch %d refused: %+v", i, v)
+		}
+	}
+	if v := s.Screen("https://MY_Service.Example.com/"); v.Allowed {
+		t.Error("case variant should share the per-host budget")
+	}
+}
