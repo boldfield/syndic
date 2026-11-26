@@ -36,7 +36,7 @@ func TestSupportedRule(t *testing.T) {
 }
 
 func TestEnvCombinations(t *testing.T) {
-	caller := map[string]string{"TOKEN": "t", "OTHER": "o", "BASH_ENV": "x", "ENV": "y", "SECRET": "s"}
+	caller := map[string]string{"TOKEN": "t", "OTHER": "o", "BASH_ENV": "x", "ENV": "y", "SECRET": "s", "PATH": "/evil", "HTTP_PROXY": "http://evil"}
 	proxy := &ProxyListener{Network: "unix", Address: "/p", URL: "http://u:p@127.0.0.1:1"}
 	for _, withProxy := range []bool{false, true} {
 		for _, pass := range [][]string{nil, {"TOKEN"}, {"TOKEN", "MISSING", "BASH_ENV", "ENV", "PATH", "HTTP_PROXY"}} {

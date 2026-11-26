@@ -5,24 +5,55 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/sandbox"
 )
 
 // plainBackend is a deliberately non-enforcing backend: a plain os/exec child.
-type plainBackend struct{}
+type plainBackend struct {
+	mu    sync.Mutex
+	roots map[string]bool
+}
 
-func (plainBackend) Name() string              { return "plain" }
-func (plainBackend) Config() map[string]string { return nil }
-func (plainBackend) Capabilities() sandbox.Report {
+// reap kills every process the backend leaked (detached helpers carry the
+// per-clause root directory in their argument vector) and waits until none is
+// left, so none outlives the test or races TempDir cleanup.
+func (b *plainBackend) reap(t *testing.T) {
+	t.Helper()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for root := range b.roots {
+		_ = exec.Command("pkill", "-9", "-f", root).Run()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if exec.Command("pgrep", "-f", root).Run() != nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func (*plainBackend) Name() string              { return "plain" }
+func (*plainBackend) Config() map[string]string { return nil }
+func (*plainBackend) Capabilities() sandbox.Report {
 	return sandbox.Report{Reason: "enforces nothing"}
 }
 
-func (plainBackend) Start(ctx context.Context, spec sandbox.Spec) (sandbox.Process, error) {
+func (b *plainBackend) Start(ctx context.Context, spec sandbox.Spec) (sandbox.Process, error) {
+	b.mu.Lock()
+	if b.roots == nil {
+		b.roots = map[string]bool{}
+	}
+	b.roots[filepath.Dir(spec.Scratch)] = true
+	b.mu.Unlock()
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -79,7 +110,9 @@ func TestSuiteDetectsNonEnforcingBackend(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("no /bin/sh")
 	}
-	res := Evaluate(t, plainBackend{}, Fixtures{})
+	b := &plainBackend{}
+	res := Evaluate(t, b, Fixtures{})
+	b.reap(t)
 	for _, name := range []string{
 		ReadOutside, ProtectedAbsent, WriteOutside, OtherScratch, NoNetwork,
 		DetachOnExit, DetachOnTimeout, DetachOnTerminate,

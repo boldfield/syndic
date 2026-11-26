@@ -78,7 +78,9 @@ func main() {
 		p.Release()
 	case "beat": // beat <file>: write an increasing counter until told off
 		for i := 0; i < 1000; i++ {
-			_ = os.WriteFile(args[0], []byte(strconv.Itoa(i)), 0o600)
+			if err := os.WriteFile(args[0], []byte(strconv.Itoa(i)), 0o600); err != nil {
+				return
+			}
 			time.Sleep(20 * time.Millisecond)
 		}
 	case "sleep": // sleep <seconds>
