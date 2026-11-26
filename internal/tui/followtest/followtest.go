@@ -5,11 +5,12 @@ package followtest
 
 import "testing"
 
-// Row is one drawn row: the item it belongs to and the character offset at
-// which it begins.
+// Row is one drawn row: the item it belongs to and the character offsets at
+// which it begins and ends (End exclusive).
 type Row struct {
 	Item string
 	Char int
+	End  int
 }
 
 // Adaptor drives one view.
@@ -27,7 +28,16 @@ type Adaptor interface {
 func Item(id string, n int) []Row {
 	rows := make([]Row, n)
 	for i := range rows {
-		rows[i] = Row{Item: id, Char: i * 10}
+		rows[i] = Row{Item: id, Char: i * 10, End: i*10 + 10}
+	}
+	return rows
+}
+
+// Wrapped returns n rows of one item, beginning at characters 0, step, 2*step, ….
+func Wrapped(id string, n, step int) []Row {
+	rows := make([]Row, n)
+	for i := range rows {
+		rows[i] = Row{Item: id, Char: i * step, End: i*step + step}
 	}
 	return rows
 }
@@ -58,6 +68,16 @@ func want(t *testing.T, a Adaptor, first int, bottom bool, count int) {
 // Cases is every case of v6 addendum 1 section 4 that names no specific view.
 // Each starts from a fresh adaptor.
 var Cases = []Case{
+	{"re-wrapping unchanged content narrower adds no new rows", func(t *testing.T, a Adaptor) {
+		a.SetHeight(4)
+		a.SetRows(Join(Item("a", 3), Item("b", 10)))
+		for i := 0; i < 4; i++ {
+			a.Press("up")
+		}
+		want(t, a, 5, false, 0)
+		a.SetRows(Join(Wrapped("a", 6, 5), Wrapped("b", 20, 5)))
+		want(t, a, 10, false, 0)
+	}},
 	{"tall answer arrives at the bottom", func(t *testing.T, a Adaptor) {
 		a.SetHeight(5)
 		a.SetRows(Item("q", 1))

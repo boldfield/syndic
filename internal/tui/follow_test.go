@@ -24,7 +24,7 @@ func (a *followAdaptor) relayout() {
 func (a *followAdaptor) SetRows(rows []followtest.Row) {
 	a.rows = a.rows[:0]
 	for _, r := range rows {
-		a.rows = append(a.rows, FollowRow{Item: r.Item, Char: r.Char})
+		a.rows = append(a.rows, FollowRow{Item: r.Item, Char: r.Char, End: r.End})
 	}
 	a.relayout()
 }
@@ -57,7 +57,7 @@ func TestFollowCases(t *testing.T) { followtest.Run(t, newFollowAdaptor) }
 func frows(parts ...[]followtest.Row) []FollowRow {
 	var out []FollowRow
 	for _, p := range followtest.Join(parts...) {
-		out = append(out, FollowRow{Item: p.Item, Char: p.Char})
+		out = append(out, FollowRow{Item: p.Item, Char: p.Char, End: p.End})
 	}
 	return out
 }
@@ -121,5 +121,44 @@ func TestFollowAnchorGonePrefersPrevious(t *testing.T) {
 	first, _, _ := f.Layout(frows(followtest.Item("a", 10), followtest.Item("c", 0)), 4)
 	if first != 6 {
 		t.Fatalf("first=%d", first)
+	}
+}
+
+func TestFollowRewrapNarrowerKeepsMarkAtItemEnd(t *testing.T) {
+	f := NewFollow()
+	f.Layout(frows(followtest.Item("a", 3), followtest.Item("b", 10)), 4)
+	f.Scroll(frows(followtest.Item("a", 3), followtest.Item("b", 10)), 4, -4)
+	rows := frows(followtest.Wrapped("a", 6, 5), followtest.Wrapped("b", 20, 5))
+	if _, bottom, n := f.Layout(rows, 4); bottom || n != 0 {
+		t.Fatalf("bottom=%v count=%d, want away with 0 new", bottom, n)
+	}
+}
+
+func TestFollowMarkMovesWhenItemShrinks(t *testing.T) {
+	f := NewFollow()
+	rows := frows(followtest.Item("a", 3), followtest.Item("b", 10))
+	f.Layout(rows, 4)
+	f.Scroll(rows, 4, -4)
+	rows = frows(followtest.Item("a", 3), followtest.Item("b", 4), followtest.Item("c", 10))
+	if _, _, n := f.Layout(rows, 4); n != 10 {
+		t.Fatalf("count=%d, want 10", n)
+	}
+	rows = frows(followtest.Item("a", 3), followtest.Item("b", 10), followtest.Item("c", 10))
+	if _, _, n := f.Layout(rows, 4); n != 16 {
+		t.Fatalf("count=%d after regrow, want 16", n)
+	}
+}
+
+func TestFollowAnchorMovesWhenItemShrinks(t *testing.T) {
+	f := NewFollow()
+	rows := frows(followtest.Item("a", 3), followtest.Item("b", 10))
+	f.Layout(rows, 4)
+	f.Scroll(rows, 4, -2) // anchor at b row 4
+	short := frows(followtest.Item("a", 3), followtest.Item("b", 2), followtest.Item("c", 10))
+	if first, _, _ := f.Layout(short, 4); first != 4 {
+		t.Fatalf("first=%d, want 4 (b's last row)", first)
+	}
+	if first, _, _ := f.Layout(rows, 4); first != 4 {
+		t.Fatalf("first=%d after regrow, want 4", first)
 	}
 }

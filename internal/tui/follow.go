@@ -1,16 +1,18 @@
 package tui
 
 // FollowRow describes one drawn row of a scrolling view: the id of the item
-// the row belongs to and the character offset within that item at which the
-// row begins. Item ids are opaque, unique within a view and stable across
+// the row belongs to and the character offsets within that item at which the
+// row begins and ends (End is exclusive; a row's End is at least its Char+1). Item ids are opaque, unique within a view and stable across
 // renders; the rows of one item are contiguous and in increasing Char order.
 type FollowRow struct {
 	Item string
 	Char int
+	End  int
 }
 
 // followPoint names a row by content: the item and the character at which
-// that row begins. none marks "before the first row".
+// that row begins. none marks "before the first row". The seen mark is the
+// exception: its char is the offset at which the last seen row ended.
 type followPoint struct {
 	item string
 	char int
@@ -99,11 +101,15 @@ func (f *Follow) seenRows(rows []FollowRow, idx followIndex) int {
 		return 0
 	}
 	if span, ok := idx[f.seen.item]; ok {
-		return rowAt(rows, span, f.seen.char) + 1
+		at := rowAt(rows, span, f.seen.char-1)
+		if at == span[1] && rows[at].End < f.seen.char {
+			f.seen.char = rows[at].End // the item now ends before the mark
+		}
+		return at + 1
 	}
 	if id := f.neighbour(f.seen.item, idx, false); id != "" {
 		span := idx[id]
-		f.seen = followPoint{item: id, char: rows[span[1]].Char}
+		f.seen = followPoint{item: id, char: rows[span[1]].End}
 		return span[1] + 1
 	}
 	f.seen = followPoint{none: true}
@@ -129,6 +135,9 @@ func (f *Follow) Layout(rows []FollowRow, height int) (first int, atBottom bool,
 	moved := false
 	if span, ok := idx[f.anchor.item]; ok {
 		first = rowAt(rows, span, f.anchor.char)
+		if first == span[1] {
+			f.anchor.char = rows[first].Char // an item that shrank moves it to its last row
+		}
 	} else {
 		moved = true
 		if id := f.neighbour(f.anchor.item, idx, true); id != "" {
@@ -177,7 +186,7 @@ func (f *Follow) show(rows []FollowRow, height, first int) {
 	seen = max(seen, first+height)
 	f.away = true
 	f.anchor = followPoint{item: rows[first].Item, char: rows[first].Char}
-	f.seen = followPoint{item: rows[seen-1].Item, char: rows[seen-1].Char}
+	f.seen = followPoint{item: rows[seen-1].Item, char: rows[seen-1].End}
 }
 
 // Scroll moves the view by delta rows (negative is up) and returns the same
