@@ -76,8 +76,13 @@ const (
 	reasonDeadlineTurn    = "deadline:turn"
 	reasonDeadlineAttempt = "deadline:attempt:"
 
-	// Tool step reasons (tool execution not yet supported).
-	reasonToolStepUnsupported = "tool_step:unsupported"
+	// Tool step reasons. A tool step from a role that was offered no tool
+	// definitions in the request it answers ends the turn: for the author,
+	// tool_limit when the definitions were withheld because its call bound
+	// was reached (v5 delta section 6, "Author tool loop"), tool_step:not_offered
+	// otherwise, and for a reviewer, which no dispatch yet offers tools.
+	reasonToolStepNotOffered = "tool_step:not_offered"
+	reasonToolLimit          = "tool_limit"
 )
 
 const defaultPool = "default"
@@ -150,6 +155,12 @@ type Options struct {
 	// are none). It exists for tests of unchanged-revision detection; the
 	// daemon never sets it.
 	AuthorChangeLines func(transport.CompleteResult) []string
+	// BeforeToolEffect, when set, is called inside each author tool call's
+	// effect, before the tool runs and after the step's pre-effect re-check,
+	// and the step is re-checked again once it returns, as it is after any
+	// wait inside an effect. It exists for tests of a cancel that lands while
+	// a call is executing; the daemon never sets it.
+	BeforeToolEffect func(turnID, attemptID, name string)
 }
 
 // Engine is the review engine.
@@ -170,6 +181,7 @@ type Engine struct {
 	noStartupProbes bool
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
+	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -252,6 +264,7 @@ func New(o Options) (*Engine, error) {
 		onRunOpened:     o.OnRunOpened,
 		newAdapter:      o.NewAdapter,
 		changeLines:     o.AuthorChangeLines,
+		beforeEffect:    o.BeforeToolEffect,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),

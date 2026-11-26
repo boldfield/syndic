@@ -541,7 +541,10 @@ func emitN(t *testing.T, h *Hub, n int) {
 // nothing further arrives.
 func readTail(t *testing.T, sub *Subscription, from, upTo int64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// The tail of TestConcurrent5000EventHandoff is thousands of journal
+	// transactions; on a loaded machine running every package in parallel
+	// they take longer than a minute, so the bound is generous.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	want := from + 1
 	for want <= upTo {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
+	"github.com/boldfield/syndic/internal/workspace"
 )
 
 // runTurn hands the turn's author dispatch to the scheduler. The dispatch
@@ -46,19 +48,125 @@ func (e *Engine) startAuthor(t *openTurn) {
 }
 
 // runAuthor calls the author, handles its result and gives back the pool slot
-// before anything else is dispatched.
+// before anything else is dispatched. An accepted tool step keeps the slot
+// while its calls run and the next author attempt is dispatched.
 func (e *Engine) runAuthor(t *openTurn, req transport.CompleteRequest, attemptID string) {
 	res, fail := e.complete(t, t.author, req)
+	var proceed, step bool
 	if t.mode != modeSolo {
-		proceed := e.completeAuthorReview(t, attemptID, req, res, fail)
-		e.release(t.author)
-		if proceed {
-			e.runReviewers(t)
+		proceed, step = e.completeAuthorReview(t, attemptID, req, res, fail)
+	} else {
+		step = e.completeAuthor(t, attemptID, req, res, fail)
+	}
+	if step {
+		e.executeToolStep(t, req, attemptID, res)
+		return
+	}
+	e.release(t.author)
+	if proceed {
+		e.runReviewers(t)
+	}
+}
+
+// executeToolStep runs the author's accepted tool step with the author's pool
+// slot still taken and e.mu not held: every call's intent is journaled, then
+// each is checked and its effect run in order, re-checking the turn before
+// each effect. It then hands the next author attempt, carrying the results,
+// to the scheduler, or ends the turn when the step could not run. A turn that
+// ended while the step ran (a cancel, the turn deadline) has had the rest of
+// the step abandoned by its re-checks, and nothing more is dispatched.
+func (e *Engine) executeToolStep(t *openTurn, req transport.CompleteRequest, attemptID string, res transport.CompleteResult) {
+	e.mu.Lock()
+	remaining := e.authorCallsRemaining(t)
+	hook := e.beforeEffect
+	var patterns []string
+	if e.roster != nil && e.roster.Tools != nil {
+		patterns = e.roster.Tools.ProtectedPaths
+	}
+	e.mu.Unlock()
+
+	out, err := e.performToolStep(t, req, attemptID, res, remaining, patterns, hook)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.open != t {
+		e.releaseLocked(t.author)
+		return
+	}
+	switch {
+	case errors.Is(err, errToolStepIDs):
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"tool_call_ids")
+	case err != nil:
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+	case out.ended != "":
+		// The step ended but the turn is still open here, which only an epoch
+		// moved outside a terminal path could cause; the results of a step
+		// that ended are never dispatched.
+		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"tool_step:"+out.ended)
+	default:
+		t.toolCallsUsed += out.used
+		e.releaseLocked(t.author)
+		if err := e.schedule(t, t.author, func() { e.startAuthorStep(t, req, res, out) }); err != nil {
+			e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 		}
 		return
 	}
-	e.completeAuthor(t, attemptID, req, res, fail)
-	e.release(t.author)
+	e.releaseLocked(t.author)
+}
+
+// performToolStep executes the step over the conversation's confined
+// workspace, opened for this step and closed after it. e.mu is not held.
+func (e *Engine) performToolStep(t *openTurn, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, remaining int, patterns []string, hook func(turnID, attemptID, name string)) (toolStepOutcome, error) {
+	var effects map[string]toolEffect
+	if t.workspace != "" {
+		fs, err := workspace.OpenConfined(t.workspace, patterns)
+		if err != nil {
+			return toolStepOutcome{}, err
+		}
+		defer func() { _ = fs.Close() }()
+		effects = e.toolEffects(fs, t.id, attemptID, hook)
+	}
+	return runToolStep(e.store, toolStep{
+		attemptID: attemptID,
+		calls:     res.ToolCalls,
+		granted:   req.Tools,
+		effects:   effects,
+		remaining: remaining,
+	})
+}
+
+// startAuthorStep begins the author attempt that follows an executed tool
+// step, carrying the step and its results, and calls the adapter on its own
+// goroutine. It runs with e.mu held and the pool slot taken.
+func (e *Engine) startAuthorStep(t *openTurn, prior transport.CompleteRequest, res transport.CompleteResult, out toolStepOutcome) {
+	var (
+		req       transport.CompleteRequest
+		attemptID string
+		msgs      []transport.Message
+		request   string
+	)
+	defs, limited, err := e.authorToolDefs(t)
+	if err == nil {
+		msgs, request, err = e.toolStepMessages(prior, res, out, limited)
+	}
+	if err == nil {
+		state := StateAuthorDispatched
+		if t.revising {
+			state = StateRevisionDispatched
+		}
+		t.toolLimited = limited
+		req, attemptID, err = e.dispatchAuthorWith(t, msgs, defs, request, state, senderEngine)
+	}
+	if err != nil {
+		if r, ok := asRefusal(err); ok {
+			e.finishBudget(t, r)
+		} else {
+			e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
+		}
+		e.releaseLocked(t.author)
+		return
+	}
+	go e.runAuthor(t, req, attemptID)
 }
 
 // returned records that the attempt's Complete call has returned. A hold on
@@ -79,17 +187,10 @@ func (e *Engine) adapterFor(id string) transport.Adapter {
 	return e.adapters[id]
 }
 
-// dispatchAuthor records the request message and the attempt, and moves the
-// turn to author_dispatched, all in one transaction. e.mu is held.
+// dispatchAuthor records the request message and the first author attempt
+// of the round, and moves the turn to author_dispatched or
+// revision_dispatched, all in one transaction. e.mu is held.
 func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string, error) {
-	var p config.Participant
-	for _, candidate := range e.roster.Participants {
-		if candidate.ID == t.author {
-			p = candidate
-			break
-		}
-	}
-
 	var msgs []transport.Message
 	state, request := StateAuthorDispatched, t.input
 	if t.revising {
@@ -103,10 +204,30 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 	} else {
 		msgs = prompt.AuthorWithHistory(t.history, t.input)
 	}
+	defs, limited, err := e.authorToolDefs(t)
+	if err != nil {
+		return transport.CompleteRequest{}, "", err
+	}
+	if limited {
+		msgs = append(msgs, transport.Message{Role: "user", Content: toolLimitStatement})
+	}
+	t.toolLimited = limited
+	return e.dispatchAuthorWith(t, msgs, defs, request, state, senderUser)
+}
+
+// dispatchAuthorWith records the request message, from sender to the author,
+// and the attempt carrying msgs and the tool definitions defs, reserves its
+// budget and emits the turn state, all in one transaction. e.mu is held.
+func (e *Engine) dispatchAuthorWith(t *openTurn, msgs []transport.Message, defs []transport.Tool, request, state, sender string) (transport.CompleteRequest, string, error) {
+	var p config.Participant
+	for _, candidate := range e.roster.Participants {
+		if candidate.ID == t.author {
+			p = candidate
+			break
+		}
+	}
 	maxOut := budget.ClampOutput(*t.eff.Budgets.AuthorMaxOutputTokens, e.built.Participants[t.author].OutputBound)
 	deadline := e.attemptDeadline(t)
-	// The tool definitions the request carries; no dispatch sends any yet.
-	var defs []transport.Tool
 
 	var req transport.CompleteRequest
 	var attemptID string
@@ -124,7 +245,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		if err != nil {
 			return err
 		}
-		msgID, sum, size, err := tx.AppendMessage(t.id, phaseAuthor, senderUser, []string{t.author}, []byte(request), nil)
+		msgID, sum, size, err := tx.AppendMessage(t.id, phaseAuthor, sender, []string{t.author}, []byte(request), nil)
 		if err != nil {
 			return err
 		}
@@ -132,7 +253,7 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 			MsgID:   msgID,
 			TurnID:  t.id,
 			Phase:   phaseAuthor,
-			Sender:  senderUser,
+			Sender:  sender,
 			SHA256:  sum,
 			ByteLen: int64(size),
 		}); err != nil {
@@ -195,8 +316,9 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 }
 
 // completeAuthor runs accept, gate and the terminal path for the author's
-// result in one transaction.
-func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) {
+// result in one transaction. It reports whether the result is an accepted
+// tool step whose calls the caller now executes; the turn then stays open.
+func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) (step bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -208,7 +330,7 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 	var term *terminal
 	var held *hold
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		quarantined, exceeded, term, held = false, false, nil, nil
+		quarantined, exceeded, term, held, step = false, false, nil, nil, false
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
 			ScrubCount:      res.ScrubCount,
@@ -265,12 +387,16 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 			return err
 		}
 		if isToolStep {
-			// Tool step accepted but not parsed; text is journaled for the transcript.
+			// Tool step accepted but not parsed; text is journaled for the
+			// transcript. Its calls run after this transaction commits.
 			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
 				return err
 			}
-			// Tool step execution is not yet supported; end the turn with an explicit reason.
-			term, err = e.endIn(tx, emit, t, StateIncomplete, reasonToolStepUnsupported)
+			if reason := e.toolStepRefusal(t, req); reason != "" {
+				term, err = e.endIn(tx, emit, t, StateIncomplete, reason)
+			} else {
+				step = true
+			}
 		} else if gate == nil {
 			// The solo answer is not a candidate; keep its text so later
 			// turns' history can carry it.
@@ -291,21 +417,25 @@ func (e *Engine) completeAuthor(t *openTurn, attemptID string, req transport.Com
 		if err == nil {
 			e.lateCommitted(attemptID, res)
 		}
-		return
+		return false
 	}
 	if err != nil {
 		// The transaction left no durable change. End the turn on its own so
 		// the engine does not stay busy; if that fails too, the turn stays
 		// open in memory exactly as it is in the journal.
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
-		return
+		return false
 	}
 	e.failedCommitted(t.author, fail, held)
 	if e.lastInflight(t.author) {
 		delete(e.running, t.author)
 	}
+	if step {
+		return true
+	}
 	e.commitTerminal(t, term)
 	e.launchCancels(term)
+	return false
 }
 
 // authorFailedStatus follows the design's "Terminal reasons" rule: the
