@@ -2,9 +2,11 @@ package engine
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 
+	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/journal"
 )
 
@@ -182,18 +184,6 @@ func unifiedDiffModify(path string, base, new []byte) string {
 	return buf.String()
 }
 
-// countLines returns the number of lines in content (treating a final newline as not adding a line).
-func countLines(content []byte) int {
-	if len(content) == 0 {
-		return 0
-	}
-	count := bytes.Count(content, []byte("\n"))
-	if !bytes.HasSuffix(content, []byte("\n")) {
-		count++
-	}
-	return count
-}
-
 // AuthorEvidence collects tool calls and results for the author's attempts
 // in a turn, excluding results cited only by reviewers.
 func AuthorEvidence(tx *journal.Tx, turnID, authorParticipant string) ([]journal.ToolCall, error) {
@@ -270,4 +260,30 @@ func FormatAuthorEvidence(calls []journal.ToolCall, getContent func(string) ([]b
 	}
 
 	return buf.String(), nil
+}
+
+// BuildEvidencePairs builds evidence pairs from tool calls for the candidate hash.
+// Each pair is {call_id:result_sha256} for calls with recorded results.
+func BuildEvidencePairs(calls []journal.ToolCall) []candidate.EvidencePair {
+	var pairs []candidate.EvidencePair
+	for _, call := range calls {
+		if call.Result != nil && call.Result.ResultSHA256 != "" {
+			pairs = append(pairs, candidate.EvidencePair{
+				CallID:       call.ID,
+				ResultSHA256: call.Result.ResultSHA256,
+			})
+		}
+	}
+	return pairs
+}
+
+// CalculateChangesHash calculates the SHA-256 hash over canonical change set
+// lines followed by the snapshot hash. For now, this returns a placeholder
+// as the full change set freezing implementation is in progress.
+func CalculateChangesHash(snapshotHash string) string {
+	// Placeholder implementation: SHA-256 of "snapshot:<snapshot_hash>"
+	// The full implementation will include the change set paths canonical form.
+	line := fmt.Sprintf("snapshot:%s", snapshotHash)
+	hash := sha256.Sum256([]byte(line))
+	return fmt.Sprintf("%x", hash)
 }

@@ -90,26 +90,6 @@ func TestUnifiedDiffModify(t *testing.T) {
 	}
 }
 
-func TestCountLines(t *testing.T) {
-	tests := []struct {
-		content []byte
-		want    int
-	}{
-		{[]byte(""), 0},
-		{[]byte("one"), 1},
-		{[]byte("one\n"), 1},
-		{[]byte("one\ntwo"), 2},
-		{[]byte("one\ntwo\n"), 2},
-	}
-
-	for _, tt := range tests {
-		got := countLines(tt.content)
-		if got != tt.want {
-			t.Errorf("countLines(%q) = %d, want %d", tt.content, got, tt.want)
-		}
-	}
-}
-
 func TestDiffs(t *testing.T) {
 	content := []byte("file content\n")
 	hash := hashContent(content)

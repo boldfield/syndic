@@ -115,6 +115,12 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		if t.revising {
 			round = t.round + 1
 		}
+		// Build evidence pairs from author's tool calls
+		evidencePairs := []candidate.EvidencePair{} // TODO: build from author calls
+
+		// Calculate placeholder changes hash (full implementation in progress)
+		changesHash := "" // TODO: freeze change set and calculate
+
 		hash, err = candidate.Hash(candidate.Identity{
 			ManifestHash:    e.manifestHash,
 			TurnID:          t.id,
@@ -122,6 +128,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			ContextHash:     t.contextHash,
 			Round:           round,
 			Content:         []byte(res.Text),
+			Evidence:        evidencePairs,
+			ChangesHash:     changesHash,
 		})
 		if err != nil {
 			return err
@@ -299,8 +307,14 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 				return err
 			}
 			msgs, err = prompt.Reviewer(in)
+			if err != nil {
+				return err
+			}
 		} else {
 			msgs, err = t.reviewerMessages(attemptID, delimiter, blocks)
+			if err != nil {
+				return err
+			}
 		}
 		if err != nil {
 			return err
