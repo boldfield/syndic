@@ -99,9 +99,16 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
-		if e.changeLines != nil {
+		fi, err := frozenInputsFor(tx, t.id, t.author)
+		if err != nil {
+			return err
+		}
+		switch {
+		case e.changeLines != nil:
 			lines = e.changeLines(res)
-		} else {
+		case len(fi.lines) > 0:
+			lines = fi.lines
+		default:
 			lines = authorChangeLines(res)
 		}
 		if t.revising && sameRevision(t.candidate, t.changeLines, res.Text, lines) {
@@ -122,6 +129,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			ContextHash:     t.contextHash,
 			Round:           round,
 			Content:         []byte(res.Text),
+			Evidence:        fi.evidence,
+			ChangesHash:     fi.changesHash,
 		})
 		if err != nil {
 			return err
@@ -137,6 +146,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if err != nil {
 			return err
+		}
+		if len(fi.changes) > 0 {
+			if _, err := tx.FreezeChangeSet(t.id, candidateID, fi.snapshotHash, fi.changesHash); err != nil {
+				return err
+			}
 		}
 		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{TurnID: t.id, CandidateHash: hash}); err != nil {
 			return err
@@ -268,6 +282,11 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		turn, err := tx.GetTurn(t.id)
 		if err != nil {
+			return err
+		}
+		// The packet is regenerated from the journal at every dispatch, never
+		// from the live workspace.
+		if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
 			return err
 		}
 		delimiter, err := e.newDelimiter(t)

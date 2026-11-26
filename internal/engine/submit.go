@@ -53,8 +53,11 @@ type openTurn struct {
 	maxRounds   int
 	candidateID string
 	changeLines []string
-	revising    bool
-	results     map[string]reviewResult
+	// pkt is the change-set diffs and author evidence the current
+	// candidate's reviewers receive, set when a reviewer is dispatched.
+	pkt      reviewerPacket
+	revising bool
+	results  map[string]reviewResult
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.

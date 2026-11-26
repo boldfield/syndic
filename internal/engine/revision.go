@@ -130,12 +130,14 @@ func (t *openTurn) repairMessages(originalAttemptID, delimiter string, blocks []
 
 func (t *openTurn) reviewInput(attemptID, delimiter string) prompt.ReviewInput {
 	return prompt.ReviewInput{
-		Request:       t.input,
-		Candidate:     t.candidate,
-		CandidateHash: t.candidateHash,
-		AttemptID:     attemptID,
-		Delimiter:     delimiter,
-		History:       t.history,
+		Request:        t.input,
+		Candidate:      t.candidate,
+		CandidateHash:  t.candidateHash,
+		AttemptID:      attemptID,
+		Delimiter:      delimiter,
+		History:        t.history,
+		Diffs:          t.pkt.diffs,
+		AuthorEvidence: t.pkt.evidence,
 	}
 }
 
@@ -145,14 +147,16 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 		open[i] = prompt.OpenBlockForRevision{BlockID: b.ReviewerBlockID, Severity: b.Severity, Evidence: b.Evidence, Remedy: b.Remedy}
 	}
 	return prompt.ReviewerRevisionInput{
-		Request:       t.input,
-		Candidate:     t.candidate,
-		CandidateHash: t.candidateHash,
-		OpenBlocks:    open,
-		AttemptID:     attemptID,
-		Delimiter:     delimiter,
-		Round:         t.round,
-		HistoryDoc:    historyOf(t),
+		Request:        t.input,
+		Candidate:      t.candidate,
+		CandidateHash:  t.candidateHash,
+		OpenBlocks:     open,
+		AttemptID:      attemptID,
+		Delimiter:      delimiter,
+		Round:          t.round,
+		HistoryDoc:     historyOf(t),
+		Diffs:          t.pkt.diffs,
+		AuthorEvidence: t.pkt.evidence,
 	}
 }
 
