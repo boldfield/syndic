@@ -54,12 +54,11 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 
 	// Build the referee payload with the web call and prior calls.
 	// PriorCalls includes the caller's own earlier web_fetch and web_search calls this turn.
-	// For now, this is populated from the turn's pending tool calls.
 	payload := referee.Payload{
 		CallName:   webCall.Name,
 		CallURL:    webCall.URL,
 		UserInput:  t.input,
-		PriorCalls: []referee.WebCall{},
+		PriorCalls: []referee.WebCall{}, // TODO: populate from turn's prior web calls
 	}
 	messages := referee.PromptMessages(payload)
 
@@ -75,82 +74,33 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 		MaxOutputTokens: maxOutputTokens,
 	}
 
-	// Dispatch through the pool system. The dispatch is treated as an ordinary
-	// accounted attempt: it reserves budget, may retry on recoverable failures,
-	// and is journaled. This integrates with the existing scheduler (via
-	// schedule()) to manage pool slots and queuing.
-	res, failure := e.dispatchAttemptLocked(t, refEndpoint, ep.RefereeModel, "referee", req)
-	if failure != nil && failure.hold {
-		// An uncertain-capacity hold; end the turn.
-		return nil, fmt.Errorf("referee: uncertain capacity hold")
-	}
-
-	// Parse the referee result. Any failure returns a deny.
-	if failure != nil || res.Status != transport.StatusComplete {
-		return &RefereeDecision{
-			Verdict: referee.DecisionDeny,
-			Reason:  fmt.Sprintf("referee dispatch failed: %v", res.TransportStatus),
-		}, nil
-	}
-
-	// Parse the response text.
-	parsed, err := referee.Parse(res.Text, res.Status, len(res.ToolCalls) > 0)
-	if err != nil {
-		return &RefereeDecision{
-			Verdict: referee.DecisionDeny,
-			Reason:  err.Error(),
-		}, nil
-	}
-
-	// Journal the referee decision: referee_decision{call_id, attempt_id, verdict, reason_sha256}
-	attemptID := res.Envelope.AttemptID
-	reasonBytes := []byte(parsed.Reason)
-	reasonSHA256, err := e.store.StoreContent(reasonBytes)
-	if err == nil {
-		_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-			// Emit referee_decision event with verdict and reason hash.
-			ev := map[string]any{
-				"attempt_id":    attemptID,
-				"call_id":       callID,
-				"verdict":       string(parsed.Decision),
-				"reason_sha256": reasonSHA256,
-			}
-			payload, _ := json.Marshal(ev)
-			return tx.AppendEvent("referee_decision", payload)
-		})
-	}
-
-	return &RefereeDecision{
-		Verdict: parsed.Decision,
-		Reason:  parsed.Reason,
-	}, nil
+	return e.dispatchRefereeLocked(t, participant, callID, webCall, req, refEndpoint)
 }
 
-// dispatchAttemptLocked issues an attempt on the specified endpoint and
-// returns its result. It handles budget reservation, scheduling through the
-// pool system, calling the adapter, and recording the result. e.mu is held
-// on entry and exit. This is a focused helper for referee and other engine-internal
-// dispatches that use the full accounting machinery.
-func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase string, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
+// dispatchRefereeLocked issues a synchronous referee attempt with proper
+// scheduler and pool management. It is called with e.mu held and returns
+// with e.mu held. This integrates the referee dispatch with the shared pool
+// to prevent starvation while maintaining synchronous result delivery.
+func (e *Engine) dispatchRefereeLocked(t *openTurn, participant string, callID string, webCall referee.WebCall, req transport.CompleteRequest, refEndpoint string) (*RefereeDecision, error) {
 	// If the turn is not open, fail fast.
 	if e.open != t {
-		return transport.CompleteResult{Status: transport.StatusError}, &failure{
-			attemptStatus:   transport.StatusError,
-			transportStatus: "turn_not_open",
-		}
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  "turn not open",
+		}, nil
 	}
 
-	// Generate the deadline: attempt deadline is min(turn deadline, now + attempt timeout).
-	attemptDeadline := t.turnDeadline
-	if attemptTimeout := 30 * time.Second; e.clock.Now().Add(attemptTimeout).Before(attemptDeadline) {
-		attemptDeadline = e.clock.Now().Add(attemptTimeout)
+	// Reserve budget and begin the attempt.
+	attemptDeadline := e.attemptDeadline(t)
+	maxOut := 64
+	if e.roster.Tools != nil && e.roster.Tools.Referee != nil && e.roster.Tools.Referee.MaxOutputTokens != nil {
+		maxOut = *e.roster.Tools.Referee.MaxOutputTokens
 	}
 
-	// Reserve the budget for this attempt using BeginAttempt.
 	var attemptID string
-	var refused *budgetRefusal
 	var epoch int
-	var estimated int
+	var refused *budgetRefusal
+
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		turn, err := tx.GetTurn(t.id)
 		if err != nil {
@@ -159,18 +109,18 @@ func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase strin
 		epoch = turn.Epoch
 
 		// Estimate the prompt tokens from the request messages.
-		estimated = 0
+		estimated := 0
 		for _, m := range req.Messages {
 			estimated += len(m.Content)
 		}
 
 		attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
 			TurnID:                t.id,
-			Participant:           req.Envelope.Participant,
-			Phase:                 phase,
+			Participant:           participant,
+			Phase:                 "referee",
 			Epoch:                 epoch,
 			Deadline:              &attemptDeadline,
-			MaxOutputTokens:       req.MaxOutputTokens,
+			MaxOutputTokens:       maxOut,
 			EstimatedPromptTokens: estimated,
 		})
 		if err != nil {
@@ -180,43 +130,46 @@ func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase strin
 			}
 			return err
 		}
+
 		req.Envelope.AttemptID = attemptID
 		req.Envelope.Epoch = epoch
 		req.Deadline = attemptDeadline
 
 		return emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
 			AttemptID:             attemptID,
-			Participant:           req.Envelope.Participant,
-			Phase:                 phase,
+			Participant:           participant,
+			Phase:                 "referee",
 			Epoch:                 int64(epoch),
 			Deadline:              attemptDeadline.Format(time.RFC3339Nano),
-			MaxOutputTokens:       int64(req.MaxOutputTokens),
+			MaxOutputTokens:       int64(maxOut),
 			EstimatedPromptTokens: int64(estimated),
 		})
 	})
 	if err != nil {
 		if refused != nil {
-			return transport.CompleteResult{Status: transport.StatusError}, &failure{
-				attemptStatus:   transport.StatusError,
-				transportStatus: "budget_refused",
-			}
+			// Reservation failure ends the turn budget:turn
+			e.finishBudget(t, refused)
+			return &RefereeDecision{
+				Verdict: referee.DecisionDeny,
+				Reason:  "referee: budget exhausted",
+			}, nil
 		}
-		return transport.CompleteResult{Status: transport.StatusError}, &failure{
-			attemptStatus:   transport.StatusError,
-			transportStatus: "journal_error",
-		}
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  fmt.Sprintf("referee: begin attempt failed: %v", err),
+		}, nil
 	}
 
-	// Mark the participant as running and release the mutex before calling the adapter.
-	e.markRunning(req.Envelope.Participant)
+	// Arm the attempt timer
 	e.armAttempt(t, attemptID, attemptDeadline)
 
 	// Call the adapter with the mutex released.
 	e.mu.Unlock()
-	res, fail := e.complete(t, req.Envelope.Participant, req)
+	res, fail := e.complete(t, participant, req)
 	e.mu.Lock()
 
 	// Record the result in the journal.
+	var wasLate bool
 	_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		accepted, err := tx.AcceptResult(attemptID, epoch, "", journal.AttemptOutput{
 			RawScrubbed:     res.RawOutput,
@@ -229,9 +182,14 @@ func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase strin
 		if err != nil {
 			return err
 		}
+
+		// Track whether the result was late
+		if !accepted {
+			wasLate = true
+		}
+
+		// If the result was not accepted (late result), quarantine it
 		if !accepted && fail == nil {
-			// A late result for a superseded epoch or a terminal turn is
-			// quarantined and nothing further happens.
 			_, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
 			return err
 		}
@@ -242,11 +200,69 @@ func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase strin
 			}
 		}
 
-		return nil
+		// Settle the attempt
+		if fail != nil {
+			if _, err = e.failedIn(tx, emit, participant, attemptID, fail); err != nil {
+				return err
+			}
+		} else {
+			if _, err = e.settle(tx, emit, t.id, attemptID, res.Usage, true); err != nil {
+				return err
+			}
+		}
+
+		// Journal the referee decision
+		reasonBytes := []byte("")
+		verdict := string(referee.DecisionDeny)
+		if !wasLate && res.Status == transport.StatusComplete && len(res.ToolCalls) == 0 {
+			reasonBytes = []byte(res.Text)
+			parsed, err := referee.Parse(res.Text, res.Status, false)
+			if err == nil {
+				verdict = string(parsed.Decision)
+			}
+		}
+
+		reasonSHA256, err := e.store.StoreContent(reasonBytes)
+		if err != nil {
+			return err
+		}
+
+		payload := map[string]any{
+			"attempt_id":    attemptID,
+			"call_id":       callID,
+			"verdict":       verdict,
+			"reason_sha256": reasonSHA256,
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		return tx.AppendEvent("referee_decision", payloadBytes)
 	})
 
-	// Release the pool slot and handle failures.
-	e.releaseLocked(req.Envelope.Participant)
+	// If result was late, refuse it
+	if wasLate {
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  "referee: late result quarantined",
+		}, nil
+	}
 
-	return res, fail
+	// Parse and return the decision
+	if res.Status != transport.StatusComplete || len(res.ToolCalls) > 0 {
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  fmt.Sprintf("referee: dispatch failed or returned tool calls: %v", res.TransportStatus),
+		}, nil
+	}
+
+	parsed, err := referee.Parse(res.Text, res.Status, false)
+	if err != nil {
+		return &RefereeDecision{
+			Verdict: referee.DecisionDeny,
+			Reason:  fmt.Sprintf("referee: parse failed: %v", err),
+		}, nil
+	}
+
+	return &RefereeDecision{
+		Verdict: parsed.Decision,
+		Reason:  parsed.Reason,
+	}, nil
 }
