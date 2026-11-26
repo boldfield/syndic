@@ -168,6 +168,8 @@ func (t *ReadTools) liveReader(path string) observation.Reader {
 		case err == nil:
 		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR):
 			return journal.ObservationAbsent, nil, nil
+		case errors.Is(err, workspace.ErrNotRegular) || errors.Is(err, unix.ELOOP):
+			return observation.KindOther, nil, nil
 		default:
 			return "", nil, &liveError{err}
 		}
@@ -192,7 +194,7 @@ func classify(path string, err error) error {
 	switch {
 	case errors.Is(err, observation.ErrSnapshotConflict):
 		return &toolError{code: ErrCodeSnapshotConflict, msg: err.Error()}
-	case errors.Is(err, workspace.ErrNotRegular):
+	case errors.Is(err, workspace.ErrNotRegular), errors.Is(err, observation.ErrOtherEntry):
 		return toolErrorf(ErrCodeNotRegular, "%q is neither a regular file nor a directory", path)
 	case errors.As(err, &le):
 		if errors.Is(le.err, unix.ELOOP) {
@@ -409,7 +411,7 @@ func (t *ReadTools) listDir(raw json.RawMessage) ([]byte, error) {
 	var out strings.Builder
 	for _, e := range v.entries {
 		name := e.Name
-		if strings.ContainsAny(name, "\r\n") {
+		if strings.ContainsAny(name, "\r\n\"") {
 			name = strconv.Quote(name)
 		}
 		out.WriteString(name)

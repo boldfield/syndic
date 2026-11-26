@@ -116,12 +116,16 @@ func (s *search) match(path string, content []byte) {
 	if s.out.Len() > s.t.maxResultBytes {
 		return
 	}
-	for i, line := range bytes.Split(content, []byte("\n")) {
+	lines := bytes.Split(content, []byte("\n"))
+	if n := len(lines); n > 1 && len(lines[n-1]) == 0 {
+		lines = lines[:n-1] // a final newline ends a line; it does not start one
+	}
+	for i, line := range lines {
 		if !s.re.Match(line) {
 			continue
 		}
 		name := path
-		if strings.ContainsAny(name, "\r\n:") {
+		if strings.ContainsAny(name, "\r\n:\"") {
 			name = strconv.Quote(name)
 		}
 		fmt.Fprintf(&s.out, "%s:%d:%s\n", name, i+1, bytes.TrimSuffix(line, []byte("\r")))

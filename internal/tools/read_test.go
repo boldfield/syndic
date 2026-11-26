@@ -335,3 +335,46 @@ func TestListDirErrors(t *testing.T) {
 		f.journaled(res, tc)
 	}
 }
+
+func TestReadFileTypeChangeOfRecordedSymlinkOrFileIsConflict(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"target": "t", "plain": "p"}, 0)
+	if err := os.Symlink("target", filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	f.list(".")
+	// A listed symlink replaced by a regular file.
+	if err := os.Remove(filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "link"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, tc := f.read(map[string]any{"path": "link"})
+	if res.ErrorCode != ErrCodeSnapshotConflict {
+		t.Fatalf("symlink->file: got %q (%s)", res.Content, res.ErrorCode)
+	}
+	f.journaled(res, tc)
+	// A listed regular file replaced by a symlink.
+	if err := os.Remove(filepath.Join(f.root, "plain")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(f.root, "plain")); err != nil {
+		t.Fatal(err)
+	}
+	res, tc = f.read(map[string]any{"path": "plain"})
+	if res.ErrorCode != ErrCodeSnapshotConflict {
+		t.Fatalf("file->symlink: got %q (%s)", res.Content, res.ErrorCode)
+	}
+	f.journaled(res, tc)
+}
+
+func TestReadFileRecordedSymlinkStillSymlinkIsNotRegular(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"target": "t"}, 0)
+	if err := os.Symlink("target", filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	f.list(".")
+	if res, _ := f.read(map[string]any{"path": "link"}); res.ErrorCode != ErrCodeNotRegular {
+		t.Fatalf("got %q (%s)", res.Content, res.ErrorCode)
+	}
+}

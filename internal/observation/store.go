@@ -43,6 +43,15 @@ type turnLock struct {
 	refs int
 }
 
+// KindOther is the kind a Reader returns for a live path that is a symbolic
+// link or special file. It is compared with the recorded type but never
+// recorded: Observe returns ErrOtherEntry instead.
+const KindOther = "other"
+
+// ErrOtherEntry is returned by Observe when the live path is a symbolic link
+// or special file consistent with the record.
+var ErrOtherEntry = errors.New("path is a symbolic link or special file")
+
 // NewStore returns a Store recording into j.
 func NewStore(j *journal.Store) *Store {
 	return &Store{j: j}
@@ -114,6 +123,11 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 			return journal.Observation{}, fmt.Errorf("journal snapshot conflict at %q (%s): %w", c.Path, c.Type, err)
 		}
 		return journal.Observation{}, c
+	}
+	if kind == KindOther {
+		// A symbolic link or special file matches its recorded type but
+		// has no content to record.
+		return journal.Observation{}, ErrOtherEntry
 	}
 	if kind == journal.ObservationListing {
 		if content, err = ns.reconcileListing(content); err != nil {

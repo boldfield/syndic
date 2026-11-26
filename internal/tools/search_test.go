@@ -142,3 +142,11 @@ func TestSearchFilesStagedOverlay(t *testing.T) {
 		t.Fatalf("got %q (%s)", res.Content, res.ErrorCode)
 	}
 }
+
+func TestSearchFilesNoPhantomLineAfterFinalNewline(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"a.txt": "one\ntwo\n", "b.txt": "x\n\ny"}, 0)
+	res, _ := f.search(map[string]any{"pattern": "^$"})
+	if want := "b.txt:2:\n"; res.ErrorCode != "" || string(res.Content) != want {
+		t.Fatalf("got %q (%s), want %q", res.Content, res.ErrorCode, want)
+	}
+}
