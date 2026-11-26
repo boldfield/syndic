@@ -526,6 +526,8 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	var quarantined, approvedNow, exceeded, revise bool
 	var endState, endReason, kind string
 	var repair bool
+	var evidenceResults map[string]string
+	var acceptedEvidence string
 	var term *terminal
 	var held *hold
 	// Everything the closure decides is held in locals and applied to the open
@@ -534,6 +536,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, revise, endState, endReason, kind = false, false, false, "", "", ""
 		repair, exceeded, term, held = false, false, nil, nil
+		evidenceResults, acceptedEvidence = nil, ""
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -652,6 +655,10 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if err := recordAcceptedReview(tx, t, d, verdictID, v); err != nil {
 				return err
 			}
+			if evidenceResults, err = recordReviewerEvidence(tx, t.id, d.participant, verdictID); err != nil {
+				return err
+			}
+			acceptedEvidence = v.Evidence
 			// A loop waits for every required reviewer's accepted result on
 			// the candidate before it decides, so the author is sent all the
 			// feedback at once.
@@ -711,7 +718,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if t.results == nil {
 			t.results = map[string]reviewResult{}
 		}
-		t.results[d.participant] = reviewResult{kind: kind, attemptID: d.attemptID, text: res.Text}
+		t.results[d.participant] = reviewResult{kind: kind, attemptID: d.attemptID, text: res.Text, results: evidenceResults, evidence: acceptedEvidence}
 	}
 	if endState != "" {
 		e.commitTerminal(t, term)
