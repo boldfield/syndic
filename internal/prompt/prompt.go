@@ -91,6 +91,10 @@ type ReviewInput struct {
 	Delimiter     string
 	// History is the frozen conversation history; nil or empty adds no block.
 	History *history.Document
+	// Diffs is the formatted unified diffs for the change set; empty adds no block.
+	Diffs string
+	// AuthorEvidence is the formatted author tool calls and results; empty adds no block.
+	AuthorEvidence string
 }
 
 // reviewerSystem builds the system message for a reviewer prompt.
@@ -133,6 +137,12 @@ func Reviewer(in ReviewInput) ([]transport.Message, error) {
 	if strings.Contains(in.Candidate, in.Delimiter) {
 		return nil, ErrDelimiterCollision
 	}
+	if in.Diffs != "" && strings.Contains(in.Diffs, in.Delimiter) {
+		return nil, ErrDelimiterCollision
+	}
+	if in.AuthorEvidence != "" && strings.Contains(in.AuthorEvidence, in.Delimiter) {
+		return nil, ErrDelimiterCollision
+	}
 
 	delimBeginReq := fmt.Sprintf("===== %s BEGIN REQUEST =====", in.Delimiter)
 	delimEndReq := fmt.Sprintf("===== %s END REQUEST =====", in.Delimiter)
@@ -151,13 +161,25 @@ func Reviewer(in ReviewInput) ([]transport.Message, error) {
 		historyBlock = fmt.Sprintf("===== %s BEGIN HISTORY =====\n%s===== %s END HISTORY =====\n\n", in.Delimiter, histBytes, in.Delimiter)
 	}
 
+	var diffsBlock string
+	if in.Diffs != "" {
+		systemContent += "\n\nThe unified diffs below show every changed file in the candidate, regenerated from the stored base content."
+		diffsBlock = in.Diffs + "\n\n"
+	}
+
+	var evidenceBlock string
+	if in.AuthorEvidence != "" {
+		systemContent += "\nThe author's tool calls and results are fenced below."
+		evidenceBlock = in.AuthorEvidence + "\n\n"
+	}
+
 	userContent := fmt.Sprintf(`%s
 %s
 %s
 
 %s%s
 %s
-%s`, delimBeginReq, in.Request, delimEndReq, historyBlock, delimBeginCand, in.Candidate, delimEndCand)
+%s%s%s`, delimBeginReq, in.Request, delimEndReq, historyBlock, delimBeginCand, in.Candidate, delimEndCand, diffsBlock, evidenceBlock)
 
 	return []transport.Message{
 		{

@@ -1519,3 +1519,75 @@ func TestRepairRevision(t *testing.T) {
 		t.Error("expected an error for an empty repair attempt id")
 	}
 }
+
+// TestReviewerWithDiffsAndEvidence tests that Reviewer includes diffs and evidence blocks
+func TestReviewerWithDiffsAndEvidence(t *testing.T) {
+	messages, err := Reviewer(ReviewInput{
+		Request:        "test request",
+		Candidate:      "test candidate",
+		CandidateHash:  "abc123",
+		AttemptID:      "attempt1",
+		Delimiter:      "separator",
+		Diffs:          "--- file.txt\n+++ file.txt\n@@@ -1 +1 @@\n-old\n+new\n",
+		AuthorEvidence: "Tool Call ID: test\nTool: read_file\n",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+
+	userContent := messages[1].Content
+	if !strings.Contains(userContent, "test request") {
+		t.Errorf("user content missing request")
+	}
+	if !strings.Contains(userContent, "test candidate") {
+		t.Errorf("user content missing candidate")
+	}
+	if !strings.Contains(userContent, "--- file.txt") {
+		t.Errorf("user content missing diffs block")
+	}
+	if !strings.Contains(userContent, "Tool Call ID: test") {
+		t.Errorf("user content missing evidence block")
+	}
+
+	systemContent := messages[0].Content
+	if !strings.Contains(systemContent, "diffs") {
+		t.Errorf("system message should mention diffs")
+	}
+	if !strings.Contains(systemContent, "evidence") || !strings.Contains(systemContent, "tool") {
+		t.Errorf("system message should mention tool calls and evidence")
+	}
+}
+
+// TestReviewerWithDiffsDelimiterCollision tests delimiter collision detection for diffs
+func TestReviewerWithDiffsDelimiterCollision(t *testing.T) {
+	_, err := Reviewer(ReviewInput{
+		Request:       "test",
+		Candidate:     "test",
+		CandidateHash: "abc123",
+		AttemptID:     "attempt1",
+		Delimiter:     "delim",
+		Diffs:         "content with delim in it",
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision, got %v", err)
+	}
+}
+
+// TestReviewerWithEvidenceDelimiterCollision tests delimiter collision detection for evidence
+func TestReviewerWithEvidenceDelimiterCollision(t *testing.T) {
+	_, err := Reviewer(ReviewInput{
+		Request:        "test",
+		Candidate:      "test",
+		CandidateHash:  "abc123",
+		AttemptID:      "attempt1",
+		Delimiter:      "delim",
+		AuthorEvidence: "content with delim in it",
+	})
+	if !errors.Is(err, ErrDelimiterCollision) {
+		t.Errorf("expected ErrDelimiterCollision, got %v", err)
+	}
+}
