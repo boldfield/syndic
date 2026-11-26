@@ -178,16 +178,16 @@ func TestOrderIndependence(t *testing.T) {
 }
 
 func TestValidation(t *testing.T) {
-	if _, err := FrameSnapshotRecords([]Record{{KindAbsent, "p", ""}, {KindAbsent, "p", ""}}); err == nil {
+	if _, err := FrameSnapshotRecords([]Record{{Kind: KindAbsent, Path: "p"}, {Kind: KindAbsent, Path: "p"}}); err == nil {
 		t.Error("duplicate snapshot path accepted")
 	}
-	if _, err := FrameSnapshotRecords([]Record{{KindFile, "p", "nothex"}}); err == nil {
+	if _, err := FrameSnapshotRecords([]Record{{Kind: KindFile, Path: "p", Value: "nothex"}}); err == nil {
 		t.Error("bad file hash accepted")
 	}
-	if _, err := FrameSnapshotRecords([]Record{{KindAbsent, "p", hexA}}); err == nil {
+	if _, err := FrameSnapshotRecords([]Record{{Kind: KindAbsent, Path: "p", Value: hexA}}); err == nil {
 		t.Error("absence with value accepted")
 	}
-	if _, err := FrameSnapshotRecords([]Record{{'x', "p", ""}}); err == nil {
+	if _, err := FrameSnapshotRecords([]Record{{Kind: 'x', Path: "p"}}); err == nil {
 		t.Error("unknown kind accepted")
 	}
 	if _, err := FrameEntries([]Entry{{"f", "a"}, {"d", "a"}}); err == nil {

@@ -36,9 +36,11 @@ func IsSHA256Hex(s string) bool { return sha256HexRegex.MatchString(s) }
 
 // Record is one snapshot observation.
 type Record struct {
-	Kind  byte
-	Path  string
-	Value string
+	Kind            byte
+	Path            string
+	Value           string
+	AttemptID       string // which attempt first observed this path
+	SnapshotVersion int    // version of the snapshot when recorded
 }
 
 // Entry is one name in a recorded directory listing.

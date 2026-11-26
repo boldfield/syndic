@@ -2,55 +2,56 @@ package observation
 
 import (
 	"bytes"
-	"os"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
 
-func testStore(t *testing.T) (*Store, *journal.Store, string, string) {
-	t.Helper()
-	dir := t.TempDir()
+func testStore(tb testing.TB) (*Store, *journal.Store, string, string) {
+	tb.Helper()
+	dir := tb.(*testing.T).TempDir()
 	dbPath := dir + "/test.db"
 	db, err := journal.Open(dbPath)
 	if err != nil {
-		t.Fatalf("open journal: %v", err)
+		tb.Fatalf("open journal: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	tb.(*testing.T).Cleanup(func() { _ = db.Close() })
 
 	j := journal.NewStore(db)
 
 	// Create a run and turn so we can record observations.
 	runID, _, err := j.CreateRun([]byte("{}"))
 	if err != nil {
-		t.Fatalf("create run: %v", err)
+		tb.Fatalf("create run: %v", err)
 	}
 
 	turnID, err := j.CreateTurn(runID, "review", nil)
 	if err != nil {
-		t.Fatalf("create turn: %v", err)
+		tb.Fatalf("create turn: %v", err)
 	}
 
 	// Create an attempt for the turn.
 	attemptID, err := j.BeginAttempt(turnID, "test-author", "revise", 0, nil, "")
 	if err != nil {
-		t.Fatalf("begin attempt: %v", err)
+		tb.Fatalf("begin attempt: %v", err)
 	}
 
 	return NewStore(j), j, turnID, attemptID
 }
 
-func TestFirstObservationFile(t *testing.T) {
+func TestObserveFile(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record a file observation with content.
 	content := []byte("hello world")
-	record, err := store.FirstObservation(turnID, attemptID, "foo.txt", KindFile, content)
+	record, err := store.Observe(turnID, attemptID, "foo.txt", KindFile, func() ([]byte, error) {
+		return content, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	if record.Kind != KindFile {
@@ -62,6 +63,9 @@ func TestFirstObservationFile(t *testing.T) {
 	if record.Value == "" {
 		t.Errorf("value (content hash) must not be empty")
 	}
+	if record.AttemptID != attemptID {
+		t.Errorf("attempt ID: got %q, want %q", record.AttemptID, attemptID)
+	}
 
 	// Verify the hash is valid.
 	if !IsSHA256Hex(record.Value) {
@@ -69,13 +73,15 @@ func TestFirstObservationFile(t *testing.T) {
 	}
 }
 
-func TestFirstObservationAbsence(t *testing.T) {
+func TestObserveAbsence(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an absence observation with no content.
-	record, err := store.FirstObservation(turnID, attemptID, "missing.txt", KindAbsent, nil)
+	record, err := store.Observe(turnID, attemptID, "missing.txt", KindAbsent, func() ([]byte, error) {
+		return nil, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	if record.Kind != KindAbsent {
@@ -89,7 +95,7 @@ func TestFirstObservationAbsence(t *testing.T) {
 	}
 }
 
-func TestFirstObservationDirectory(t *testing.T) {
+func TestObserveDirectory(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record a directory observation.
@@ -99,9 +105,11 @@ func TestFirstObservationDirectory(t *testing.T) {
 		{Type: "d", Name: "subdir"},
 	})
 
-	record, err := store.FirstObservation(turnID, attemptID, "dir", KindDir, entries)
+	record, err := store.Observe(turnID, attemptID, "dir", KindDir, func() ([]byte, error) {
+		return entries, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	if record.Kind != KindDir {
@@ -117,15 +125,24 @@ func TestRepeatedReadIgnoresLiveEdits(t *testing.T) {
 
 	// Record a file observation.
 	content := []byte("original")
-	record1, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, content)
+	record1, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return content, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
-	// Try to record the same path again - should fail.
-	record2, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, []byte("modified"))
-	if err == nil {
-		t.Errorf("second observation should fail, got record %+v", record2)
+	// Try to observe the same path again - should return the recorded observation, not an error.
+	record2, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return []byte("modified"), nil
+	})
+	if err != nil {
+		t.Fatalf("repeated observe should return record, got error: %v", err)
+	}
+
+	// Verify that the second call returned the same recorded value.
+	if record2.Value != record1.Value {
+		t.Errorf("repeated read should return same value: %q != %q", record2.Value, record1.Value)
 	}
 
 	// Verify the stored observation is the original.
@@ -152,22 +169,31 @@ func TestObservedAbsenceRemainsAbsent(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an absence observation.
-	record, err := store.FirstObservation(turnID, attemptID, "missing.txt", KindAbsent, nil)
+	record, err := store.Observe(turnID, attemptID, "missing.txt", KindAbsent, func() ([]byte, error) {
+		return nil, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	if record.Value != "" {
 		t.Errorf("absence should have empty value")
 	}
 
-	// Try to observe the same path as a file - should fail.
-	_, err = store.FirstObservation(turnID, attemptID, "missing.txt", KindFile, []byte("content"))
-	if err == nil {
-		t.Errorf("observing same path again should fail")
+	// Try to observe the same path as a file - should return the recorded absence, not record as file.
+	record2, err := store.Observe(turnID, attemptID, "missing.txt", KindFile, func() ([]byte, error) {
+		return []byte("content"), nil
+	})
+	if err != nil {
+		t.Fatalf("repeated observe should return record, got error: %v", err)
 	}
 
-	// Verify it still reads as absent.
+	// Verify it still reads as absent (the recorded kind should be preserved).
+	if record2.Kind != record.Kind {
+		t.Errorf("kind should remain absent, got %q", record2.Kind)
+	}
+
+	// Verify it still reads as absent from the store.
 	obs, err := store.ObservationAt(turnID, "missing.txt")
 	if err != nil {
 		t.Fatalf("observation at: %v", err)
@@ -193,32 +219,43 @@ func TestConcurrentFirstTouches(t *testing.T) {
 		attemptIDs[i] = attemptID
 	}
 
+	// Track how many times the reader is invoked.
+	var readerInvoked atomic.Int32
+
 	// Two goroutines try to observe the same path concurrently.
 	var wg sync.WaitGroup
-	var recordedCount atomic.Int32
-	var recordedValue string
+	var records [2]Record
+	var errs [2]error
 
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
-		go func(attemptID string) {
+		go func(idx int, attemptID string) {
 			defer wg.Done()
-			content := []byte("content from attempt")
-			record, err := store.FirstObservation(turnID, attemptID, "concurrent.txt", KindFile, content)
-			if err != nil {
-				t.Logf("observation failed: %v", err)
-				return
-			}
-			recordedCount.Add(1)
-			if recordedValue == "" {
-				recordedValue = record.Value
-			}
-		}(attemptIDs[i])
+			record, err := store.Observe(turnID, attemptID, "concurrent.txt", KindFile, func() ([]byte, error) {
+				readerInvoked.Add(1)
+				return []byte("content from attempt"), nil
+			})
+			records[idx] = record
+			errs[idx] = err
+		}(i, attemptIDs[i])
 	}
 	wg.Wait()
 
-	// Exactly one should have succeeded in recording.
-	if recordedCount.Load() != 1 {
-		t.Errorf("concurrent first touches: got %d recorded, want 1", recordedCount.Load())
+	// Both should succeed without error (one reads, one gets the recorded observation).
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("observe[%d] failed: %v", i, err)
+		}
+	}
+
+	// Both should get the same record value.
+	if records[0].Value != records[1].Value {
+		t.Errorf("concurrent touches got different values: %q != %q", records[0].Value, records[1].Value)
+	}
+
+	// The reader should have been invoked exactly once.
+	if readerInvoked.Load() != 1 {
+		t.Errorf("reader invoked %d times, want 1", readerInvoked.Load())
 	}
 
 	// Verify the observation exists.
@@ -227,8 +264,8 @@ func TestConcurrentFirstTouches(t *testing.T) {
 		t.Fatalf("observation at: %v", err)
 	}
 
-	if obs.Value != recordedValue {
-		t.Errorf("recorded value mismatch: %q != %q", obs.Value, recordedValue)
+	if obs.Value != records[0].Value {
+		t.Errorf("recorded value mismatch: %q != %q", obs.Value, records[0].Value)
 	}
 }
 
@@ -245,9 +282,11 @@ func TestSnapshotVersionIncrement(t *testing.T) {
 	}
 
 	// Record first observation - version should be 1.
-	_, err = store.FirstObservation(turnID, attemptID, "file1.txt", KindFile, []byte("content1"))
+	rec1, err := store.Observe(turnID, attemptID, "file1.txt", KindFile, func() ([]byte, error) {
+		return []byte("content1"), nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 	v, err = store.SnapshotVersion(turnID)
 	if err != nil {
@@ -256,11 +295,16 @@ func TestSnapshotVersionIncrement(t *testing.T) {
 	if v != 1 {
 		t.Errorf("after first observation: got version %d, want 1", v)
 	}
+	if rec1.SnapshotVersion != 1 {
+		t.Errorf("record snapshot version: got %d, want 1", rec1.SnapshotVersion)
+	}
 
 	// Record second observation - version should be 2.
-	_, err = store.FirstObservation(turnID, attemptID, "file2.txt", KindFile, []byte("content2"))
+	rec2, err := store.Observe(turnID, attemptID, "file2.txt", KindFile, func() ([]byte, error) {
+		return []byte("content2"), nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 	v, err = store.SnapshotVersion(turnID)
 	if err != nil {
@@ -269,15 +313,20 @@ func TestSnapshotVersionIncrement(t *testing.T) {
 	if v != 2 {
 		t.Errorf("after second observation: got version %d, want 2", v)
 	}
+	if rec2.SnapshotVersion != 2 {
+		t.Errorf("record snapshot version: got %d, want 2", rec2.SnapshotVersion)
+	}
 }
 
 func TestObservationsBoundToOriginalAttempt(t *testing.T) {
 	store, _, turnID, attemptID := testStore(t)
 
 	// Record an observation.
-	_, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, []byte("content"))
+	origRec, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return []byte("content"), nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	// Retrieve observations.
@@ -297,6 +346,14 @@ func TestObservationsBoundToOriginalAttempt(t *testing.T) {
 	if obs[0].Kind != KindFile {
 		t.Errorf("kind: got %q, want %q", obs[0].Kind, KindFile)
 	}
+
+	if obs[0].AttemptID != attemptID {
+		t.Errorf("attempt ID: got %q, want %q", obs[0].AttemptID, attemptID)
+	}
+
+	if obs[0].SnapshotVersion != origRec.SnapshotVersion {
+		t.Errorf("snapshot version: got %d, want %d", obs[0].SnapshotVersion, origRec.SnapshotVersion)
+	}
 }
 
 func TestMultipleObservationsOrdered(t *testing.T) {
@@ -304,9 +361,11 @@ func TestMultipleObservationsOrdered(t *testing.T) {
 
 	paths := []string{"c.txt", "a.txt", "b.txt"}
 	for _, path := range paths {
-		_, err := store.FirstObservation(turnID, attemptID, path, KindFile, []byte("content"))
+		_, err := store.Observe(turnID, attemptID, path, KindFile, func() ([]byte, error) {
+			return []byte("content"), nil
+		})
 		if err != nil {
-			t.Fatalf("first observation: %v", err)
+			t.Fatalf("observe: %v", err)
 		}
 	}
 
@@ -328,23 +387,6 @@ func TestMultipleObservationsOrdered(t *testing.T) {
 	}
 }
 
-func TestRecordObservationDirectlyBypassesLock(t *testing.T) {
-	store, _, turnID, attemptID := testStore(t)
-
-	// First observation via FirstObservation.
-	_, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, []byte("first"))
-	if err != nil {
-		t.Fatalf("first observation: %v", err)
-	}
-
-	// RecordObservation directly bypasses the lock and should fail in the
-	// journal layer (not in the Store lock).
-	record, err := store.RecordObservation(turnID, attemptID, "file.txt", KindFile, []byte("second"))
-	if err == nil {
-		t.Errorf("RecordObservation should fail for already-observed path, got %+v", record)
-	}
-}
-
 func TestObservationAtNotFound(t *testing.T) {
 	store, _, turnID, _ := testStore(t)
 
@@ -361,9 +403,11 @@ func TestBinaryPathsAndContent(t *testing.T) {
 	binaryPath := "file\x00with\nnulls"
 	binaryContent := []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 0xfd}
 
-	_, err := store.FirstObservation(turnID, attemptID, binaryPath, KindFile, binaryContent)
+	_, err := store.Observe(turnID, attemptID, binaryPath, KindFile, func() ([]byte, error) {
+		return binaryContent, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation with binary path: %v", err)
+		t.Fatalf("observe with binary path: %v", err)
 	}
 
 	// Verify it can be retrieved.
@@ -386,36 +430,15 @@ func TestBinaryPathsAndContent(t *testing.T) {
 	}
 }
 
-func TestStoreCleanup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow cleanup test in short mode")
-	}
-
-	store, _, turnID, attemptID := testStore(t)
-
-	_, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, []byte("content"))
-	if err != nil {
-		t.Fatalf("first observation: %v", err)
-	}
-
-	// Clear the turn lock.
-	store.ClearTurnLock(turnID)
-
-	// After clearing, the lock should be gone. A new attempt should fail in
-	// the journal (ErrObserved from RecordObservation), but not in the Store lock.
-	_, err2 := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, []byte("new"))
-	if err2 == nil {
-		t.Errorf("after clear turn lock, FirstObservation should fail in journal")
-	}
-}
-
 func TestContentStorage(t *testing.T) {
 	store, j, turnID, attemptID := testStore(t)
 
 	content := []byte("test file content")
-	record, err := store.FirstObservation(turnID, attemptID, "file.txt", KindFile, content)
+	record, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return content, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe: %v", err)
 	}
 
 	// Retrieve the content by hash.
@@ -429,81 +452,59 @@ func TestContentStorage(t *testing.T) {
 	}
 }
 
-func TestStoreWithRealFilesystem(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping filesystem test in short mode")
+func TestReaderErrorHandling(t *testing.T) {
+	store, _, turnID, attemptID := testStore(t)
+
+	// Test that errors from the reader are propagated.
+	testErr := fmt.Errorf("reader error")
+	record, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return nil, testErr
+	})
+	if err != testErr {
+		t.Errorf("expected reader error %v, got %v", testErr, err)
+	}
+	if record.Path != "" {
+		t.Errorf("should not have created record on reader error, got %+v", record)
 	}
 
-	store, j, turnID, attemptID := testStore(t)
-
-	// Create a temporary file and read it.
-	dir := t.TempDir()
-	filepath := dir + "/test.txt"
-	content := []byte("file from filesystem")
-	if err := os.WriteFile(filepath, content, 0644); err != nil {
-		t.Fatalf("write test file: %v", err)
-	}
-
-	// In a real tool, this would read from the filesystem.
-	// For this test, we just simulate by recording the content.
-	record, err := store.FirstObservation(turnID, attemptID, "fs/test.txt", KindFile, content)
+	// Subsequent observe with successful reader should work normally.
+	content := []byte("content")
+	record2, err := store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return content, nil
+	})
 	if err != nil {
-		t.Fatalf("first observation: %v", err)
+		t.Fatalf("observe after reader error: %v", err)
 	}
-
-	// Verify the content is stored.
-	retrieved, err := j.Content(record.Value)
-	if err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-
-	if !bytes.Equal(retrieved, content) {
-		t.Errorf("filesystem content mismatch")
+	if record2.Path != "file.txt" {
+		t.Errorf("path: got %q, want file.txt", record2.Path)
 	}
 }
 
-func BenchmarkFirstObservation(b *testing.B) {
-	store, _, turnID, attemptID := testStore(&testing.T{})
+func BenchmarkObserve(b *testing.B) {
+	store, _, turnID, attemptID := testStore(b)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		path := "file" + string(rune(i%100)) + ".txt"
-		_, _ = store.FirstObservation(turnID, attemptID, path, KindFile, []byte("benchmark"))
+		path := "file" + fmt.Sprintf("%03d", i%100) + ".txt"
+		_, _ = store.Observe(turnID, attemptID, path, KindFile, func() ([]byte, error) {
+			return []byte("benchmark"), nil
+		})
 	}
 }
 
-func BenchmarkConcurrentFirstTouches(b *testing.B) {
-	store, j, turnID, _ := testStore(&testing.T{})
+func BenchmarkObserveRepeatedly(b *testing.B) {
+	store, _, turnID, attemptID := testStore(b)
 
-	// Pre-create enough attempts for the benchmark.
-	var attemptIDs []string
-	for i := 0; i < b.N; i++ {
-		attemptID, err := j.BeginAttempt(turnID, "test-author", "revise", i, nil, "")
-		if err != nil {
-			b.Fatalf("begin attempt: %v", err)
-		}
-		attemptIDs = append(attemptIDs, attemptID)
-	}
-
-	// Use a channel to coordinate goroutines racing to observe the same path.
-	readyChan := make(chan struct{})
-	var wg sync.WaitGroup
+	// Pre-observe a path.
+	_, _ = store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+		return []byte("content"), nil
+	})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wg.Add(1)
-		go func(attemptID string) {
-			defer wg.Done()
-			<-readyChan
-			_, _ = store.FirstObservation(turnID, attemptID, "concurrent.txt", KindFile, []byte("x"))
-		}(attemptIDs[i])
-
-		switch i {
-		case 0:
-			time.Sleep(1 * time.Millisecond)
-		case b.N - 1:
-			close(readyChan)
-		}
+		// Repeated observe of same path should be fast (get from cache).
+		_, _ = store.Observe(turnID, attemptID, "file.txt", KindFile, func() ([]byte, error) {
+			return []byte("x"), nil
+		})
 	}
-	wg.Wait()
 }

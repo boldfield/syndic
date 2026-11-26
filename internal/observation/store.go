@@ -23,7 +23,7 @@ type Store struct {
 // tree (design v5 delta section 6).
 type turnLock struct {
 	mu    sync.Mutex
-	paths map[string]bool // paths already observed
+	paths map[string]*Record // paths already observed with their records
 }
 
 // NewStore wraps the journal store to provide turn-serialized observation
@@ -41,20 +41,26 @@ func (s *Store) ensureTurnLock(turnID string) *turnLock {
 	if tl, ok := s.turns[turnID]; ok {
 		return tl
 	}
-	tl := &turnLock{paths: make(map[string]bool)}
+	tl := &turnLock{paths: make(map[string]*Record)}
 	s.turns[turnID] = tl
 	return tl
 }
 
-// FirstObservation records an observation of path as kind with the given
-// content (or empty for absence), or returns an error. If the path is already
-// observed in this turn, FirstObservation returns an error. This method
-// serializes concurrent first touches so that two threads recording the same
-// path simultaneously yield one record and one reader of the live tree.
+// Observe attempts to observe a path, reading from the live tree if not yet
+// observed and returning the existing recorded observation for repeated touches.
+// The reader callback is invoked at most once, inside the per-turn lock,
+// if the path has not been previously observed.
 //
-// The returned Record carries the recorded kind and content hash (for file or
-// directory) or is empty (for absence).
-func (s *Store) FirstObservation(turnID, attemptID, path string, kind byte, content []byte) (Record, error) {
+// Two concurrent first touches of the same path yield one record and one
+// invocation of the reader (design v5 delta section 6).
+func (s *Store) Observe(turnID, attemptID, path string, kind byte, reader func() ([]byte, error)) (Record, error) {
+	kindStr := string(rune(kind))
+	switch kindStr {
+	case "f", "a", "d":
+	default:
+		return Record{}, fmt.Errorf("unknown observation kind %q", kindStr)
+	}
+
 	s.mu.Lock()
 	tl := s.ensureTurnLock(turnID)
 	s.mu.Unlock()
@@ -62,23 +68,21 @@ func (s *Store) FirstObservation(turnID, attemptID, path string, kind byte, cont
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 
-	if tl.paths[path] {
-		return Record{}, fmt.Errorf("path %q already observed in turn %q", path, turnID)
+	// Check if already observed; return the recorded observation.
+	if rec, ok := tl.paths[path]; ok {
+		return *rec, nil
 	}
 
-	// Mark this path as observed so concurrent attempts fail.
-	tl.paths[path] = true
+	// Read the live tree under the lock so concurrent first touches
+	// serialize and only one reader is invoked.
+	content, err := reader()
+	if err != nil {
+		return Record{}, err
+	}
 
 	// Record the observation in the journal.
-	kindStr := string(rune(kind))
-	switch kindStr {
-	case "f", "a", "d":
-	default:
-		return Record{}, fmt.Errorf("unknown observation kind %q", kindStr)
-	}
-
 	var obs journal.Observation
-	err := s.j.Tx(func(tx *journal.Tx) error {
+	err = s.j.Tx(func(tx *journal.Tx) error {
 		var txErr error
 		obs, txErr = tx.RecordObservation(turnID, attemptID, path, kindStr, content)
 		return txErr
@@ -87,42 +91,17 @@ func (s *Store) FirstObservation(turnID, attemptID, path string, kind byte, cont
 		return Record{}, err
 	}
 
-	// Return the record in the observation.Record format.
-	return Record{
-		Kind:  kind,
-		Path:  path,
-		Value: obs.ContentSHA256,
-	}, nil
-}
-
-// RecordObservation records an observation using the journal directly. This is
-// a lower-level method that does NOT enforce the concurrent-first-touch
-// serialization; it is for use by code that has its own coordination.
-//
-// Deprecated: use FirstObservation for most tool use cases.
-func (s *Store) RecordObservation(turnID, attemptID, path string, kind byte, content []byte) (Record, error) {
-	kindStr := string(rune(kind))
-	switch kindStr {
-	case "f", "a", "d":
-	default:
-		return Record{}, fmt.Errorf("unknown observation kind %q", kindStr)
+	// Mark this path as observed only after successful journal write.
+	rec := &Record{
+		Kind:            kind,
+		Path:            path,
+		Value:           obs.ContentSHA256,
+		AttemptID:       attemptID,
+		SnapshotVersion: obs.SnapshotVersion,
 	}
+	tl.paths[path] = rec
 
-	var obs journal.Observation
-	err := s.j.Tx(func(tx *journal.Tx) error {
-		var txErr error
-		obs, txErr = tx.RecordObservation(turnID, attemptID, path, kindStr, content)
-		return txErr
-	})
-	if err != nil {
-		return Record{}, err
-	}
-
-	return Record{
-		Kind:  kind,
-		Path:  path,
-		Value: obs.ContentSHA256,
-	}, nil
+	return *rec, nil
 }
 
 // ObservationAt returns the recorded observation for the given path in the
@@ -139,9 +118,11 @@ func (s *Store) ObservationAt(turnID, path string) (Record, error) {
 	}
 
 	return Record{
-		Kind:  byte(obs.Kind[0]),
-		Path:  obs.Path,
-		Value: obs.ContentSHA256,
+		Kind:            byte(obs.Kind[0]),
+		Path:            obs.Path,
+		Value:           obs.ContentSHA256,
+		AttemptID:       obs.AttemptID,
+		SnapshotVersion: obs.SnapshotVersion,
 	}, nil
 }
 
@@ -161,9 +142,11 @@ func (s *Store) Observations(turnID string) ([]Record, error) {
 	records := make([]Record, len(obs))
 	for i, o := range obs {
 		records[i] = Record{
-			Kind:  byte(o.Kind[0]),
-			Path:  o.Path,
-			Value: o.ContentSHA256,
+			Kind:            byte(o.Kind[0]),
+			Path:            o.Path,
+			Value:           o.ContentSHA256,
+			AttemptID:       o.AttemptID,
+			SnapshotVersion: o.SnapshotVersion,
 		}
 	}
 	return records, nil
@@ -179,14 +162,4 @@ func (s *Store) SnapshotVersion(turnID string) (int, error) {
 		return txErr
 	})
 	return version, err
-}
-
-// ClearTurnLock releases the per-turn lock. This is intended for testing or
-// cleanup after a turn is complete. After this call, FirstObservation will
-// allow re-recording paths that were previously observed (which will fail in
-// the journal layer, but the store lock will not prevent it).
-func (s *Store) ClearTurnLock(turnID string) {
-	s.mu.Lock()
-	delete(s.turns, turnID)
-	s.mu.Unlock()
 }
