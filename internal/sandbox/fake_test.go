@@ -123,6 +123,46 @@ func TestFakeTerminateRecordsAndEnds(t *testing.T) {
 	}
 }
 
+// The shell's writes are buffered as by a kernel pipe, so neither its exit
+// nor a kill waits for a reader, and what it wrote stays readable after.
+func TestFakeUnreadOutput(t *testing.T) {
+	f := NewFake(0,
+		FakeScript{Chunks: []FakeChunk{{Data: []byte("hello")}}, Exit: ExitStatus{Code: 3}},
+		FakeScript{Chunks: []FakeChunk{{Data: []byte("hello")}}, Runtime: time.Hour},
+	)
+	exits := startFake(t, f, Spec{})
+	killed := startFake(t, f, Spec{})
+	_ = killed.Terminate(syscall.SIGKILL)
+
+	for i, c := range []struct {
+		p    Process
+		want ExitStatus
+	}{
+		{exits, ExitStatus{Code: 3}},
+		{killed, SignalStatus(syscall.SIGKILL, true)},
+	} {
+		select {
+		case <-waitChan(c.p):
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%d: Wait blocked with output unread", i)
+		}
+		if st, _ := c.p.Wait(); st != c.want {
+			t.Errorf("%d: status %+v", i, st)
+		}
+		if err := confirmWithin(c.p, time.Second); err != nil {
+			t.Errorf("%d: ConfirmEmpty: %v", i, err)
+		}
+	}
+	if got := readChunks(t, exits.Output()); !reflect.DeepEqual(got, []string{"hello"}) {
+		t.Errorf("exited: output %q", got)
+	}
+	// Whether the kill landed before the write is a race, as with a real
+	// process; either way the pipe reaches end of file.
+	if got := readChunks(t, killed.Output()); len(got) > 1 || (len(got) == 1 && got[0] != "hello") {
+		t.Errorf("killed: output %q", got)
+	}
+}
+
 func waitChan(p Process) <-chan struct{} {
 	ch := make(chan struct{})
 	go func() {

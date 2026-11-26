@@ -133,7 +133,9 @@ func (f *Fake) Start(ctx context.Context, spec Spec) (Process, error) {
 		descDead: make(chan struct{}),
 		exited:   make(chan struct{}),
 	}
+	p.pending.cond = sync.NewCond(&p.pending.mu)
 	go p.run(time.Now())
+	go p.drain()
 	return p, nil
 }
 
@@ -163,6 +165,17 @@ type fakeProcess struct {
 	descDead chan struct{} // closed when the holding descendant ends
 	exited   chan struct{} // closed when the shell has exited
 	status   ExitStatus
+
+	// pending stands in for the kernel pipe buffer: the shell's writes land
+	// here and never block, so shell exit, Wait and Terminate do not depend
+	// on anyone reading Output. drain delivers the chunks to the pipe in
+	// order, one Write each.
+	pending struct {
+		mu     sync.Mutex
+		cond   *sync.Cond
+		chunks [][]byte
+		closed bool // every writer has gone; close the pipe once drained
+	}
 }
 
 func (p *fakeProcess) run(start time.Time) {
@@ -170,9 +183,7 @@ func (p *fakeProcess) run(start time.Time) {
 		if !p.sleep(c.Delay) {
 			break
 		}
-		if _, err := p.pw.Write(c.Data); err != nil {
-			break
-		}
+		p.emit(c.Data)
 	}
 	if rest := p.script.Runtime - time.Since(start); rest > 0 {
 		p.sleep(rest)
@@ -191,7 +202,42 @@ func (p *fakeProcess) run(start time.Time) {
 	if p.script.HoldPipe {
 		<-p.descDead
 	}
-	_ = p.pw.Close()
+	p.pending.mu.Lock()
+	p.pending.closed = true
+	p.pending.mu.Unlock()
+	p.pending.cond.Signal()
+}
+
+// emit buffers one write by the shell without waiting for a reader.
+func (p *fakeProcess) emit(data []byte) {
+	p.pending.mu.Lock()
+	p.pending.chunks = append(p.pending.chunks, append([]byte(nil), data...))
+	p.pending.mu.Unlock()
+	p.pending.cond.Signal()
+}
+
+// drain delivers buffered writes to the pipe, and closes it after the last
+// writer has gone and everything buffered has been delivered, as a reader
+// of a real pipe sees end of file only after the buffered bytes. If the
+// reader closes Output, what remains is discarded.
+func (p *fakeProcess) drain() {
+	for {
+		p.pending.mu.Lock()
+		for len(p.pending.chunks) == 0 && !p.pending.closed {
+			p.pending.cond.Wait()
+		}
+		if len(p.pending.chunks) == 0 {
+			p.pending.mu.Unlock()
+			_ = p.pw.Close()
+			return
+		}
+		c := p.pending.chunks[0]
+		p.pending.chunks = p.pending.chunks[1:]
+		p.pending.mu.Unlock()
+		if _, err := p.pw.Write(c); err != nil {
+			return
+		}
+	}
 }
 
 // sleep waits d, and reports false when the shell was killed first.
