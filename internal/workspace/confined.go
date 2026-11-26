@@ -111,10 +111,8 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 		if isLast {
 			// Last component: apply the requested flags
 			openFlags |= flags
-			// Use O_NONBLOCK on read opens to prevent FIFOs from blocking
-			if (flags & unix.O_WRONLY) == 0 {
-				openFlags |= unix.O_NONBLOCK
-			}
+			// Use O_NONBLOCK on all final opens to prevent FIFOs from blocking
+			openFlags |= unix.O_NONBLOCK
 		} else {
 			// Intermediate components: open as directory for further traversal
 			openFlags |= unix.O_RDONLY | unix.O_DIRECTORY

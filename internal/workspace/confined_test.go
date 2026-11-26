@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -177,38 +178,6 @@ func TestConfinedOpenFile_SymlinkInPathRejected(t *testing.T) {
 	_, err = c.OpenFile("link/test.txt", os.O_RDONLY, 0)
 	if err == nil {
 		t.Error("OpenFile through symlink component should fail due to O_NOFOLLOW")
-	}
-}
-
-func TestConfinedOpenFile_SymlinkSwapAttack(t *testing.T) {
-	if os.Getenv("GITHUB_ACTIONS") != "" {
-		t.Skip("symlink swap timing test may be flaky in CI")
-	}
-
-	dir := t.TempDir()
-	subdir := filepath.Join(dir, "sub")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	testFile := filepath.Join(subdir, "file.txt")
-	if err := os.WriteFile(testFile, []byte("original"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	c, err := OpenConfined(dir, nil)
-	if err != nil {
-		t.Fatalf("OpenConfined: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	// Try to open the file - this should work initially
-	// Even if someone swaps the directory for a symlink between our
-	// component checks, the O_NOFOLLOW flag on the last component
-	// and the directory components will catch it
-	_, err = c.OpenFile("sub/file.txt", os.O_RDONLY, 0)
-	if err != nil {
-		t.Fatalf("Initial open should work: %v", err)
 	}
 }
 
@@ -729,6 +698,43 @@ func TestConfinedOpenFile_NonRegularFilesRejected(t *testing.T) {
 	}
 }
 
+// Regression test: WriteFile on FIFO must not hang
+// Tests that opening a FIFO with O_WRONLY and O_NONBLOCK returns ENXIO
+// and the fstat check rejects it before any blocking can occur
+func TestConfinedOpenFile_WriteFIFODoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Create a FIFO
+	fifoPath := filepath.Join(dir, "testfifo")
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+
+	// Try to write to the FIFO - with O_NONBLOCK, openat should fail with ENXIO
+	// if there's no reader. This should not hang.
+	done := make(chan error, 1)
+	go func() {
+		err := c.WriteFile("testfifo", []byte("data"), 0644)
+		done <- err
+	}()
+
+	// Wait up to 2 seconds for the write to complete
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("WriteFile to FIFO should fail")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("WriteFile to FIFO hung (should fail with ENXIO, not block)")
+	}
+}
+
 // Regression test for issue 5: Symlink swap attack deterministic test
 // Tests that symlink swaps between components are caught
 func TestConfinedOpenFile_SymlinkSwapDeterministic(t *testing.T) {
@@ -772,8 +778,9 @@ func TestConfinedOpenFile_SymlinkSwapDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a directory outside root
-	outsideDir := filepath.Join(dir, "..", "outside")
+	// Create a directory outside root in a separate temp directory
+	outsideParent := t.TempDir()
+	outsideDir := filepath.Join(outsideParent, "outside")
 	if err := os.MkdirAll(outsideDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +802,7 @@ func TestConfinedOpenFile_SymlinkSwapDeterministic(t *testing.T) {
 }
 
 // Regression test for root relocation identity
-// Tests that operations through the same root fd give consistent results
+// Tests that operations through the same root fd give consistent results even after root is moved
 func TestConfinedOpenFile_RootRelocationIdentity(t *testing.T) {
 	dir := t.TempDir()
 	testFile := filepath.Join(dir, "test.txt")
@@ -810,64 +817,49 @@ func TestConfinedOpenFile_RootRelocationIdentity(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 
-	// Open file multiple times and verify consistent access
-	for i := 0; i < 3; i++ {
-		f, err := c.OpenFile("test.txt", os.O_RDONLY, 0)
-		if err != nil {
-			t.Fatalf("Open iteration %d: %v", i, err)
-		}
-
-		content, err := io.ReadAll(f)
-		if err != nil {
-			_ = f.Close()
-			t.Fatalf("Read iteration %d: %v", i, err)
-		}
-
-		if string(content) != testContent {
-			_ = f.Close()
-			t.Errorf("Iteration %d: content mismatch", i)
-		}
-
-		_ = f.Close()
-	}
-
-	// Verify we can't escape even if we try using descriptors
-	// Get a stat of the opened file
-	f, err := c.OpenFile("test.txt", os.O_RDONLY, 0)
+	// Verify we can read the file through the confined instance
+	content, err := c.ReadFile("test.txt")
 	if err != nil {
-		t.Fatalf("Final open: %v", err)
+		t.Fatalf("Initial read: %v", err)
+	}
+	if string(content) != testContent {
+		t.Errorf("Initial read content mismatch: %q != %q", string(content), testContent)
 	}
 
-	_, err = f.Stat()
+	// Now rename the root directory to a new location
+	tempParent := t.TempDir()
+	newRoot := filepath.Join(tempParent, "moved_root")
+	if err := os.Rename(dir, newRoot); err != nil {
+		t.Fatalf("Rename root: %v", err)
+	}
+
+	// Operations through the same root fd should still work and affect the moved directory
+	writeData := "written after relocation"
+	if err := c.WriteFile("written.txt", []byte(writeData), 0644); err != nil {
+		t.Fatalf("Write after relocation: %v", err)
+	}
+
+	// Verify the written file exists in the moved location
+	writtenPath := filepath.Join(newRoot, "written.txt")
+	if _, err := os.Stat(writtenPath); err != nil {
+		t.Fatalf("Written file not found in moved location: %v", err)
+	}
+
+	// Read the written file through the filesystem to verify it's in the right place
+	diskContent, err := os.ReadFile(writtenPath)
 	if err != nil {
-		_ = f.Close()
-		t.Fatalf("Stat: %v", err)
+		t.Fatalf("Read written file from disk: %v", err)
 	}
-	_ = f.Close()
+	if string(diskContent) != writeData {
+		t.Errorf("Written content mismatch: %q != %q", string(diskContent), writeData)
+	}
 
-	// Get the same file again and stat it
-	f, err = c.OpenFile("test.txt", os.O_RDONLY, 0)
+	// Verify we can still read through the confined instance
+	readBack, err := c.ReadFile("written.txt")
 	if err != nil {
-		t.Fatalf("Second open: %v", err)
+		t.Fatalf("Read back after relocation: %v", err)
 	}
-
-	_, err = f.Stat()
-	if err != nil {
-		_ = f.Close()
-		t.Fatalf("Stat 2: %v", err)
-	}
-	_ = f.Close()
-
-	// Inode should be the same - get inodes from both opens
-	var stat1, stat2 unix.Stat_t
-	if err := unix.Stat(testFile, &stat1); err != nil {
-		t.Fatalf("Stat file directly: %v", err)
-	}
-	if err := unix.Stat(testFile, &stat2); err != nil {
-		t.Fatalf("Stat file directly 2: %v", err)
-	}
-
-	if stat1.Ino != stat2.Ino {
-		t.Errorf("Inode mismatch: %d != %d", stat1.Ino, stat2.Ino)
+	if string(readBack) != writeData {
+		t.Errorf("Read back content mismatch: %q != %q", string(readBack), writeData)
 	}
 }
