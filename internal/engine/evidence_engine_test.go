@@ -380,7 +380,9 @@ func TestCitedReviewerResultTransfersToAuthor(t *testing.T) {
 	var h *enginetest.Harness
 	var r1Uncited string
 	r1Done := make(chan struct{})
-	record := func(attempt string, bodies ...string) []string {
+	var mu sync.Mutex
+	own := map[string][]string{} // reviewer -> its result ids
+	record := func(participant, attempt string, bodies ...string) []string {
 		var ids []string
 		err := h.Store.Tx(func(tx *journal.Tx) error {
 			for i, b := range bodies {
@@ -399,16 +401,19 @@ func TestCitedReviewerResultTransfersToAuthor(t *testing.T) {
 		if err != nil {
 			panic(err)
 		}
+		mu.Lock()
+		own[participant] = append(own[participant], ids...)
+		mu.Unlock()
 		return ids
 	}
 	r1 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-		ids := record(req.Envelope.AttemptID, "cited-result-body", "uncited-result-body")
+		ids := record("r1", req.Envelope.AttemptID, "cited-result-body", "uncited-result-body")
 		r1Uncited = ids[1]
 		close(r1Done)
 		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "see "+ids[0], "r", "r")
 	})
 	r2 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-		record(req.Envelope.AttemptID, "other-reviewer-body")
+		record("r2", req.Envelope.AttemptID, "other-reviewer-body")
 		<-r1Done
 		// Names the other reviewer's uncited result, which this reviewer never received.
 		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b2", "high", "see "+r1Uncited, "r", "r")
@@ -450,8 +455,14 @@ func TestCitedReviewerResultTransfersToAuthor(t *testing.T) {
 			continue
 		}
 		withEvidence++
-		if len(ev.ResultIDs) > 2 {
-			t.Fatalf("verdict %s holds results beyond its own reviewer's: %+v", v.ID, ev)
+		// Every verdict holds exactly its own reviewer's results, the
+		// round-1 verdict included.
+		a, err := h.Store.GetAttempt(v.AttemptID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := strings.Join(ev.ResultIDs, ","), strings.Join(own[a.Participant], ","); got != want {
+			t.Fatalf("%s verdict %s results = %s, want %s", a.Participant, v.ID, got, want)
 		}
 	}
 	if withEvidence != 4 {
