@@ -50,6 +50,9 @@ var (
 // journaled as accepted intent so that the tool error answering it is too.
 const ToolClassNone = "none"
 
+// ToolClassExec is the class of a bash call (v7 delta section 2).
+const ToolClassExec = "exec"
+
 // Reasons ToolStepLive gives for a step that may have no further effect.
 const (
 	StepEndedTurn  = "turn_ended" // the turn has a terminal state
@@ -292,7 +295,7 @@ func (tx *Tx) RecordToolCall(attemptID string, callIndex int, providerCallID, na
 		return ToolCall{}, fmt.Errorf("tool call needs a provider call id and a name")
 	}
 	switch class {
-	case "read", "web", "write", ToolClassNone:
+	case "read", "web", "write", ToolClassExec, ToolClassNone:
 	default:
 		return ToolCall{}, fmt.Errorf("unknown tool class %q", class)
 	}
