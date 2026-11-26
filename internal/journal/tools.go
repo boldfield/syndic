@@ -34,6 +34,26 @@ var (
 	// participant, from an attempt dispatched after the verdict's, or
 	// received after the verdict was recorded.
 	ErrEvidenceScope = errors.New("evidence out of the verdict's scope")
+	// ErrNotToolStep is returned by RecordToolStep for an attempt that is not
+	// an accepted tool step: still pending, quarantined as late, failed by
+	// the gate, or completed under any status but tool_calls. Nothing of such
+	// a step is journaled as intent and nothing of it is executed.
+	ErrNotToolStep = errors.New("attempt is not an accepted tool step")
+	// ErrToolStepRecorded is returned by RecordToolStep for an attempt whose
+	// calls are already journaled: a step's intent is recorded, and the step
+	// executed, once.
+	ErrToolStepRecorded = errors.New("tool step already recorded")
+)
+
+// ToolClassNone is the class of a call that can never be executed: it names
+// a tool in no group, names no tool, or is not a function call. It is still
+// journaled as accepted intent so that the tool error answering it is too.
+const ToolClassNone = "none"
+
+// Reasons ToolStepLive gives for a step that may have no further effect.
+const (
+	StepEndedTurn  = "turn_ended" // the turn has a terminal state
+	StepEndedEpoch = "epoch"      // the turn's epoch has moved past the attempt's
 )
 
 // Tool call statuses. Accepted is implied by a call with no result.
@@ -266,11 +286,13 @@ func (tx *Tx) RecordToolCall(attemptID string, callIndex int, providerCallID, na
 	if callIndex < 0 {
 		return ToolCall{}, fmt.Errorf("call index must be >= 0, got %d", callIndex)
 	}
-	if providerCallID == "" || name == "" {
+	// Only a call of class none may name no tool: it is journaled so that
+	// its tool error can be, and is never executed.
+	if providerCallID == "" || (name == "" && class != ToolClassNone) {
 		return ToolCall{}, fmt.Errorf("tool call needs a provider call id and a name")
 	}
 	switch class {
-	case "read", "web", "write":
+	case "read", "web", "write", ToolClassNone:
 	default:
 		return ToolCall{}, fmt.Errorf("unknown tool class %q", class)
 	}
@@ -307,6 +329,91 @@ func (tx *Tx) RecordToolCall(attemptID string, callIndex int, providerCallID, na
 		ArgsSHA256: argsSHA, ArgsByteLen: int64(len(args)), RecordedAt: recordedAt,
 		Status: ToolCallAccepted,
 	}, nil
+}
+
+// StepCall is one call of a tool step as the model returned it, with the
+// class of the tool it names: read, web or write for a tool in that group,
+// ToolClassNone for anything that cannot be executed.
+type StepCall struct {
+	ProviderCallID string
+	Name           string
+	Class          string
+	Args           []byte
+}
+
+// RecordToolStep journals the accepted intent of every call of an accepted
+// tool step, in the order the model returned them, before any call is checked
+// or has an effect. The attempt must be an accepted tool step: completed, not
+// quarantined, with no gate error and status tool_calls. Anything else, a
+// pending attempt, a late result quarantined at acceptance, a result the gate
+// failed, a result under another status, is refused with ErrNotToolStep, so
+// a late or quarantined step is journaled only by its acceptance and never
+// has a call recorded or executed. A step whose calls are already journaled
+// is refused with ErrToolStepRecorded. Each call emits tool_call_accepted in
+// this transaction, so a rollback leaves no trace of the step.
+func (tx *Tx) RecordToolStep(attemptID string, calls []StepCall) ([]ToolCall, error) {
+	if len(calls) == 0 {
+		return nil, fmt.Errorf("tool step of attempt %q carries no calls", attemptID)
+	}
+	var state string
+	var status, gateErr sql.NullString
+	var quarantined bool
+	err := tx.tx.QueryRow(`SELECT state, status, quarantined, gate_error FROM attempts WHERE id = ?`, attemptID).
+		Scan(&state, &status, &quarantined, &gateErr)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("attempt %q not found", attemptID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query attempt: %w", err)
+	}
+	if state != "completed" || quarantined || gateErr.Valid || status.String != "tool_calls" {
+		return nil, fmt.Errorf("%w: attempt %q (state %s, status %q, quarantined %t, gate error %q)",
+			ErrNotToolStep, attemptID, state, status.String, quarantined, gateErr.String)
+	}
+	var recorded bool
+	if err := tx.tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM tool_calls WHERE attempt_id = ?)`, attemptID).Scan(&recorded); err != nil {
+		return nil, fmt.Errorf("query tool calls: %w", err)
+	}
+	if recorded {
+		return nil, fmt.Errorf("%w: attempt %q", ErrToolStepRecorded, attemptID)
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for i, c := range calls {
+		call, err := tx.RecordToolCall(attemptID, i, c.ProviderCallID, c.Name, c.Class, c.Args)
+		if err != nil {
+			return nil, fmt.Errorf("call %d of attempt %q: %w", i, attemptID, err)
+		}
+		out = append(out, call)
+	}
+	return out, nil
+}
+
+// ToolStepLive reports whether a call of the attempt's tool step may still
+// have an effect: the attempt's turn has no terminal state (a cancel ends the
+// turn) and the turn's epoch is still the attempt's. When it may not, reason
+// is StepEndedTurn or StepEndedEpoch. It is the re-check the engine makes
+// immediately before each effect and again after every wait inside one.
+func (tx *Tx) ToolStepLive(attemptID string) (live bool, reason string, err error) {
+	var attemptEpoch, turnEpoch int
+	var terminal sql.NullString
+	err = tx.tx.QueryRow(`
+		SELECT a.epoch, t.epoch, t.terminal_state
+		FROM attempts a JOIN turns t ON t.id = a.turn_id
+		WHERE a.id = ?
+	`, attemptID).Scan(&attemptEpoch, &turnEpoch, &terminal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", fmt.Errorf("attempt %q not found in any turn", attemptID)
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("query tool step: %w", err)
+	}
+	switch {
+	case terminal.Valid:
+		return false, StepEndedTurn, nil
+	case turnEpoch != attemptEpoch:
+		return false, StepEndedEpoch, nil
+	}
+	return true, "", nil
 }
 
 // RecordToolResult journals the one terminal outcome of an accepted call.
