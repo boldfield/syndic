@@ -401,3 +401,9 @@ func (d *Document) RenderForReviewer(rand io.Reader) (string, error) {
 	}
 	return fmt.Sprintf("===== %s BEGIN HISTORY =====\n%s===== %s END HISTORY =====\n", delim, doc, delim), nil
 }
+
+// WriteField appends one `<name> <byte-length>\n<bytes>\n` field to buf, the
+// framing other canonical documents reuse.
+func WriteField(buf *bytes.Buffer, name string, content []byte) {
+	writeField(buf, name, content)
+}
