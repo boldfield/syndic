@@ -234,29 +234,36 @@ func (t *WriteTools) editFile(raw json.RawMessage) ([]byte, error) {
 	if t.fs.IsProtected(path) {
 		return nil, toolErrorf(ErrCodeProtected, "%q is protected", path)
 	}
-	obs, err := t.observePath(path)
-	if err != nil {
-		return nil, err
-	}
-	if obs.Kind != journal.ObservationFile {
-		if obs.Kind == journal.ObservationListing {
-			return nil, toolErrorf(ErrCodeIsDirectory, "%q is a directory; cannot edit with edit_file", path)
-		}
-		return nil, toolErrorf(ErrCodeNotFound, "%q not found", path)
-	}
-	currentBody, err := t.content(obs.ContentSHA256)
-	if err != nil {
-		return nil, fmt.Errorf("get current content: %w", err)
+	if args.Old == "" {
+		return nil, toolErrorf(ErrCodeBadArguments, "old must not be empty")
 	}
 	staging, err := t.loadStaging()
 	if err != nil {
 		return nil, err
 	}
+	var currentBody []byte
 	if stagedHash, staged := staging[path]; staged {
-		currentBody, err = t.content(stagedHash)
+		body, err := t.content(stagedHash)
 		if err != nil {
 			return nil, fmt.Errorf("get staged content: %w", err)
 		}
+		currentBody = body
+	} else {
+		obs, err := t.observePath(path)
+		if err != nil {
+			return nil, err
+		}
+		if obs.Kind != journal.ObservationFile {
+			if obs.Kind == journal.ObservationListing {
+				return nil, toolErrorf(ErrCodeIsDirectory, "%q is a directory; cannot edit with edit_file", path)
+			}
+			return nil, toolErrorf(ErrCodeNotFound, "%q not found", path)
+		}
+		body, err := t.content(obs.ContentSHA256)
+		if err != nil {
+			return nil, fmt.Errorf("get current content: %w", err)
+		}
+		currentBody = body
 	}
 	oldStr := args.Old
 	newStr := args.New
@@ -272,7 +279,12 @@ func (t *WriteTools) editFile(raw json.RawMessage) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stage content: %w", err)
 	}
-	msg := fmt.Sprintf("replaced %d bytes with %d bytes (base: %s)", len(oldStr), len(newStr), entry.BaseSHA256)
+	var msg string
+	if entry.BaseSHA256 != "" {
+		msg = fmt.Sprintf("replaced %d bytes with %d bytes (base: %s)", len(oldStr), len(newStr), entry.BaseSHA256)
+	} else {
+		msg = fmt.Sprintf("replaced %d bytes with %d bytes (created)", len(oldStr), len(newStr))
+	}
 	return []byte(msg), nil
 }
 

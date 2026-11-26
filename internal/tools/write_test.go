@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -18,6 +19,7 @@ type writeFixture struct {
 	turn  string
 	att   string
 	tools *WriteTools
+	fs    *workspace.Confined
 	calls int
 }
 
@@ -53,6 +55,7 @@ func newWriteFixture(t *testing.T, files map[string]string) *writeFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	f.fs = c
 	f.tools = NewWriteTools(f.j, c, f.turn, f.att)
 	return f
 }
@@ -325,5 +328,160 @@ func TestEditFileJournalsChange(t *testing.T) {
 	}
 	if call.Status != journal.ToolCallExecuted || call.Result == nil {
 		t.Fatalf("call status = %s, result = %v", call.Status, call.Result)
+	}
+}
+
+func TestEditFileStagedCreation(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "new.txt", "content": "hello world"})
+	res, tc := f.edit(map[string]any{"path": "new.txt", "old": "world", "new": "there"})
+	if res.ErrorCode != "" || tc.Status != journal.ToolCallExecuted {
+		t.Fatalf("edit created file: got %q (%s)", res.Content, res.ErrorCode)
+	}
+	staging := f.staged()
+	body, err := f.tools.content(staging["new.txt"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hello there" {
+		t.Fatalf("got %q, want %q", body, "hello there")
+	}
+}
+
+func TestEditFileCreatedMessageFormat(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "new.txt", "content": "hello world"})
+	res, tc := f.edit(map[string]any{"path": "new.txt", "old": "world", "new": "there"})
+	if res.ErrorCode != "" || tc.Status != journal.ToolCallExecuted {
+		t.Fatalf("got %q (%s)", res.Content, res.ErrorCode)
+	}
+	if !strings.Contains(string(res.Content), "created") {
+		t.Fatalf("got %q, want message with 'created'", res.Content)
+	}
+}
+
+func TestEditFileEmptyOld(t *testing.T) {
+	f := newWriteFixture(t, map[string]string{"a.txt": ""})
+	f.observe("a.txt")
+	res, tc := f.edit(map[string]any{"path": "a.txt", "old": "", "new": "x"})
+	if res.ErrorCode != ErrCodeBadArguments || tc.Status != journal.ToolCallError {
+		t.Fatalf("got %q (%s), want bad arguments", res.Content, res.ErrorCode)
+	}
+}
+
+func TestEditFileMismatchDoesNotMutateStagingMap(t *testing.T) {
+	f := newWriteFixture(t, map[string]string{"a.txt": "content"})
+	f.observe("a.txt")
+	stagingBefore := f.staged()
+	res, tc := f.edit(map[string]any{"path": "a.txt", "old": "nope", "new": "y"})
+	if res.ErrorCode != ErrCodeBadArguments || tc.Status != journal.ToolCallError {
+		t.Fatalf("got %q (%s), want bad arguments", res.Content, res.ErrorCode)
+	}
+	stagingAfter := f.staged()
+	if len(stagingBefore) != 0 || len(stagingAfter) != 0 {
+		t.Fatalf("staging before = %v, after = %v, both should be empty", stagingBefore, stagingAfter)
+	}
+}
+
+func TestUnstageCreatedFile(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "new.txt", "content": "hello"})
+	staging := f.staged()
+	if len(staging) != 1 {
+		t.Fatalf("before unstage: %v", staging)
+	}
+	res, tc := f.unstage(map[string]any{"path": "new.txt"})
+	if res.ErrorCode != "" || tc.Status != journal.ToolCallExecuted {
+		t.Fatalf("got %q (%s)", res.Content, res.ErrorCode)
+	}
+	staging = f.staged()
+	if len(staging) != 0 {
+		t.Fatalf("after unstage: %v", staging)
+	}
+}
+
+func TestCreationVisibleInListThenRemovedOnUnstage(t *testing.T) {
+	wf := newWriteFixture(t, nil)
+	wf.observe(".")
+	wf.write_(map[string]any{"path": "new.txt", "content": "hello"})
+
+	readTools := NewReadTools(wf.j, wf.fs, wf.turn, wf.att, 0)
+
+	raw, err := json.Marshal(map[string]any{"path": "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	callIdx := wf.calls
+	if err := wf.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(wf.att, callIdx, fmt.Sprintf("p%d", callIdx), "list_dir", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wf.calls++
+
+	res, err := readTools.ListDir(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("listDir before unstage failed: %q", res.ErrorCode)
+	}
+	if !strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("new.txt not in listing before unstage: %q", res.Content)
+	}
+
+	wf.unstage(map[string]any{"path": "new.txt"})
+
+	raw, err = json.Marshal(map[string]any{"path": "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callIdx = wf.calls
+	if err := wf.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(wf.att, callIdx, fmt.Sprintf("p%d", callIdx), "list_dir", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wf.calls++
+
+	res, err = readTools.ListDir(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("listDir after unstage failed: %q", res.ErrorCode)
+	}
+	if strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("new.txt still in listing after unstage: %q", res.Content)
+	}
+}
+
+func TestWorkspaceByteIdenticalAfterStaging(t *testing.T) {
+	content := "original file content"
+	f := newWriteFixture(t, map[string]string{"file.txt": content})
+	f.observe("file.txt")
+
+	origBody, err := os.ReadFile(filepath.Join(f.root, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.write_(map[string]any{"path": "file.txt", "content": "modified content"})
+
+	finalBody, err := os.ReadFile(filepath.Join(f.root, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(origBody) != string(finalBody) {
+		t.Fatalf("workspace file changed: was %q, now %q", origBody, finalBody)
 	}
 }
