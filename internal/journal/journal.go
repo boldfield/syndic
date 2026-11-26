@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"net/url"
 
 	_ "modernc.org/sqlite"
 )
@@ -23,7 +24,8 @@ type DB struct {
 // constraints. The caller must call Close on the returned DB.
 func Open(path string) (*DB, error) {
 	// Use DSN to enable WAL mode and foreign keys on all connections
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	// Escape the path so characters such as # and ? stay part of the file name.
+	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

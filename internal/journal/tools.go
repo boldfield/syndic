@@ -1070,10 +1070,11 @@ func inProgress(ops []ApplyOp) bool {
 	return last == "started"
 }
 
-// RecordApplyFile journals one path's outcome, applied or conflict, during an
+// RecordApplyFile journals one path's outcome, applied, conflict or (after a
+// fresh classification) pending, during an
 // apply that has begun and not finished. The path must be in the change set.
 func (tx *Tx) RecordApplyFile(changeSetID, path, outcome string) error {
-	if outcome != PathApplied && outcome != PathConflict {
+	if outcome != PathApplied && outcome != PathConflict && outcome != PathPending {
 		return fmt.Errorf("unknown path outcome %q", outcome)
 	}
 	cs, err := tx.GetChangeSet(changeSetID)
