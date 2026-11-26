@@ -1,11 +1,15 @@
 package engine_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/candidate"
 	"github.com/boldfield/syndic/internal/engine"
@@ -452,5 +456,173 @@ func TestCitedReviewerResultTransfersToAuthor(t *testing.T) {
 	}
 	if withEvidence != 4 {
 		t.Fatalf("verdicts with evidence = %d, want 4", withEvidence)
+	}
+}
+
+// Each accepted verdict binds only the observations its own reviewer added
+// since its last verdict: never the author's, never the other reviewer's and
+// never one an earlier verdict took. Its snapshot version is the candidate's
+// frozen version raised to the newest observation it binds.
+func TestVerdictEvidenceBindsOnlyOwnNewObservations(t *testing.T) {
+	var h *enginetest.Harness
+	var mu sync.Mutex
+	// who maps a verdict attempt to its reviewer and round; want maps it to
+	// the observation ids its verdict should bind; frozen holds the author's
+	// observation each round, the newest before that round's candidate froze.
+	type key struct {
+		participant string
+		round       int
+	}
+	who := map[string]key{}
+	want := map[string][]string{}
+	r1Observed := make(chan struct{})
+	frozen := map[int]string{}
+	observe := func(req transport.CompleteRequest, paths ...string) []string {
+		var ids []string
+		err := h.Store.Tx(func(tx *journal.Tx) error {
+			for _, p := range paths {
+				o, err := tx.RecordObservation(req.Envelope.TurnID, req.Envelope.AttemptID, p, journal.ObservationFile, []byte(p))
+				if err != nil {
+					return err
+				}
+				ids = append(ids, o.ID)
+			}
+			return nil
+		})
+		if err != nil {
+			panic(err)
+		}
+		return ids
+	}
+	author := func(round int, path, text string) fake.Step {
+		return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			ids := observe(req, path)
+			mu.Lock()
+			frozen[round] = ids[0]
+			mu.Unlock()
+			return text
+		})
+	}
+	reviewer := func(participant string, round int, reply func(hash, attempt string) string, paths ...string) fake.Step {
+		return enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+			ids := observe(req, paths...)
+			mu.Lock()
+			who[req.Envelope.AttemptID] = key{participant, round}
+			want[req.Envelope.AttemptID] = ids
+			mu.Unlock()
+			return reply(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+		})
+	}
+	block := func(id string) func(string, string) string {
+		return func(hash, attempt string) string {
+			return fake.VerdictBlock(hash, attempt, id, "high", "e", "r", "r")
+		}
+	}
+	withdraw := func(id string) func(string, string) string {
+		return func(hash, attempt string) string {
+			return "VERDICT v2\ncandidate: " + hash + "\nattempt: " + attempt +
+				"\nround: 1\nblock-state: " + id + " withdrawn\nverdict: approve\nreason: r\nEND VERDICT"
+		}
+	}
+	scripts := map[string][]fake.Step{
+		"author": {author(0, "author-0.txt", authorText), author(1, "author-1.txt", revisedText)},
+		"r1": {
+			reviewer("r1", 0, block("b1"), "r1-0a.txt", "r1-0b.txt"),
+			reviewer("r1", 1, func(hash, attempt string) string {
+				close(r1Observed)
+				return withdraw("b1")(hash, attempt)
+			}, "r1-1.txt"),
+		},
+		"r2": {
+			reviewer("r2", 0, block("b2"), "r2-0.txt"),
+			// A lookup with no observation, accepted after r1's later first
+			// touch: the verdict keeps the frozen version, not the turn's.
+			reviewer("r2", 1, func(hash, attempt string) string {
+				err := h.Store.Tx(func(tx *journal.Tx) error {
+					call, err := tx.RecordToolCall(attempt, 0, "prov_r2", "lookup", "read", []byte(`{}`))
+					if err != nil {
+						return err
+					}
+					_, err = tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte("r2 result"), "")
+					return err
+				})
+				if err != nil {
+					panic(err)
+				}
+				select {
+				case <-r1Observed:
+				case <-time.After(5 * time.Second):
+					panic("r1 never observed in round 1")
+				}
+				return withdraw("b2")(hash, attempt)
+			}),
+		},
+	}
+	h = enginetest.New(t, revisionRoster("2", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+
+	versions := map[string]int{}
+	err := h.Store.Tx(func(tx *journal.Tx) error {
+		all, err := tx.Observations(turnID)
+		for _, o := range all {
+			versions[o.ID] = o.SnapshotVersion
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 6 {
+		t.Fatalf("observations = %d, want 6", len(versions))
+	}
+	verdicts, err := h.Store.ListVerdicts(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[key]bool{}
+	bound := map[string]bool{}
+	for _, v := range verdicts {
+		k, ok := who[v.AttemptID]
+		if !ok {
+			t.Fatalf("verdict %s from an unknown attempt", v.ID)
+		}
+		seen[k] = true
+		ev, err := h.Store.GetVerdictEvidence(v.ID)
+		if len(want[v.AttemptID]) == 0 && k != (key{"r2", 1}) {
+			// Nothing looked up: nothing is journaled under the verdict.
+			if !errors.Is(err, journal.ErrNoSuchContent) {
+				t.Fatalf("%v verdict evidence = %+v, %v; want none", k, ev, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%v verdict evidence: %v", k, err)
+		}
+		got, exp := append([]string{}, ev.ObservationIDs...), append([]string{}, want[v.AttemptID]...)
+		sort.Strings(got)
+		sort.Strings(exp)
+		if strings.Join(got, ",") != strings.Join(exp, ",") {
+			t.Fatalf("%v verdict binds observations %v, want its own new %v", k, got, exp)
+		}
+		version := versions[frozen[k.round]]
+		if k == (key{"r2", 1}) && (len(ev.ResultIDs) != 1 || len(got) != 0) {
+			t.Fatalf("r2's round-1 verdict evidence = %+v, want its one result", ev)
+		}
+		for _, id := range got {
+			if bound[id] {
+				t.Fatalf("observation %s bound twice", id)
+			}
+			bound[id] = true
+			version = max(version, versions[id])
+		}
+		if ev.SnapshotVersion != version {
+			t.Fatalf("%v verdict snapshot version = %d, want %d", k, ev.SnapshotVersion, version)
+		}
+	}
+	for _, k := range []key{{"r1", 0}, {"r2", 0}, {"r1", 1}, {"r2", 1}} {
+		if !seen[k] {
+			t.Fatalf("no verdict from %v", k)
+		}
 	}
 }

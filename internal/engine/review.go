@@ -54,14 +54,14 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var hash, candidateID string
-	var round int
+	var round, frozenVersion int
 	var lines []string
 	var quarantined, ended, exceeded bool
 	var term *terminal
 	var held *hold
 	var endReason string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, candidateID, round, lines = "", "", 0, nil
+		hash, candidateID, round, frozenVersion, lines = "", "", 0, 0, nil
 		quarantined, ended, exceeded, term, held = false, false, false, nil, nil
 		endReason = ""
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
@@ -103,6 +103,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		if err != nil {
 			return err
 		}
+		frozenVersion = fi.version
 		switch {
 		case e.changeLines != nil:
 			lines = e.changeLines(res)
@@ -185,6 +186,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	t.candidate = res.Text
 	t.candidateHash = hash
 	t.candidateID = candidateID
+	t.frozenVersion = frozenVersion
 	t.changeLines = lines
 	if t.revising {
 		t.revising = false
@@ -655,7 +657,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if err := recordAcceptedReview(tx, t, d, verdictID, v); err != nil {
 				return err
 			}
-			if evidenceResults, err = recordReviewerEvidence(tx, t.id, d.participant, verdictID); err != nil {
+			if evidenceResults, err = recordReviewerEvidence(tx, t.id, d.participant, verdictID, t.frozenVersion); err != nil {
 				return err
 			}
 			acceptedEvidence = v.Evidence

@@ -28,6 +28,8 @@ type frozenInputs struct {
 	changes      []observation.Change
 	snapshotHash string
 	changesHash  string
+	// version is the snapshot version the candidate was frozen on.
+	version int
 	// lines are the canonical change-set lines the unchanged-revision
 	// comparison uses.
 	lines []string
@@ -48,6 +50,9 @@ func frozenInputsFor(tx *journal.Tx, turnID, author string) (frozenInputs, error
 			continue
 		}
 		fi.evidence = append(fi.evidence, candidate.EvidencePair{CallID: c.ID, ResultSHA256: c.Result.ResultSHA256})
+	}
+	if fi.version, err = tx.SnapshotVersion(turnID); err != nil {
+		return fi, err
 	}
 	staged, err := tx.Staging(turnID)
 	if err != nil {
@@ -158,11 +163,13 @@ func packetFor(tx *journal.Tx, turnID, author string) (reviewerPacket, error) {
 }
 
 // recordReviewerEvidence journals what the reviewer's accepted verdict rested
-// on: the snapshot version, the results of its own calls and the observations
-// it added. It returns each result's content by id, which is what a block
+// on: the snapshot version it saw, the results of its own calls and the
+// observations it added. The version is the candidate's frozen one, raised to
+// the newest observation the reviewer added; a later first touch by the other
+// reviewer is not one this reviewer saw. It returns each result's content by id, which is what a block
 // citing one transfers to the author. Only the reviewer's own calls count;
 // the author's and the other reviewer's never appear.
-func recordReviewerEvidence(tx *journal.Tx, turnID, participant, verdictID string) (map[string]string, error) {
+func recordReviewerEvidence(tx *journal.Tx, turnID, participant, verdictID string, frozenVersion int) (map[string]string, error) {
 	calls, err := tx.ToolCallsByTurn(turnID, participant)
 	if err != nil {
 		return nil, err
@@ -190,9 +197,21 @@ func recordReviewerEvidence(tx *journal.Tx, turnID, participant, verdictID strin
 	if len(resultIDs) == 0 && len(obsIDs) == 0 {
 		return results, nil
 	}
-	version, err := tx.SnapshotVersion(turnID)
-	if err != nil {
-		return nil, err
+	version := frozenVersion
+	if len(obsIDs) > 0 {
+		added := map[string]bool{}
+		for _, id := range obsIDs {
+			added[id] = true
+		}
+		all, err := tx.Observations(turnID)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range all {
+			if added[o.ID] {
+				version = max(version, o.SnapshotVersion)
+			}
+		}
 	}
 	if err := tx.RecordVerdictEvidence(verdictID, version, resultIDs, obsIDs); err != nil {
 		return nil, err

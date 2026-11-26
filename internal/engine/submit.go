@@ -52,7 +52,10 @@ type openTurn struct {
 	round       int
 	maxRounds   int
 	candidateID string
-	changeLines []string
+	// frozenVersion is the snapshot version the current candidate was
+	// frozen on.
+	frozenVersion int
+	changeLines   []string
 	// pkt is the change-set diffs and author evidence the current
 	// candidate's reviewers receive, set when a reviewer is dispatched.
 	pkt      reviewerPacket

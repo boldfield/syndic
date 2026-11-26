@@ -1350,3 +1350,83 @@ func TestReviewerEvidenceDoesNotRewriteFrozenCandidate(t *testing.T) {
 		t.Fatalf("author evidence = %+v", id.Evidence)
 	}
 }
+
+// UnboundObservationIDs lists only the participant's own observations on the
+// turn, in snapshot-version order, and drops those a verdict has taken.
+func TestUnboundObservationIDs(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := buildToolsTurn(t, store)
+	other := buildToolsTurn(t, store)
+
+	obs := map[string]journal.Observation{}
+	err := store.Tx(func(tx *journal.Tx) error {
+		for _, o := range []struct{ name, turn, attempt string }{
+			{"author", f.turn, f.author},
+			{"r1a", f.turn, f.step["r1"]},
+			{"r2", f.turn, f.step["r2"]},
+			{"r1b", f.turn, f.step["r1"]},
+			{"other", other.turn, other.step["r1"]},
+		} {
+			rec, err := tx.RecordObservation(o.turn, o.attempt, o.name+".go", journal.ObservationFile, []byte(o.name))
+			if err != nil {
+				return err
+			}
+			obs[o.name] = rec
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unbound := func(participant string) string {
+		t.Helper()
+		var ids []string
+		err := store.Tx(func(tx *journal.Tx) error {
+			var err error
+			ids, err = tx.UnboundObservationIDs(f.turn, participant)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(ids, ",")
+	}
+	ids := func(names ...string) string {
+		var out []string
+		for _, n := range names {
+			out = append(out, obs[n].ID)
+		}
+		return strings.Join(out, ",")
+	}
+	if obs["r1a"].SnapshotVersion >= obs["r1b"].SnapshotVersion {
+		t.Fatalf("versions: r1a %d, r1b %d", obs["r1a"].SnapshotVersion, obs["r1b"].SnapshotVersion)
+	}
+	for _, c := range []struct{ participant, want string }{
+		{"r1", ids("r1a", "r1b")},
+		{"r2", ids("r2")},
+		{"author", ids("author")},
+		{"", ""},
+	} {
+		if got := unbound(c.participant); got != c.want {
+			t.Fatalf("unbound(%q) = %q, want %q", c.participant, got, c.want)
+		}
+	}
+
+	// Binding r1's first observation leaves only its second unbound; the
+	// other participants' lists are untouched.
+	giveVerdict(t, store, &f, "r1")
+	err = store.Tx(func(tx *journal.Tx) error {
+		return tx.RecordVerdictEvidence(f.verdict["r1"], obs["r1a"].SnapshotVersion, nil, []string{obs["r1a"].ID})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := unbound("r1"), ids("r1b"); got != want {
+		t.Fatalf("unbound(r1) after binding = %q, want %q", got, want)
+	}
+	if got, want := unbound("r2"), ids("r2"); got != want {
+		t.Fatalf("unbound(r2) after r1's binding = %q, want %q", got, want)
+	}
+}
