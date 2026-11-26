@@ -3,6 +3,7 @@ package observation
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"sync"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -100,6 +101,26 @@ func (s *Store) lock(turnID string) func() {
 // ErrSnapshotConflict) after journaling the conflict, recording nothing.
 // Paths are slash-separated, with Root for the workspace root.
 func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Observation, error) {
+	return s.ObserveWithMode(turnID, attemptID, path, func() (string, []byte, bool, error) {
+		kind, content, err := read()
+		return kind, content, false, err
+	})
+}
+
+// ModeReader is a Reader that also reports, for a file, whether it was
+// executable for its owner (see OwnerExec) at the moment its content was read.
+// The bit is ignored for any other kind.
+type ModeReader func() (kind string, content []byte, ownerExec bool, err error)
+
+// OwnerExec reports the owner-execute bit of mode. It is the only bit of a
+// file's mode ever recorded: setuid, setgid, sticky and every other bit are
+// dropped (design v7 delta, section 5, "Modes").
+func OwnerExec(mode fs.FileMode) bool { return mode&0o100 != 0 }
+
+// ObserveWithMode is Observe for a reader that reports the owner-execute bit.
+// For a file the bit is recorded in the mode record in the same transaction
+// as the content, and the live tree is never asked for it again.
+func (s *Store) ObserveWithMode(turnID, attemptID, path string, read ModeReader) (journal.Observation, error) {
 	defer s.lock(turnID)()
 
 	if o, err := s.lookup(turnID, path); err == nil {
@@ -122,10 +143,10 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 	if ns.absent {
 		// The record already settles the name as absent; the live tree is not
 		// consulted.
-		return s.record(turnID, attemptID, path, journal.ObservationAbsent, nil)
+		return s.record(turnID, attemptID, path, journal.ObservationAbsent, nil, false)
 	}
 
-	kind, content, err := read()
+	kind, content, ownerExec, err := read()
 	if err != nil {
 		return journal.Observation{}, err
 	}
@@ -146,15 +167,32 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 			return journal.Observation{}, err
 		}
 	}
-	return s.record(turnID, attemptID, path, kind, content)
+	return s.record(turnID, attemptID, path, kind, content, ownerExec)
 }
 
-func (s *Store) record(turnID, attemptID, path, kind string, content []byte) (journal.Observation, error) {
+// OwnerExec returns the owner-execute bit recorded with turnID's observation
+// of path. A path with no mode record, including one observed before modes
+// were recorded, reads as not executable.
+func (s *Store) OwnerExec(turnID, path string) (exec bool, err error) {
+	err = s.j.Tx(func(tx *journal.Tx) error {
+		var txErr error
+		exec, txErr = tx.ObservationOwnerExec(turnID, path)
+		return txErr
+	})
+	return exec, err
+}
+
+func (s *Store) record(turnID, attemptID, path, kind string, content []byte, ownerExec bool) (journal.Observation, error) {
 	var o journal.Observation
 	err := s.j.Tx(func(tx *journal.Tx) error {
 		var txErr error
-		o, txErr = tx.RecordObservation(turnID, attemptID, path, kind, content)
-		return txErr
+		if o, txErr = tx.RecordObservation(turnID, attemptID, path, kind, content); txErr != nil {
+			return txErr
+		}
+		if kind == journal.ObservationFile {
+			return tx.RecordObservationMode(turnID, path, ownerExec)
+		}
+		return nil
 	})
 	if errors.Is(err, journal.ErrAlreadyObserved) {
 		// Another Store on the same journal recorded it first.
