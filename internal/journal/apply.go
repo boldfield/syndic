@@ -270,6 +270,11 @@ func writeFile(root int, p ChangeSetPath, content []byte) (string, error) {
 		return "", fmt.Errorf("write temporary file for %q: %w", p.Path, werr)
 	}
 
+	// Hook point after temp write, before final re-check (for atomic-save tests).
+	if err := hook("temp", p.Path); err != nil {
+		return "", err
+	}
+
 	if p.Op == "create" {
 		if err := unix.Linkat(dir, tmp, dir, name, 0); err != nil {
 			if errors.Is(err, unix.EEXIST) {
