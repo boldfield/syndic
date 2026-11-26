@@ -118,6 +118,37 @@ func (f *writeFixture) unstage(args any) (Result, journal.ToolCall) {
 	return f.call("unstage", args, f.tools.Unstage)
 }
 
+func (f *writeFixture) search(args map[string]any) (Result, journal.ToolCall) {
+	f.t.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	var id string
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(f.att, f.calls, fmt.Sprintf("call_%d", f.calls), "search_files", "read", raw)
+		id = c.ID
+		f.calls++
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	readTools := NewReadTools(f.j, f.fs, f.turn, f.att, 0)
+	res, err := readTools.SearchFiles(id, raw)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	var tc journal.ToolCall
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		var err error
+		tc, err = tx.GetToolCall(id)
+		return err
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	return res, tc
+}
+
 // observe records an observation of a path as the read tools do.
 func (f *writeFixture) observe(path string) {
 	f.t.Helper()
@@ -385,6 +416,32 @@ func TestEditFileMismatchDoesNotMutateStagingMap(t *testing.T) {
 	}
 }
 
+func TestEditFileStagedMismatchDoesNotMutateStagingMap(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "a.txt", "content": "foo bar foo"})
+	stagingBefore := f.staged()
+	hashBefore := stagingBefore["a.txt"]
+
+	res, tc := f.edit(map[string]any{"path": "a.txt", "old": "nope", "new": "y"})
+	if res.ErrorCode != ErrCodeBadArguments || tc.Status != journal.ToolCallError {
+		t.Fatalf("no-match: got %q (%s), want bad arguments", res.Content, res.ErrorCode)
+	}
+	stagingAfter := f.staged()
+	if stagingAfter["a.txt"] != hashBefore {
+		t.Fatalf("no-match: staging changed from %v to %v", hashBefore, stagingAfter["a.txt"])
+	}
+
+	res, tc = f.edit(map[string]any{"path": "a.txt", "old": "foo", "new": "z"})
+	if res.ErrorCode != ErrCodeBadArguments || tc.Status != journal.ToolCallError {
+		t.Fatalf("multiple-match: got %q (%s), want bad arguments", res.Content, res.ErrorCode)
+	}
+	stagingAfter2 := f.staged()
+	if stagingAfter2["a.txt"] != hashBefore {
+		t.Fatalf("multiple-match: staging changed from %v to %v", hashBefore, stagingAfter2["a.txt"])
+	}
+}
+
 func TestUnstageCreatedFile(t *testing.T) {
 	f := newWriteFixture(t, nil)
 	f.observe(".")
@@ -436,7 +493,18 @@ func TestCreationVisibleInListThenRemovedOnUnstage(t *testing.T) {
 		t.Fatalf("new.txt not in listing before unstage: %q", res.Content)
 	}
 
-	wf.unstage(map[string]any{"path": "new.txt"})
+	res, _ = wf.search(map[string]any{"pattern": "hello"})
+	if res.ErrorCode != "" {
+		t.Fatalf("search before unstage failed: %q", res.ErrorCode)
+	}
+	if !strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("new.txt not in search results before unstage: %q", res.Content)
+	}
+
+	res, tc := wf.unstage(map[string]any{"path": "new.txt"})
+	if res.ErrorCode != "" || tc.Status != journal.ToolCallExecuted {
+		t.Fatalf("unstage failed: %q (%s)", res.Content, res.ErrorCode)
+	}
 
 	raw, err = json.Marshal(map[string]any{"path": "."})
 	if err != nil {
@@ -462,6 +530,91 @@ func TestCreationVisibleInListThenRemovedOnUnstage(t *testing.T) {
 	if strings.Contains(string(res.Content), "new.txt") {
 		t.Fatalf("new.txt still in listing after unstage: %q", res.Content)
 	}
+
+	res, _ = wf.search(map[string]any{"pattern": "hello"})
+	if res.ErrorCode != "" {
+		t.Fatalf("search after unstage failed: %q", res.ErrorCode)
+	}
+	if strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("new.txt still in search results after unstage: %q", res.Content)
+	}
+}
+
+func TestStagingPersistsAcrossAttempts(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "new.txt", "content": "content v1"})
+
+	staging := f.staged()
+	if len(staging) != 1 {
+		t.Fatalf("first attempt staging: %v", staging)
+	}
+
+	var att2 string
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		var err error
+		att2, err = tx.BeginAttempt(f.turn, "author", "author", 2, nil, "")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tools2 := NewWriteTools(f.j, f.fs, f.turn, att2)
+
+	staging2, err := tools2.loadStaging()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staging2) != 1 {
+		t.Fatalf("second attempt staging: %v", staging2)
+	}
+
+	raw, err := json.Marshal(map[string]any{"path": "new.txt", "old": "v1", "new": "v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 0, "call_0", "edit_file", "write", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tools2.EditFile(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("edit in second attempt failed: %q", res.ErrorCode)
+	}
+
+	raw, err = json.Marshal(map[string]any{"path": "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 1, "call_1", "unstage", "write", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools2.Unstage(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("unstage creation in second attempt failed: %q", res.ErrorCode)
+	}
+
+	staging2, err = tools2.loadStaging()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staging2) != 0 {
+		t.Fatalf("after unstage: %v", staging2)
+	}
 }
 
 func TestWorkspaceByteIdenticalAfterStaging(t *testing.T) {
@@ -482,6 +635,20 @@ func TestWorkspaceByteIdenticalAfterStaging(t *testing.T) {
 	}
 
 	if string(origBody) != string(finalBody) {
-		t.Fatalf("workspace file changed: was %q, now %q", origBody, finalBody)
+		t.Fatalf("write_file: workspace file changed: was %q, now %q", origBody, finalBody)
+	}
+
+	origBody, _ = os.ReadFile(filepath.Join(f.root, "file.txt"))
+	f.edit(map[string]any{"path": "file.txt", "old": "modified", "new": "changed"})
+	finalBody, _ = os.ReadFile(filepath.Join(f.root, "file.txt"))
+	if string(origBody) != string(finalBody) {
+		t.Fatalf("edit_file: workspace file changed: was %q, now %q", origBody, finalBody)
+	}
+
+	newPath := filepath.Join(f.root, "created.txt")
+	f.observe(".")
+	f.write_(map[string]any{"path": "created.txt", "content": "new file"})
+	if _, err := os.Stat(newPath); err == nil {
+		t.Fatalf("created.txt exists on disk, but should not be materialized")
 	}
 }

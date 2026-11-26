@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -195,9 +194,6 @@ func (t *WriteTools) writeFile(raw json.RawMessage) ([]byte, error) {
 	body := []byte(args.Content)
 	entry, err := t.stageContent(path, body)
 	if err != nil {
-		if strings.Contains(err.Error(), "is a directory") {
-			return nil, toolErrorf(ErrCodeIsDirectory, "%q is a directory; cannot replace it with write_file", path)
-		}
 		return nil, fmt.Errorf("stage content: %w", err)
 	}
 	var msg string
