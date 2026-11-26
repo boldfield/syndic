@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -663,6 +664,82 @@ func TestConfinedProtectedPaths_QuestionMarkGlob(t *testing.T) {
 	}
 }
 
+// Regression test for rooted protection patterns
+// Tests that patterns starting with / protect only top-level files, not nested ones
+func TestConfinedProtectedPaths_RootAnchoredPatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create top-level and nested secret files
+	topLevelSecret := filepath.Join(dir, "secrets.env")
+	if err := os.WriteFile(topLevelSecret, []byte("API_KEY=secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nestedDir := filepath.Join(dir, "config")
+	if err := os.MkdirAll(nestedDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nestedSecret := filepath.Join(nestedDir, "secrets.env")
+	if err := os.WriteFile(nestedSecret, []byte("API_KEY=nested"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, []string{"/secrets.env"})
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// /secrets.env should protect only top-level secrets.env
+	_, err = c.ReadFile("secrets.env")
+	if err == nil {
+		t.Error("ReadFile secrets.env should be rejected (protected by /secrets.env)")
+	}
+
+	// /secrets.env should NOT protect nested config/secrets.env
+	_, err = c.ReadFile("config/secrets.env")
+	if err != nil {
+		t.Errorf("ReadFile config/secrets.env should succeed (not protected): %v", err)
+	}
+
+	// Test another rooted pattern: /top should only protect top/, not sub/top/
+	topDir := filepath.Join(dir, "top")
+	if err := os.MkdirAll(topDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	topFile := filepath.Join(topDir, "config.txt")
+	if err := os.WriteFile(topFile, []byte("config"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	subDir := filepath.Join(dir, "sub", "top")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	subFile := filepath.Join(subDir, "config.txt")
+	if err := os.WriteFile(subFile, []byte("config"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c2, err := OpenConfined(dir, []string{"/top/"})
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c2.Close() }()
+
+	// /top/ should protect top/config.txt
+	_, err = c2.ReadFile("top/config.txt")
+	if err == nil {
+		t.Error("ReadFile top/config.txt should be rejected (protected by /top/)")
+	}
+
+	// /top/ should NOT protect sub/top/config.txt
+	_, err = c2.ReadFile("sub/top/config.txt")
+	if err != nil {
+		t.Errorf("ReadFile sub/top/config.txt should succeed (not protected): %v", err)
+	}
+}
+
 // Regression test for issue 4: non-regular files aren't refused
 // Tests that FIFOs, directories, and other non-regular files are rejected
 func TestConfinedOpenFile_NonRegularFilesRejected(t *testing.T) {
@@ -798,6 +875,80 @@ func TestConfinedOpenFile_SymlinkSwapDeterministic(t *testing.T) {
 	_, err = c.OpenFile("sub/file.txt", os.O_RDONLY, 0)
 	if err == nil {
 		t.Error("OpenFile through swapped symlink should fail")
+	}
+}
+
+// Regression test for in-flight symlink swap during path walk
+// Tests that swapping a component with a symlink during one open operation is caught
+func TestConfinedOpenFile_SymlinkSwapInFlight(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "level1", "level2")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetFile := filepath.Join(subdir, "file.txt")
+	if err := os.WriteFile(targetFile, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := OpenConfined(dir, nil)
+	if err != nil {
+		t.Fatalf("OpenConfined: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Create an outside directory for the symlink to point to
+	outsideParent := t.TempDir()
+	outsideDir := filepath.Join(outsideParent, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outsideDir, "file.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use goroutines to race the open with a symlink swap at level1
+	// This simulates an attacker trying to swap a component while we're walking
+	level1dir := filepath.Join(dir, "level1")
+	successChan := make(chan bool, 1)
+	var mu sync.Mutex
+	var openErr error
+	var openFile *os.File
+
+	// Start the open in a goroutine
+	go func() {
+		openFile, openErr = c.OpenFile("level1/level2/file.txt", os.O_RDONLY, 0)
+		if openErr == nil {
+			successChan <- true
+		} else {
+			successChan <- false
+		}
+	}()
+
+	// Give the open a chance to start (this is inherently racy but that's OK for this test)
+	time.Sleep(10 * time.Millisecond)
+
+	// Try to swap level1 with a symlink to outside
+	mu.Lock()
+	_ = os.RemoveAll(level1dir)
+	_ = os.Symlink(outsideDir, level1dir)
+	mu.Unlock()
+
+	// Wait for the open to complete
+	success := <-successChan
+
+	// If the open succeeded, it got the original file (because it was holding the fd)
+	// If it failed, that's also OK - we just want to prove it can't escape to outside
+	if success {
+		if openFile != nil {
+			content, _ := io.ReadAll(openFile)
+			_ = openFile.Close()
+			if string(content) == "outside" {
+				t.Error("OpenFile escaped to outside directory despite symlink swap")
+			}
+		}
 	}
 }
 

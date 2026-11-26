@@ -242,7 +242,11 @@ func compileProtectionPattern(pattern string) (*regexp.Regexp, error) {
 	escaped = strings.ReplaceAll(escaped, `\?`, `[^/]`)
 
 	// Anchor pattern appropriately
-	if !strings.HasPrefix(pattern, "/") {
+	if strings.HasPrefix(pattern, "/") {
+		// Root-anchored pattern: strip leading / and anchor at start
+		escaped = strings.TrimPrefix(escaped, `/`)
+		escaped = `^` + escaped
+	} else {
 		// Pattern should match from the start or any directory
 		escaped = `(^|/)` + escaped
 	}
