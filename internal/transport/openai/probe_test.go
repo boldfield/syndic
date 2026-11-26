@@ -48,6 +48,14 @@ type probeServer struct {
 	// tool_calls probe control
 	toolCallsRequest map[string]any // body of the last tool_calls probe request
 	toolCallsSupport string         // "yes", "no", or "unknown"; controls tool_calls probe response
+	// toolCallsRequests holds every tool_calls probe request body, in order.
+	toolCallsRequests []map[string]any
+	// forcedRefusal makes the endpoint refuse a forced tool_choice with the
+	// given status and body; autoReply is then "call", "text", or "400" for
+	// the request that follows with tool_choice "auto".
+	forcedRefusalStatus int
+	forcedRefusalBody   string
+	autoReply           string
 }
 
 func (p *probeServer) count(k string) int {
@@ -103,6 +111,7 @@ func (p *probeServer) handler() http.Handler {
 		if isToolCallsProbe {
 			p.mu.Lock()
 			p.toolCallsRequest = req
+			p.toolCallsRequests = append(p.toolCallsRequests, req)
 			p.mu.Unlock()
 		}
 
@@ -130,6 +139,38 @@ func (p *probeServer) handler() http.Handler {
 		if p.calibrationStatus != 0 && (isCalibration || isCalibrationText) {
 			w.WriteHeader(p.calibrationStatus)
 			return
+		}
+
+		if isToolCallsProbe && p.forcedRefusalStatus != 0 {
+			if _, forced := req["tool_choice"].(map[string]any); forced {
+				w.WriteHeader(p.forcedRefusalStatus)
+				_, _ = w.Write([]byte(p.forcedRefusalBody))
+				return
+			}
+			switch p.autoReply {
+			case "400":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"bad request"}}`))
+				return
+			case "call":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{
+						"message": map[string]any{"role": "assistant", "content": "", "tool_calls": []any{
+							map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "probe_tool", "arguments": `{}`}},
+						}},
+						"finish_reason": "tool_calls",
+					}},
+				})
+				return
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []any{map[string]any{
+						"message":       map[string]any{"role": "assistant", "content": "I will not."},
+						"finish_reason": "stop",
+					}},
+				})
+				return
+			}
 		}
 
 		answer := "ok"
@@ -1164,5 +1205,123 @@ func TestProbeOverLengthNoFinishReasonForRejection(t *testing.T) {
 	}
 	if rec.OverLengthClassifier == "" {
 		t.Errorf("OverLengthClassifier should be set for rejection")
+	}
+}
+
+const toolChoiceRefusal = `{"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}`
+
+func probeToolCallsRefused(t *testing.T, p *probeServer) (transport.CapabilityRecord, []map[string]any) {
+	t.Helper()
+	srv, a := newProbeServer(p)
+	defer srv.Close()
+	rec, err := a.ProbeWithOptions(context.Background(), "test", "m1", transport.ProbeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return rec, append([]map[string]any(nil), p.toolCallsRequests...)
+}
+
+func hasRestriction(rec transport.CapabilityRecord) bool {
+	for _, r := range rec.ToolRestrictions {
+		if r == "forced_tool_choice_unsupported" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProbeToolCallsForcedRefusedAutoYes(t *testing.T) {
+	p := &probeServer{forcedRefusalStatus: 400, forcedRefusalBody: toolChoiceRefusal, autoReply: "call"}
+	rec, reqs := probeToolCallsRefused(t, p)
+	if len(reqs) != 2 {
+		t.Fatalf("requests: got %d, want 2", len(reqs))
+	}
+	if reqs[1]["tool_choice"] != "auto" {
+		t.Errorf("second tool_choice: got %v", reqs[1]["tool_choice"])
+	}
+	if reqs[1]["max_tokens"] != float64(1024) {
+		t.Errorf("second limit: got %v", reqs[1]["max_tokens"])
+	}
+	if reqs[0]["max_tokens"] != float64(50) {
+		t.Errorf("first limit: got %v", reqs[0]["max_tokens"])
+	}
+	if rec.ToolCalls != transport.TriYes {
+		t.Errorf("ToolCalls: got %v, want yes", rec.ToolCalls)
+	}
+	if !hasRestriction(rec) {
+		t.Errorf("restrictions: got %v", rec.ToolRestrictions)
+	}
+
+	var raw map[string]map[string]any
+	if err := json.Unmarshal(rec.Raw, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []string{"tool_calls", "tool_calls_auto"} {
+		entry, ok := raw[step]
+		if !ok {
+			t.Fatalf("raw record lacks %s", step)
+		}
+		if req, _ := entry["request"].(string); !strings.Contains(req, "probe_tool") {
+			t.Errorf("%s request not recorded: %v", step, entry["request"])
+		}
+	}
+	if strings.Contains(string(rec.Raw), "tok-123") {
+		t.Error("raw record holds the secret")
+	}
+}
+
+func TestProbeToolCallsForcedRefusedAutoText(t *testing.T) {
+	p := &probeServer{forcedRefusalStatus: 400, forcedRefusalBody: toolChoiceRefusal, autoReply: "text"}
+	rec, reqs := probeToolCallsRefused(t, p)
+	if len(reqs) != 2 {
+		t.Fatalf("requests: got %d, want 2", len(reqs))
+	}
+	if rec.ToolCalls != transport.TriUnknown {
+		t.Errorf("ToolCalls: got %v, want unknown", rec.ToolCalls)
+	}
+	if !hasRestriction(rec) {
+		t.Errorf("restrictions: got %v", rec.ToolRestrictions)
+	}
+}
+
+func TestProbeToolCallsForcedRefusedAuto400(t *testing.T) {
+	p := &probeServer{forcedRefusalStatus: 400, forcedRefusalBody: toolChoiceRefusal, autoReply: "400"}
+	rec, reqs := probeToolCallsRefused(t, p)
+	if len(reqs) != 2 {
+		t.Fatalf("requests: got %d, want 2", len(reqs))
+	}
+	if rec.ToolCalls != transport.TriUnknown {
+		t.Errorf("ToolCalls: got %v, want unknown", rec.ToolCalls)
+	}
+	if !hasRestriction(rec) {
+		t.Errorf("restrictions: got %v", rec.ToolRestrictions)
+	}
+}
+
+func TestProbeToolCallsOtherErrorsNotRetried(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"tools not supported", 400, `{"error":{"message":"tools are not supported for this model"}}`},
+		{"unauthorized", 401, `{"error":{"message":"invalid tool_choice key"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &probeServer{forcedRefusalStatus: c.status, forcedRefusalBody: c.body, autoReply: "call"}
+			rec, reqs := probeToolCallsRefused(t, p)
+			if len(reqs) != 1 {
+				t.Fatalf("requests: got %d, want 1", len(reqs))
+			}
+			if rec.ToolCalls != transport.TriUnknown {
+				t.Errorf("ToolCalls: got %v, want unknown", rec.ToolCalls)
+			}
+			if hasRestriction(rec) {
+				t.Errorf("restrictions: got %v", rec.ToolRestrictions)
+			}
+		})
 	}
 }
