@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"syscall"
@@ -19,7 +20,7 @@ const NoneNotice = "exec: sandbox none; filesystem and network confinement are u
 const containProcessGroup = "process_group"
 
 func init() {
-	containers[containProcessGroup] = func() Container { return &processGroup{} }
+	containers[containProcessGroup] = func(json.RawMessage) (Container, error) { return &processGroup{}, nil }
 }
 
 // None is the backend for tools.exec.sandbox = "none" (v7 delta, section 3,
@@ -59,7 +60,7 @@ func (*None) Capabilities() (CapSet, string) {
 // process group only, and is blind to any descendant that left it by
 // starting a new session or process group or by detaching.
 func (n *None) Start(ctx context.Context, spec Spec) (Process, error) {
-	return n.Supervisor.start(ctx, containProcessGroup, spec)
+	return n.Supervisor.start(ctx, launch{container: containProcessGroup}, spec)
 }
 
 // processGroup contains a command in a new process group of which it is the

@@ -48,8 +48,21 @@ type Container interface {
 }
 
 // containers maps a container name, as the engine sends it to the
-// supervisor, to a constructor. Backends register theirs from init.
-var containers = map[string]func() Container{}
+// supervisor, to a constructor given the container's configuration as the
+// engine sent it. Backends register theirs from init.
+var containers = map[string]func(config json.RawMessage) (Container, error){}
+
+// launch says how a backend's supervisor is started and what it contains.
+type launch struct {
+	// container names the Container the supervisor uses.
+	container string
+	// config is the container's configuration, sent to the supervisor as
+	// JSON; nil for none.
+	config any
+	// attr, when not nil, adjusts the supervisor's process attributes
+	// before it starts, for example to start it in new namespaces.
+	attr func(*syscall.SysProcAttr)
+}
 
 // Supervisor says how the engine starts a command's supervisor
 // (v7 delta, section 3, P; section 8, "Engine stop and recovery").
@@ -70,6 +83,11 @@ type supervisorConfig struct {
 	Container       string        `json:"container"`
 	KillGrace       time.Duration `json:"kill_grace"`
 	CleanupDeadline time.Duration `json:"cleanup_deadline"`
+	// ContainerConfig is the container's configuration.
+	ContainerConfig json.RawMessage `json:"container_config,omitempty"`
+	// Probe asks the supervisor to prepare its container and report, as
+	// started or start_failed, whether it could, and to run no command.
+	Probe bool `json:"probe,omitempty"`
 }
 
 // supervisorRequest is a later message from the engine.
@@ -99,14 +117,47 @@ type supervisorEvent struct {
 // errSupervisorLost is returned when the supervisor ends without reporting.
 var errSupervisorLost = errors.New("sandbox: supervisor ended without reporting")
 
-// start starts a supervisor that runs spec contained by the named container,
-// and returns the command's Process once it has started.
-func (s Supervisor) start(ctx context.Context, container string, spec Spec) (*supervisedProcess, error) {
+// start starts a supervisor that runs spec contained as l says, and returns
+// the command's Process once it has started.
+func (s Supervisor) start(ctx context.Context, l launch, spec Spec) (*supervisedProcess, error) {
+	if len(spec.Argv) == 0 {
+		return nil, errors.New("sandbox: empty argument vector")
+	}
+	return s.run(ctx, l, supervisorConfig{
+		Argv:            spec.Argv,
+		Dir:             spec.ScratchDir,
+		Env:             spec.Env,
+		KillGrace:       s.Sequence.KillGrace,
+		CleanupDeadline: s.Sequence.CleanupDeadline,
+	})
+}
+
+// probe starts a throwaway supervisor that prepares the container l
+// describes and runs nothing, and returns nil only if the preparation
+// succeeded.
+func (s Supervisor) probe(ctx context.Context, l launch) error {
+	p, err := s.run(ctx, l, supervisorConfig{Probe: true})
+	if err != nil {
+		return err
+	}
+	p.abandon()
+	<-p.reaped
+	return nil
+}
+
+// run starts a supervisor, sends it cfg completed from l, and returns once
+// it reports the start.
+func (s Supervisor) run(ctx context.Context, l launch, cfg supervisorConfig) (*supervisedProcess, error) {
 	if len(s.Command) == 0 {
 		return nil, errors.New("sandbox: no supervisor command")
 	}
-	if len(spec.Argv) == 0 {
-		return nil, errors.New("sandbox: empty argument vector")
+	cfg.Container = l.container
+	if l.config != nil {
+		b, err := json.Marshal(l.config)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: container configuration: %w", err)
+		}
+		cfg.ContainerConfig = b
 	}
 	ctl, childCtl, err := controlPair()
 	if err != nil {
@@ -128,6 +179,9 @@ func (s Supervisor) start(ctx context.Context, container string, spec Spec) (*su
 	// threads do only for a goroutine locked to its thread: start is not
 	// to be called from one.
 	setParentDeathSignal(cmd.SysProcAttr, syscall.SIGTERM)
+	if l.attr != nil {
+		l.attr(cmd.SysProcAttr)
+	}
 	err = cmd.Start()
 	_ = childCtl.Close()
 	_ = pw.Close()
@@ -150,14 +204,7 @@ func (s Supervisor) start(ctx context.Context, container string, spec Spec) (*su
 	go p.read()
 	go p.reap()
 
-	if err := p.send(supervisorConfig{
-		Argv:            spec.Argv,
-		Dir:             spec.ScratchDir,
-		Env:             spec.Env,
-		Container:       container,
-		KillGrace:       s.Sequence.KillGrace,
-		CleanupDeadline: s.Sequence.CleanupDeadline,
-	}); err != nil {
+	if err := p.send(cfg); err != nil {
 		p.abandon()
 		return nil, fmt.Errorf("sandbox: configure supervisor: %w", err)
 	}
@@ -173,6 +220,10 @@ func (s Supervisor) start(ctx context.Context, container string, spec Spec) (*su
 		return nil, errSupervisorLost
 	case <-ctx.Done():
 		p.abandon()
+		if cfg.Probe {
+			// A probe has nothing to terminate but itself.
+			_ = cmd.Process.Kill()
+		}
 		return nil, ctx.Err()
 	}
 }
@@ -400,6 +451,15 @@ func Supervise(stderr io.Writer) int {
 		exited: make(chan struct{}),
 		empty:  make(chan struct{}),
 	}
+	if cfg.Probe {
+		_ = out.Close()
+		if err := probeContainer(cfg); err != nil {
+			s.report(supervisorEvent{Event: eventStartFailed, Error: err.Error()})
+			return 1
+		}
+		s.report(supervisorEvent{Event: eventStarted})
+		return 0
+	}
 	if err := s.startCommand(cfg, out); err != nil {
 		s.report(supervisorEvent{Event: eventStartFailed, Error: err.Error()})
 		return 1
@@ -460,20 +520,15 @@ type supervisor struct {
 
 func (s *supervisor) startCommand(cfg supervisorConfig, out *os.File) error {
 	defer func() { _ = out.Close() }()
-	newContainer, ok := containers[cfg.Container]
-	if !ok {
-		return fmt.Errorf("unknown container %q", cfg.Container)
-	}
 	if len(cfg.Argv) == 0 {
 		return errors.New("empty argument vector")
 	}
-	path, err := lookPath(cfg.Argv[0], cfg.Env)
+	container, err := newContainer(cfg)
 	if err != nil {
 		return err
 	}
-	s.container = newContainer()
+	s.container = container
 	s.cmd = &exec.Cmd{
-		Path: path,
 		Args: cfg.Argv,
 		Dir:  cfg.Dir,
 		// Exactly the given environment; a nil Env would pass the
@@ -485,7 +540,31 @@ func (s *supervisor) startCommand(cfg supervisorConfig, out *os.File) error {
 	if err := s.container.Prepare(s.cmd); err != nil {
 		return err
 	}
+	// Resolved after Prepare, which may change what the command sees.
+	path, err := lookPath(cfg.Argv[0], cfg.Env)
+	if err != nil {
+		return err
+	}
+	s.cmd.Path = path
 	return s.cmd.Start()
+}
+
+// newContainer constructs the container cfg names.
+func newContainer(cfg supervisorConfig) (Container, error) {
+	newC, ok := containers[cfg.Container]
+	if !ok {
+		return nil, fmt.Errorf("unknown container %q", cfg.Container)
+	}
+	return newC(cfg.ContainerConfig)
+}
+
+// probeContainer prepares the container cfg names around no command.
+func probeContainer(cfg supervisorConfig) error {
+	c, err := newContainer(cfg)
+	if err != nil {
+		return err
+	}
+	return c.Prepare(&exec.Cmd{})
 }
 
 func (s *supervisor) report(ev supervisorEvent) {
