@@ -308,10 +308,18 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if doc, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
 			return err
 		}
+		// The taint comes from every turn the journal records for the
+		// conversation, not from the history in view, so a trim cannot
+		// launder it. This turn is tainted too when its preset grants read
+		// or write to any role.
 		tainted, err := tx.ConversationFileTainted(convID)
 		if err != nil {
 			return err
 		}
+		if we := egressRefusal(e.roster, eff, tainted); we != nil {
+			return we
+		}
+		tainted = tainted || eff.Preset.GrantsFileTools()
 		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
 			return err
 		}

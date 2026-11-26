@@ -10,8 +10,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/candidate"
+	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/observation"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 const (
@@ -93,6 +95,38 @@ func frozenInputsFor(tx *journal.Tx, turnID, author string) (frozenInputs, error
 	fi.lines = strings.SplitAfter(string(framed), "\n")
 	fi.lines = fi.lines[:len(fi.lines)-1]
 	return fi, nil
+}
+
+// egressRefusal returns the refusal of a submit under eff to a conversation
+// whose journal records it file-tainted (tainted), or nil. Every route by
+// which a turn under eff could carry file-derived content, the diffs and
+// evidence this file builds among them, must end on an endpoint the roster
+// allows it; roster load holds a preset to the same rule untainted, so here
+// it is the carry-forward that bites. In a tainted conversation every
+// participant is reached by history, whatever tools the preset grants and
+// wherever the trim is set, and a preset that turns web with file content
+// off may not give any participant web.
+func egressRefusal(r *config.Roster, eff config.Effective, tainted bool) *wire.Error {
+	refuse := func(participant, route string) *wire.Error {
+		we := refusal(wire.ErrorCodeEgress)
+		we.Participant, we.Route = strPtr(participant), strPtr(route)
+		return we
+	}
+	if bad := r.FileEgressViolations(eff.Preset, tainted); len(bad) > 0 {
+		return refuse(bad[0].Participant, bad[0].Route)
+	}
+	if web := r.WebWithFileViolation(eff.Preset, tainted); len(web) > 0 {
+		route := config.EgressRouteHistory
+		if !tainted {
+			for _, fr := range config.FileRoutes(eff.Preset, false) {
+				if fr.Participant == web[0] {
+					route = fr.Route
+				}
+			}
+		}
+		return refuse(web[0], route)
+	}
+	return nil
 }
 
 // reviewerPacket is the data a reviewer receives beside the request, the

@@ -652,46 +652,23 @@ func (r *Roster) Validate() error {
 			errs = append(errs, fmt.Errorf("preset %q: solo mode cannot have write tools", name))
 		}
 
-		// Check if preset has file-derived content tools
-		hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
-		hasWrite := slices.Contains(preset.Tools, "write")
-		needsEgressCheck := hasRead || hasWrite
-
-		// If preset has read or write, check file egress destinations for all participants
-		if needsEgressCheck {
-			allParticipants := []string{preset.Author}
-			allParticipants = append(allParticipants, preset.RequiredReviewers...)
-
-			localEndpoints := make(map[string]bool)
-			for _, ep := range r.Endpoints {
-				if ep.DeclaredExecution == "local" {
-					localEndpoints[ep.Name] = true
+		// Every participant file-derived content could reach must be on an
+		// endpoint it may go to; the error names the participant and the route.
+		for _, v := range r.FileEgressViolations(preset, false) {
+			var part *Participant
+			for i := range r.Participants {
+				if r.Participants[i].ID == v.Participant {
+					part = &r.Participants[i]
+					break
 				}
 			}
-			egressDestinations := make(map[string]bool)
-			if r.Tools != nil {
-				for _, dest := range r.Tools.FileEgressDestinations {
-					egressDestinations[dest] = true
-				}
-			}
-
-			for _, pID := range allParticipants {
-				for _, p := range r.Participants {
-					if p.ID == pID {
-						switch p.Route {
-						case "api":
-							if p.Endpoint == "" {
-								errs = append(errs, fmt.Errorf("preset %q: api participant %q missing endpoint but has tools requiring file egress", name, pID))
-							} else if !localEndpoints[p.Endpoint] && !egressDestinations[p.Endpoint] {
-								errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress, but endpoint is not local and not in tools.file_egress_destinations", name, pID, p.Endpoint))
-							}
-						case "cli":
-							// CLI participants cannot have file content tools - they must be on an endpoint
-							errs = append(errs, fmt.Errorf("preset %q: CLI participant %q cannot have read/write tools; use an api participant with an appropriate endpoint", name, pID))
-						}
-						break
-					}
-				}
+			switch {
+			case part.Route != "api":
+				errs = append(errs, fmt.Errorf("preset %q: CLI participant %q requires file egress by route %q; use an api participant on an endpoint with local execution or in tools.file_egress_destinations", name, v.Participant, v.Route))
+			case part.Endpoint == "":
+				errs = append(errs, fmt.Errorf("preset %q: api participant %q missing endpoint but requires file egress by route %q", name, v.Participant, v.Route))
+			default:
+				errs = append(errs, fmt.Errorf("preset %q: participant %q on endpoint %q requires file egress by route %q, but endpoint is not local and not in tools.file_egress_destinations", name, v.Participant, part.Endpoint, v.Route))
 			}
 		}
 
@@ -745,51 +722,15 @@ func (r *Roster) Validate() error {
 			}
 		}
 
-		// Check tools.allow_web_with_read constraint
-		// Determine effective allow_web_with_read setting (per-preset overrides roster-wide)
-		effectiveAllowWebWithRead := true // default is to allow
-		if preset.AllowWebWithRead != nil {
-			// Per-preset setting overrides roster-wide
-			effectiveAllowWebWithRead = *preset.AllowWebWithRead
-		} else if r.Tools != nil && r.Tools.AllowWebWithRead != nil {
-			// Use roster-wide setting
-			effectiveAllowWebWithRead = *r.Tools.AllowWebWithRead
-		}
-
-		if !effectiveAllowWebWithRead {
-			// If allow_web_with_read is false, preset cannot have:
-			// - any participant with web AND
-			// - any participant (same or different) with read or write
-			hasWeb := slices.Contains(preset.Tools, "web") || slices.Contains(preset.ReviewerTools, "web")
-			hasRead := slices.Contains(preset.Tools, "read") || slices.Contains(preset.ReviewerTools, "read")
-			hasWrite := slices.Contains(preset.Tools, "write")
-
-			if hasWeb && (hasRead || hasWrite) {
-				// Find web and file-content participants
-				webParticipants := []string{}
-				fileParticipants := []string{}
-
-				if slices.Contains(preset.Tools, "web") {
-					webParticipants = append(webParticipants, preset.Author)
-				}
-				if slices.Contains(preset.ReviewerTools, "web") {
-					webParticipants = append(webParticipants, preset.RequiredReviewers...)
-				}
-
-				// File content recipients: anyone with read or write
-				if slices.Contains(preset.Tools, "read") || slices.Contains(preset.Tools, "write") {
-					fileParticipants = append(fileParticipants, preset.Author)
-				}
-				if hasRead {
-					fileParticipants = append(fileParticipants, preset.RequiredReviewers...)
-				}
-
-				// Reject if any web participant and any file participant exist (preset-wide rule)
-				if len(webParticipants) > 0 && len(fileParticipants) > 0 {
-					errs = append(errs, fmt.Errorf("preset %q: cannot combine web (participants: %v) with read/write (participants: %v) when tools.allow_web_with_read=false",
-						name, webParticipants, fileParticipants))
-				}
+		// With tools.allow_web_with_read off (per preset or roster-wide), web
+		// and file content cannot meet in one preset.
+		if web := r.WebWithFileViolation(preset, false); len(web) > 0 {
+			var exposed []string
+			for _, fr := range FileRoutes(preset, false) {
+				exposed = append(exposed, fr.Participant)
 			}
+			errs = append(errs, fmt.Errorf("preset %q: cannot combine web (participants: %v) with read/write (file content reaches participants: %v) when tools.allow_web_with_read=false",
+				name, web, exposed))
 		}
 	}
 
