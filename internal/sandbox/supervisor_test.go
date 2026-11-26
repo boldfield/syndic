@@ -424,6 +424,23 @@ func TestSupervisorPassesExactlyThePipe(t *testing.T) {
 	}
 }
 
+func TestSupervisorClosesControlOnCompletion(t *testing.T) {
+	r := startRunning(t, Sequence{}, `exit 0`)
+	if st := r.wait(t); st.Code != 0 {
+		t.Fatalf("status %+v", st)
+	}
+	select {
+	case <-r.p.reaped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("supervisor did not exit")
+	}
+	// The engine's end of the control pipe is closed once the supervisor
+	// has gone, not left to a finalizer.
+	if _, err := r.p.ctl.Write([]byte("{}")); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("write to the control pipe after completion: %v, want %v", err, os.ErrClosed)
+	}
+}
+
 func TestSuperviseRefusesWithoutControl(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

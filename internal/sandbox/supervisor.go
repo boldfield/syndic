@@ -207,11 +207,14 @@ type supervisedProcess struct {
 
 	sendMu sync.Mutex
 
-	mu        sync.Mutex
-	pid       int // the command's process ID
-	startErr  error
-	status    ExitStatus
-	confirmed *bool // the outcome of a sequence the supervisor ran itself
+	mu       sync.Mutex
+	pid      int // the command's process ID
+	startErr error
+	status   ExitStatus
+	// confirmed is the outcome of a sequence the supervisor ran itself, nil
+	// if it ran none. Nothing reads it yet: it is kept for the journaling of
+	// an unverified containment, which is later work.
+	confirmed *bool
 
 	started chan struct{} // closed on started or start_failed
 	exited  chan struct{} // closed on exit
@@ -231,9 +234,12 @@ func (p *supervisedProcess) send(v any) error {
 	return err
 }
 
-// read dispatches the supervisor's events until the control pipe ends.
+// read dispatches the supervisor's events until the control pipe ends, and
+// then closes the engine's end: nothing more can arrive on it, and a later
+// send fails with os.ErrClosed rather than holding a descriptor open.
 func (p *supervisedProcess) read() {
 	defer close(p.done)
+	defer func() { _ = p.ctl.Close() }()
 	dec := json.NewDecoder(p.ctl)
 	var startedOnce, exitedOnce, emptyOnce sync.Once
 	for {
