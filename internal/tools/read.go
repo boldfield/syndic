@@ -49,6 +49,17 @@ type SizeErrorResult struct {
 	Size  int64  `json:"size"`
 }
 
+// validatePath checks if a path is safe and confined.
+func validatePath(path string) error {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") {
+		return fmt.Errorf("absolute paths not allowed")
+	}
+	if strings.HasPrefix(path, "..") || strings.HasSuffix(path, "/..") || strings.Contains(path, "/../") {
+		return fmt.Errorf("parent directory traversal not allowed")
+	}
+	return nil
+}
+
 // ReadFile executes the read_file tool. It reads a file from the workspace,
 // observing it through the snapshot store, and returns its content. If offset
 // and limit are provided, it reads only that range. If the file is larger than
@@ -61,8 +72,8 @@ func ReadFile(
 ) (json.RawMessage, error) {
 	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "..") || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
-		return nil, fmt.Errorf("invalid path: %q", args.Path)
+	if err := validatePath(path); err != nil {
+		return nil, fmt.Errorf("invalid path: %q: %w", args.Path, err)
 	}
 
 	// Check offset and limit.
@@ -81,9 +92,12 @@ func ReadFile(
 		limit = *args.Limit
 	}
 
+	// Check if a range was explicitly requested.
+	rangeRequested := args.Offset != nil || args.Limit != nil
+
 	// Check if the file is staged.
 	if newSHA, ok := staging[path]; ok {
-		return readStaged(ctx, path, newSHA, offset, limit, maxResultBytes)
+		return readStaged(ctx, path, newSHA, offset, limit, maxResultBytes, rangeRequested)
 	}
 
 	// Observe the file through the snapshot.
@@ -109,7 +123,7 @@ func ReadFile(
 	}
 
 	// Check if the file is too large and no range is requested.
-	if int64(len(content)) > maxResultBytes && offset == 0 && limit == maxResultBytes {
+	if int64(len(content)) > maxResultBytes && !rangeRequested {
 		result := SizeErrorResult{
 			Error: "file too large",
 			Size:  int64(len(content)),
@@ -119,7 +133,7 @@ func ReadFile(
 	}
 
 	// Handle ranged reads.
-	if offset > 0 || limit < int64(len(content)) {
+	if rangeRequested {
 		return rangedRead(content, offset, limit)
 	}
 
@@ -135,8 +149,10 @@ func ListDirFunc(
 ) (json.RawMessage, error) {
 	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "..") || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
-		return nil, fmt.Errorf("invalid path: %q", args.Path)
+	if path != "." && path != "" {
+		if err := validatePath(path); err != nil {
+			return nil, fmt.Errorf("invalid path: %q: %w", args.Path, err)
+		}
 	}
 	if path == "." || path == "" {
 		path = observation.Root
@@ -267,7 +283,7 @@ func readLiveDir(conf *workspace.Confined, dirPath string) (string, []byte, erro
 }
 
 // readStaged reads a file that has been staged for writing.
-func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, limit int64, maxResultBytes int64) (json.RawMessage, error) {
+func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, limit int64, maxResultBytes int64, rangeRequested bool) (json.RawMessage, error) {
 	// Get the staged content from the content store.
 	content, err := ctx.ContentStore.Content(newSHA)
 	if err != nil {
@@ -275,7 +291,7 @@ func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, l
 	}
 
 	// Check if the file is too large and no range is requested.
-	if int64(len(content)) > maxResultBytes && offset == 0 && limit == maxResultBytes {
+	if int64(len(content)) > maxResultBytes && !rangeRequested {
 		result := SizeErrorResult{
 			Error: "file too large",
 			Size:  int64(len(content)),
@@ -285,7 +301,7 @@ func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, l
 	}
 
 	// Handle ranged reads.
-	if offset > 0 || limit < int64(len(content)) {
+	if rangeRequested {
 		return rangedRead(content, offset, limit)
 	}
 
@@ -298,7 +314,14 @@ func rangedRead(content []byte, offset int64, limit int64) (json.RawMessage, err
 		return json.Marshal(ReadResult{Content: ""})
 	}
 
-	end := offset + limit
+	// Compute end without overflow: if limit > MaxInt64 - offset, cap at MaxInt64.
+	var end int64
+	if limit > 9223372036854775807-offset {
+		end = 9223372036854775807
+	} else {
+		end = offset + limit
+	}
+
 	if end > int64(len(content)) {
 		end = int64(len(content))
 	}

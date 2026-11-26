@@ -13,6 +13,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/observation"
+	"github.com/boldfield/syndic/internal/workspace"
 )
 
 // SearchFilesArgs are the arguments to the search_files tool.
@@ -53,8 +54,8 @@ func SearchFilesFunc(
 	scope := observation.Root
 	if args.Path != nil {
 		scope = filepath.Clean(*args.Path)
-		if filepath.IsAbs(scope) || strings.HasPrefix(scope, "/") || strings.HasPrefix(scope, "..") || strings.Contains(scope, "/../") || strings.HasSuffix(scope, "/..") {
-			return nil, fmt.Errorf("invalid search path: %q", *args.Path)
+		if err := validatePath(scope); err != nil {
+			return nil, fmt.Errorf("invalid search path: %q: %w", *args.Path, err)
 		}
 	}
 
@@ -71,6 +72,29 @@ func SearchFilesFunc(
 
 	result := SearchResult{Matches: matches}
 	return json.Marshal(result)
+}
+
+// typeDetectingReader tries to determine if a path is a file or directory,
+// then returns the appropriate observation type and content.
+func typeDetectingReader(conf *workspace.Confined, scope string) (string, []byte, error) {
+	// First, try to read as a directory.
+	dirKind, dirContent, dirErr := readLiveDir(conf, scope)
+	if dirErr == nil {
+		// Successfully read as directory.
+		return dirKind, dirContent, nil
+	}
+
+	// If directory read failed but it's not because of a type mismatch, return the error.
+	// A type mismatch would manifest as ENOTDIR, but readLiveDir might return other errors.
+	// In that case, try to read as a file.
+	fileKind, fileContent, fileErr := readLiveFile(conf, scope)
+	if fileErr != nil {
+		// Both failed; prefer the directory error.
+		return "", nil, dirErr
+	}
+
+	// File read succeeded, return the file result.
+	return fileKind, fileContent, nil
 }
 
 // searchScope recursively searches for matches in a scope (file or directory).
@@ -91,12 +115,10 @@ func searchScope(
 		return nil, nil
 	}
 
-	// Try to observe as a directory first (handles both "." and actual directories).
-	// If it's a file, dirReader will determine that and we fall back to file search.
-	dirReader := func() (string, []byte, error) {
-		return readLiveDir(ctx.Confined, scope)
-	}
-	obs, err := ctx.ObserveStore.Observe(ctx.TurnID, ctx.AttemptID, scope, dirReader)
+	// Use a type-detecting reader that handles both files and directories.
+	obs, err := ctx.ObserveStore.Observe(ctx.TurnID, ctx.AttemptID, scope, func() (string, []byte, error) {
+		return typeDetectingReader(ctx.Confined, scope)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("observe %q: %w", scope, err)
 	}
@@ -163,7 +185,49 @@ func searchScope(
 		return fileMatches, nil
 	}
 
-	// If it's absent, nothing to search.
+	// If it's absent, check if we can find it in staged changes.
+	if obs.Kind == journal.ObservationAbsent {
+		// Check if the absent scope might be a staged directory.
+		// Look for staged entries that have this scope as a prefix.
+		for stagedPath := range staging {
+			prefix := scope
+			if scope != observation.Root {
+				prefix = scope + "/"
+			}
+			if strings.HasPrefix(stagedPath, prefix) {
+				// Found staged content under this scope, treat as directory.
+				// Synthesize directory entries from staged content.
+				entries := applyStagedDirEntries([]observation.Entry{}, scope, staging)
+				for _, entry := range entries {
+					entryPath := entry.Name
+					if scope != observation.Root {
+						entryPath = scope + "/" + entry.Name
+					}
+
+					if isProtected(entryPath) {
+						continue
+					}
+
+					if entry.Type == "d" {
+						subMatches, err := searchScope(ctx, entryPath, pattern, staging, isProtected)
+						if err != nil {
+							return nil, err
+						}
+						matches = append(matches, subMatches...)
+					} else {
+						fileMatches, err := searchFile(ctx, entryPath, pattern, staging)
+						if err != nil && !errors.Is(err, os.ErrNotExist) {
+							return nil, err
+						}
+						matches = append(matches, fileMatches...)
+					}
+				}
+				return matches, nil
+			}
+		}
+	}
+
+	// If it's absent and no staged content, nothing to search.
 	return nil, nil
 }
 

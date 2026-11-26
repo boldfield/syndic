@@ -510,3 +510,76 @@ func TestListDirWithStagedCreations(t *testing.T) {
 		t.Error("expected synthesized directory newdir")
 	}
 }
+
+func TestReadFileOversizeWithExplicitLimit(t *testing.T) {
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	// Read a large file with explicit limit equal to maxResultBytes
+	// Should return the requested bytes, not a size error
+	maxBytes := int64(4)
+	limit := maxBytes
+	args := ReadFileArgs{Path: "large.bin", Limit: &limit}
+	result, err := ReadFile(ctx, args, nil, maxBytes)
+	if err != nil {
+		t.Fatalf("read_file with explicit limit: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Should return content, not error
+	if _, hasError := parsed["error"]; hasError {
+		t.Error("expected content, not size error when explicit limit is provided")
+	}
+
+	if content, ok := parsed["content"]; !ok {
+		t.Error("expected content field in result")
+	} else if contentStr, ok := content.(string); !ok {
+		t.Error("content field is not a string")
+	} else if len(contentStr) != 4 {
+		t.Errorf("expected 4 bytes, got %d", len(contentStr))
+	}
+}
+
+func TestReadFileRangeOverflow(t *testing.T) {
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	// Test with offset=1 and limit=MaxInt64 (should not panic)
+	offset := int64(1)
+	limit := int64(9223372036854775807) // MaxInt64
+	args := ReadFileArgs{Path: "README.md", Offset: &offset, Limit: &limit}
+	result, err := ReadFile(ctx, args, nil, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("read_file with large limit: %v", err)
+	}
+
+	var parsed ReadResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Should have returned content without panicking
+	if len(parsed.Content) == 0 {
+		t.Error("expected content from ranged read with large limit")
+	}
+}
