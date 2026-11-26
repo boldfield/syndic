@@ -81,6 +81,7 @@ type URLScreener struct {
 	maxTurn  int
 	corpus   map[[canaryRun]byte]struct{}
 	perHost  map[string]int
+	policy   *HostPolicy
 	totalNum int
 }
 
@@ -116,6 +117,9 @@ func (s *URLScreener) Screen(rawURL string) Verdict {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if r := checkScheme(rawURL); r != nil {
+		return refuse(r.Rule, r.Reason)
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return refuse(RuleShape, "URL does not parse")
@@ -126,6 +130,12 @@ func (s *URLScreener) Screen(rawURL string) Verdict {
 	host, v := shapeCheck(rawURL, u)
 	if v != nil {
 		return *v
+	}
+	if r := checkCredentials(u); r != nil {
+		return refuse(r.Rule, r.Reason)
+	}
+	if r := s.policy.checkHost(u); r != nil {
+		return refuse(r.Rule, r.Reason)
 	}
 	if s.perHost[host] >= maxFetchesPerHost {
 		return refuse(RuleHostCount, "per-host fetch limit reached for this turn")
