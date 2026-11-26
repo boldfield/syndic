@@ -504,3 +504,72 @@ func TestApplyRecoverRecordsConflictToPending(t *testing.T) {
 		t.Fatalf("not persisted: %+v", got)
 	}
 }
+
+// Atomic-save replacement (new inode) between temp write and re-check is
+// detected as conflict and the editor's file is preserved. This is the race
+// that the pre-rename re-check protects against.
+func TestApplyAtomicSaveReplacementDetectedAsConflict(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "temp" && path == "b" {
+			// Simulate an editor's atomic save: write a sibling file and rename
+			// it over the target, creating a new inode.
+			sibPath := filepath.Join(ws, "b.tmp-atomic")
+			if err := os.WriteFile(sibPath, []byte("editor's atomic save"), 0o644); err != nil {
+				return err
+			}
+			return os.Rename(sibPath, filepath.Join(ws, "b"))
+		}
+		return nil
+	})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := outcomes(res.Paths)
+	if res.State != journal.ChangeSetConflict || o["a"] != "applied" || o["b"] != "conflict" {
+		t.Fatalf("result = %+v", res)
+	}
+	// Editor's atomic-save content is preserved.
+	if readFile(t, filepath.Join(ws, "b")) != "editor's atomic save" {
+		t.Fatal("editor's atomic save was overwritten")
+	}
+	// No temp file left behind.
+	if ents, _ := os.ReadDir(ws); len(ents) != 2 {
+		t.Fatalf("temporary file left: %v", ents)
+	}
+}
+
+// Concurrent creation at the temp stage is detected as conflict and the
+// existing file is left untouched. This exercises linkat's EEXIST rejection.
+func TestApplyConcurrentCreateAtTempStageDetectedAsConflict(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"new", "", "created by us"})
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "temp" && path == "new" {
+			// A concurrent create: write a file at the target name before our
+			// linkat attempt.
+			return os.WriteFile(filepath.Join(ws, "new"), []byte("created by other"), 0o644)
+		}
+		return nil
+	})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := outcomes(res.Paths)
+	if res.State != journal.ChangeSetConflict || o["new"] != "conflict" {
+		t.Fatalf("result = %+v", res)
+	}
+	// The other process's file is left untouched.
+	if readFile(t, filepath.Join(ws, "new")) != "created by other" {
+		t.Fatal("concurrent create was overwritten")
+	}
+	// No temp file left behind.
+	if ents, _ := os.ReadDir(ws); len(ents) != 1 {
+		t.Fatalf("temporary file left: %v", ents)
+	}
+}
