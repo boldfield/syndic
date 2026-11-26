@@ -75,8 +75,12 @@ func (s *Store) lock(turnID string) func() {
 // so concurrent first touches yield one record and one live read. A failed
 // read or record leaves nothing recorded and the path free to retry.
 //
-// For directory listings, Observe reconciles prior absences and known files.
-// For files, it checks for conflicts with prior directory observations.
+// For directory listings, Observe reconciles prior absences and known files,
+// and checks for conflicts with prior directory observations.
+// For files or absences, Observe checks if the parent directory has been listed,
+// and if so, whether the name is in the listing. If the name is not listed,
+// an absence is recorded without calling the reader. If the name is listed,
+// conflicts with prior type observations are checked.
 func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Observation, error) {
 	defer s.lock(turnID)()
 
@@ -86,57 +90,122 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 		return journal.Observation{}, err
 	}
 
+	parent, name := parentAndName(path)
+
+	// Before reading the live tree, check if the parent directory has been
+	// listed. If it has and this name is not in the listing, synthesize an
+	// absence without calling the reader.
+	var listedNames map[string]bool
+	var listedTypes map[string]string
+	err := s.j.Tx(func(tx *journal.Tx) error {
+		obs, err := tx.ObservationAt(turnID, parent)
+		if errors.Is(err, journal.ErrNotObserved) {
+			return nil // Parent not yet listed, proceed normally
+		}
+		if err != nil {
+			return err
+		}
+		if obs.Kind != journal.ObservationListing {
+			return nil // Parent not a directory, proceed normally
+		}
+		// Parent is listed; parse the entries.
+		content, err := tx.Content(obs.ContentSHA256)
+		if err != nil {
+			return err
+		}
+		entries, err := ParseEntries(content)
+		if err != nil {
+			return err
+		}
+		listedNames = make(map[string]bool)
+		listedTypes = make(map[string]string)
+		for _, e := range entries {
+			listedNames[e.Name] = true
+			listedTypes[e.Name] = e.Type
+		}
+		return nil
+	})
+	if err != nil {
+		return journal.Observation{}, err
+	}
+
+	// If parent has been listed and this name is not in it, synthesize an absence.
+	if listedNames != nil && !listedNames[name] {
+		// Record absence without calling the reader.
+		var o journal.Observation
+		err = s.j.Tx(func(tx *journal.Tx) error {
+			var txErr error
+			o, txErr = tx.RecordObservation(turnID, attemptID, path, journal.ObservationAbsent, nil)
+			return txErr
+		})
+		if errors.Is(err, journal.ErrAlreadyObserved) {
+			return s.lookup(turnID, path)
+		}
+		return o, err
+	}
+
+	// Call the reader.
 	kind, content, err := read()
 	if err != nil {
 		return journal.Observation{}, err
 	}
 
 	// Pre-process the observation before recording it, under the turn lock.
+	conflictType := ""
 	switch kind {
 	case journal.ObservationListing:
-		// Reconcile the directory listing with prior observations.
-		entries, err := ParseEntries(content)
-		if err != nil {
+		// Check for conflicts with prior directory observations.
+		if err := CheckFileConflict(turnID, path, "d", s.j); errors.Is(err, ErrSnapshotConflict) {
+			conflictType = extractConflictType(err)
+			if conflictType == "" {
+				conflictType = "directory_conflict"
+			}
+		} else if err != nil {
 			return journal.Observation{}, err
 		}
-		reconciled, err := ReconcileDirectoryObservation(turnID, path, entries, s.j)
-		if err != nil {
-			return journal.Observation{}, err
-		}
-		// Re-encode the reconciled entries.
-		content, err = FrameEntries(reconciled)
-		if err != nil {
-			return journal.Observation{}, err
+
+		if conflictType == "" {
+			// No conflict; reconcile the directory listing with prior observations.
+			entries, err := ParseEntries(content)
+			if err != nil {
+				return journal.Observation{}, err
+			}
+			reconciled, err := ReconcileDirectoryObservation(turnID, path, entries, s.j)
+			if err != nil {
+				return journal.Observation{}, err
+			}
+			// Re-encode the reconciled entries.
+			content, err = FrameEntries(reconciled)
+			if err != nil {
+				return journal.Observation{}, err
+			}
 		}
 	case journal.ObservationFile:
 		// Check for conflicts with prior directory observations.
 		if err := CheckFileConflict(turnID, path, "f", s.j); errors.Is(err, ErrSnapshotConflict) {
-			// Conflict detected; don't record the observation.
-			// Journal the conflict.
-			_ = s.j.Tx(func(tx *journal.Tx) error {
-				// Record a journal event noting the snapshot conflict.
-				// (Future: add explicit conflict journaling if journal.Tx provides a method)
-				return nil
-			})
-			return journal.Observation{}, err
+			conflictType = extractConflictType(err)
+			if conflictType == "" {
+				conflictType = "type_changed"
+			}
 		} else if err != nil {
 			return journal.Observation{}, err
 		}
 	case journal.ObservationAbsent:
 		// Check for conflicts with prior directory observations.
-		// A file marked absent must not exist in the recorded parent listing.
 		if err := CheckFileConflict(turnID, path, journal.ObservationAbsent, s.j); errors.Is(err, ErrSnapshotConflict) {
-			// Conflict detected; don't record the observation.
-			// Journal the conflict.
-			_ = s.j.Tx(func(tx *journal.Tx) error {
-				// Record a journal event noting the snapshot conflict.
-				// (Future: add explicit conflict journaling if journal.Tx provides a method)
-				return nil
-			})
-			return journal.Observation{}, err
+			conflictType = extractConflictType(err)
+			if conflictType == "" {
+				conflictType = "deleted"
+			}
 		} else if err != nil {
 			return journal.Observation{}, err
 		}
+	}
+
+	// If a conflict was detected, journal it and return the error.
+	if conflictType != "" {
+		_ = s.j.RecordSnapshotConflict(turnID, attemptID, path, conflictType)
+		return journal.Observation{}, fmt.Errorf("%w: %s (%s)", ErrSnapshotConflict, path, conflictType)
 	}
 
 	var o journal.Observation

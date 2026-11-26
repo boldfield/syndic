@@ -671,28 +671,42 @@ func TestObserve_UnlistedFileTriggersCacheConflict(t *testing.T) {
 		t.Fatalf("observe directory: %v", err)
 	}
 
-	// Now try to observe "new.txt" (not in the listing) through Store.Observe
-	_, err = s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
-		return journal.ObservationFile, []byte("new content"), nil
+	// Now try to observe "new.txt" (not in the listing) through Store.Observe.
+	// The reader will not be called, and an absence should be synthesized.
+	readerCalled := false
+	obs, err := s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
+		readerCalled = true
+		t.Fatal("reader should not be called for unlisted name")
+		return "", nil, nil
 	})
 
-	// Should get snapshot_conflict error
-	if err == nil {
-		t.Fatal("expected snapshot_conflict error, got nil")
+	// Should succeed and return an absence observation
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, ErrSnapshotConflict) {
-		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	if obs.Kind != journal.ObservationAbsent {
+		t.Fatalf("expected absence observation, got kind=%s", obs.Kind)
+	}
+	if readerCalled {
+		t.Fatal("reader was called but should not have been")
 	}
 
-	// Verify nothing was recorded for "dir/new.txt"
-	obs, err := f.j.Observations(f.turn)
+	// Verify an absence was recorded for "dir/new.txt"
+	allObs, err := f.j.Observations(f.turn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range obs {
+	found := false
+	for _, o := range allObs {
 		if o.Path == "dir/new.txt" {
-			t.Fatalf("unexpected observation recorded for dir/new.txt: %+v", o)
+			if o.Kind != journal.ObservationAbsent {
+				t.Fatalf("expected absence for dir/new.txt, got kind=%s", o.Kind)
+			}
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("no observation recorded for dir/new.txt")
 	}
 }
 
@@ -812,17 +826,24 @@ func TestObserve_CachedListingExcludesLaterLiveFile(t *testing.T) {
 		t.Fatalf("expected listing, got %s", listingObs.Kind)
 	}
 
-	// Now try to record "work/new" (not in the listing)
-	_, err = s.Observe(f.turn, f.author, "work/new", func() (string, []byte, error) {
-		return journal.ObservationFile, []byte("new"), nil
+	// Now try to record "work/new" (not in the listing).
+	// Should synthesize an absence without calling the reader.
+	readerCalled := false
+	newObs, err := s.Observe(f.turn, f.author, "work/new", func() (string, []byte, error) {
+		readerCalled = true
+		t.Fatal("reader should not be called for unlisted file")
+		return "", nil, nil
 	})
 
-	// Should fail with snapshot_conflict because "new" is not in the cached listing
-	if err == nil {
-		t.Fatal("expected snapshot_conflict for unlisted file, got nil")
+	// Should succeed and return an absence
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, ErrSnapshotConflict) {
-		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	if newObs.Kind != journal.ObservationAbsent {
+		t.Fatalf("expected absence for unlisted file, got kind=%s", newObs.Kind)
+	}
+	if readerCalled {
+		t.Fatal("reader was called for unlisted file")
 	}
 
 	// Try to observe "work/a" (is in the listing) - should succeed

@@ -639,6 +639,40 @@ func (s *Store) Observations(turnID string) (out []Observation, err error) {
 	return out, err
 }
 
+// RecordSnapshotConflict journals a conflict between observations. The conflict
+// is recorded with the turn, path, attempt, and conflict type, and no observation
+// is recorded for the path.
+func (tx *Tx) RecordSnapshotConflict(turnID, attemptID, path, conflictType string) error {
+	if conflictType != "deleted" && conflictType != "type_changed" && conflictType != "directory_conflict" {
+		return fmt.Errorf("invalid conflict_type %q", conflictType)
+	}
+	id, err := generateID()
+	if err != nil {
+		return fmt.Errorf("generate conflict id: %w", err)
+	}
+	seq, err := tx.nextJournalSeq()
+	if err != nil {
+		return err
+	}
+	at := nowStamp()
+	if _, err := tx.tx.Exec(`
+		INSERT INTO snapshot_conflicts (id, turn_id, attempt_id, path, conflict_type, journal_seq, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, id, turnID, attemptID, []byte(path), conflictType, seq, at); err != nil {
+		return fmt.Errorf("insert snapshot conflict: %w", err)
+	}
+	payload := map[string]any{"conflict_type": conflictType}
+	pathJSON(payload, path)
+	return tx.emitTools(turnID, "snapshot_conflict", payload)
+}
+
+// RecordSnapshotConflict journals a conflict between observations on Store.
+func (s *Store) RecordSnapshotConflict(turnID, attemptID, path, conflictType string) error {
+	return s.Tx(func(tx *Tx) error {
+		return tx.RecordSnapshotConflict(turnID, attemptID, path, conflictType)
+	})
+}
+
 // StageWrite records path's new content in the turn's staging map. The path
 // must already be observed in the turn: the first time it is staged its base
 // is the observed file content, or absent for an observed absence. Staging it

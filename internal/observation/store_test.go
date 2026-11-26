@@ -436,27 +436,42 @@ func TestObserve_CachedListingExcludesUnlistedFile(t *testing.T) {
 		t.Fatalf("observe directory: %v", err)
 	}
 
-	// Now try to observe "dir/new.txt" (not in listing) - should fail with snapshot_conflict
-	_, err = s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
-		return journal.ObservationFile, []byte("new content"), nil
+	// Now try to observe "dir/new.txt" (not in listing).
+	// Should synthesize an absence without calling the reader.
+	readerCalled := false
+	obs, err := s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
+		readerCalled = true
+		t.Fatal("reader should not be called for unlisted file")
+		return "", nil, nil
 	})
 
-	if err == nil {
-		t.Fatal("expected snapshot_conflict for unlisted file, got nil")
+	// Should succeed and return an absence
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !errors.Is(err, ErrSnapshotConflict) {
-		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	if obs.Kind != journal.ObservationAbsent {
+		t.Fatalf("expected absence for unlisted file, got kind=%s", obs.Kind)
+	}
+	if readerCalled {
+		t.Fatal("reader was called for unlisted file")
 	}
 
-	// Verify "dir/new.txt" was not recorded
-	obs, err := f.j.Observations(f.turn)
+	// Verify an absence was recorded for "dir/new.txt"
+	allObs, err := f.j.Observations(f.turn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range obs {
+	found := false
+	for _, o := range allObs {
 		if o.Path == "dir/new.txt" {
-			t.Fatalf("dir/new.txt should not be recorded, but got: %+v", o)
+			if o.Kind != journal.ObservationAbsent {
+				t.Fatalf("expected absence for dir/new.txt, got kind=%s", o.Kind)
+			}
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("no observation recorded for dir/new.txt")
 	}
 }
 
