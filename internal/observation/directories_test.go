@@ -2,6 +2,7 @@ package observation
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -111,7 +112,7 @@ func TestReconcileDirectoryObservation_RemovesAbsentEntries(t *testing.T) {
 	f := newDirFixture(t)
 	s := NewStore(f.j)
 
-	// First, observe that "deleted.txt" is absent
+	// First, observe that "dir/deleted.txt" is absent
 	if _, err := s.Observe(f.turn, f.author, "dir/deleted.txt", func() (string, []byte, error) {
 		return journal.ObservationAbsent, nil, nil
 	}); err != nil {
@@ -141,7 +142,7 @@ func TestReconcileDirectoryObservation_PreservesOtherEntries(t *testing.T) {
 	f := newDirFixture(t)
 	s := NewStore(f.j)
 
-	// Observe that "absent.txt" is absent
+	// Observe that "dir/absent.txt" is absent
 	if _, err := s.Observe(f.turn, f.author, "dir/absent.txt", func() (string, []byte, error) {
 		return journal.ObservationAbsent, nil, nil
 	}); err != nil {
@@ -216,8 +217,8 @@ func TestCheckFileConflict_DetectsTypeChange(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected conflict error, got nil")
 	}
-	if err.Error() != "snapshot_conflict: dir/target" {
-		t.Fatalf("got error %q, want snapshot_conflict", err)
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("got error %v, want ErrSnapshotConflict", err)
 	}
 }
 
@@ -415,6 +416,174 @@ func TestEntriesHash(t *testing.T) {
 	}
 	if _, err := hex.DecodeString(hash1); err != nil {
 		t.Fatalf("hash not valid hex: %v", err)
+	}
+}
+
+// Test: Known file retained in later parent view.
+// When a file is observed, then its parent directory is listed,
+// the file must appear in the listing even if the live directory doesn't have it.
+func TestReconcileDirectoryObservation_RetainsKnownFiles(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, observe that "work/a.txt" exists
+	if _, err := s.Observe(f.turn, f.author, "work/a.txt", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("content"), nil
+	}); err != nil {
+		t.Fatalf("observe a.txt: %v", err)
+	}
+
+	// Now reconcile a directory listing that does not include "a.txt"
+	// (simulating live directory missing the file)
+	entries := []Entry{
+		{Type: "f", Name: "b.txt"},
+	}
+
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "work", entries, f.j)
+	if err != nil {
+		t.Fatalf("ReconcileDirectoryObservation: %v", err)
+	}
+
+	// The reconciled listing should include both b.txt and a.txt
+	if len(reconciled) != 2 {
+		t.Fatalf("got %d entries, want 2", len(reconciled))
+	}
+	names := make(map[string]bool)
+	for _, e := range reconciled {
+		names[e.Name] = true
+	}
+	if !names["a.txt"] || !names["b.txt"] {
+		t.Fatalf("reconciled entries missing a.txt or b.txt: %+v", reconciled)
+	}
+}
+
+// Test: Deleted file conflict detection.
+// When a file is listed in a directory, and later we try to read it but it's deleted,
+// CheckFileConflict should detect it.
+func TestCheckFileConflict_Deleted(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing where "target" is a file
+	dirEntries := []Entry{
+		{Type: "f", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now check if reading that path when it's deleted creates a conflict
+	// (empty string means the file is not found)
+	err = CheckFileConflict(f.turn, "dir/target", "", f.j)
+	if err == nil {
+		t.Fatal("expected conflict error for deleted file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+}
+
+// Test: Type-changed file conflict detection.
+// When a file is listed as "f" in a directory, but later we try to read it as "d",
+// we should get a snapshot_conflict error.
+func TestObserveFileConflict_TypeChanged(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing where "target" is a directory
+	dirEntries := []Entry{
+		{Type: "d", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe it as a file (type changed from d to f)
+	_, err = s.Observe(f.turn, f.author, "dir/target", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("content"), nil
+	})
+	// Should get a snapshot_conflict error
+	if err == nil {
+		t.Fatal("expected snapshot_conflict error for type change, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+}
+
+// Test: Root-level file (parent is "").
+func TestReconcileDirectoryObservation_RootLevel(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, observe that a root-level file is absent
+	if _, err := s.Observe(f.turn, f.author, "root.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	}); err != nil {
+		t.Fatalf("observe absence: %v", err)
+	}
+
+	// Now reconcile a root directory listing that includes "root.txt"
+	entries := []Entry{
+		{Type: "f", Name: "root.txt"},
+		{Type: "d", Name: "dir"},
+	}
+
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "", entries, f.j)
+	if err != nil {
+		t.Fatalf("ReconcileDirectoryObservation: %v", err)
+	}
+
+	// The reconciled listing should exclude "root.txt" (which is marked absent)
+	if len(reconciled) != 1 {
+		t.Fatalf("got %d entries, want 1", len(reconciled))
+	}
+	if reconciled[0].Name != "dir" {
+		t.Fatalf("got entry %s, want dir", reconciled[0].Name)
+	}
+}
+
+// Test: Cached listing excludes later live file.
+// When a directory is listed without a file, and later a file appears in the live tree
+// with that name, reading it should return not found (cached listing behavior enforced by snapshot).
+func TestCheckFileConflict_UnlistedFile(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing without "unlisted.txt"
+	dirEntries := []Entry{
+		{Type: "f", Name: "listed.txt"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now check if reading "unlisted.txt" conflicts
+	// It should not conflict because it was never in the listing
+	err = CheckFileConflict(f.turn, "dir/unlisted.txt", "f", f.j)
+	if err != nil {
+		t.Fatalf("unexpected error for unlisted path: %v", err)
 	}
 }
 

@@ -74,6 +74,9 @@ func (s *Store) lock(turnID string) func() {
 // once, under the turn's lock, and its result is recorded bound to attemptID,
 // so concurrent first touches yield one record and one live read. A failed
 // read or record leaves nothing recorded and the path free to retry.
+//
+// For directory listings, Observe reconciles prior absences and known files.
+// For files, it checks for conflicts with prior directory observations.
 func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Observation, error) {
 	defer s.lock(turnID)()
 
@@ -86,6 +89,34 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 	kind, content, err := read()
 	if err != nil {
 		return journal.Observation{}, err
+	}
+
+	// Pre-process the observation before recording it, under the turn lock.
+	switch kind {
+	case journal.ObservationListing:
+		// Reconcile the directory listing with prior observations.
+		entries, err := ParseEntries(content)
+		if err != nil {
+			return journal.Observation{}, err
+		}
+		reconciled, err := ReconcileDirectoryObservation(turnID, path, entries, s.j)
+		if err != nil {
+			return journal.Observation{}, err
+		}
+		// Re-encode the reconciled entries.
+		content, err = FrameEntries(reconciled)
+		if err != nil {
+			return journal.Observation{}, err
+		}
+	case journal.ObservationFile:
+		// Check for conflicts with prior directory observations.
+		if err := CheckFileConflict(turnID, path, "f", s.j); errors.Is(err, ErrSnapshotConflict) {
+			// Conflict detected; don't record the observation.
+			// Return a tool error that wraps ErrSnapshotConflict.
+			return journal.Observation{}, fmt.Errorf("%w", err)
+		} else if err != nil {
+			return journal.Observation{}, err
+		}
 	}
 
 	var o journal.Observation
