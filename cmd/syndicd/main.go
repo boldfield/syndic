@@ -25,6 +25,9 @@ import (
 const version = "dev"
 
 func main() {
+	if isSupervise(os.Args[1:]) {
+		os.Exit(supervise(os.Stderr))
+	}
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	exitCode := run(os.Args[1:], os.Stdout, os.Stderr, sigChan)
