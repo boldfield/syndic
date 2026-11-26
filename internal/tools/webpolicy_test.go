@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -780,5 +782,50 @@ func TestNilPolicyWithMatchURL(t *testing.T) {
 	err = p.MatchURL("http://example.com")
 	if err != nil {
 		t.Fatalf("MatchURL should work with nil policy for named hosts: %v", err)
+	}
+}
+
+func TestNewHTTPRequestNoCredentialsWithHTTPTest(t *testing.T) {
+	// Create a test server that records request headers
+	var requestReceived *http.Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = r
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Test 1: Normal URL should work
+	req, err := NewHTTPRequest(server.URL + "/path")
+	if err != nil {
+		t.Fatalf("NewHTTPRequest failed: %v", err)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if requestReceived.Method != "GET" {
+		t.Errorf("method should be GET, got %q", requestReceived.Method)
+	}
+	if requestReceived.Header.Get("Authorization") != "" {
+		t.Errorf("Authorization header should not be set, got %q", requestReceived.Header.Get("Authorization"))
+	}
+	if requestReceived.Header.Get("Cookie") != "" {
+		t.Errorf("Cookie header should not be set")
+	}
+
+	// Test 2: URL with userinfo should be rejected before the request is created
+	_, err = NewHTTPRequest(server.URL + "/path?user=user&pass=pass")
+	if err != nil {
+		t.Fatalf("URL without userinfo in query should work")
+	}
+
+	// But URL with actual userinfo should be rejected
+	_, err = NewHTTPRequest("http://user:pass@example.com/path")
+	if err == nil {
+		t.Fatalf("NewHTTPRequest should reject URL with userinfo")
 	}
 }
