@@ -544,6 +544,56 @@ func TestReaderErrorHandling(t *testing.T) {
 	}
 }
 
+func TestReaderCanTouchJournal(t *testing.T) {
+	store, j, turnID, attemptID := testStore(t)
+
+	// Test that the reader can safely call journal methods without deadlocking.
+	// This verifies the reader runs outside the journal transaction.
+	record, err := store.Observe(turnID, attemptID, "file.txt", func() (byte, []byte, error) {
+		// Reader touches the journal - this should not deadlock.
+		err := j.Tx(func(tx *journal.Tx) error {
+			_, err := tx.Observations(turnID)
+			return err
+		})
+		if err != nil {
+			return 0, nil, err
+		}
+		return KindFile, []byte("content"), nil
+	})
+	if err != nil {
+		t.Fatalf("observe with journal-touching reader: %v", err)
+	}
+	if record.Path != "file.txt" {
+		t.Errorf("path: got %q, want file.txt", record.Path)
+	}
+}
+
+func TestAbsenceWithContentRejected(t *testing.T) {
+	store, _, turnID, attemptID := testStore(t)
+
+	// Test that an absence with content is rejected.
+	record, err := store.Observe(turnID, attemptID, "missing.txt", func() (byte, []byte, error) {
+		return KindAbsent, []byte("unwanted content"), nil
+	})
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("absence observation must not have content")) {
+		t.Errorf("expected absence-with-content error, got %v", err)
+	}
+	if record.Path != "" {
+		t.Errorf("should not have created record for invalid absence, got %+v", record)
+	}
+
+	// A subsequent observe with valid absence should work normally.
+	record2, err := store.Observe(turnID, attemptID, "missing.txt", func() (byte, []byte, error) {
+		return KindAbsent, nil, nil
+	})
+	if err != nil {
+		t.Fatalf("observe after absence-with-content error: %v", err)
+	}
+	if record2.Kind != KindAbsent {
+		t.Errorf("kind: got %q, want %q", record2.Kind, KindAbsent)
+	}
+}
+
 func BenchmarkObserve(b *testing.B) {
 	store, _, turnID, attemptID := testStore(b)
 
