@@ -23,6 +23,14 @@ jobs:
       - name: Cross-build for macOS
         run: GOOS=darwin GOARCH=arm64 go build ./... && GOOS=darwin GOARCH=arm64 go vet ./...
       - run: go test -timeout 5m ./...
+      - name: Sandbox enforcement (linux-namespaces)
+        run: |
+          # Ubuntu's AppArmor restricts unprivileged user namespaces; lift
+          # the restriction where the key exists.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          SYNDIC_SANDBOX_TEST=1 go test -count=1 -timeout 5m -run TestLinuxNamespacesEnforcement -v ./internal/sandbox/
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.15.0
