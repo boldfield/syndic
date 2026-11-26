@@ -170,7 +170,7 @@ func (ns namespace) conflict(kind string) string {
 		switch kind {
 		case journal.ObservationAbsent:
 			return ConflictDeleted
-		case journal.ObservationFile:
+		case journal.ObservationFile, KindSymlink, KindSpecial:
 			return ConflictTypeChanged
 		}
 	}
@@ -182,6 +182,10 @@ func (ns namespace) conflict(kind string) string {
 		want = journal.ObservationFile
 	case "d":
 		want = journal.ObservationListing
+	case "l":
+		want = KindSymlink
+	case "o":
+		want = KindSpecial
 	}
 	switch {
 	case kind == journal.ObservationAbsent:

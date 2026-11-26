@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -900,5 +901,57 @@ func TestConfinedOpenFile_RootRelocationIdentity(t *testing.T) {
 	}
 	if string(readBack) != writeData {
 		t.Errorf("Read back content mismatch: %q != %q", string(readBack), writeData)
+	}
+}
+
+func TestExamineFileDirAndRoot(t *testing.T) {
+	root := t.TempDir()
+	for name, body := range map[string]string{"a.txt": "A", "sub/b.txt": "B", ".env": "S"} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("a.txt", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := OpenConfined(root, []string{".env*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ex, err := c.Examine("a.txt")
+	if err != nil || ex.IsDir || string(ex.Content) != "A" {
+		t.Fatalf("file: %+v, %v", ex, err)
+	}
+	ex, err = c.Examine(".")
+	if err != nil || !ex.IsDir {
+		t.Fatalf("root: %+v, %v", ex, err)
+	}
+	types := map[string]string{}
+	for _, e := range ex.Entries {
+		types[e.Name] = e.Type
+	}
+	if len(types) != 3 || types["a.txt"] != "f" || types["sub"] != "d" || types["link"] != "l" {
+		t.Fatalf("entries %v (protected .env must be left out)", types)
+	}
+	if _, err := c.Examine("nope"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing: %v", err)
+	}
+	if _, err := c.Examine("link"); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("symlink must be refused with ErrSymlink: %v", err)
+	}
+	if _, err := c.Examine(".env"); err == nil {
+		t.Fatal("protected path must be refused")
+	}
+	if _, err := c.Examine("../x"); err == nil {
+		t.Fatal("escape must be refused")
+	}
+	if !c.IsProtected(".env") || c.IsProtected("a.txt") {
+		t.Fatal("IsProtected")
 	}
 }
