@@ -2,231 +2,505 @@ package journal_test
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
 
-// applyFixture freezes a change set over a (modify), b (modify) and n (create).
-func applyFixture(t *testing.T, store *journal.Store) (csID, turn string, hashes map[string][2]string) {
+// applyEdit is one staged path: base "" means absent.
+type applyEdit struct{ path, base, next string }
+
+// applyFixture freezes a change set over edits, writing the base files into a
+// fresh workspace first.
+func applyFixture(t *testing.T, store *journal.Store, edits ...applyEdit) (ws, csID string) {
 	t.Helper()
+	ws = filepath.Join(t.TempDir(), "ws")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	f := buildToolsTurn(t, store)
-	hashes = map[string][2]string{}
 	err := store.Tx(func(tx *journal.Tx) error {
-		for _, p := range []string{"a", "b"} {
-			if _, err := tx.RecordObservation(f.turn, f.author, p, journal.ObservationFile, []byte("base "+p)); err != nil {
+		for _, e := range edits {
+			if e.base == "" {
+				if _, err := tx.RecordObservation(f.turn, f.author, e.path, journal.ObservationAbsent, nil); err != nil {
+					return err
+				}
+			} else {
+				full := filepath.Join(ws, e.path)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(full, []byte(e.base), 0o640); err != nil {
+					return err
+				}
+				if _, err := tx.RecordObservation(f.turn, f.author, e.path, journal.ObservationFile, []byte(e.base)); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.StageWrite(f.turn, e.path, []byte(e.next)); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.RecordObservation(f.turn, f.author, "n", journal.ObservationAbsent, nil); err != nil {
-			return err
-		}
-		for _, p := range []string{"a", "b", "n"} {
-			if _, err := tx.StageWrite(f.turn, p, []byte("new "+p)); err != nil {
-				return err
-			}
-		}
-		cs, err := tx.FreezeChangeSet(f.turn, f.candidate, "s", "c")
-		if err != nil {
-			return err
-		}
+		cs, err := tx.FreezeChangeSet(f.turn, f.candidate, "snap", "chg")
 		csID = cs.ID
-		for _, p := range cs.Paths {
-			hashes[p.Path] = [2]string{p.BaseSHA256, p.NewSHA256}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws, csID
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func outcomes(paths []journal.ChangeSetPath) map[string]string {
+	m := map[string]string{}
+	for _, p := range paths {
+		m[p.Path] = p.Outcome
+	}
+	return m
+}
+
+func newApplyStore(t *testing.T) *journal.Store {
+	db, cleanup := openTestDB(t)
+	t.Cleanup(cleanup)
+	return journal.NewStore(db)
+}
+
+func TestApplyModifyAndCreateThenStableRetry(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store,
+		applyEdit{"a.txt", "old a", "new a"},
+		applyEdit{"sub/dir/c.txt", "", "created"})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := outcomes(res.Paths)
+	if res.State != journal.ChangeSetApplied || o["a.txt"] != "applied" || o["sub/dir/c.txt"] != "applied" {
+		t.Fatalf("result = %+v", res)
+	}
+	if readFile(t, filepath.Join(ws, "a.txt")) != "new a" || readFile(t, filepath.Join(ws, "sub/dir/c.txt")) != "created" {
+		t.Fatal("content not written")
+	}
+	if fi, _ := os.Stat(filepath.Join(ws, "a.txt")); fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %v", fi.Mode())
+	}
+	if ents, _ := os.ReadDir(ws); len(ents) != 2 {
+		t.Fatalf("stray files in workspace: %v", ents)
+	}
+	opsBefore, _ := store.ApplyOps(id)
+
+	// Retry of an applied change set returns the stable state, writes and
+	// journals nothing, even if the files have since changed.
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("later edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.ApplyChangeSet(ws, id, false)
+	if err != nil || again.State != journal.ChangeSetApplied {
+		t.Fatalf("retry = %+v, %v", again, err)
+	}
+	if readFile(t, filepath.Join(ws, "a.txt")) != "later edit" {
+		t.Fatal("retry wrote")
+	}
+	if opsAfter, _ := store.ApplyOps(id); len(opsAfter) != len(opsBefore) {
+		t.Fatalf("retry journaled: %d -> %d", len(opsBefore), len(opsAfter))
+	}
+}
+
+func TestApplyFirstApplyBaseChangedWritesNothing(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	if err := os.WriteFile(filepath.Join(ws, "b"), []byte("edited"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.ApplyChangeSet(ws, id, false)
+	var bc *journal.BaseChangedError
+	if !errors.Is(err, journal.ErrBaseChanged) || !errors.As(err, &bc) || len(bc.Paths) != 1 || bc.Paths[0].Path != "b" {
+		t.Fatalf("err = %v", err)
+	}
+	if readFile(t, filepath.Join(ws, "a")) != "base a" {
+		t.Fatal("a was written")
+	}
+	cs, _ := store.GetChangeSet(id)
+	if cs.State != journal.ChangeSetAppliable {
+		t.Fatalf("state = %s", cs.State)
+	}
+	if ops, _ := store.ApplyOps(id); len(ops) != 0 {
+		t.Fatalf("journaled %+v", ops)
+	}
+	// An already-applied path on a first apply is also base_changed.
+	if err := os.WriteFile(filepath.Join(ws, "b"), []byte("base b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "a"), []byte("new a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyChangeSet(ws, id, false); !errors.Is(err, journal.ErrBaseChanged) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestApplyWorkspaceMissing(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "x", "y"})
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyChangeSet(ws, id, false); !errors.Is(err, journal.ErrWorkspaceMissing) {
+		t.Fatalf("err = %v", err)
+	}
+	if ops, _ := store.ApplyOps(id); len(ops) != 0 {
+		t.Fatal("journaled")
+	}
+}
+
+// A crash after the rename and before apply_file leaves the apply unfinished;
+// recovery persists what it finds without writing, and a retry completes.
+func TestApplyCrashRecoverThenRetry(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	crash := errors.New("crash")
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "renamed" && path == "a" {
+			return crash
 		}
 		return nil
 	})
+	_, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if !errors.Is(err, crash) {
+		t.Fatalf("err = %v", err)
+	}
+	cs, _ := store.GetChangeSet(id)
+	if cs.State != journal.ChangeSetPartial || outcomes(cs.Paths)["a"] != journal.PathPending {
+		t.Fatalf("after crash = %+v", cs)
+	}
+	rec, err := store.RecoverApply(ws, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return csID, f.turn, hashes
-}
-
-func outcomes(t *testing.T, store *journal.Store, csID string) (string, map[string]string) {
-	t.Helper()
-	cs, err := store.GetChangeSet(csID)
-	if err != nil {
+	if o := outcomes(rec.Paths); rec.State != journal.ChangeSetPartial || o["a"] != "applied" || o["b"] != "pending" {
+		t.Fatalf("recovered = %+v", rec)
+	}
+	if readFile(t, filepath.Join(ws, "b")) != "base b" {
+		t.Fatal("recovery wrote")
+	}
+	// Persisted, not only returned.
+	if got, _ := store.GetChangeSet(id); outcomes(got.Paths)["a"] != "applied" {
+		t.Fatalf("not persisted: %+v", got)
+	}
+	// Recovery with nothing unfinished is a no-op.
+	n1, _ := store.ApplyOps(id)
+	if _, err := store.RecoverApply(ws, id); err != nil {
 		t.Fatal(err)
 	}
-	out := map[string]string{}
-	for _, p := range cs.Paths {
-		out[p.Path] = p.Outcome
+	if n2, _ := store.ApplyOps(id); len(n2) != len(n1) {
+		t.Fatal("second recovery journaled")
 	}
-	return cs.State, out
+	res, err := store.ApplyChangeSet(ws, id, false)
+	if err != nil || res.State != journal.ChangeSetApplied {
+		t.Fatalf("retry = %+v, %v", res, err)
+	}
+	if readFile(t, filepath.Join(ws, "a")) != "new a" || readFile(t, filepath.Join(ws, "b")) != "new b" {
+		t.Fatal("retry content")
+	}
 }
 
-func TestClassifyPaths(t *testing.T) {
-	paths := []journal.ChangeSetPath{
-		{Path: "m", Op: "modify", BaseSHA256: "b", NewSHA256: "n"},
-		{Path: "c", Op: "create", NewSHA256: "n"},
-	}
-	cases := []struct {
-		live map[string]journal.LivePath
-		want [2]string
-	}{
-		{map[string]journal.LivePath{"m": {true, "b"}}, [2]string{journal.PathPending, journal.PathPending}},
-		{map[string]journal.LivePath{"m": {true, "n"}, "c": {true, "n"}}, [2]string{journal.PathApplied, journal.PathApplied}},
-		{map[string]journal.LivePath{"m": {true, "x"}, "c": {true, "x"}}, [2]string{journal.PathConflict, journal.PathConflict}},
-		{map[string]journal.LivePath{}, [2]string{journal.PathConflict, journal.PathPending}},
-	}
-	for i, c := range cases {
-		got := journal.ClassifyPaths(paths, c.live)
-		if got[0].Outcome != c.want[0] || got[1].Outcome != c.want[1] {
-			t.Errorf("case %d: got %+v, want %v", i, got, c.want)
+// A conflict is reported by name after pending paths are written; discard
+// then keeps the applied path recorded.
+func TestApplyPartialConflictRetryAndDiscard(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "write" && path == "b" {
+			return os.WriteFile(filepath.Join(ws, "b"), []byte("edited meanwhile"), 0o644)
 		}
+		return nil
+	})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := outcomes(res.Paths); res.State != journal.ChangeSetConflict || o["a"] != "applied" || o["b"] != "conflict" {
+		t.Fatalf("result = %+v", res)
+	}
+	if readFile(t, filepath.Join(ws, "b")) != "edited meanwhile" {
+		t.Fatal("conflicting target overwritten")
+	}
+	if ents, _ := os.ReadDir(ws); len(ents) != 2 {
+		t.Fatalf("temporary file left: %v", ents)
+	}
+
+	// Retry after restoring b: a is skipped, b is written.
+	if err := os.WriteFile(filepath.Join(ws, "b"), []byte("base b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err = store.ApplyChangeSet(ws, id, false)
+	if err != nil || res.State != journal.ChangeSetApplied || readFile(t, filepath.Join(ws, "b")) != "new b" {
+		t.Fatalf("retry = %+v, %v", res, err)
+	}
+
+	// Partial discard preserves applied paths.
+	ws2, id2 := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	restore = journal.SetApplyHook(func(stage, path string) error {
+		if stage == "write" && path == "b" {
+			return errors.New("crash")
+		}
+		return nil
+	})
+	_, _ = store.ApplyChangeSet(ws2, id2, false)
+	restore()
+	if _, err := store.RecoverApply(ws2, id2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Tx(func(tx *journal.Tx) error { return tx.DiscardChangeSet(id2) }); err != nil {
+		t.Fatal(err)
+	}
+	cs, _ := store.GetChangeSet(id2)
+	if o := outcomes(cs.Paths); cs.State != journal.ChangeSetDiscarded || o["a"] != journal.PathApplied || o["b"] != journal.PathPending {
+		t.Fatalf("discarded = %+v", cs)
+	}
+	if readFile(t, filepath.Join(ws2, "a")) != "new a" {
+		t.Fatal("discard deleted applied file")
+	}
+	if _, err := store.ApplyChangeSet(ws2, id2, false); !errors.Is(err, journal.ErrChangeSetState) {
+		t.Fatalf("apply discarded err = %v", err)
 	}
 }
 
-func TestPrepareApplyBaseChangedWritesNothing(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	store := journal.NewStore(db)
-	csID, _, h := applyFixture(t, store)
-	live := map[string]journal.LivePath{"a": {true, h["a"][0]}, "b": {true, "other"}, "n": {true, "squatter"}}
-	err := store.Tx(func(tx *journal.Tx) error {
-		_, err := tx.PrepareApply(csID, live, false)
-		return err
+func TestApplyCreateNeverReplaces(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"new.txt", "", "mine"})
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "write" {
+			return os.WriteFile(filepath.Join(ws, path), []byte("theirs"), 0o644)
+		}
+		return nil
 	})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if err != nil || res.State != journal.ChangeSetConflict || outcomes(res.Paths)["new.txt"] != "conflict" {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if readFile(t, filepath.Join(ws, "new.txt")) != "theirs" {
+		t.Fatal("create replaced an existing file")
+	}
+	if ents, _ := os.ReadDir(ws); len(ents) != 1 {
+		t.Fatalf("temporary file left: %v", ents)
+	}
+}
+
+func TestApplyConfinement(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store,
+		applyEdit{"link/x", "", "escaped"},
+		applyEdit{"../outside", "", "escaped"},
+		applyEdit{"ok", "", "fine"})
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.ApplyChangeSet(ws, id, false)
 	var bc *journal.BaseChangedError
-	if !errors.Is(err, journal.ErrBaseChanged) || !errors.As(err, &bc) || len(bc.Paths) != 2 || bc.Paths[0] != "b" || bc.Paths[1] != "n" {
+	if !errors.As(err, &bc) || len(bc.Paths) != 2 {
 		t.Fatalf("err = %v", err)
 	}
-	if s, _ := outcomes(t, store, csID); s != journal.ChangeSetAppliable {
-		t.Fatalf("state = %s", s)
+	if ents, _ := os.ReadDir(outside); len(ents) != 0 {
+		t.Fatalf("escaped into %v", ents)
 	}
-	if ops, _ := store.ApplyOps(csID); len(ops) != 0 {
-		t.Fatalf("ops = %+v", ops)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ws), "outside")); err == nil {
+		t.Fatal("wrote through ..")
+	}
+
+	// Swapped for a link between classification and effect: refused at open.
+	ws2, id2 := applyFixture(t, store, applyEdit{"d/f", "", "x"}, applyEdit{"ok", "", "y"})
+	restore := journal.SetApplyHook(func(stage, path string) error {
+		if stage == "write" && path == "d/f" {
+			return os.Symlink(outside, filepath.Join(ws2, "d"))
+		}
+		return nil
+	})
+	res, err := store.ApplyChangeSet(ws2, id2, false)
+	restore()
+	if o := outcomes(res.Paths); err != nil || o["d/f"] != "conflict" || o["ok"] != "applied" {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if ents, _ := os.ReadDir(outside); len(ents) != 0 {
+		t.Fatalf("escaped into %v", ents)
 	}
 }
 
-func TestAppliedRetryAndPartialDiscard(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	store := journal.NewStore(db)
-	csID, _, h := applyFixture(t, store)
-	live := map[string]journal.LivePath{"a": {true, h["a"][0]}, "b": {true, h["b"][0]}} // n absent: pending
-	var plan journal.ApplyPlan
-	if err := store.Tx(func(tx *journal.Tx) (err error) { plan, err = tx.PrepareApply(csID, live, false); return }); err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Pending) != 3 || plan.State != journal.ChangeSetPartial {
-		t.Fatalf("plan = %+v", plan)
-	}
-	if err := store.Tx(func(tx *journal.Tx) error {
-		if err := tx.RecordApplyFile(csID, "a", journal.PathApplied); err != nil {
-			return err
+func TestApplyFollowsRelocatedRootAndRefusesSpecialFile(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	moved := ws + "-moved"
+	restore := journal.SetApplyHook(func(stage, _ string) error {
+		if stage == "started" {
+			return os.Rename(ws, moved)
 		}
-		return tx.DiscardChangeSet(csID)
-	}); err != nil {
-		t.Fatal(err)
+		return nil
+	})
+	res, err := store.ApplyChangeSet(ws, id, false)
+	restore()
+	if err != nil || res.State != journal.ChangeSetApplied {
+		t.Fatalf("result = %+v, %v", res, err)
 	}
-	s, o := outcomes(t, store, csID)
-	if s != journal.ChangeSetDiscarded || o["a"] != journal.PathApplied || o["b"] != journal.PathPending {
-		t.Fatalf("after discard = %s %v", s, o)
+	if readFile(t, filepath.Join(moved, "a")) != "new a" {
+		t.Fatal("moved root not followed")
+	}
+	if _, err := os.Stat(ws); err == nil {
+		t.Fatal("wrote at the old path")
 	}
 
-	// Applied retry on a second change set is stable and journals nothing.
-	csID2, _, h2 := applyFixture(t, store)
-	done := map[string]journal.LivePath{"a": {true, h2["a"][1]}, "b": {true, h2["b"][1]}, "n": {true, h2["n"][1]}}
-	if err := store.Tx(func(tx *journal.Tx) error {
-		if _, err := tx.PrepareApply(csID2, map[string]journal.LivePath{"a": {true, h2["a"][0]}, "b": {true, h2["b"][0]}}, false); err != nil {
+	// A FIFO at the target is not a regular file: base_changed, no blocking.
+	ws2, id2 := applyFixture(t, store, applyEdit{"f", "x", "y"})
+	if err := os.Remove(filepath.Join(ws2, "f")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mkfifo(filepath.Join(ws2, "f")); err != nil {
+		t.Skip("mkfifo unavailable:", err)
+	}
+	if _, err = store.ApplyChangeSet(ws2, id2, false); !errors.Is(err, journal.ErrBaseChanged) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Failure between record operations rolls back atomically.
+func TestApplyRecordsRollBackAtomically(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "x", "y"}, applyEdit{"b", "", "z"})
+	boom := errors.New("boom")
+	err := store.Tx(func(tx *journal.Tx) error {
+		if err := tx.BeginApply(id, false); err != nil {
 			return err
 		}
-		for _, p := range []string{"a", "b", "n"} {
-			if err := tx.RecordApplyFile(csID2, p, journal.PathApplied); err != nil {
-				return err
-			}
+		if err := tx.RecordApplyFile(id, "a", journal.PathApplied); err != nil {
+			return err
 		}
-		_, err := tx.FinishApply(csID2)
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	if ops, _ := store.ApplyOps(id); len(ops) != 0 {
+		t.Fatalf("partial records survived: %+v", ops)
+	}
+	cs, _ := store.GetChangeSet(id)
+	if cs.State != journal.ChangeSetAppliable || outcomes(cs.Paths)["a"] != journal.PathPending {
+		t.Fatalf("state = %+v", cs)
+	}
+	// A clean apply still works afterwards.
+	if res, err := store.ApplyChangeSet(ws, id, false); err != nil || res.State != journal.ChangeSetApplied {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// An old change set survives a later one staging the same path and fails its
+// base check once the other is applied.
+func TestApplyOldProposalSurvivesOverlappingStaging(t *testing.T) {
+	store := newApplyStore(t)
+	ws, first := applyFixture(t, store, applyEdit{"a", "base", "first"})
+	f := buildToolsTurn(t, store)
+	var second string
+	err := store.Tx(func(tx *journal.Tx) error {
+		if _, err := tx.RecordObservation(f.turn, f.author, "a", journal.ObservationFile, []byte("base")); err != nil {
+			return err
+		}
+		if _, err := tx.StageWrite(f.turn, "a", []byte("second")); err != nil {
+			return err
+		}
+		cs, err := tx.FreezeChangeSet(f.turn, f.candidate, "snap2", "chg2")
+		second = cs.ID
 		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := store.ApplyOps(csID2)
-	for i := 0; i < 2; i++ {
-		if err := store.Tx(func(tx *journal.Tx) (err error) { plan, err = tx.PrepareApply(csID2, done, false); return }); err != nil {
-			t.Fatal(err)
-		}
-		if plan.State != journal.ChangeSetApplied || len(plan.Pending) != 0 {
-			t.Fatalf("retry plan = %+v", plan)
-		}
-	}
-	if after, _ := store.ApplyOps(csID2); len(after) != len(before) {
-		t.Fatalf("retry journaled: %d -> %d", len(before), len(after))
-	}
-}
-
-func TestRecoverApplyPersistsPerPathStates(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	store := journal.NewStore(db)
-	csID, _, h := applyFixture(t, store)
-	if err := store.Tx(func(tx *journal.Tx) error { return tx.BeginApply(csID, false) }); err != nil {
-		t.Fatal(err)
-	}
-	live := map[string]journal.LivePath{"a": {true, h["a"][1]}, "b": {true, h["b"][0]}} // a done, b pending, n absent
-	cs, err := store.RecoverApply(csID, live)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cs.State != journal.ChangeSetPartial {
-		t.Fatalf("state = %s", cs.State)
+	if cs, err := store.GetChangeSet(first); err != nil || cs.State != journal.ChangeSetAppliable {
+		t.Fatalf("first = %+v, %v", cs, err)
 	}
-	s, o := outcomes(t, store, csID)
-	if s != journal.ChangeSetPartial || o["a"] != journal.PathApplied || o["b"] != journal.PathPending || o["n"] != journal.PathPending {
-		t.Fatalf("durable = %s %v", s, o)
+	if res, err := store.ApplyChangeSet(ws, second, false); err != nil || res.State != journal.ChangeSetApplied {
+		t.Fatalf("second = %+v, %v", res, err)
 	}
-	// Recovering again needs a new started op: refused, nothing changes.
-	if _, err := store.RecoverApply(csID, live); !errors.Is(err, journal.ErrChangeSetState) {
-		t.Fatalf("second recover = %v", err)
+	if _, err = store.ApplyChangeSet(ws, first, false); !errors.Is(err, journal.ErrBaseChanged) {
+		t.Fatalf("first err = %v", err)
+	}
+	cs, err := store.GetChangeSet(first)
+	if err != nil || cs.State != journal.ChangeSetAppliable || readFile(t, filepath.Join(ws, "a")) != "second" {
+		t.Fatalf("first kept = %+v, %v", cs, err)
 	}
 }
 
-func TestRecoverApplyRollsBackAtomically(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	store := journal.NewStore(db)
-	csID, _, h := applyFixture(t, store)
-	// No apply in progress: the file records are refused, so nothing is kept.
-	live := map[string]journal.LivePath{"a": {true, h["a"][1]}}
-	if _, err := store.RecoverApply(csID, live); !errors.Is(err, journal.ErrChangeSetState) {
-		t.Fatalf("err = %v", err)
-	}
-	if ops, _ := store.ApplyOps(csID); len(ops) != 0 {
-		t.Fatalf("ops = %+v", ops)
-	}
-
-	// Failure after the file records, before apply_recovered, undoes them.
-	if err := store.Tx(func(tx *journal.Tx) error { return tx.BeginApply(csID, false) }); err != nil {
+// A created file takes the process umask, not a fixed world-writable mode.
+func TestApplyCreatedFileHonoursUmask(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"new.txt", "", "hello"}, applyEdit{"m.txt", "old", "new"})
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+	if _, err := store.ApplyChangeSet(ws, id, false); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := store.ApplyOps(csID)
-	sentinel := errors.New("boom")
-	err := store.Tx(func(tx *journal.Tx) error {
-		if _, err := tx.RecoverApply(csID, live); err != nil {
+	fi, err := os.Stat(filepath.Join(ws, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("created mode = %v, want -rw-r--r--", fi.Mode().Perm())
+	}
+	if fi, _ := os.Stat(filepath.Join(ws, "m.txt")); fi.Mode().Perm() != 0o640 {
+		t.Fatalf("modified mode = %v", fi.Mode().Perm())
+	}
+}
+
+// The applied state is read before the workspace is opened.
+func TestApplyAppliedRetryWithWorkspaceGone(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "x", "y"})
+	if _, err := store.ApplyChangeSet(ws, id, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	res, err := store.ApplyChangeSet(ws, id, false)
+	if err != nil || res.State != journal.ChangeSetApplied {
+		t.Fatalf("retry = %+v, %v", res, err)
+	}
+}
+
+// Recovery records every fresh classification, including a path that was
+// recorded as conflict and is back at its base.
+func TestApplyRecoverRecordsConflictToPending(t *testing.T) {
+	store := newApplyStore(t)
+	ws, id := applyFixture(t, store, applyEdit{"a", "base a", "new a"}, applyEdit{"b", "base b", "new b"})
+	if err := store.Tx(func(tx *journal.Tx) error {
+		if err := tx.BeginApply(id, false); err != nil {
 			return err
 		}
-		return sentinel
-	})
-	if !errors.Is(err, sentinel) {
+		return tx.RecordApplyFile(id, "a", journal.PathConflict)
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if after, _ := store.ApplyOps(csID); len(after) != len(before) {
-		t.Fatalf("ops not rolled back: %d -> %d", len(before), len(after))
-	}
-}
-
-func TestOldChangeSetSurvivesOverlappingStaging(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	defer cleanup()
-	store := journal.NewStore(db)
-	csID, _, h := applyFixture(t, store)
-	_, _, _ = applyFixture(t, store) // a later turn stages the same paths
-	live := map[string]journal.LivePath{"a": {true, h["a"][0]}, "b": {true, h["b"][0]}}
-	if err := store.Tx(func(tx *journal.Tx) error { _, err := tx.PrepareApply(csID, live, false); return err }); err != nil {
+	rec, err := store.RecoverApply(ws, id)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if s, _ := outcomes(t, store, csID); s != journal.ChangeSetPartial {
-		t.Fatalf("state = %s", s)
+	if o := outcomes(rec.Paths); rec.State != journal.ChangeSetPartial || o["a"] != journal.PathPending || o["b"] != journal.PathPending {
+		t.Fatalf("recovered = %+v", rec)
+	}
+	if got, _ := store.GetChangeSet(id); outcomes(got.Paths)["a"] != journal.PathPending {
+		t.Fatalf("not persisted: %+v", got)
 	}
 }
