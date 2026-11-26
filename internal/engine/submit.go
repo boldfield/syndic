@@ -62,6 +62,15 @@ type openTurn struct {
 	revising bool
 	results  map[string]reviewResult
 
+	// Tool state, owned by Engine.mu. workspace is the conversation's
+	// workspace root, empty when it has none, in which case no file tool is
+	// offered. toolCallsUsed counts the author's calls that counted against
+	// tools.max_calls_per_turn; toolLimited is set once the author has been
+	// dispatched without definitions because the bound was reached.
+	workspace     string
+	toolCallsUsed int
+	toolLimited   bool
+
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
 	delivering    bool
@@ -281,9 +290,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	turnDeadline := e.clock.Now().UTC().Add(turn)
 
 	var (
-		turnID, convID, contextHash string
-		doc                         *history.Document
-		rec                         budgetRecord
+		turnID, convID, contextHash, workspace string
+		doc                                    *history.Document
+		rec                                    budgetRecord
 	)
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
@@ -302,6 +311,15 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			if err := emit("", wire.EventKindConversationCreated, wire.EvConversationCreated{ConversationID: convID}); err != nil {
 				return err
 			}
+		}
+		// The tools' workspace is the conversation's (v5 delta section 6),
+		// which an earlier submit may have set.
+		conv, err := tx.GetConversation(convID)
+		if err != nil {
+			return err
+		}
+		if conv.Workspace != nil {
+			workspace = *conv.Workspace
 		}
 		// The history is rendered once, here, and admission, the stored
 		// document and the context hash are all taken from these bytes.
@@ -390,6 +408,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
+		workspace:       workspace,
 		required:        eff.Preset.RequiredReviewers,
 		approved:        map[string]bool{},
 		results:         map[string]reviewResult{},

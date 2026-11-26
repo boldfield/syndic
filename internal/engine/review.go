@@ -43,9 +43,10 @@ func (e *Engine) participantConfig(id string) config.Participant {
 
 // completeAuthorReview runs accept and gate for the author's result in a
 // review-mode turn and, when it passes, freezes the candidate. It reports
-// whether reviewers should be dispatched. A turn it does not carry on is
-// either ended here or already terminal.
-func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) bool {
+// whether reviewers should be dispatched (proceed) or whether the result is
+// an accepted tool step whose calls the caller now executes (step). A turn it
+// does not carry on either way is either ended here or already terminal.
+func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transport.CompleteRequest, res transport.CompleteResult, fail *failure) (proceed, step bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -83,14 +84,15 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			return err
 		}
 		if isToolStep {
-			// Tool step accepted but not frozen as a candidate; text is journaled.
+			// Tool step accepted but not frozen as a candidate; text is
+			// journaled. Its calls run after this transaction commits.
 			if err = tx.SetAttemptText(attemptID, res.Text); err != nil {
 				return err
 			}
-			// Tool step execution is not yet supported; end the turn with an explicit reason.
-			ended = true
-			endReason = reasonToolStepUnsupported
-			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
+			if endReason = e.toolStepRefusal(t, req); endReason != "" {
+				ended = true
+				term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
+			}
 			return err
 		}
 		if gate != nil {
@@ -164,12 +166,12 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	}
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
-		return false
+		return false, false
 	}
 	if quarantined {
 		// The turn already ended; release reports the author idle.
 		e.lateCommitted(attemptID, res)
-		return false
+		return false, false
 	}
 	e.failedCommitted(t.author, fail, held)
 	if e.lastInflight(t.author) {
@@ -181,7 +183,10 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		// A revision's author failed or changed nothing: the candidate and its
 		// reviews exist, so the terminal state is delivered (none before one).
 		e.deliverTerminal(t, StateIncomplete, endReason)
-		return false
+		return false, false
+	}
+	if isToolStep {
+		return false, true
 	}
 	t.candidate = res.Text
 	t.candidateHash = hash
@@ -193,7 +198,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		t.round = round
 		t.resetRound()
 	}
-	return true
+	return true, false
 }
 
 // runReviewers hands every required reviewer's dispatch to the scheduler, in
@@ -564,12 +569,14 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 		if isToolStep {
-			// Reviewer tool step accepted but not parsed as a verdict; text is journaled.
+			// Reviewer tool step accepted but not parsed as a verdict; text is
+			// journaled. No reviewer dispatch offers tool definitions yet, so
+			// a reviewer's tool step calls tools it was not offered and ends
+			// the turn; nothing of it is executed.
 			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
 				return err
 			}
-			// Tool step execution is not yet supported; end the turn with an explicit reason.
-			endState, endReason = StateIncomplete, reasonToolStepUnsupported
+			endState, endReason = StateIncomplete, reasonToolStepNotOffered
 			term, err = e.endIn(tx, emit, t, endState, endReason)
 			return err
 		}

@@ -120,6 +120,7 @@ type options struct {
 	blockingCancel bool
 	clockStart     time.Time
 	changeLines    func(transport.CompleteResult) []string
+	beforeEffect   func(turnID, attemptID, name string)
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -186,6 +187,13 @@ func BlockingCancel() Option {
 // returns, for tests of unchanged-revision detection.
 func WithAuthorChangeLines(f func(transport.CompleteResult) []string) Option {
 	return func(o *options) { o.changeLines = f }
+}
+
+// WithBeforeToolEffect calls f inside every author tool call's effect, before
+// the tool runs, as a wait inside the effect would; the engine re-checks the
+// step once f returns. A test of a cancel landing mid-step cancels in f.
+func WithBeforeToolEffect(f func(turnID, attemptID, name string)) Option {
+	return func(o *options) { o.beforeEffect = f }
 }
 
 // NoStart builds the engine without starting it.
@@ -305,6 +313,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		// replace the states SkipProbe sets up.
 		NoStartupProbes:   true,
 		AuthorChangeLines: o.changeLines,
+		BeforeToolEffect:  o.beforeEffect,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {

@@ -156,9 +156,10 @@ func TestBudgetReserveChargesDefinitions(t *testing.T) {
 	}
 }
 
-// No dispatch sends definitions yet, and each is reserved at the estimate of
-// exactly the request it sends: the author, the review, the repair and the
-// deliveries of a preset that gives both roles tools.
+// Each dispatch is reserved at the estimate of exactly the request it sends:
+// the author's request carries the read definitions its preset gives it over
+// the conversation's workspace, and the review, the repair and the deliveries
+// carry none, no reviewer dispatch offering definitions yet.
 func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
 	roster := withPresetTools(t, enginetest.RosterTOML, "review", []string{tools.GroupRead}, []string{tools.GroupRead})
@@ -176,12 +177,20 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	phases := map[string]int{}
 	for _, id := range []string{"author", "reviewer"} {
 		for _, call := range h.Adapters[id].Calls() {
-			if len(call.Request.Tools) != 0 {
-				t.Errorf("%s %s request carries %d definitions", id, call.Request.Envelope.Phase, len(call.Request.Tools))
+			wantDefs := 0
+			if call.Request.Envelope.Phase == "author" {
+				wantDefs = len(definitions(t, tools.GroupRead))
+			}
+			if len(call.Request.Tools) != wantDefs {
+				t.Errorf("%s %s request carries %d definitions, want %d", id, call.Request.Envelope.Phase, len(call.Request.Tools), wantDefs)
+			}
+			want := estimate(call.Request.Messages)
+			if len(call.Request.Tools) > 0 {
+				want += definitionsEstimate(call.Request.Tools)
 			}
 			row := getAttempt(t, h, call.Request.Envelope.AttemptID)
-			if row.EstimatedPromptTokens == nil || *row.EstimatedPromptTokens != estimate(call.Request.Messages) {
-				t.Errorf("%s %s estimate = %v, want %d", id, row.Phase, row.EstimatedPromptTokens, estimate(call.Request.Messages))
+			if row.EstimatedPromptTokens == nil || *row.EstimatedPromptTokens != want {
+				t.Errorf("%s %s estimate = %v, want %d", id, row.Phase, row.EstimatedPromptTokens, want)
 			}
 			phases[row.Phase]++
 		}
