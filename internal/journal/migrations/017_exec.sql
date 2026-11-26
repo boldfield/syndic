@@ -66,7 +66,7 @@ CREATE TABLE exec_calls (
 );
 
 -- The result of a finished command. At most one per call, and none beside an
--- abandoned outcome (the triggers below keep the two exclusive).
+-- outcome (the triggers below keep the two exclusive).
 CREATE TABLE exec_results (
 	tool_call_id TEXT PRIMARY KEY REFERENCES exec_calls(tool_call_id),
 	exit_code INTEGER NOT NULL,
@@ -81,8 +81,9 @@ CREATE TABLE exec_results (
 	recorded_at TEXT NOT NULL
 );
 
--- A call that delivers no result. A call has at most one abandoned outcome;
--- containment_unverified may stand beside it.
+-- A call that delivers no result, so none beside a result. A call has at most
+-- one outcome of each kind;
+-- containment_unverified may stand beside abandoned.
 CREATE TABLE exec_outcomes (
 	id TEXT PRIMARY KEY,
 	tool_call_id TEXT NOT NULL REFERENCES exec_calls(tool_call_id),
@@ -93,15 +94,15 @@ CREATE TABLE exec_outcomes (
 );
 
 CREATE TRIGGER exec_results_no_abandoned BEFORE INSERT ON exec_results
-WHEN EXISTS (SELECT 1 FROM exec_outcomes WHERE tool_call_id = NEW.tool_call_id AND kind = 'abandoned')
+WHEN EXISTS (SELECT 1 FROM exec_outcomes WHERE tool_call_id = NEW.tool_call_id)
 BEGIN
-	SELECT RAISE(ABORT, 'exec call is abandoned and has no result');
+	SELECT RAISE(ABORT, 'exec call has an outcome and delivers no result');
 END;
 
 CREATE TRIGGER exec_outcomes_no_result BEFORE INSERT ON exec_outcomes
-WHEN NEW.kind = 'abandoned' AND EXISTS (SELECT 1 FROM exec_results WHERE tool_call_id = NEW.tool_call_id)
+WHEN EXISTS (SELECT 1 FROM exec_results WHERE tool_call_id = NEW.tool_call_id)
 BEGIN
-	SELECT RAISE(ABORT, 'exec call has a result and is not abandoned');
+	SELECT RAISE(ABORT, 'exec call has a result and delivers no outcome');
 END;
 
 -- Each read the referee made in one decision, in order. sha256 and byte_len

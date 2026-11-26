@@ -15,10 +15,10 @@ import (
 // Errors returned by the exec record methods, wrapped with detail.
 var (
 	// ErrExecResultRecorded is returned for a second result, or a result for
-	// a call that is abandoned.
+	// a call that has an outcome.
 	ErrExecResultRecorded = errors.New("exec call already has a result or is abandoned")
 	// ErrExecOutcomeRecorded is returned for a second outcome of one kind, or
-	// an abandoned outcome for a call that has a result.
+	// an outcome for a call that has a result.
 	ErrExecOutcomeRecorded = errors.New("exec call outcome already recorded")
 )
 
@@ -347,7 +347,7 @@ func (tx *Tx) RecordExecCall(in ExecCallInput) (ExecCall, error) {
 }
 
 // RecordExecResult journals the result of a finished command. The kept output
-// is stored by hash. A second result, or a result for an abandoned call, is
+// is stored by hash. A second result, or a result for a call with an outcome, is
 // refused with ErrExecResultRecorded. It emits exec_result.
 func (tx *Tx) RecordExecResult(toolCallID string, in ExecResultInput) (ExecResult, error) {
 	if in.DurationMS < 0 || in.OutputBytesTotal < int64(len(in.Output)) {
@@ -363,7 +363,7 @@ func (tx *Tx) RecordExecResult(toolCallID string, in ExecResultInput) (ExecResul
 	var taken bool
 	if err := tx.tx.QueryRow(`
 		SELECT EXISTS(SELECT 1 FROM exec_results WHERE tool_call_id = ?)
-		    OR EXISTS(SELECT 1 FROM exec_outcomes WHERE tool_call_id = ? AND kind = 'abandoned')
+		    OR EXISTS(SELECT 1 FROM exec_outcomes WHERE tool_call_id = ?)
 	`, toolCallID, toolCallID).Scan(&taken); err != nil {
 		return ExecResult{}, fmt.Errorf("query exec result: %w", err)
 	}
@@ -432,8 +432,8 @@ func (tx *Tx) RecordExecOutcome(toolCallID, kind, cause string) (ExecOutcome, er
 	var taken bool
 	if err := tx.tx.QueryRow(`
 		SELECT EXISTS(SELECT 1 FROM exec_outcomes WHERE tool_call_id = ? AND kind = ?)
-		    OR (? = 'abandoned' AND EXISTS(SELECT 1 FROM exec_results WHERE tool_call_id = ?))
-	`, toolCallID, kind, kind, toolCallID).Scan(&taken); err != nil {
+		    OR EXISTS(SELECT 1 FROM exec_results WHERE tool_call_id = ?)
+	`, toolCallID, kind, toolCallID).Scan(&taken); err != nil {
 		return ExecOutcome{}, fmt.Errorf("query exec outcome: %w", err)
 	}
 	if taken {

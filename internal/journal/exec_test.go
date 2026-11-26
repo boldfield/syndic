@@ -329,7 +329,22 @@ func TestExecTablesAreAppendOnly(t *testing.T) {
 		if _, err := tx.RecordExecResult(f.call, journal.ExecResultInput{Output: []byte("x"), OutputBytesTotal: 1, CaptureComplete: true}); err != nil {
 			return err
 		}
-		if _, err := tx.RecordExecOutcome(f.call, journal.ExecContainmentUnverified, journal.ExecCauseRecovery); err != nil {
+		c2, err := tx.RecordToolCall(f.author, 1, "call_1", "bash", journal.ToolClassExec, []byte(`{"command":"pwd"}`))
+		if err != nil {
+			return err
+		}
+		d2, err := tx.RecordRefereeDecision(c2.ID, journal.RefereeAllow, "prints cwd", "")
+		if err != nil {
+			return err
+		}
+		if _, err := tx.RecordExecCall(journal.ExecCallInput{
+			ToolCallID: c2.ID, Command: []byte("pwd"), TimeoutSEffective: 120, Shell: "/bin/bash",
+			View:              journal.ExecView{SnapshotVersion: 3, OverlaySHA256: "ov", ModesSHA256: "md"},
+			RefereeDecisionID: d2.ID, SandboxBackend: "bwrap", PolicyHash: "ph",
+		}); err != nil {
+			return err
+		}
+		if _, err := tx.RecordExecOutcome(c2.ID, journal.ExecContainmentUnverified, journal.ExecCauseRecovery); err != nil {
 			return err
 		}
 		if _, err := tx.RecordRefereeRead(f.decision, f.refAttempt, "list_dir", []byte(`{}`), []byte("x"), false); err != nil {
@@ -367,5 +382,55 @@ func TestExecTablesAreAppendOnly(t *testing.T) {
 		if _, err := c.Exec(stmt); err == nil || !strings.Contains(err.Error(), "immutable") {
 			t.Errorf("%s: %v", stmt, err)
 		}
+	}
+}
+
+func TestExecOutcomeExcludesResultInBothOrders(t *testing.T) {
+	for _, kind := range []string{journal.ExecAbandoned, journal.ExecContainmentUnverified} {
+		t.Run("result then "+kind, func(t *testing.T) {
+			db, cleanup := openTestDB(t)
+			defer cleanup()
+			store := journal.NewStore(db)
+			f := buildExecCall(t, store)
+			recordExec(t, store, f)
+			err := store.Tx(func(tx *journal.Tx) error {
+				_, err := tx.RecordExecResult(f.call, journal.ExecResultInput{Output: []byte("x"), OutputBytesTotal: 1, CaptureComplete: true})
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.Tx(func(tx *journal.Tx) error {
+				_, err := tx.RecordExecOutcome(f.call, kind, journal.ExecCauseRecovery)
+				return err
+			})
+			if !errors.Is(err, journal.ErrExecOutcomeRecorded) {
+				t.Fatalf("outcome beside result: %v", err)
+			}
+			if _, err := db.Conn().Exec(`INSERT INTO exec_outcomes (id, tool_call_id, kind, cause, recorded_at) VALUES ('x', ?, ?, 'recovery', 't')`, f.call, kind); err == nil {
+				t.Fatal("schema accepted outcome beside result")
+			}
+		})
+		t.Run(kind+" then result", func(t *testing.T) {
+			db, cleanup := openTestDB(t)
+			defer cleanup()
+			store := journal.NewStore(db)
+			f := buildExecCall(t, store)
+			recordExec(t, store, f)
+			err := store.Tx(func(tx *journal.Tx) error {
+				_, err := tx.RecordExecOutcome(f.call, kind, journal.ExecCauseRecovery)
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.Tx(func(tx *journal.Tx) error {
+				_, err := tx.RecordExecResult(f.call, journal.ExecResultInput{Output: []byte("x"), OutputBytesTotal: 1, CaptureComplete: true})
+				return err
+			})
+			if !errors.Is(err, journal.ErrExecResultRecorded) {
+				t.Fatalf("result beside outcome: %v", err)
+			}
+		})
 	}
 }
