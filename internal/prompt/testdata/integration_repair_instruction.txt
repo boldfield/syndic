@@ -1,0 +1,6 @@
+Your reply was not in the required form. Reply again with the same answer and the same disposition, in exactly this form:
+
+=== SYNDIC ANSWER ===
+<the answer>
+=== SYNDIC DISPOSITION ===
+<the disposition>
