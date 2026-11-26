@@ -398,7 +398,7 @@ func (r *Roster) Validate() error {
 			errs = append(errs, r.validateDeliberatePreset(name, preset, seenParticipantIDs)...)
 			continue
 		}
-		if len(preset.Proposers) > 0 || preset.Integrator != "" {
+		if preset.Proposers != nil || preset.Integrator != "" {
 			errs = append(errs, fmt.Errorf("preset %q: proposers and integrator are valid only with mode deliberate", name))
 		}
 
@@ -1025,6 +1025,8 @@ func (r *Roster) validateDeliberatePreset(name string, preset Preset, known map[
 				errs = append(errs, fmt.Errorf("preset %q: integrator %q must not be a required reviewer", name, id))
 			} else if !known[id] {
 				errs = append(errs, fmt.Errorf("preset %q: required reviewer %q is not a participant", name, id))
+			} else {
+				errs = append(errs, r.checkRoleEligible(name, "reviewer", id, RoleReviewer)...)
 			}
 		}
 	}

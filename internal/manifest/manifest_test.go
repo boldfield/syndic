@@ -1719,3 +1719,50 @@ func TestBuild_AllowWebWithReadDifferenceAffectsRosterHash(t *testing.T) {
 		t.Error("different allow_web_with_read should produce different roster hash")
 	}
 }
+
+func TestBuild_DeliberatePresetAffectsRosterHash(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	store := journal.NewStore(db)
+	createTestProbeRun(t, store, "ep1", "m1", 0)
+	now := time.Now().Truncate(time.Second)
+
+	hash := func(proposers []string, integrator string) string {
+		roster := &config.Roster{
+			Participants: []config.Participant{
+				{ID: "a", Endpoint: "ep1", Model: "m1"},
+				{ID: "b", Endpoint: "ep1", Model: "m1"},
+				{ID: "c", Endpoint: "ep1", Model: "m1"},
+			},
+			Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+			DefaultPreset: "d",
+			Presets: map[string]config.Preset{
+				"d": {Mode: config.ModeDeliberate, Proposers: proposers, Integrator: integrator},
+			},
+			Budgets: config.Budgets{},
+			Pools:   map[string]config.Pool{},
+		}
+		built, err := Build(Input{
+			Store:          store,
+			Roster:         roster,
+			RosterPath:     "/path/to/roster.toml",
+			RosterFile:     []byte("content"),
+			EngineVersion:  "1.0",
+			StartedAt:      now,
+			AdapterVersion: func(p config.Participant) string { return "1.0" },
+		})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+		return built.RosterHash
+	}
+
+	base := hash([]string{"a", "b"}, "a")
+	if base == hash([]string{"a", "b"}, "b") {
+		t.Error("different integrator should produce different roster hash")
+	}
+	if base == hash([]string{"a", "b", "c"}, "a") {
+		t.Error("different proposers should produce different roster hash")
+	}
+}

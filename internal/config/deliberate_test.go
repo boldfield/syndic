@@ -36,6 +36,7 @@ func TestDeliberatePresetValidation(t *testing.T) {
 		{"integrator among reviewers", func(p *Preset) { p.RequiredReviewers = []string{"a", "b"} }, "must not be a required reviewer"},
 		{"empty reviewers", func(p *Preset) { p.RequiredReviewers = []string{} }, "must not be empty"},
 		{"unknown reviewer", func(p *Preset) { p.RequiredReviewers = []string{"zz"} }, "required reviewer \"zz\" is not a participant"},
+		{"ineligible required reviewer", func(p *Preset) { p.RequiredReviewers = []string{"author"} }, "reviewer \"author\" is not eligible for reviewer role"},
 		{"author refused", func(p *Preset) { p.Author = "a" }, "must not set author"},
 		{"ineligible proposer", func(p *Preset) { p.Proposers = []string{"a", "author"} }, "proposer \"author\" is not eligible for reviewer role"},
 		{"ineligible integrator", func(p *Preset) { p.Proposers = []string{"reviewer", "b"}; p.Integrator = "reviewer" }, "integrator \"reviewer\" is not eligible for author role"},
@@ -63,6 +64,11 @@ func TestProposersRefusedOnOtherModes(t *testing.T) {
 	r.Presets["review"] = p
 	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "valid only with mode deliberate") {
 		t.Fatalf("Validate() = %v", err)
+	}
+	p.Proposers, p.Integrator = []string{}, ""
+	r.Presets["review"] = p
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "valid only with mode deliberate") {
+		t.Fatalf("explicit empty proposers: Validate() = %v", err)
 	}
 	p.Proposers, p.Integrator = nil, "author"
 	r.Presets["review"] = p
