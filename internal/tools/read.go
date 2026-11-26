@@ -59,9 +59,9 @@ func ReadFile(
 	staging map[string]string, // path -> new_sha256 for staged changes
 	maxResultBytes int64,
 ) (json.RawMessage, error) {
-	// Normalize the path.
+	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if strings.Contains(path, "..") || filepath.IsAbs(path) {
+	if filepath.IsAbs(path) || strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
 		return nil, fmt.Errorf("invalid path: %q", args.Path)
 	}
 
@@ -83,7 +83,7 @@ func ReadFile(
 
 	// Check if the file is staged.
 	if newSHA, ok := staging[path]; ok {
-		return readStaged(ctx, path, newSHA, offset, limit)
+		return readStaged(ctx, path, newSHA, offset, limit, maxResultBytes)
 	}
 
 	// Observe the file through the snapshot.
@@ -108,19 +108,19 @@ func ReadFile(
 		return nil, fmt.Errorf("get file content: %w", err)
 	}
 
-	// Handle ranged reads.
-	if offset > 0 || limit < int64(len(content)) {
-		return rangedRead(content, offset, limit)
-	}
-
-	// Check if the file is too large.
-	if int64(len(content)) > maxResultBytes {
+	// Check if the file is too large and no range is requested.
+	if int64(len(content)) > maxResultBytes && offset == 0 && limit == maxResultBytes {
 		result := SizeErrorResult{
 			Error: "file too large",
 			Size:  int64(len(content)),
 		}
 		data, _ := json.Marshal(result)
 		return data, nil
+	}
+
+	// Handle ranged reads.
+	if offset > 0 || limit < int64(len(content)) {
+		return rangedRead(content, offset, limit)
 	}
 
 	return json.Marshal(ReadResult{Content: string(content)})
@@ -133,9 +133,9 @@ func ListDirFunc(
 	args ListDirArgs,
 	staging map[string]string, // path -> new_sha256 for staged changes
 ) (json.RawMessage, error) {
-	// Normalize the path.
+	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if strings.Contains(path, "..") || filepath.IsAbs(path) {
+	if filepath.IsAbs(path) || strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
 		return nil, fmt.Errorf("invalid path: %q", args.Path)
 	}
 	if path == "." || path == "" {
@@ -245,7 +245,7 @@ func readLiveDir(conf *workspace.Confined, dirPath string) (string, []byte, erro
 	for _, name := range entries {
 		// Use fstatat to determine the type without crossing symlinks.
 		var stat unix.Stat_t
-		if err := unix.Fstatat(-int(f.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := unix.Fstatat(int(f.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			// Skip entries that can't be stat'd (they may have been deleted).
 			continue
 		}
@@ -267,11 +267,21 @@ func readLiveDir(conf *workspace.Confined, dirPath string) (string, []byte, erro
 }
 
 // readStaged reads a file that has been staged for writing.
-func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, limit int64) (json.RawMessage, error) {
+func readStaged(ctx ReadFileContext, path string, newSHA string, offset int64, limit int64, maxResultBytes int64) (json.RawMessage, error) {
 	// Get the staged content from the content store.
 	content, err := ctx.ContentStore.Content(newSHA)
 	if err != nil {
 		return nil, fmt.Errorf("get staged content: %w", err)
+	}
+
+	// Check if the file is too large and no range is requested.
+	if int64(len(content)) > maxResultBytes && offset == 0 && limit == maxResultBytes {
+		result := SizeErrorResult{
+			Error: "file too large",
+			Size:  int64(len(content)),
+		}
+		data, _ := json.Marshal(result)
+		return data, nil
 	}
 
 	// Handle ranged reads.
