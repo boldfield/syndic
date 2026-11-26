@@ -219,6 +219,26 @@ func recordReviewerEvidence(tx *journal.Tx, turnID, participant, verdictID strin
 	return results, nil
 }
 
+// openBlockEvidence returns the evidence fields of the reviewer's blocks
+// still open once its verdict is applied, one per line in the order they were
+// opened. A block opened by this verdict is among them, and so is a block
+// opened in an earlier round and maintained since: its citation transfers on
+// every revision while it stays open. A withdrawn block, and the other
+// reviewer's blocks, cite nothing.
+func openBlockEvidence(tx *journal.Tx, turnID, participant string) (string, error) {
+	blocks, err := tx.ReviewerOpenBlocks(turnID, participant)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Evidence != "" {
+			parts = append(parts, b.Evidence)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
 // diffLine is one line of a file, with its newline when it has one.
 type diffLine struct {
 	text  string

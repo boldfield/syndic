@@ -660,7 +660,9 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if evidenceResults, err = recordReviewerEvidence(tx, t.id, d.participant, verdictID, t.frozenVersion); err != nil {
 				return err
 			}
-			acceptedEvidence = v.Evidence
+			if acceptedEvidence, err = openBlockEvidence(tx, t.id, d.participant); err != nil {
+				return err
+			}
 			// A loop waits for every required reviewer's accepted result on
 			// the candidate before it decides, so the author is sent all the
 			// feedback at once.

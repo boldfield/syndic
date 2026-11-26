@@ -637,3 +637,73 @@ func TestVerdictEvidenceBindsOnlyOwnNewObservations(t *testing.T) {
 		}
 	}
 }
+
+// A block that cites a reviewer's result and is maintained into later rounds
+// transfers that result on every revision while it stays open, though the
+// maintaining verdict carries no evidence field of its own. Once the block is
+// withdrawn the result no longer reaches the author, and the other
+// reviewer's result never does.
+func TestMaintainedBlockCitationTransfersOnEveryRevision(t *testing.T) {
+	var h *enginetest.Harness
+	record := func(attempt, body string) string {
+		var id string
+		err := h.Store.Tx(func(tx *journal.Tx) error {
+			call, err := tx.RecordToolCall(attempt, 0, "prov_0", "lookup", "read", []byte(`{"q":"`+body+`"}`))
+			if err != nil {
+				return err
+			}
+			res, err := tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte(body), "")
+			if err != nil {
+				return err
+			}
+			id = res.ID
+			return nil
+		})
+		if err != nil {
+			panic(err)
+		}
+		return id
+	}
+	r1 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		id := record(req.Envelope.AttemptID, "maintained-cited-body")
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "see "+id, "r", "r")
+	})
+	r2 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		record(req.Envelope.AttemptID, "other-reviewer-body")
+		return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), enginetest.Reply(revisedText), enginetest.Reply(revisedText + " twice"), enginetest.Reply(revisedText + " thrice")},
+		"r1": {
+			r1,
+			v2Verdict("1", "approve-with-changes", "", "b1 maintained"),
+			v2Verdict("2", "approve-with-changes", "", "b1 withdrawn"),
+			v2Verdict("3", "approve", ""),
+		},
+		"r2": {r2, v2Verdict("1", "approve", ""), v2Verdict("2", "approve", ""), v2Verdict("3", "approve", "")},
+	}
+	h = enginetest.New(t, revisionRoster("3", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+
+	calls := h.Adapters["author"].Calls()
+	if len(calls) != 4 {
+		t.Fatalf("author calls = %d, want 4", len(calls))
+	}
+	for i, wantCited := range []bool{true, true, false} {
+		var feedback string
+		for _, m := range calls[i+1].Request.Messages {
+			feedback += m.Content + "\n"
+		}
+		got := strings.Count(feedback, "maintained-cited-body")
+		if wantCited && got != 1 {
+			t.Fatalf("revision %d: cited result of open block b1 appears %d times, want 1:\n%s", i+1, got, feedback)
+		}
+		if !wantCited && got != 0 {
+			t.Fatalf("revision %d: result of withdrawn block b1 reached the author:\n%s", i+1, feedback)
+		}
+		if strings.Contains(feedback, "other-reviewer-body") {
+			t.Fatalf("revision %d: author received the other reviewer's result:\n%s", i+1, feedback)
+		}
+	}
+}

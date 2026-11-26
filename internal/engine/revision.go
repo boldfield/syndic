@@ -32,8 +32,8 @@ type reviewResult struct {
 	attemptID string
 	text      string
 	// results are the reviewer's own tool results by id and evidence is the
-	// accepted block's evidence field; the author receives only the results
-	// that evidence cites.
+	// evidence of its blocks still open after the verdict; the author receives
+	// only the results that evidence cites.
 	results  map[string]string
 	evidence string
 }

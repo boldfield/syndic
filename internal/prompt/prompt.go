@@ -325,8 +325,9 @@ type RevisionFeedback struct {
 	// Results maps the ids of the tool results this reviewer received to their
 	// content. Only results this reviewer's evidence cites reach the author.
 	Results map[string]string
-	// Evidence is the evidence field of this reviewer's accepted verdict block,
-	// as parsed for the envelope version actually received (v1 or v2). When
+	// Evidence is the evidence of this reviewer's blocks still open after its
+	// accepted verdict, including blocks maintained from earlier rounds, as
+	// parsed for the envelope version actually received (v1 or v2). When
 	// empty, a valid v1 envelope in Output is parsed instead.
 	Evidence string
 }
