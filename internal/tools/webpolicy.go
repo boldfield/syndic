@@ -249,9 +249,12 @@ type Resolver interface {
 }
 
 // Fetcher sends screened GET requests. A URL is resolved only after the
-// screener has allowed it, and then once.
-//
-// The address rule and connection pinning are not part of this type.
+// screener has allowed it. The lookup is a pre-flight query on the canonical
+// (punycode) host and its result is not used for dialing: the transport
+// resolves the name again, so this type does not pin the connection to the
+// address that was looked up (design v5 delta, section 6). The address rule
+// and connection pinning belong to a later task and this Fetcher is not
+// compliant with them.
 type Fetcher struct {
 	Screener *URLScreener
 	Resolver Resolver
@@ -259,7 +262,7 @@ type Fetcher struct {
 	Transport http.RoundTripper
 }
 
-// Fetch screens rawURL, resolves its host once, and sends a GET with no body,
+// Fetch screens rawURL, looks up its canonical host, and sends a GET with no body,
 // cookie jar, credentials or redirect following. A refusal is a *RefusalError.
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*http.Response, error) {
 	if f.Screener == nil || f.Resolver == nil {
@@ -272,8 +275,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*http.Response, err
 	if err != nil {
 		return nil, err
 	}
-	if _, err := f.Resolver.LookupNetIP(ctx, "ip", req.URL.Hostname()); err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", req.URL.Hostname(), err)
+	host, _ := canonicalHost(req.URL)
+	if _, err := f.Resolver.LookupNetIP(ctx, "ip", host); err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
 	}
 	c := &http.Client{
 		Transport:     f.Transport,

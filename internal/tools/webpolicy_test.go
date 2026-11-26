@@ -197,7 +197,7 @@ func TestFetchResolvesOnlyAfterAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if len(res.hosts) != 1 || res.hosts[0] != "Example.com" || len(tr.reqs) != 1 {
+	if len(res.hosts) != 1 || res.hosts[0] != "example.com" || len(tr.reqs) != 1 {
 		t.Fatalf("allowed URL: resolver %v, transport %d", res.hosts, len(tr.reqs))
 	}
 }
@@ -245,5 +245,20 @@ func TestFetchNeverSendsURLUserinfo(t *testing.T) {
 	}
 	if _, err := NewGETRequest(context.Background(), "ftp://example.com/"); err == nil {
 		t.Fatal("NewGETRequest accepted ftp")
+	}
+}
+
+func TestFetchResolvesCanonicalIDNHost(t *testing.T) {
+	res := &recordingResolver{}
+	s := NewURLScreener(0)
+	s.SetHostPolicy(mustPolicy(t, "**.bücher.de"))
+	f := &Fetcher{Screener: s, Resolver: res, Transport: &recordingTransport{}}
+	resp, err := f.Fetch(context.Background(), "http://www.bücher.de/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if len(res.hosts) != 1 || res.hosts[0] != "www.xn--bcher-kva.de" {
+		t.Fatalf("resolver queried %v, want www.xn--bcher-kva.de", res.hosts)
 	}
 }
