@@ -134,7 +134,9 @@ type Runner struct {
 	Backend sandbox.Backend
 	// Shell is the run's shell, from SelectShell.
 	Shell Shell
-	// Sequence is the termination sequence.
+	// Sequence is the termination sequence. It must be configured: with a
+	// zero CleanupDeadline no containment is confirmed and every call is
+	// ErrContainmentUnverified.
 	Sequence sandbox.Sequence
 	// Bounds are the bounds applied to each call.
 	Bounds Bounds
@@ -219,10 +221,15 @@ func (r *Runner) Run(ctx context.Context, call Call) (*Result, error) {
 	}
 	start := time.Now()
 	out := startCapture(proc.Output(), bounds.MaxOutputBytes)
+	// The capture cutoff runs from the shell's end, concurrently with the
+	// termination sequence, so that confirming the containment empty does
+	// not extend the time the pipe is read.
 	waitc := make(chan waited, 1)
+	capc := make(chan Output, 1)
 	go func() {
 		st, err := proc.Wait()
 		waitc <- waited{status: st, err: err, at: time.Now()}
+		capc <- out.finish(captureCutoff)
 	}()
 
 	timer := time.NewTimer(timeout)
@@ -264,7 +271,7 @@ func (r *Runner) Run(ctx context.Context, call Call) (*Result, error) {
 		return nil, fmt.Errorf("command: wait: %w", w.err)
 	}
 
-	captured := out.finish(captureCutoff)
+	captured := <-capc
 	if ctx.Err() != nil {
 		return nil, ErrTerminatedByCaller
 	}

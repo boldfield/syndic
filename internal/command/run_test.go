@@ -333,6 +333,65 @@ func TestCaptureCutoff(t *testing.T) {
 	}
 }
 
+// slowConfirmBackend wraps heldBackend so that confirming the containment
+// empty takes delay, and records when the pipe was closed.
+type slowConfirmBackend struct {
+	heldBackend
+	delay  time.Duration
+	closed chan time.Time
+}
+
+func (b slowConfirmBackend) Start(ctx context.Context, spec sandbox.Spec) (sandbox.Process, error) {
+	p, err := b.heldBackend.Start(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	h := p.(heldProcess)
+	go func() {
+		<-h.out.closed
+		b.closed <- time.Now()
+	}()
+	return slowConfirmProcess{heldProcess: h, delay: b.delay}, nil
+}
+
+type slowConfirmProcess struct {
+	heldProcess
+	delay time.Duration
+}
+
+func (p slowConfirmProcess) ConfirmEmpty(ctx context.Context) error {
+	select {
+	case <-time.After(p.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return p.heldProcess.ConfirmEmpty(ctx)
+}
+
+// The cutoff runs from the shell's exit, not from the confirmation of the
+// containment, and the result still waits for the confirmation.
+func TestCaptureCutoffDuringSlowConfirmation(t *testing.T) {
+	const delay = 700 * time.Millisecond
+	fake := sandbox.NewFake(sandbox.Caps(sandbox.D), output("held\n"))
+	b := slowConfirmBackend{heldBackend: heldBackend{fake}, delay: delay, closed: make(chan time.Time, 1)}
+	r := &Runner{Backend: b, Shell: Bash, Sequence: fastSequence}
+	begin := time.Now()
+	res, err := r.Run(context.Background(), fakeCall("hold"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned := time.Since(begin)
+	if res.CaptureComplete || res.Output != "held\n" {
+		t.Errorf("complete %v output %q", res.CaptureComplete, res.Output)
+	}
+	if d := (<-b.closed).Sub(begin); d > captureCutoff+300*time.Millisecond {
+		t.Errorf("pipe closed %v after start, cutoff %v", d, captureCutoff)
+	}
+	if returned < delay {
+		t.Errorf("returned after %v, before the confirmation", returned)
+	}
+}
+
 func TestCancelled(t *testing.T) {
 	r, fake := fakeRunner(t, Bounds{}, sandbox.FakeScript{Runtime: time.Hour})
 	ctx, cancel := context.WithCancel(context.Background())
