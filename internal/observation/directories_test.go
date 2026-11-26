@@ -230,15 +230,39 @@ func TestKnownDescendantForcesDirectory(t *testing.T) {
 	wantConflict(t, f, "p/q", err, ConflictTypeChanged)
 }
 
-func TestConflictJournalFailureIsReturned(t *testing.T) {
+func TestConflictWithBadAttemptIsNotJournaledOrReportedAsConflict(t *testing.T) {
 	f := newFixture(t)
+	var other string
+	err := f.j.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun([]byte(`{}`))
+		if err != nil {
+			return err
+		}
+		turn, err := tx.CreateTurn(run, "review", nil)
+		if err != nil {
+			return err
+		}
+		other, err = tx.BeginAttempt(turn, "author", "author", 1, nil, "")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var reads atomic.Int32
 	f.mustObserve(t, "dir", listReader(t, &reads, Entry{"f", "a"}))
-	// A turn the journal does not know makes the event insert fail.
-	s := NewStore(f.j)
-	err := s.journalConflict("no-such-turn", f.author, &SnapshotConflictError{Path: "x", Type: ConflictDeleted})
-	if err == nil {
-		t.Fatal("journaling failure swallowed")
+	for name, attempt := range map[string]string{"nonexistent": "no-such-attempt", "cross-turn": other} {
+		t.Run(name, func(t *testing.T) {
+			_, err := NewStore(f.j).Observe(f.turn, attempt, "dir/a", absentReader(&reads))
+			if err == nil || errors.Is(err, ErrSnapshotConflict) {
+				t.Fatalf("err = %v, want a journaling failure that is not snapshot_conflict", err)
+			}
+			if f.recorded(t, "dir/a") {
+				t.Fatal("dir/a recorded")
+			}
+			if evs := f.conflictEvents(t); len(evs) != 0 {
+				t.Fatalf("conflict event written for a bad attempt: %v", evs)
+			}
+		})
 	}
 }
 

@@ -1343,3 +1343,18 @@ func (s *Store) GetVerdictEvidence(verdictID string) (ev VerdictEvidence, err er
 	})
 	return ev, err
 }
+
+// EmitAttemptEvent appends an event of the given type to the turn's journal
+// after checking in the same transaction that attemptID exists and belongs to
+// turnID, so an event bound to an attempt never names a foreign or missing one.
+func (tx *Tx) EmitAttemptEvent(turnID, attemptID, eventType string, data []byte) error {
+	attemptTurn, _, err := tx.turnAttempt(attemptID)
+	if err != nil {
+		return err
+	}
+	if attemptTurn != turnID {
+		return fmt.Errorf("attempt %q belongs to turn %q, not %q", attemptID, attemptTurn, turnID)
+	}
+	_, err = tx.Emit(turnID, eventType, data)
+	return err
+}

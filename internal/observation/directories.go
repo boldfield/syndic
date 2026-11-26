@@ -245,7 +245,6 @@ func (s *Store) journalConflict(turnID, attemptID string, c *SnapshotConflictErr
 		return err
 	}
 	return s.j.Tx(func(tx *journal.Tx) error {
-		_, err := tx.Emit(turnID, "snapshot_conflict", data)
-		return err
+		return tx.EmitAttemptEvent(turnID, attemptID, "snapshot_conflict", data)
 	})
 }

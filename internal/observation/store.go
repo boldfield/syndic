@@ -111,7 +111,7 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 	if ct := ns.conflict(kind); ct != "" {
 		c := &SnapshotConflictError{Path: path, Type: ct}
 		if err := s.journalConflict(turnID, attemptID, c); err != nil {
-			return journal.Observation{}, fmt.Errorf("journal %w: %w", c, err)
+			return journal.Observation{}, fmt.Errorf("journal snapshot conflict at %q (%s): %w", c.Path, c.Type, err)
 		}
 		return journal.Observation{}, c
 	}
