@@ -20,10 +20,21 @@ type Reader func() (kind string, content []byte, err error)
 // first touches per turn.
 type Store struct {
 	j *journal.Store
-
-	mu    sync.Mutex
-	turns map[string]*turnLock
 }
+
+// lockKey scopes a turn lock to one journal, so every Store over the same
+// journal serializes against the others.
+type lockKey struct {
+	j    *journal.Store
+	turn string
+}
+
+// turnLocks is shared by all Stores: a second Store over the same journal
+// must not bypass the per-turn serialization.
+var turnLocks = struct {
+	mu sync.Mutex
+	m  map[lockKey]*turnLock
+}{m: map[lockKey]*turnLock{}}
 
 // turnLock is reference-counted so it exists only while a caller holds or
 // waits for it.
@@ -34,26 +45,27 @@ type turnLock struct {
 
 // NewStore returns a Store recording into j.
 func NewStore(j *journal.Store) *Store {
-	return &Store{j: j, turns: map[string]*turnLock{}}
+	return &Store{j: j}
 }
 
 func (s *Store) lock(turnID string) func() {
-	s.mu.Lock()
-	tl := s.turns[turnID]
+	key := lockKey{s.j, turnID}
+	turnLocks.mu.Lock()
+	tl := turnLocks.m[key]
 	if tl == nil {
 		tl = &turnLock{}
-		s.turns[turnID] = tl
+		turnLocks.m[key] = tl
 	}
 	tl.refs++
-	s.mu.Unlock()
+	turnLocks.mu.Unlock()
 	tl.mu.Lock()
 	return func() {
 		tl.mu.Unlock()
-		s.mu.Lock()
+		turnLocks.mu.Lock()
 		if tl.refs--; tl.refs == 0 {
-			delete(s.turns, turnID)
+			delete(turnLocks.m, key)
 		}
-		s.mu.Unlock()
+		turnLocks.mu.Unlock()
 	}
 }
 

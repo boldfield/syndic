@@ -42,6 +42,56 @@ func newFixture(tb testing.TB) fixture {
 	return f
 }
 
+func heldLocks(j *journal.Store) int {
+	turnLocks.mu.Lock()
+	defer turnLocks.mu.Unlock()
+	n := 0
+	for k := range turnLocks.m {
+		if k.j == j {
+			n++
+		}
+	}
+	return n
+}
+
+func TestConcurrentFirstTouchAcrossStoresReadsOnce(t *testing.T) {
+	f := newFixture(t)
+	var reads atomic.Int32
+	n := 8
+	if testing.Short() {
+		n = 4
+	}
+	ids := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o, err := NewStore(f.j).Observe(f.turn, f.author, "a.txt", func() (string, []byte, error) {
+				reads.Add(1)
+				time.Sleep(5 * time.Millisecond)
+				return journal.ObservationFile, []byte("A"), nil
+			})
+			if err != nil {
+				t.Error(err)
+			}
+			ids[i] = o.ID
+		}()
+	}
+	wg.Wait()
+	if reads.Load() != 1 {
+		t.Fatalf("live reads = %d, want 1", reads.Load())
+	}
+	for _, id := range ids {
+		if id != ids[0] || id == "" {
+			t.Fatalf("ids differ: %v", ids)
+		}
+	}
+	if f.count(t) != 1 {
+		t.Fatalf("records = %d", f.count(t))
+	}
+}
+
 func fileReader(n *atomic.Int32, body string) Reader {
 	return func() (string, []byte, error) {
 		n.Add(1)
@@ -95,8 +145,8 @@ func TestConcurrentFirstTouchReadsOnce(t *testing.T) {
 	if f.count(t) != 1 {
 		t.Fatalf("records = %d", f.count(t))
 	}
-	if len(s.turns) != 0 {
-		t.Fatalf("turn locks retained: %d", len(s.turns))
+	if n := heldLocks(f.j); n != 0 {
+		t.Fatalf("turn locks retained: %d", n)
 	}
 }
 
@@ -202,8 +252,8 @@ func TestFailedObserveRecordsNothingAndRetries(t *testing.T) {
 	if err != nil || o.Kind != journal.ObservationFile {
 		t.Fatalf("retry = %+v, %v", o, err)
 	}
-	if len(s.turns) != 0 {
-		t.Fatalf("turn locks retained: %d", len(s.turns))
+	if n := heldLocks(f.j); n != 0 {
+		t.Fatalf("turn locks retained: %d", n)
 	}
 }
 
