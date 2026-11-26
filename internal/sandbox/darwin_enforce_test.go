@@ -381,7 +381,6 @@ func testTokenDirsFixed(t *testing.T, b sandbox.Backend) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token := filepath.Join(tmp, sandbox.MacAllowTokenName)
 	// One background child, bounded by its own 30-second sleep.
 	lines := c.shell(t, b, fmt.Sprintf(`T=%s S=%s
 /bin/mv "$T" "$S/moved" 2>/dev/null; echo "mv_into_scratch $?"
@@ -397,11 +396,10 @@ echo "child $!"`, tmp, scratch, sandbox.MacAllowTokenName))
 			t.Errorf("%s succeeded", op)
 		}
 	}
+	// The call's cleanup removes the token once it has ended, so whether
+	// it stayed in place is checked from inside.
 	if field(t, lines, "exists") != "0" {
 		t.Errorf("the allow token is gone from inside")
-	}
-	if _, err := os.Stat(token); err != nil {
-		t.Errorf("the allow token is gone: %v", err)
 	}
 	pid, err := strconv.Atoi(field(t, lines, "child"))
 	if err != nil || pid <= 0 {
