@@ -1,0 +1,477 @@
+package observation
+
+import (
+	"encoding/hex"
+	"fmt"
+	"path/filepath"
+	"testing"
+
+	"github.com/boldfield/syndic/internal/journal"
+)
+
+type dirFixture struct {
+	j      *journal.Store
+	turn   string
+	author string
+}
+
+func newDirFixture(tb testing.TB) dirFixture {
+	tb.Helper()
+	db, err := journal.Open(filepath.Join(tb.TempDir(), "j.db"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = db.Close() })
+	f := dirFixture{j: journal.NewStore(db)}
+	err = f.j.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun([]byte(`{}`))
+		if err != nil {
+			return err
+		}
+		if f.turn, err = tx.CreateTurn(run, "review", nil); err != nil {
+			return err
+		}
+		f.author, err = tx.BeginAttempt(f.turn, "author", "author", 1, nil, "")
+		return err
+	})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return f
+}
+
+func TestParseEntries(t *testing.T) {
+	entries := []Entry{
+		{Type: "f", Name: "file.txt"},
+		{Type: "d", Name: "subdir"},
+		{Type: "l", Name: "link"},
+	}
+
+	// Frame the entries (this sorts them by name)
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	// Parse them back (they come out sorted by name: file.txt, link, subdir)
+	parsed, err := ParseEntries(frameData)
+	if err != nil {
+		t.Fatalf("ParseEntries: %v", err)
+	}
+
+	if len(parsed) != len(entries) {
+		t.Fatalf("got %d entries, want %d", len(parsed), len(entries))
+	}
+	expectedOrder := []Entry{
+		{Type: "f", Name: "file.txt"},
+		{Type: "l", Name: "link"},
+		{Type: "d", Name: "subdir"},
+	}
+	for i, e := range parsed {
+		if e.Type != expectedOrder[i].Type || e.Name != expectedOrder[i].Name {
+			t.Fatalf("entry %d: got %+v, want %+v", i, e, expectedOrder[i])
+		}
+	}
+}
+
+func TestParseEntriesWithSpecialCharacters(t *testing.T) {
+	entries := []Entry{
+		{Type: "f", Name: "file\nwith\nnewlines"},
+		{Type: "d", Name: "dir with spaces"},
+		{Type: "f", Name: "binary\x00\x01\x02"},
+	}
+
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	parsed, err := ParseEntries(frameData)
+	if err != nil {
+		t.Fatalf("ParseEntries: %v", err)
+	}
+
+	if len(parsed) != len(entries) {
+		t.Fatalf("got %d entries, want %d", len(parsed), len(entries))
+	}
+	// After sorting by name: binary..., dir with spaces, file\nwith\nnewlines
+	expectedOrder := []Entry{
+		{Type: "f", Name: "binary\x00\x01\x02"},
+		{Type: "d", Name: "dir with spaces"},
+		{Type: "f", Name: "file\nwith\nnewlines"},
+	}
+	for i, e := range parsed {
+		if e.Type != expectedOrder[i].Type || e.Name != expectedOrder[i].Name {
+			t.Fatalf("entry %d: got %+v, want %+v", i, e, expectedOrder[i])
+		}
+	}
+}
+
+func TestReconcileDirectoryObservation_RemovesAbsentEntries(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, observe that "deleted.txt" is absent
+	if _, err := s.Observe(f.turn, f.author, "dir/deleted.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	}); err != nil {
+		t.Fatalf("first observe (absent): %v", err)
+	}
+
+	// Now reconcile a directory listing that includes "deleted.txt"
+	entries := []Entry{
+		{Type: "f", Name: "file.txt"},
+		{Type: "f", Name: "deleted.txt"},
+	}
+
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "dir", entries, f.j)
+	if err != nil {
+		t.Fatalf("ReconcileDirectoryObservation: %v", err)
+	}
+
+	if len(reconciled) != 1 {
+		t.Fatalf("got %d entries, want 1", len(reconciled))
+	}
+	if reconciled[0].Name != "file.txt" {
+		t.Fatalf("got entry %s, want file.txt", reconciled[0].Name)
+	}
+}
+
+func TestReconcileDirectoryObservation_PreservesOtherEntries(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Observe that "absent.txt" is absent
+	if _, err := s.Observe(f.turn, f.author, "dir/absent.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	}); err != nil {
+		t.Fatalf("observe absent: %v", err)
+	}
+
+	// Reconcile a listing without the absent file
+	entries := []Entry{
+		{Type: "f", Name: "a.txt"},
+		{Type: "d", Name: "b"},
+		{Type: "f", Name: "c.txt"},
+	}
+
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "dir", entries, f.j)
+	if err != nil {
+		t.Fatalf("ReconcileDirectoryObservation: %v", err)
+	}
+
+	if len(reconciled) != 3 {
+		t.Fatalf("got %d entries, want 3", len(reconciled))
+	}
+}
+
+func TestReconcileDirectoryObservation_IgnoresAbsenceFromOtherDirs(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Observe that "otherdir/file.txt" is absent
+	if _, err := s.Observe(f.turn, f.author, "otherdir/file.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	}); err != nil {
+		t.Fatalf("observe absent in other dir: %v", err)
+	}
+
+	// Reconcile a listing in a different directory
+	entries := []Entry{
+		{Type: "f", Name: "file.txt"},
+	}
+
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "thisdir", entries, f.j)
+	if err != nil {
+		t.Fatalf("ReconcileDirectoryObservation: %v", err)
+	}
+
+	// The entry should be preserved since the absence was in a different directory
+	if len(reconciled) != 1 || reconciled[0].Name != "file.txt" {
+		t.Fatalf("got %+v, want [file.txt]", reconciled)
+	}
+}
+
+func TestCheckFileConflict_DetectsTypeChange(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing where "target" is a directory
+	dirEntries := []Entry{
+		{Type: "d", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now check if reading that path as a file (type "f") creates a conflict
+	err = CheckFileConflict(f.turn, "dir/target", "f", f.j)
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+	if err.Error() != "snapshot_conflict: dir/target" {
+		t.Fatalf("got error %q, want snapshot_conflict", err)
+	}
+}
+
+func TestCheckFileConflict_AllowsMatchingType(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Record a directory listing where "target" is a file
+	dirEntries := []Entry{
+		{Type: "f", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Check if reading that path as a file (type "f") succeeds
+	err = CheckFileConflict(f.turn, "dir/target", "f", f.j)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckFileConflict_IgnoresUnlistedPaths(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Record a directory listing with one entry
+	dirEntries := []Entry{
+		{Type: "f", Name: "listed.txt"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Check if reading a path that wasn't in the listing succeeds
+	// (no conflict because it wasn't in the listing)
+	err = CheckFileConflict(f.turn, "dir/unlisted.txt", "f", f.j)
+	if err != nil {
+		t.Fatalf("unexpected error for unlisted path: %v", err)
+	}
+}
+
+func TestCheckFileConflict_IgnoresOtherDirectories(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Record a directory listing in "otherdir"
+	dirEntries := []Entry{
+		{Type: "d", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "otherdir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe otherdir: %v", err)
+	}
+
+	// Check if reading "thisdir/target" as a file succeeds
+	// (no conflict because the listing was in a different directory)
+	err = CheckFileConflict(f.turn, "thisdir/target", "f", f.j)
+	if err != nil {
+		t.Fatalf("unexpected error for different directory: %v", err)
+	}
+}
+
+func TestReconcileAndCheckRoundTrip(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// Scenario: file A is present, file B was absent
+	if _, err := s.Observe(f.turn, f.author, "work/a.txt", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("content A"), nil
+	}); err != nil {
+		t.Fatalf("observe a.txt: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "work/b.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	}); err != nil {
+		t.Fatalf("observe b.txt absent: %v", err)
+	}
+
+	// Now list the directory with both A and B
+	entries := []Entry{
+		{Type: "f", Name: "a.txt"},
+		{Type: "f", Name: "b.txt"},
+	}
+
+	// Reconciliation should remove B (because it was observed as absent)
+	reconciled, err := ReconcileDirectoryObservation(f.turn, "work", entries, f.j)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if len(reconciled) != 1 || reconciled[0].Name != "a.txt" {
+		t.Fatalf("reconciled entries: got %+v, want [a.txt]", reconciled)
+	}
+
+	// Record the reconciled listing
+	frameData, err := FrameEntries(reconciled)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "work", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe work directory: %v", err)
+	}
+
+	// Check if reading a.txt (type f) succeeds - it's in the listing with matching type
+	if err := CheckFileConflict(f.turn, "work/a.txt", "f", f.j); err != nil {
+		t.Fatalf("check a.txt: %v", err)
+	}
+
+	// Check if reading a.txt (type d) fails - it's in the listing as "f" but we're checking as "d"
+	if err := CheckFileConflict(f.turn, "work/a.txt", "d", f.j); err == nil {
+		t.Fatal("expected conflict for a.txt type change from f to d")
+	}
+}
+
+func TestFrameEntries(t *testing.T) {
+	entries := []Entry{
+		{Type: "f", Name: "z.txt"},
+		{Type: "d", Name: "a_dir"},
+		{Type: "f", Name: "m.txt"},
+	}
+
+	data, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	// Should be sorted by name
+	parsed, err := ParseEntries(data)
+	if err != nil {
+		t.Fatalf("ParseEntries: %v", err)
+	}
+
+	expected := []string{"a_dir", "m.txt", "z.txt"}
+	for i, name := range expected {
+		if parsed[i].Name != name {
+			t.Fatalf("entry %d: got %s, want %s", i, parsed[i].Name, name)
+		}
+	}
+}
+
+func TestEntriesHash(t *testing.T) {
+	entries := []Entry{
+		{Type: "f", Name: "file.txt"},
+		{Type: "d", Name: "dir"},
+	}
+
+	hash1, err := EntriesHash(entries)
+	if err != nil {
+		t.Fatalf("EntriesHash first call: %v", err)
+	}
+
+	// Same entries in different order should produce the same hash
+	entries2 := []Entry{
+		{Type: "d", Name: "dir"},
+		{Type: "f", Name: "file.txt"},
+	}
+
+	hash2, err := EntriesHash(entries2)
+	if err != nil {
+		t.Fatalf("EntriesHash second call: %v", err)
+	}
+
+	if hash1 != hash2 {
+		t.Fatalf("hashes differ for same entries: %s vs %s", hash1, hash2)
+	}
+
+	// Verify it's a valid SHA256 hex string
+	if len(hash1) != 64 {
+		t.Fatalf("hash length: got %d, want 64", len(hash1))
+	}
+	if _, err := hex.DecodeString(hash1); err != nil {
+		t.Fatalf("hash not valid hex: %v", err)
+	}
+}
+
+func BenchmarkParseEntries(b *testing.B) {
+	entries := []Entry{}
+	for i := 0; i < 100; i++ {
+		entries = append(entries, Entry{
+			Type: "f",
+			Name: fmt.Sprintf("file%d.txt", i),
+		})
+	}
+
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := ParseEntries(frameData); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReconcileDirectoryObservation(b *testing.B) {
+	f := newDirFixture(b)
+	s := NewStore(f.j)
+
+	// Setup: observe some absent files
+	for i := 0; i < 10; i++ {
+		if _, err := s.Observe(f.turn, f.author, fmt.Sprintf("dir/absent_%d.txt", i), func() (string, []byte, error) {
+			return journal.ObservationAbsent, nil, nil
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	// Create a large directory listing
+	entries := []Entry{}
+	for i := 0; i < 100; i++ {
+		entries = append(entries, Entry{
+			Type: "f",
+			Name: fmt.Sprintf("file%d.txt", i),
+		})
+		if i < 10 {
+			entries = append(entries, Entry{
+				Type: "f",
+				Name: fmt.Sprintf("absent_%d.txt", i),
+			})
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := ReconcileDirectoryObservation(f.turn, "dir", entries, f.j); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
