@@ -6,8 +6,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -228,5 +230,73 @@ func TestHelperReportsHighDescriptor(t *testing.T) {
 				t.Errorf("with descriptor %d inherited, helper printed %q, want %q", high, out, want)
 			}
 		})
+	}
+}
+
+// TestHelperReadDistinguishesAbsent checks that the helper reports "absent"
+// only for a path that does not exist, and "denied" for a path that exists
+// but cannot be read: an unreadable file (EACCES) and a directory (EISDIR).
+// The protected-path clause depends on this distinction.
+func TestHelperReadDistinguishesAbsent(t *testing.T) {
+	bin := BuildHelper(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	unreadable := filepath.Join(dir, "unreadable")
+	if err := os.WriteFile(unreadable, []byte("secret"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, path, want string
+	}{
+		{"enoent", missing, resultAbsent},
+		{"eacces", unreadable, resultDenied},
+		{"eisdir", dir, resultDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "eacces" && os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 file")
+			}
+			out, err := exec.Command(bin, "read", tc.path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("helper: %v\n%s", err, out)
+			}
+			lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+			if len(lines) != 2 || lines[0] != "ready" {
+				t.Fatalf("helper printed %q", out)
+			}
+			if !strings.HasPrefix(lines[1], tc.want+" ") {
+				t.Errorf("reading %s: got %q, want result %q", tc.path, lines[1], tc.want)
+			}
+		})
+	}
+}
+
+// TestProtectedAbsentRejectsDenied checks the judgement of the protected-path
+// clause: a read of the protected path that fails with anything other than
+// ENOENT, as a backend that exposes the path but denies the read reports,
+// does not satisfy it. The generic read-fails clauses accept either.
+func TestProtectedAbsentRejectsDenied(t *testing.T) {
+	absent := []string{"absent /w/.env: open /w/.env: no such file or directory", "absent /s/.env: open /s/.env: no such file or directory"}
+	denied := []string{"denied /w/.env: open /w/.env: permission denied", "absent /s/.env: open /s/.env: no such file or directory"}
+	exposed := []string{"ok /w/.env: 17 bytes", "absent /s/.env: open /s/.env: no such file or directory"}
+
+	if err := checkLines(absent, 2, resultAbsent); err != nil {
+		t.Errorf("protected clause rejected absent paths: %v", err)
+	}
+	if err := checkLines(denied, 2, resultAbsent); err == nil {
+		t.Error("protected clause accepted a denied read of an exposed path")
+	}
+	if err := checkLines(exposed, 2, resultAbsent); err == nil {
+		t.Error("protected clause accepted a successful read")
+	}
+	if err := checkLines(denied, 2, resultDenied, resultAbsent); err != nil {
+		t.Errorf("read-fails clause rejected a denied or absent read: %v", err)
+	}
+	if err := checkLines(exposed, 2, resultDenied, resultAbsent); err == nil {
+		t.Error("read-fails clause accepted a successful read")
+	}
+	if err := checkLines(absent, 1, resultAbsent); err == nil {
+		t.Error("a wrong line count was accepted")
 	}
 }

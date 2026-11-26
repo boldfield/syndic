@@ -6,7 +6,10 @@
 // Command helper is the program the sandbox contract suite runs inside a
 // backend. It is built from source at test time. Every mode prints "ready"
 // first, then one line per probe: "ok <detail>" when the operation succeeded
-// and "denied <error>" when it failed.
+// and "denied <error>" when it failed. A read of a path that does not exist
+// (ENOENT) prints "absent <error>" instead of "denied", so that the suite can
+// tell a protected path that is not there from one that is there but
+// unreadable.
 //
 //	helper read <path>...             open and read each file
 //	helper write <path>...            create each file
@@ -19,6 +22,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -58,9 +62,13 @@ func main() {
 	switch mode {
 	case "read":
 		for _, p := range args {
-			if b, err := os.ReadFile(p); err != nil {
+			b, err := os.ReadFile(p)
+			switch {
+			case errors.Is(err, syscall.ENOENT):
+				fmt.Printf("absent %s: %v\n", p, err)
+			case err != nil:
 				fmt.Printf("denied %s: %v\n", p, err)
-			} else {
+			default:
 				fmt.Printf("ok %s: %d bytes\n", p, len(b))
 			}
 		}

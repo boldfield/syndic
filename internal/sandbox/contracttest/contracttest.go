@@ -38,10 +38,12 @@ const (
 	// it a backend that runs nothing would pass every denial.
 	Baseline Clause = "baseline"
 	// ReadOutside: a read outside the scratch, temporary and system
-	// locations fails.
+	// locations fails, whether the backend denies the path or hides it.
 	ReadOutside Clause = "read_outside"
-	// ProtectedAbsent: a protected path is not found, neither in the live
-	// workspace nor in the scratch directory.
+	// ProtectedAbsent: a protected path is not found (ENOENT), neither in
+	// the live workspace nor in the scratch directory. A backend that
+	// exposes the path but denies the read (EACCES) fails this clause: the
+	// design requires that the command finds no such file.
 	ProtectedAbsent Clause = "protected_absent"
 	// WriteOutside: a write outside the scratch and temporary directories
 	// fails and leaves no file.
@@ -448,35 +450,63 @@ func (c *call) runHelper(t *testing.T, args ...string) []string {
 	return lines[1:]
 }
 
-// expectAll checks that each probe line starts with want ("ok" or "denied")
-// and that there is one line per probe.
-func expectAll(t *testing.T, lines []string, n int, want, what string) {
+// Helper results: the first word of each probe line.
+const (
+	resultOK     = "ok"     // the operation succeeded
+	resultDenied = "denied" // the operation failed, for a reason other than ENOENT
+	resultAbsent = "absent" // a read failed with ENOENT: no such file
+)
+
+// expectAll checks that there is one probe line per probe and that each
+// begins with one of the accepted results.
+func expectAll(t *testing.T, lines []string, n int, what string, accepted ...string) {
 	t.Helper()
+	if err := checkLines(lines, n, accepted...); err != nil {
+		t.Errorf("%s: %v", what, err)
+	}
+}
+
+// checkLines reports how lines departs from n probe lines each beginning
+// with one of the accepted results, or nil when it does not. It is the
+// whole judgement of the read, write, signal and connect clauses, so that a
+// test can show which results a clause rejects.
+func checkLines(lines []string, n int, accepted ...string) error {
+	var errs []error
 	if len(lines) != n {
-		t.Errorf("%s: got %d probe lines, want %d: %q", what, len(lines), n, lines)
+		errs = append(errs, fmt.Errorf("got %d probe lines, want %d: %q", len(lines), n, lines))
 	}
 	for _, l := range lines {
-		if !strings.HasPrefix(l, want+" ") {
-			t.Errorf("%s: want %s, got %q", what, want, l)
+		ok := false
+		for _, a := range accepted {
+			if strings.HasPrefix(l, a+" ") {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			errs = append(errs, fmt.Errorf("want %s, got %q", strings.Join(accepted, " or "), l))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 func testBaseline(t *testing.T, c *call) {
 	lines := c.runHelper(t, "read", filepath.Join(c.scratch, "main.go"))
-	expectAll(t, lines, 1, "ok", "read in scratch")
+	expectAll(t, lines, 1, "read in scratch", resultOK)
 	lines = c.runHelper(t, "write", filepath.Join(c.scratch, "out.txt"), filepath.Join(c.tmp, "out.txt"))
-	expectAll(t, lines, 2, "ok", "write in scratch and temporary directories")
+	expectAll(t, lines, 2, "write in scratch and temporary directories", resultOK)
 }
 
 func testReadOutside(t *testing.T, c *call) {
 	lines := c.runHelper(t, "read", filepath.Join(c.outside, "secret.txt"), filepath.Join(c.workspace, "main.go"))
-	expectAll(t, lines, 2, "denied", "read outside the allowed locations")
+	expectAll(t, lines, 2, "read outside the allowed locations", resultDenied, resultAbsent)
 }
 
 func testProtectedAbsent(t *testing.T, c *call) {
 	lines := c.runHelper(t, "read", filepath.Join(c.workspace, protectedName), filepath.Join(c.scratch, protectedName))
-	expectAll(t, lines, 2, "denied", "read a protected path")
+	// Only "absent" satisfies this clause: the path must not be there. A
+	// read that fails for any other reason means the path is exposed.
+	expectAll(t, lines, 2, "read a protected path", resultAbsent)
 }
 
 func testWriteOutside(t *testing.T, c *call) {
@@ -487,7 +517,7 @@ func testWriteOutside(t *testing.T, c *call) {
 		filepath.Join(filepath.Dir(c.tmp), "new.txt"),
 	}
 	lines := c.runHelper(t, append([]string{"write"}, targets...)...)
-	expectAll(t, lines, len(targets), "denied", "write outside the scratch and temporary directories")
+	expectAll(t, lines, len(targets), "write outside the scratch and temporary directories", resultDenied)
 	for _, p := range targets {
 		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s exists after a denied write (err %v)", p, err)
@@ -497,7 +527,7 @@ func testWriteOutside(t *testing.T, c *call) {
 
 func testOtherScratch(t *testing.T, c *call) {
 	lines := c.runHelper(t, "read", filepath.Join(c.other, "notes.txt"))
-	expectAll(t, lines, 1, "denied", "read another participant's scratch directory")
+	expectAll(t, lines, 1, "read another participant's scratch directory", resultDenied, resultAbsent)
 }
 
 func testNoSignal(t *testing.T, c *call) {
@@ -508,7 +538,7 @@ func testNoSignal(t *testing.T, c *call) {
 	defer signal.Ignore(syscall.SIGUSR1)
 
 	lines := c.runHelper(t, "signal", strconv.Itoa(os.Getpid()))
-	expectAll(t, lines, 1, "denied", "signal the test process")
+	expectAll(t, lines, 1, "signal the test process", resultDenied)
 	select {
 	case <-got:
 		t.Errorf("the test process received SIGUSR1 from the command")
@@ -569,7 +599,7 @@ func testNoNetwork(t *testing.T, c *call) {
 	args = append(args, "udp4", pc.LocalAddr().String())
 
 	lines := c.runHelper(t, append([]string{"connect"}, args...)...)
-	expectAll(t, lines, len(args)/2, "denied", "connect with no listener")
+	expectAll(t, lines, len(args)/2, "connect with no listener", resultDenied)
 	time.Sleep(100 * time.Millisecond)
 	if n := hits.Load(); n != 0 {
 		t.Errorf("listeners saw %d connections or datagrams from the command", n)
