@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -314,7 +315,11 @@ func printSummary(endpoint, model string, record transport.CapabilityRecord, raw
 	fmt.Printf("  Max-tokens field: %s\n", record.MaxTokensField)
 	fmt.Printf("  Usage available:  %s\n", record.UsageAvailable)
 	fmt.Printf("  System role:      %s\n", record.SystemRoleHonored)
-	fmt.Printf("  Tool calls:       %s\n", record.ToolCalls)
+	if len(record.ToolRestrictions) > 0 {
+		fmt.Printf("  Tool calls:       %s (restrictions: %s)\n", record.ToolCalls, strings.Join(record.ToolRestrictions, ", "))
+	} else {
+		fmt.Printf("  Tool calls:       %s\n", record.ToolCalls)
+	}
 	fmt.Printf("  Over-length:      %s\n", record.OverLength)
 	if record.OverLengthDetail != "" {
 		fmt.Printf("    Reason:         %s\n", record.OverLengthDetail)
