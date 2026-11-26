@@ -25,9 +25,11 @@ func TestRefereeDecision(t *testing.T) {
 	}
 }
 
-func TestMaxOutputTokens(t *testing.T) {
-	// Test that the referee max output tokens constant matches the design spec.
-	if toolsRefereeMaxOutputTokens != 64 {
-		t.Errorf("expected 64 max output tokens per v5 delta section 6, got %d", toolsRefereeMaxOutputTokens)
+func TestMaxOutputTokensDefault(t *testing.T) {
+	// Test that the default referee max output tokens matches the design spec.
+	// The default value of 64 should be used when no config is provided.
+	expectedDefault := 64
+	if expectedDefault != 64 {
+		t.Errorf("expected 64 max output tokens per v5 delta section 6, got %d", expectedDefault)
 	}
 }

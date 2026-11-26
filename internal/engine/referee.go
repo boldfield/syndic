@@ -3,11 +3,13 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/referee"
 	"github.com/boldfield/syndic/internal/transport"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 // RefereeDecision is the result of a referee call: allow or deny with a reason.
@@ -44,7 +46,15 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 		}
 	}
 
+	// Get max_output_tokens from config, default 64.
+	maxOutputTokens := 64
+	if e.roster.Tools != nil && e.roster.Tools.Referee != nil && e.roster.Tools.Referee.MaxOutputTokens != nil {
+		maxOutputTokens = *e.roster.Tools.Referee.MaxOutputTokens
+	}
+
 	// Build the referee payload with the web call and prior calls.
+	// PriorCalls includes the caller's own earlier web_fetch and web_search calls this turn.
+	// For now, this is populated from the turn's pending tool calls.
 	payload := referee.Payload{
 		CallName:   webCall.Name,
 		CallURL:    webCall.URL,
@@ -53,8 +63,7 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 	}
 	messages := referee.PromptMessages(payload)
 
-	// Build the attempt request. The deadline, epoch, and attempt ID are
-	// assigned by schedule() when the attempt is dispatched.
+	// Build the attempt request.
 	req := transport.CompleteRequest{
 		Envelope: transport.AttemptEnvelope{
 			Participant: participant,
@@ -63,7 +72,7 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 		},
 		Model:           ep.RefereeModel,
 		Messages:        messages,
-		MaxOutputTokens: toolsRefereeMaxOutputTokens,
+		MaxOutputTokens: maxOutputTokens,
 	}
 
 	// Dispatch through the pool system. The dispatch is treated as an ordinary
@@ -94,12 +103,14 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 	}
 
 	// Journal the referee decision: referee_decision{call_id, attempt_id, verdict, reason_sha256}
+	attemptID := res.Envelope.AttemptID
 	reasonBytes := []byte(parsed.Reason)
 	reasonSHA256, err := e.store.StoreContent(reasonBytes)
 	if err == nil {
 		_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 			// Emit referee_decision event with verdict and reason hash.
 			ev := map[string]any{
+				"attempt_id":    attemptID,
 				"call_id":       callID,
 				"verdict":       string(parsed.Decision),
 				"reason_sha256": reasonSHA256,
@@ -115,20 +126,127 @@ func (e *Engine) DispatchReferee(t *openTurn, participant string, callID string,
 	}, nil
 }
 
-// toolsRefereeMaxOutputTokens is the maximum output tokens for a referee
-// decision, per v5 delta section 6.
-const toolsRefereeMaxOutputTokens = 64
-
 // dispatchAttemptLocked issues an attempt on the specified endpoint and
 // returns its result. It handles budget reservation, scheduling through the
 // pool system, calling the adapter, and recording the result. e.mu is held
-// throughout. This is a focused helper for referee and other engine-internal
+// on entry and exit. This is a focused helper for referee and other engine-internal
 // dispatches that use the full accounting machinery.
-// TODO: This helper will be completed by integrating with the existing budget,
-// scheduling, and adapter infrastructure in a later task.
 func (e *Engine) dispatchAttemptLocked(t *openTurn, endpoint, model, phase string, req transport.CompleteRequest) (transport.CompleteResult, *failure) {
-	return transport.CompleteResult{Status: transport.StatusError}, &failure{
-		attemptStatus:   transport.StatusError,
-		transportStatus: "not_implemented",
+	// If the turn is not open, fail fast.
+	if e.open != t {
+		return transport.CompleteResult{Status: transport.StatusError}, &failure{
+			attemptStatus:   transport.StatusError,
+			transportStatus: "turn_not_open",
+		}
 	}
+
+	// Generate the deadline: attempt deadline is min(turn deadline, now + attempt timeout).
+	attemptDeadline := t.turnDeadline
+	if attemptTimeout := 30 * time.Second; e.clock.Now().Add(attemptTimeout).Before(attemptDeadline) {
+		attemptDeadline = e.clock.Now().Add(attemptTimeout)
+	}
+
+	// Reserve the budget for this attempt using BeginAttempt.
+	var attemptID string
+	var refused *budgetRefusal
+	var epoch int
+	var estimated int
+	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		turn, err := tx.GetTurn(t.id)
+		if err != nil {
+			return err
+		}
+		epoch = turn.Epoch
+
+		// Estimate the prompt tokens from the request messages.
+		estimated = 0
+		for _, m := range req.Messages {
+			estimated += len(m.Content)
+		}
+
+		attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
+			TurnID:                t.id,
+			Participant:           req.Envelope.Participant,
+			Phase:                 phase,
+			Epoch:                 epoch,
+			Deadline:              &attemptDeadline,
+			MaxOutputTokens:       req.MaxOutputTokens,
+			EstimatedPromptTokens: estimated,
+		})
+		if err != nil {
+			if r, ok := asRefusal(err); ok {
+				refused = r
+				return err
+			}
+			return err
+		}
+		req.Envelope.AttemptID = attemptID
+		req.Envelope.Epoch = epoch
+		req.Deadline = attemptDeadline
+
+		return emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
+			AttemptID:             attemptID,
+			Participant:           req.Envelope.Participant,
+			Phase:                 phase,
+			Epoch:                 int64(epoch),
+			Deadline:              attemptDeadline.Format(time.RFC3339Nano),
+			MaxOutputTokens:       int64(req.MaxOutputTokens),
+			EstimatedPromptTokens: int64(estimated),
+		})
+	})
+	if err != nil {
+		if refused != nil {
+			return transport.CompleteResult{Status: transport.StatusError}, &failure{
+				attemptStatus:   transport.StatusError,
+				transportStatus: "budget_refused",
+			}
+		}
+		return transport.CompleteResult{Status: transport.StatusError}, &failure{
+			attemptStatus:   transport.StatusError,
+			transportStatus: "journal_error",
+		}
+	}
+
+	// Mark the participant as running and release the mutex before calling the adapter.
+	e.markRunning(req.Envelope.Participant)
+	e.armAttempt(t, attemptID, attemptDeadline)
+
+	// Call the adapter with the mutex released.
+	e.mu.Unlock()
+	res, fail := e.complete(t, req.Envelope.Participant, req)
+	e.mu.Lock()
+
+	// Record the result in the journal.
+	_ = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+		accepted, err := tx.AcceptResult(attemptID, epoch, "", journal.AttemptOutput{
+			RawScrubbed:     res.RawOutput,
+			ScrubCount:      res.ScrubCount,
+			Identity:        identityString(res.Identity),
+			Status:          string(res.Status),
+			NativeFinish:    res.NativeFinish,
+			TransportStatus: res.TransportStatus,
+		})
+		if err != nil {
+			return err
+		}
+		if !accepted && fail == nil {
+			// A late result for a superseded epoch or a terminal turn is
+			// quarantined and nothing further happens.
+			_, err = e.settleQuarantined(tx, emit, t.id, attemptID, res)
+			return err
+		}
+
+		if res.Usage != nil {
+			if err := tx.SetAttemptUsage(attemptID, res.Usage.Prompt, res.Usage.Completion); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	// Release the pool slot and handle failures.
+	e.releaseLocked(req.Envelope.Participant)
+
+	return res, fail
 }
