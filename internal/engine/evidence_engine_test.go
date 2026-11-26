@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -100,41 +101,174 @@ func TestReviewerReceivesDiffAndAuthorEvidence(t *testing.T) {
 	}
 }
 
-// Acceptance (a): the diff is regenerated from the journal, so a live
-// workspace edit after the freeze cannot change it, and a later dispatch
-// yields the same bytes.
-func TestDiffRegeneratedIndependentOfLiveWorkspace(t *testing.T) {
+// revisionEvidence runs a two-round turn. The author's first candidate is
+// built from a file read in ws, and the file is edited live while the first
+// reviewer runs. That reviewer also records a call of its own under its
+// attempt and then blocks, so a second dispatch follows.
+func revisionEvidence(t *testing.T, ws string) (*enginetest.Harness, string, *[]string) {
+	t.Helper()
+	var h *enginetest.Harness
+	var seen []string
+	author := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		base, err := os.ReadFile(filepath.Join(ws, "a.txt"))
+		if err != nil {
+			panic(err)
+		}
+		turn, attempt := req.Envelope.TurnID, req.Envelope.AttemptID
+		err = h.Store.Tx(func(tx *journal.Tx) error {
+			if _, err := tx.RecordObservation(turn, attempt, "a.txt", journal.ObservationFile, base); err != nil {
+				return err
+			}
+			if _, err := tx.StageWrite(turn, "a.txt", []byte(evStaged)); err != nil {
+				return err
+			}
+			call, err := tx.RecordToolCall(attempt, 0, "prov_1", "read_file", "read", []byte(`{"path":"a.txt"}`))
+			if err != nil {
+				return err
+			}
+			_, err = tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte("author result"), "")
+			return err
+		})
+		if err != nil {
+			panic(err)
+		}
+		return authorText
+	})
+	round := 0
+	reviewer := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		seen = append(seen, req.Messages[len(req.Messages)-1].Content)
+		if round++; round > 1 {
+			return "VERDICT v2\ncandidate: " + req.Envelope.CandidateHash + "\nattempt: " + req.Envelope.AttemptID +
+				"\nround: 1\nblock-state: b1 withdrawn\nverdict: approve\nreason: r\nEND VERDICT"
+		}
+		// The live workspace moves on, and the reviewer looks something up.
+		if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("live edit\nafter freeze\n"), 0o600); err != nil {
+			panic(err)
+		}
+		err := h.Store.Tx(func(tx *journal.Tx) error {
+			call, err := tx.RecordToolCall(req.Envelope.AttemptID, 0, "prov_r", "reviewer_lookup", "read", []byte(`{"q":"x"}`))
+			if err != nil {
+				return err
+			}
+			_, err = tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte("reviewer result"), "")
+			return err
+		})
+		if err != nil {
+			panic(err)
+		}
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "e", "r", "r")
+	})
+	scripts := map[string][]fake.Step{
+		"author":   {author, enginetest.Reply(revisedText)},
+		"reviewer": {reviewer, reviewer},
+	}
+	h = enginetest.New(t, revisionRoster("2"), scripts)
+	return h, submitReview(t, h, "s1"), &seen
+}
+
+// fenced returns the text between a fence's BEGIN and END lines.
+func fenced(t *testing.T, msg, name string) string {
+	t.Helper()
+	b, e := " BEGIN "+name+" =====\n", "\n===== "
+	i := strings.Index(msg, b)
+	if i < 0 {
+		t.Fatalf("no %s in:\n%s", name, msg)
+	}
+	rest := msg[i+len(b):]
+	j := strings.Index(rest, e)
+	if j < 0 {
+		t.Fatalf("unterminated %s in:\n%s", name, msg)
+	}
+	return rest[:j]
+}
+
+func liveWorkspace(t *testing.T) string {
+	t.Helper()
 	ws := t.TempDir()
-	h, turnID, seen := evHarness(t, evStaged, "r")
-	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
-	if err := os.WriteFile(ws+"/a.txt", []byte("live edit\nafter freeze\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte(evBase), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var again string
-	err := h.Store.Tx(func(tx *journal.Tx) error {
-		cs, err := tx.ChangeSetForTurn(turnID)
-		if err != nil {
-			return err
+	return ws
+}
+
+// Acceptance (a): the diff is regenerated from the journal, so an edit to
+// the live workspace after the freeze cannot change it. The second dispatch,
+// after the live edit, carries the same change-set bytes as the first.
+func TestDiffRegeneratedIndependentOfLiveWorkspace(t *testing.T) {
+	ws := liveWorkspace(t)
+	h, turnID, seen := revisionEvidence(t, ws)
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	if len(*seen) != 2 {
+		t.Fatalf("reviewer requests = %d, want 2", len(*seen))
+	}
+	live, err := os.ReadFile(filepath.Join(ws, "a.txt"))
+	if err != nil || !strings.Contains(string(live), "live edit") {
+		t.Fatalf("live workspace was not edited: %q, %v", live, err)
+	}
+	const want = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+2\n three"
+	for i, msg := range *seen {
+		if got := fenced(t, msg, "CHANGE SET"); got != want {
+			t.Fatalf("dispatch %d diff = %q, want %q", i, got, want)
 		}
-		base, err := tx.Content(cs.Paths[0].BaseSHA256)
-		if err != nil {
-			return err
+		if strings.Contains(msg, "live edit") {
+			t.Fatalf("dispatch %d carries live workspace content", i)
 		}
-		body, err := tx.Content(cs.Paths[0].NewSHA256)
-		if err != nil {
-			return err
+	}
+}
+
+// Only the author's calls reach the packet or the candidate hash. A reviewer
+// records a call of its own in round 0; the round-1 dispatch and the round-1
+// candidate hash must not include it.
+func TestPacketExcludesOtherParticipantsCalls(t *testing.T) {
+	h, turnID, seen := revisionEvidence(t, liveWorkspace(t))
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+	for i, msg := range *seen {
+		got := fenced(t, msg, "AUTHOR EVIDENCE")
+		if strings.Count(got, "call ") != 1 || !strings.Contains(got, "author result") ||
+			strings.Contains(got, "reviewer_lookup") || strings.Contains(got, "reviewer result") {
+			t.Fatalf("dispatch %d evidence is not the author's alone:\n%s", i, got)
 		}
-		again = engine.UnifiedDiffForTest(cs.Paths[0].Path, false, base, body)
-		return nil
-	})
+	}
+	all, err := h.Store.ToolCallsByTurn(turnID, "")
+	if err != nil || len(all) != 2 {
+		t.Fatalf("the turn should hold the author's and the reviewer's call: %+v, %v", all, err)
+	}
+	authorCalls, err := h.Store.ToolCallsByTurn(turnID, "author")
+	if err != nil || len(authorCalls) != 1 || authorCalls[0].Result == nil {
+		t.Fatalf("author calls = %+v, %v", authorCalls, err)
+	}
+	cs, err := h.Store.ChangeSetForTurn(turnID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains((*seen)[0], again) {
-		t.Fatalf("regenerated diff %q is not what the reviewer received:\n%s", again, (*seen)[0])
+	turn, err := h.Store.GetTurn(turnID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains((*seen)[0], "live edit") {
-		t.Fatal("live workspace content reached the reviewer")
+	id := candidate.Identity{
+		ManifestHash:    *h.Engine.Hello().ManifestHash,
+		TurnID:          turnID,
+		AuthorAttemptID: h.Adapters["author"].Calls()[1].Request.Envelope.AttemptID,
+		Round:           1,
+		Content:         []byte(revisedText),
+		Evidence:        []candidate.EvidencePair{{CallID: authorCalls[0].ID, ResultSHA256: authorCalls[0].Result.ResultSHA256}},
+		ChangesHash:     cs.ChangesHash,
+	}
+	if turn.ContextHash != nil {
+		id.ContextHash = *turn.ContextHash
+	}
+	got, err := candidate.Hash(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last string
+	for _, ev := range h.Events() {
+		if p, ok := ev.Payload.(*wire.EvCandidateFrozen); ok && ev.TurnID == turnID {
+			last = p.CandidateHash
+		}
+	}
+	if got != last {
+		t.Fatalf("round-1 candidate hash %s is not the hash over the author's calls alone %s", last, got)
 	}
 }
 
@@ -230,16 +364,5 @@ func TestAuthorOnlyEvidenceChangesCandidateHash(t *testing.T) {
 	swapped.Evidence = []candidate.EvidencePair{{CallID: id1.Evidence[0].CallID, ResultSHA256: id2.Evidence[0].ResultSHA256}}
 	if hashOf(t, swapped) == recorded1 {
 		t.Fatal("changing only the result bytes does not change the hash")
-	}
-}
-
-// Only the author's calls reach the packet; another participant's calls in the
-// same turn stay under that participant.
-func TestPacketExcludesOtherParticipantsCalls(t *testing.T) {
-	h, turnID, seen := evHarness(t, evStaged, "author result")
-	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
-	got := (*seen)[0]
-	if strings.Count(got, "call ") != 1 {
-		t.Fatalf("packet has other calls:\n%s", got)
 	}
 }
