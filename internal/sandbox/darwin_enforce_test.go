@@ -57,6 +57,7 @@ func TestMacOSSandboxExecEnforcement(t *testing.T) {
 	t.Run("launchctl_bootstrap", func(t *testing.T) { testLaunchctlBootstrap(t, b) })
 	t.Run("nested_sandbox", func(t *testing.T) { testNestedSandbox(t, b) })
 	t.Run("allow_token_fixed", func(t *testing.T) { testAllowTokenFixed(t, b) })
+	t.Run("token_dirs_fixed", func(t *testing.T) { testTokenDirsFixed(t, b) })
 	t.Run("listener_only", func(t *testing.T) { testListenerOnly(t, b, helper) })
 	t.Run("fork_storm", func(t *testing.T) { testForkStorm(t, b) })
 	t.Run("no_member_after", func(t *testing.T) { testNoMemberIdle(t) })
@@ -363,6 +364,62 @@ func testAllowTokenFixed(t *testing.T, b sandbox.Backend) {
 	}
 	if field(t, lines, "exists") != "0" {
 		t.Errorf("the allow token is gone")
+	}
+}
+
+// testTokenDirsFixed: a command cannot rename or remove the directories
+// that hold its allow token, which would move the token from the path the
+// membership test checks, and a detached child of such a command is still
+// found and killed by termination.
+func testTokenDirsFixed(t *testing.T, b sandbox.Backend) {
+	c := newMacCall(t)
+	tmp, err := filepath.EvalSymlinks(c.tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := filepath.EvalSymlinks(c.scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := filepath.Join(tmp, sandbox.MacAllowTokenName)
+	// One background child, bounded by its own 30-second sleep.
+	lines := c.shell(t, b, fmt.Sprintf(`T=%s S=%s
+/bin/mv "$T" "$S/moved" 2>/dev/null; echo "mv_into_scratch $?"
+/bin/mv "$T" "$T.x" 2>/dev/null; echo "mv_beside $?"
+/bin/mv "$S" "$T/moved" 2>/dev/null; echo "mv_scratch_into_tmp $?"
+/bin/chmod 0 "$T" 2>/dev/null; echo "chmod $?"
+/bin/test -f "$T/%s"; echo "exists $?"
+/bin/sleep 30 </dev/null >/dev/null 2>&1 &
+echo "child $!"`, tmp, scratch, sandbox.MacAllowTokenName))
+	t.Logf("inside the sandbox: %q", lines)
+	for _, op := range []string{"mv_into_scratch", "mv_beside", "mv_scratch_into_tmp", "chmod"} {
+		if field(t, lines, op) == "0" {
+			t.Errorf("%s succeeded", op)
+		}
+	}
+	if field(t, lines, "exists") != "0" {
+		t.Errorf("the allow token is gone from inside")
+	}
+	if _, err := os.Stat(token); err != nil {
+		t.Errorf("the allow token is gone: %v", err)
+	}
+	pid, err := strconv.Atoi(field(t, lines, "child"))
+	if err != nil || pid <= 0 {
+		t.Fatalf("child pid %q", field(t, lines, "child"))
+	}
+	// An orphan that has ended may wait a moment for launchd to reap it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("the detached child %d remains after termination (kill: %v)", pid, err)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

@@ -317,9 +317,16 @@ func macProfile(scratch, tmp string, sys SystemLocations, allowToken, denyToken 
 	sb.WriteString(")\n")
 	sb.WriteString("(allow file-write*\n  (subpath " + q(scratchR) + ")\n  (subpath " + q(tmpR) + ")\n  (literal " + q(macFixedWriteLiteral) + "))\n")
 	// The allow token is inside the writable temporary directory: were the
-	// command able to remove or rename it, the membership test would find
-	// no member and the command's processes would escape the scan.
-	sb.WriteString("(deny file-write* (literal " + q(allowToken) + "))\n")
+	// command able to remove or rename it, or any writable directory that
+	// holds it, the token would leave the path the membership test checks,
+	// no member would be found and the command's processes would escape the
+	// scan. The scratch and temporary directories themselves are fixed too;
+	// what is created inside them is checked against its own path.
+	sb.WriteString("(deny file-write*\n  (literal " + q(allowToken) + ")")
+	for _, p := range macFixedDirs(allowToken, scratchR, tmpR) {
+		sb.WriteString("\n  (literal " + q(p) + ")")
+	}
+	sb.WriteString(")\n")
 	sb.WriteString("(deny file-read* (literal " + q(denyToken) + "))\n")
 	if port != 0 {
 		sb.WriteString(`(allow network-outbound (remote tcp "localhost:` + strconv.Itoa(port) + `"))` + "\n")
@@ -328,6 +335,33 @@ func macProfile(scratch, tmp string, sys SystemLocations, allowToken, denyToken 
 		return "", nil, bad
 	}
 	return sb.String(), skipped, nil
+}
+
+// macFixedDirs returns the directories a command must not rename, remove
+// or change: each directory that holds the allow token and lies inside the
+// scratch or temporary directory, nearest first, then the scratch and
+// temporary directories themselves.
+func macFixedDirs(allowToken, scratchR, tmpR string) []string {
+	inside := func(p, dir string) bool {
+		return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
+	}
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			dirs = append(dirs, p)
+		}
+	}
+	for d := filepath.Dir(allowToken); inside(d, scratchR) || inside(d, tmpR); d = filepath.Dir(d) {
+		add(d)
+		if d == filepath.Dir(d) {
+			break
+		}
+	}
+	add(scratchR)
+	add(tmpR)
+	return dirs
 }
 
 // sbplString quotes p as a string of the profile language: a quote and a

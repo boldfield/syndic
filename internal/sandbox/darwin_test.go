@@ -57,7 +57,10 @@ func wantMacProfile(root, listener string) string {
   (subpath "` + root + `/scratch")
   (subpath "` + root + `/tmp")
   (literal "/dev/null"))
-(deny file-write* (literal "` + root + `/tmp/allow"))
+(deny file-write*
+  (literal "` + root + `/tmp/allow")
+  (literal "` + root + `/tmp")
+  (literal "` + root + `/scratch"))
 (deny file-read* (literal "` + root + `/private/deny"))
 ` + listener
 }
@@ -165,6 +168,26 @@ func TestMacProfileRefusesUnescapable(t *testing.T) {
 	// The tokens are paths of the profile too.
 	if _, _, err := macProfile(scratch, tmp, SystemLocations{}, filepath.Join(tmp, "allow\n"), filepath.Join(root, "deny"), nil); err == nil {
 		t.Error("an unescapable allow token accepted")
+	}
+}
+
+func TestMacFixedDirs(t *testing.T) {
+	for _, tc := range []struct {
+		token, scratch, tmp string
+		want                []string
+	}{
+		{"/r/tmp/allow", "/r/scratch", "/r/tmp", []string{"/r/tmp", "/r/scratch"}},
+		// A temporary directory inside the scratch directory: every
+		// directory between them is fixed too.
+		{"/r/s/a/tmp/allow", "/r/s", "/r/s/a/tmp", []string{"/r/s/a/tmp", "/r/s/a", "/r/s"}},
+		// A scratch directory inside the temporary directory.
+		{"/r/tmp/allow", "/r/tmp/s", "/r/tmp", []string{"/r/tmp", "/r/tmp/s"}},
+		{"/allow", "/", "/r/tmp", []string{"/", "/r/tmp"}},
+	} {
+		got := macFixedDirs(tc.token, tc.scratch, tc.tmp)
+		if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+			t.Errorf("macFixedDirs(%s, %s, %s) = %q, want %q", tc.token, tc.scratch, tc.tmp, got, tc.want)
+		}
 	}
 }
 
