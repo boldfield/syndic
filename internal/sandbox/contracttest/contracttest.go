@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -357,12 +358,21 @@ func otherScratch(h *harness) error {
 }
 
 func noSignal(h *harness) error {
+	// Deliver a real, harmless signal: a handler in this process records it.
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGUSR1)
+	defer signal.Stop(ch)
 	r, err := h.call(callOpts{argv: direct("signal", fmt.Sprint(os.Getpid()))})
 	if err != nil {
 		return err
 	}
-	if r.Status.Code == 0 {
+	select {
+	case <-ch:
 		return fmt.Errorf("the command signalled the engine process: %q", r.Out)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if r.Status.Code == 0 {
+		return fmt.Errorf("the command's signal was not denied: %q", r.Out)
 	}
 	return nil
 }

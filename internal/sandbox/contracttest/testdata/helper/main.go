@@ -42,8 +42,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("written")
-	case "signal": // signal <pid>: signal 0 to the pid
-		if err := syscall.Kill(mustInt(args[0]), 0); err != nil {
+	case "signal": // signal <pid>: SIGUSR1 to the pid
+		if err := syscall.Kill(mustInt(args[0]), syscall.SIGUSR1); err != nil {
 			fmt.Println("kill:", err)
 			os.Exit(1)
 		}
