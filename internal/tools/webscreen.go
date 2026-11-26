@@ -127,6 +127,11 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		if !s.canaryCheck(label) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in hostname"}
 		}
+		// Also try with spaces mapped back to + for standard base64 decoding
+		labelWithPlus := strings.ReplaceAll(label, " ", "+")
+		if !s.canaryCheck(labelWithPlus) {
+			return ScreenResult{Allowed: false, Reason: "canary: match in hostname"}
+		}
 		if !s.shapeCheck(label) {
 			return ScreenResult{Allowed: false, Reason: "shape: high entropy in hostname label"}
 		}
@@ -138,32 +143,68 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		if !s.canaryCheck(userinfo) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in userinfo"}
 		}
+		// Also try with spaces mapped back to + for standard base64 decoding
+		userinfoWithPlus := strings.ReplaceAll(userinfo, " ", "+")
+		if !s.canaryCheck(userinfoWithPlus) {
+			return ScreenResult{Allowed: false, Reason: "canary: match in userinfo"}
+		}
 	}
 
-	// Check path segments
-	pathSegments := strings.Split(strings.Trim(u.Path, "/"), "/")
+	// Check path segments from escaped path, then percent-decode each segment
+	pathSegments := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
 	for _, segment := range pathSegments {
 		if segment == "" {
 			continue
 		}
-		if !s.canaryCheck(segment) {
+		decodedSegment, err := url.QueryUnescape(segment)
+		if err != nil {
+			decodedSegment = segment
+		}
+		if !s.canaryCheck(decodedSegment) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in path"}
 		}
-		if !s.shapeCheck(segment) {
+		// Also try with spaces mapped back to + for standard base64 decoding
+		decodedSegmentWithPlus := strings.ReplaceAll(decodedSegment, " ", "+")
+		if !s.canaryCheck(decodedSegmentWithPlus) {
+			return ScreenResult{Allowed: false, Reason: "canary: match in path"}
+		}
+		if !s.shapeCheck(decodedSegment) {
 			return ScreenResult{Allowed: false, Reason: "shape: high entropy in path"}
 		}
 	}
 
-	// Check query keys and values
-	for key, values := range u.Query() {
-		if !s.canaryCheck(key) {
-			return ScreenResult{Allowed: false, Reason: "canary: match in query key"}
-		}
-		for _, val := range values {
-			if !s.canaryCheck(val) {
+	// Check query keys and values from raw query
+	rawQuery := u.RawQuery
+	if rawQuery != "" {
+		for _, pair := range strings.Split(rawQuery, "&") {
+			parts := strings.SplitN(pair, "=", 2)
+			key := parts[0]
+			val := ""
+			if len(parts) > 1 {
+				val = parts[1]
+			}
+			// Decode both key and value
+			decodedKey, err := url.QueryUnescape(key)
+			if err != nil {
+				decodedKey = key
+			}
+			decodedVal, err := url.QueryUnescape(val)
+			if err != nil {
+				decodedVal = val
+			}
+			// For standard base64, also try with spaces mapped back to +
+			decodedValWithPlus := strings.ReplaceAll(decodedVal, " ", "+")
+
+			if !s.canaryCheck(decodedKey) {
+				return ScreenResult{Allowed: false, Reason: "canary: match in query key"}
+			}
+			if !s.canaryCheck(decodedVal) {
 				return ScreenResult{Allowed: false, Reason: "canary: match in query value"}
 			}
-			if !s.shapeCheck(val) {
+			if !s.canaryCheck(decodedValWithPlus) {
+				return ScreenResult{Allowed: false, Reason: "canary: match in query value"}
+			}
+			if !s.shapeCheck(decodedVal) {
 				return ScreenResult{Allowed: false, Reason: "shape: high entropy in query value"}
 			}
 		}
@@ -171,16 +212,18 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 
 	// Count and check host fetch limit
 	canHost := s.canonicalHost(u)
-	s.hostFetches[canHost]++
-	if s.hostFetches[canHost] > 10 {
+	if s.hostFetches[canHost]+1 > 10 {
 		return ScreenResult{Allowed: false, Reason: fmt.Sprintf("host_count: exceeds 10 fetches to %s", canHost)}
 	}
 
 	// Count and check total fetch limit
-	s.totalFetches++
-	if s.totalFetches > s.maxPerTurn {
+	if s.totalFetches+1 > s.maxPerTurn {
 		return ScreenResult{Allowed: false, Reason: fmt.Sprintf("turn_count: exceeds %d total fetches in turn", s.maxPerTurn)}
 	}
+
+	// All checks passed, increment counters
+	s.hostFetches[canHost]++
+	s.totalFetches++
 
 	return ScreenResult{Allowed: true}
 }
