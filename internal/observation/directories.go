@@ -87,8 +87,9 @@ func parentAndName(p string) (parent, name string) {
 // turn's existing observations. It:
 // 1. Filters out entries that were previously observed as absent in that directory.
 // 2. Adds entries for files previously observed in this directory but missing from the live listing.
+// 3. Preserves known types: a previously-recorded type overrides a conflicting live type.
 func ReconcileDirectoryObservation(turnID string, dirPath string, entries []Entry, j *journal.Store) ([]Entry, error) {
-	var absences, priorFiles map[string]bool
+	var absences map[string]bool
 	var priorTypes map[string]string
 
 	err := j.Tx(func(tx *journal.Tx) error {
@@ -97,7 +98,6 @@ func ReconcileDirectoryObservation(turnID string, dirPath string, entries []Entr
 			return err
 		}
 		absences = make(map[string]bool)
-		priorFiles = make(map[string]bool)
 		priorTypes = make(map[string]string)
 
 		for _, o := range obs {
@@ -110,7 +110,6 @@ func ReconcileDirectoryObservation(turnID string, dirPath string, entries []Entr
 			case journal.ObservationAbsent:
 				absences[name] = true
 			case journal.ObservationFile:
-				priorFiles[name] = true
 				priorTypes[name] = "f"
 			}
 		}
@@ -126,16 +125,22 @@ func ReconcileDirectoryObservation(turnID string, dirPath string, entries []Entr
 	// Add live entries that are not marked absent.
 	for _, e := range entries {
 		if !absences[e.Name] {
-			result[e.Name] = e
+			// Use prior type if available, otherwise use live type.
+			if priorType, found := priorTypes[e.Name]; found && priorType != e.Type {
+				// Type recorded previously: preserve it.
+				result[e.Name] = Entry{Type: priorType, Name: e.Name}
+			} else {
+				result[e.Name] = e
+			}
 		}
 	}
 
-	// Add previously-observed files that are not in the live listing.
-	for name := range priorFiles {
+	// Add previously-observed entries that are not in the live listing.
+	for name, priorType := range priorTypes {
 		if _, inLive := result[name]; !inLive {
-			// File was previously observed but missing from live listing.
+			// Entry was previously observed but missing from live listing.
 			// Add it to the result with its prior type.
-			result[name] = Entry{Type: "f", Name: name}
+			result[name] = Entry{Type: priorType, Name: name}
 		}
 	}
 
@@ -151,10 +156,12 @@ func ReconcileDirectoryObservation(turnID string, dirPath string, entries []Entr
 	return out, nil
 }
 
-// CheckFileConflict checks whether a file observation conflicts with prior
-// directory observations. It detects when a file listed in a parent directory
-// has been deleted or changed type, returning a SnapshotConflict error.
-// liveFileType should be "f", "d", or empty string for missing/deleted.
+// CheckFileConflict checks whether a file or absence observation conflicts with
+// prior directory observations. It detects when:
+// - A file listed in a parent directory has been deleted or changed type
+// - A file is not in a recorded parent listing but exists in the live tree
+// - A file is in a recorded parent listing but is absent in the live tree
+// liveFileType should be "f", "d", "", or journal.ObservationAbsent for an absence.
 func CheckFileConflict(turnID string, path string, liveFileType string, j *journal.Store) error {
 	var conflict bool
 	var conflictType string
@@ -187,24 +194,41 @@ func CheckFileConflict(turnID string, path string, liveFileType string, j *journ
 			}
 
 			// Check if our file name is in the listing.
+			fileInListing := false
+			var listedType string
 			for _, e := range entries {
 				if e.Name == name {
-					// The file is listed. Check if the type changed or file is deleted.
-					if liveFileType == "" {
-						// File was listed but is now deleted/missing.
-						conflict = true
-						conflictType = "deleted"
-						return nil
-					}
-					if e.Type != liveFileType {
-						// File type changed.
-						conflict = true
-						conflictType = "type-changed"
-						return nil
-					}
+					fileInListing = true
+					listedType = e.Type
+					break
+				}
+			}
+
+			switch liveFileType {
+			case journal.ObservationAbsent, "":
+				// Live observation is an absence (empty string or ObservationAbsent).
+				if fileInListing {
+					// File is in listing but missing from live tree: conflict.
+					conflict = true
+					conflictType = "deleted"
+					return nil
+				}
+			default:
+				// Live observation is a file or directory with a type ("f" or "d").
+				if !fileInListing {
+					// File exists in live tree but was not in cached listing: conflict.
+					conflict = true
+					conflictType = "unlisted"
+					return nil
+				}
+				if listedType != liveFileType {
+					// File type changed.
+					conflict = true
+					conflictType = "type-changed"
 					return nil
 				}
 			}
+			return nil
 		}
 		return nil
 	})

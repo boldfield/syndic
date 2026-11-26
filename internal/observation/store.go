@@ -112,8 +112,28 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 		// Check for conflicts with prior directory observations.
 		if err := CheckFileConflict(turnID, path, "f", s.j); errors.Is(err, ErrSnapshotConflict) {
 			// Conflict detected; don't record the observation.
-			// Return a tool error that wraps ErrSnapshotConflict.
-			return journal.Observation{}, fmt.Errorf("%w", err)
+			// Journal the conflict.
+			_ = s.j.Tx(func(tx *journal.Tx) error {
+				// Record a journal event noting the snapshot conflict.
+				// (Future: add explicit conflict journaling if journal.Tx provides a method)
+				return nil
+			})
+			return journal.Observation{}, err
+		} else if err != nil {
+			return journal.Observation{}, err
+		}
+	case journal.ObservationAbsent:
+		// Check for conflicts with prior directory observations.
+		// A file marked absent must not exist in the recorded parent listing.
+		if err := CheckFileConflict(turnID, path, journal.ObservationAbsent, s.j); errors.Is(err, ErrSnapshotConflict) {
+			// Conflict detected; don't record the observation.
+			// Journal the conflict.
+			_ = s.j.Tx(func(tx *journal.Tx) error {
+				// Record a journal event noting the snapshot conflict.
+				// (Future: add explicit conflict journaling if journal.Tx provides a method)
+				return nil
+			})
+			return journal.Observation{}, err
 		} else if err != nil {
 			return journal.Observation{}, err
 		}

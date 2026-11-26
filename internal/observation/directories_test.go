@@ -248,7 +248,7 @@ func TestCheckFileConflict_AllowsMatchingType(t *testing.T) {
 	}
 }
 
-func TestCheckFileConflict_IgnoresUnlistedPaths(t *testing.T) {
+func TestCheckFileConflict_UnlistedPathsConflict(t *testing.T) {
 	f := newDirFixture(t)
 	s := NewStore(f.j)
 
@@ -267,11 +267,14 @@ func TestCheckFileConflict_IgnoresUnlistedPaths(t *testing.T) {
 		t.Fatalf("observe directory: %v", err)
 	}
 
-	// Check if reading a path that wasn't in the listing succeeds
-	// (no conflict because it wasn't in the listing)
+	// Check if reading a path that wasn't in the listing conflicts
+	// (must conflict because it's not in the cached listing)
 	err = CheckFileConflict(f.turn, "dir/unlisted.txt", "f", f.j)
-	if err != nil {
-		t.Fatalf("unexpected error for unlisted path: %v", err)
+	if err == nil {
+		t.Fatal("expected snapshot_conflict for unlisted path, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
 	}
 }
 
@@ -559,7 +562,7 @@ func TestReconcileDirectoryObservation_RootLevel(t *testing.T) {
 
 // Test: Cached listing excludes later live file.
 // When a directory is listed without a file, and later a file appears in the live tree
-// with that name, reading it should return not found (cached listing behavior enforced by snapshot).
+// with that name, reading it should return snapshot_conflict (cached listing behavior).
 func TestCheckFileConflict_UnlistedFile(t *testing.T) {
 	f := newDirFixture(t)
 	s := NewStore(f.j)
@@ -579,11 +582,14 @@ func TestCheckFileConflict_UnlistedFile(t *testing.T) {
 		t.Fatalf("observe directory: %v", err)
 	}
 
-	// Now check if reading "unlisted.txt" conflicts
-	// It should not conflict because it was never in the listing
+	// Now check if reading "unlisted.txt" (which is not in the listing) conflicts
+	// It should conflict because it was not in the cached listing but exists in live tree
 	err = CheckFileConflict(f.turn, "dir/unlisted.txt", "f", f.j)
-	if err != nil {
-		t.Fatalf("unexpected error for unlisted path: %v", err)
+	if err == nil {
+		t.Fatal("expected snapshot_conflict error for unlisted file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
 	}
 }
 
@@ -642,5 +648,191 @@ func BenchmarkReconcileDirectoryObservation(b *testing.B) {
 		if _, err := ReconcileDirectoryObservation(f.turn, "dir", entries, f.j); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// End-to-end test: Observe a file not in cached listing returns snapshot_conflict and records nothing.
+func TestObserve_UnlistedFileTriggersCacheConflict(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing without "new.txt"
+	dirEntries := []Entry{
+		{Type: "f", Name: "existing.txt"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "new.txt" (not in the listing) through Store.Observe
+	_, err = s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("new content"), nil
+	})
+
+	// Should get snapshot_conflict error
+	if err == nil {
+		t.Fatal("expected snapshot_conflict error, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify nothing was recorded for "dir/new.txt"
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/new.txt" {
+			t.Fatalf("unexpected observation recorded for dir/new.txt: %+v", o)
+		}
+	}
+}
+
+// End-to-end test: Observe a deleted listed file returns snapshot_conflict and records nothing.
+func TestObserve_DeletedListedFileTriggersCacheConflict(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing with "file.txt"
+	dirEntries := []Entry{
+		{Type: "f", Name: "file.txt"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "file.txt" as absent through Store.Observe
+	_, err = s.Observe(f.turn, f.author, "dir/file.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	})
+
+	// Should get snapshot_conflict error
+	if err == nil {
+		t.Fatal("expected snapshot_conflict error, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify nothing was recorded for "dir/file.txt"
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/file.txt" {
+			t.Fatalf("unexpected observation recorded for dir/file.txt: %+v", o)
+		}
+	}
+}
+
+// End-to-end test: Observe a type-changed listed file through Observe.
+func TestObserve_TypeChangedListedFileTriggersCacheConflict(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing with "target" as a directory
+	dirEntries := []Entry{
+		{Type: "d", Name: "target"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	if _, err := s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	}); err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "dir/target" as a file (type changed from d to f)
+	_, err = s.Observe(f.turn, f.author, "dir/target", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("file content"), nil
+	})
+
+	// Should get snapshot_conflict error
+	if err == nil {
+		t.Fatal("expected snapshot_conflict error for type change, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify nothing was recorded for "dir/target"
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/target" {
+			t.Fatalf("unexpected observation recorded for dir/target: %+v", o)
+		}
+	}
+}
+
+// End-to-end test: Cached listing properly excludes later live file.
+func TestObserve_CachedListingExcludesLaterLiveFile(t *testing.T) {
+	f := newDirFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a listing of "work" with only [a]
+	dirEntries := []Entry{
+		{Type: "f", Name: "a"},
+	}
+	frameData, err := FrameEntries(dirEntries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	listingObs, err := s.Observe(f.turn, f.author, "work", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	})
+	if err != nil {
+		t.Fatalf("observe listing: %v", err)
+	}
+
+	// Verify the listing was recorded
+	if listingObs.Kind != journal.ObservationListing {
+		t.Fatalf("expected listing, got %s", listingObs.Kind)
+	}
+
+	// Now try to record "work/new" (not in the listing)
+	_, err = s.Observe(f.turn, f.author, "work/new", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("new"), nil
+	})
+
+	// Should fail with snapshot_conflict because "new" is not in the cached listing
+	if err == nil {
+		t.Fatal("expected snapshot_conflict for unlisted file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Try to observe "work/a" (is in the listing) - should succeed
+	fileObs, err := s.Observe(f.turn, f.author, "work/a", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("content a"), nil
+	})
+	if err != nil {
+		t.Fatalf("observe file in listing: %v", err)
+	}
+	if fileObs.Kind != journal.ObservationFile {
+		t.Fatalf("expected file observation, got %s", fileObs.Kind)
 	}
 }

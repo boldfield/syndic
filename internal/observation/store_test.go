@@ -347,3 +347,205 @@ func BenchmarkObserve(b *testing.B) {
 		}
 	}
 }
+
+// End-to-end test: Known file retained in later parent view.
+// When a file is observed, then its parent directory is listed without it,
+// the file must appear in the listing with its known type.
+func TestObserve_KnownFileRetainedInLaterParentView(t *testing.T) {
+	f := newFixture(t)
+	s := NewStore(f.j)
+
+	// First, observe that "work/a.txt" exists
+	fileObs, err := s.Observe(f.turn, f.author, "work/a.txt", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("content"), nil
+	})
+	if err != nil {
+		t.Fatalf("observe file: %v", err)
+	}
+	if fileObs.Kind != journal.ObservationFile {
+		t.Fatalf("expected file observation, got %s", fileObs.Kind)
+	}
+
+	// Now list the parent directory without "a.txt"
+	// (simulating live directory missing the file)
+	entries := []Entry{
+		{Type: "f", Name: "b.txt"},
+	}
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	listingObs, err := s.Observe(f.turn, f.author, "work", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	})
+	if err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Parse the recorded listing by fetching content through journal
+	var listingEntries []Entry
+	err = f.j.Tx(func(tx *journal.Tx) error {
+		content, err := tx.Content(listingObs.ContentSHA256)
+		if err != nil {
+			return err
+		}
+		listingEntries, err = ParseEntries(content)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+
+	// The reconciled listing should include both b.txt and a.txt
+	if len(listingEntries) != 2 {
+		t.Fatalf("got %d entries, want 2 (should include both a.txt and b.txt)", len(listingEntries))
+	}
+
+	names := make(map[string]string)
+	for _, e := range listingEntries {
+		names[e.Name] = e.Type
+	}
+
+	if names["a.txt"] != "f" {
+		t.Fatalf("a.txt not in listing or wrong type: %v", names)
+	}
+	if names["b.txt"] != "f" {
+		t.Fatalf("b.txt not in listing or wrong type: %v", names)
+	}
+}
+
+// End-to-end test: Cached listing excludes later live file through Observe.
+func TestObserve_CachedListingExcludesUnlistedFile(t *testing.T) {
+	f := newFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing without "new.txt"
+	entries := []Entry{
+		{Type: "f", Name: "existing.txt"},
+	}
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	_, err = s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	})
+	if err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "dir/new.txt" (not in listing) - should fail with snapshot_conflict
+	_, err = s.Observe(f.turn, f.author, "dir/new.txt", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("new content"), nil
+	})
+
+	if err == nil {
+		t.Fatal("expected snapshot_conflict for unlisted file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify "dir/new.txt" was not recorded
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/new.txt" {
+			t.Fatalf("dir/new.txt should not be recorded, but got: %+v", o)
+		}
+	}
+}
+
+// End-to-end test: Deleted listed file triggers snapshot_conflict through Observe.
+func TestObserve_DeletedListedFileConflict(t *testing.T) {
+	f := newFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing with "file.txt"
+	entries := []Entry{
+		{Type: "f", Name: "file.txt"},
+	}
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	_, err = s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	})
+	if err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "dir/file.txt" as absent - should fail with snapshot_conflict
+	_, err = s.Observe(f.turn, f.author, "dir/file.txt", func() (string, []byte, error) {
+		return journal.ObservationAbsent, nil, nil
+	})
+
+	if err == nil {
+		t.Fatal("expected snapshot_conflict for deleted listed file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify "dir/file.txt" was not recorded
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/file.txt" {
+			t.Fatalf("dir/file.txt should not be recorded, but got: %+v", o)
+		}
+	}
+}
+
+// End-to-end test: Type-changed listed file triggers snapshot_conflict through Observe.
+func TestObserve_TypeChangedListedFileConflict(t *testing.T) {
+	f := newFixture(t)
+	s := NewStore(f.j)
+
+	// First, record a directory listing with "target" as a directory
+	entries := []Entry{
+		{Type: "d", Name: "target"},
+	}
+	frameData, err := FrameEntries(entries)
+	if err != nil {
+		t.Fatalf("FrameEntries: %v", err)
+	}
+
+	_, err = s.Observe(f.turn, f.author, "dir", func() (string, []byte, error) {
+		return journal.ObservationListing, frameData, nil
+	})
+	if err != nil {
+		t.Fatalf("observe directory: %v", err)
+	}
+
+	// Now try to observe "dir/target" as a file (type changed from d to f) - should fail with snapshot_conflict
+	_, err = s.Observe(f.turn, f.author, "dir/target", func() (string, []byte, error) {
+		return journal.ObservationFile, []byte("file content"), nil
+	})
+
+	if err == nil {
+		t.Fatal("expected snapshot_conflict for type-changed file, got nil")
+	}
+	if !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("expected ErrSnapshotConflict, got %v", err)
+	}
+
+	// Verify "dir/target" was not recorded
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range obs {
+		if o.Path == "dir/target" {
+			t.Fatalf("dir/target should not be recorded, but got: %+v", o)
+		}
+	}
+}
