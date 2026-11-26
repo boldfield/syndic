@@ -166,6 +166,9 @@ func (t *ReadTools) liveReader(path string) observation.Reader {
 		ex, err := t.fs.Examine(path)
 		switch {
 		case err == nil:
+		case errors.Is(err, workspace.ErrSymlinkOnPath):
+			// Checked before ENOTDIR, which it wraps: refused, not absent.
+			return "", nil, observation.ErrSymlinkOnPath
 		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR):
 			return journal.ObservationAbsent, nil, nil
 		case errors.Is(err, workspace.ErrSymlink):
@@ -196,12 +199,11 @@ func classify(path string, err error) error {
 	switch {
 	case errors.Is(err, observation.ErrSnapshotConflict):
 		return &toolError{code: ErrCodeSnapshotConflict, msg: err.Error()}
+	case errors.Is(err, observation.ErrSymlinkOnPath):
+		return toolErrorf(ErrCodeNotRegular, "%q has a symbolic link on its path; symbolic links are refused", path)
 	case errors.Is(err, workspace.ErrNotRegular), errors.Is(err, observation.ErrOtherEntry):
 		return toolErrorf(ErrCodeNotRegular, "%q is neither a regular file nor a directory", path)
 	case errors.As(err, &le):
-		if errors.Is(le.err, unix.ELOOP) {
-			return toolErrorf(ErrCodeNotRegular, "%q is a symbolic link or has one on its path; symbolic links are refused", path)
-		}
 		return toolErrorf(ErrCodeIO, "cannot read %q: %v", path, le.err)
 	}
 	return err
@@ -378,7 +380,8 @@ type listDirArgs struct {
 
 // ListDir executes list_dir for the accepted call callID and journals the
 // exact bytes returned, or the error text. The result is one name per line,
-// directories with a trailing "/", in byte order.
+// directories with a trailing "/" and symbolic links (which every tool
+// refuses) with a trailing "@", in byte order.
 func (t *ReadTools) ListDir(callID string, raw json.RawMessage) (Result, error) {
 	content, err := t.listDir(raw)
 	return t.finish(callID, content, err)
@@ -413,12 +416,15 @@ func (t *ReadTools) listDir(raw json.RawMessage) ([]byte, error) {
 	var out strings.Builder
 	for _, e := range v.entries {
 		name := e.Name
-		if strings.ContainsAny(name, "\r\n\"") {
+		if strings.ContainsAny(name, "\r\n\"") || strings.HasSuffix(name, "@") {
 			name = strconv.Quote(name)
 		}
 		out.WriteString(name)
-		if e.Type == "d" {
+		switch e.Type {
+		case "d":
 			out.WriteByte('/')
+		case "l":
+			out.WriteByte('@')
 		}
 		out.WriteByte('\n')
 	}

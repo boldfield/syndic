@@ -155,14 +155,11 @@ func (c *Confined) openWalk(path string, flags int, perm fs.FileMode, allowRoot 
 
 		fd, err := unix.Openat(currentfd, component, openFlags, uint32(perm))
 		if err != nil {
+			err = c.walkError(currentfd, component, isLast, err)
 			if openedfd >= 0 {
 				_ = unix.Close(openedfd)
 			}
-			if isLast && errors.Is(err, unix.ELOOP) {
-				// O_NOFOLLOW refused the last component: it is a symbolic link.
-				return -1, "", fmt.Errorf("open component %q: %w: %w", component, ErrSymlink, err)
-			}
-			return -1, "", fmt.Errorf("open component %q: %w", component, err)
+			return -1, "", err
 		}
 
 		// Close the previous fd if it's not the root
@@ -179,6 +176,23 @@ func (c *Confined) openWalk(path string, flags int, perm fs.FileMode, allowRoot 
 	}
 
 	return openedfd, strings.Join(components, "/"), nil
+}
+
+// walkError describes the failure to open component relative to dirfd.
+func (c *Confined) walkError(dirfd int, component string, isLast bool, err error) error {
+	if isLast && errors.Is(err, unix.ELOOP) {
+		// O_NOFOLLOW refused the last component: it is a symbolic link.
+		return fmt.Errorf("open component %q: %w: %w", component, ErrSymlink, err)
+	}
+	if !isLast && (errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP)) {
+		// O_DIRECTORY|O_NOFOLLOW refuses a symbolic link with ENOTDIR, as it
+		// does a regular file; only the link is a refusal.
+		var st unix.Stat_t
+		if unix.Fstatat(dirfd, component, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && st.Mode&unix.S_IFMT == unix.S_IFLNK {
+			return fmt.Errorf("open component %q: %w: %w", component, ErrSymlinkOnPath, err)
+		}
+	}
+	return fmt.Errorf("open component %q: %w", component, err)
 }
 
 // ReadFile reads the entire contents of a file, checking confinement and protected paths.
@@ -313,6 +327,11 @@ var ErrNotRegular = errors.New("not a regular file or directory")
 // ErrSymlink is returned (wrapping ELOOP) when the last component of a path is
 // a symbolic link, which the confined walk never follows.
 var ErrSymlink = errors.New("path is a symbolic link")
+
+// ErrSymlinkOnPath is returned (wrapping the open error) when a component
+// before the last is a symbolic link: the walk refuses to follow it, and the
+// path is neither present nor absent.
+var ErrSymlinkOnPath = errors.New("path has a symbolic link on it")
 
 // IsProtected reports whether path matches a protected pattern.
 func (c *Confined) IsProtected(path string) bool {

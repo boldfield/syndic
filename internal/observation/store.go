@@ -56,6 +56,11 @@ const (
 // or special file consistent with the record.
 var ErrOtherEntry = errors.New("path is a symbolic link or special file")
 
+// ErrSymlinkOnPath is returned by Observe, recording nothing, when a component
+// of the path before the last is a symbolic link, by the record or (returned
+// by the Reader) live. The path is refused: it is neither present nor absent.
+var ErrSymlinkOnPath = errors.New("path has a symbolic link on it")
+
 // NewStore returns a Store recording into j.
 func NewStore(j *journal.Store) *Store {
 	return &Store{j: j}
@@ -110,6 +115,9 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 		return txErr
 	}); err != nil {
 		return journal.Observation{}, err
+	}
+	if ns.viaSymlink {
+		return journal.Observation{}, ErrSymlinkOnPath
 	}
 	if ns.absent {
 		// The record already settles the name as absent; the live tree is not

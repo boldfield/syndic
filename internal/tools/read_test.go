@@ -303,7 +303,7 @@ func TestListDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, tc := f.list(".")
-	if want := "a.txt\nb.txt\nlink\nsub/\n"; string(res.Content) != want {
+	if want := "a.txt\nb.txt\nlink@\nsub/\n"; string(res.Content) != want {
 		t.Fatalf("got %q, want %q", res.Content, want)
 	}
 	f.journaled(res, tc)
@@ -314,7 +314,7 @@ func TestListDir(t *testing.T) {
 	f.stage("sub/d.txt", "s")
 	f.stage("fresh/x.txt", "s")
 	res, _ = f.list(".")
-	if want := "a.txt\nb.txt\nfresh/\nlink\nsub/\n"; string(res.Content) != want {
+	if want := "a.txt\nb.txt\nfresh/\nlink@\nsub/\n"; string(res.Content) != want {
 		t.Fatalf("got %q, want %q", res.Content, want)
 	}
 	res, _ = f.list("sub")
@@ -428,4 +428,74 @@ func TestReadFileRecordedFIFOStillFIFOIsNotRegular(t *testing.T) {
 		t.Fatalf("got %q (%s)", res.Content, res.ErrorCode)
 	}
 	f.journaled(res, tc)
+}
+
+// observed returns the paths recorded in the turn's snapshot.
+func (f *readFixture) observed() map[string]string {
+	f.t.Helper()
+	obs, err := f.j.Observations(f.turn)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, o := range obs {
+		got[o.Path] = o.Kind
+	}
+	return got
+}
+
+func TestListDirQuotesNameEndingInSymlinkMarker(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"a@": "x"}, 0)
+	if res, _ := f.list("."); string(res.Content) != "\"a@\"\n" {
+		t.Fatalf("got %q", res.Content)
+	}
+}
+
+// A path through a symbolic link is refused and journaled, never answered
+// not_found: nothing is recorded for it, so no false absence enters the
+// snapshot, whether or not the link's parent was listed first.
+func TestPathThroughSymlinkedDirectoryIsRefusedNotAbsent(t *testing.T) {
+	for _, listFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("listFirst=%v", listFirst), func(t *testing.T) {
+			f := newReadFixture(t, map[string]string{"real/x.txt": "hello\n", "a.txt": "a"}, 0)
+			if err := os.Symlink("real", filepath.Join(f.root, "linkdir")); err != nil {
+				t.Fatal(err)
+			}
+			if listFirst {
+				if res, _ := f.list("."); string(res.Content) != "a.txt\nlinkdir@\nreal/\n" {
+					t.Fatalf("got %q", res.Content)
+				}
+			}
+			calls := []struct {
+				name string
+				run  func() (Result, journal.ToolCall)
+			}{
+				{"read_file", func() (Result, journal.ToolCall) { return f.read(map[string]any{"path": "linkdir/x.txt"}) }},
+				{"list_dir", func() (Result, journal.ToolCall) { return f.list("linkdir/x.txt") }},
+				{"search_files", func() (Result, journal.ToolCall) {
+					return f.search(map[string]any{"pattern": "hello", "path": "linkdir/x.txt"})
+				}},
+			}
+			for _, c := range calls {
+				res, tc := c.run()
+				if res.ErrorCode != ErrCodeNotRegular || !strings.Contains(string(res.Content), "symbolic link") {
+					t.Errorf("%s: got %q (%s), want a symbolic-link refusal", c.name, res.Content, res.ErrorCode)
+				}
+				f.journaled(res, tc)
+			}
+			for p := range f.observed() {
+				if strings.HasPrefix(p, "linkdir") {
+					t.Errorf("recorded %q through a symbolic link", p)
+				}
+			}
+			// A regular-file ancestor still has nothing beneath it.
+			if res, _ := f.read(map[string]any{"path": "a.txt/x"}); res.ErrorCode != ErrCodeNotFound {
+				t.Errorf("a.txt/x: got %q (%s), want not_found", res.Content, res.ErrorCode)
+			}
+			// The real directory is still read normally.
+			if res, _ := f.read(map[string]any{"path": "real/x.txt"}); string(res.Content) != "hello\n" {
+				t.Errorf("real/x.txt: got %q (%s)", res.Content, res.ErrorCode)
+			}
+		})
+	}
 }

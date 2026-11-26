@@ -150,3 +150,23 @@ func TestSearchFilesNoPhantomLineAfterFinalNewline(t *testing.T) {
 		t.Fatalf("got %q (%s), want %q", res.Content, res.ErrorCode, want)
 	}
 }
+
+func TestSearchFilesEmptyFileHasNoLines(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"empty.txt": "", "a.txt": "x\n"}, 0)
+	res, _ := f.search(map[string]any{"pattern": "^$"})
+	if res.ErrorCode != "" || string(res.Content) != "no matches" {
+		t.Fatalf("got %q (%s), want no matches", res.Content, res.ErrorCode)
+	}
+}
+
+func TestSearchFilesCRLFAnchoredPattern(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"a.txt": "hello\r\nworld\r\n"}, 0)
+	res, _ := f.search(map[string]any{"pattern": "^hello$"})
+	if want := "a.txt:1:hello\n"; res.ErrorCode != "" || string(res.Content) != want {
+		t.Fatalf("got %q (%s), want %q", res.Content, res.ErrorCode, want)
+	}
+	res, _ = f.search(map[string]any{"pattern": "\r"})
+	if res.ErrorCode != "" || string(res.Content) != "no matches" {
+		t.Fatalf("got %q (%s), want no matches", res.Content, res.ErrorCode)
+	}
+}

@@ -955,3 +955,36 @@ func TestExamineFileDirAndRoot(t *testing.T) {
 		t.Fatal("IsProtected")
 	}
 }
+
+func TestExamineSymlinkOnPathIsRefusedNotMissing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"real/x.txt": "X", "a.txt": "A"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("real", filepath.Join(root, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := OpenConfined(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	for _, p := range []string{"linkdir/x.txt", "linkdir/missing/y"} {
+		if _, err := c.Examine(p); !errors.Is(err, ErrSymlinkOnPath) || errors.Is(err, ErrSymlink) {
+			t.Fatalf("%s: want ErrSymlinkOnPath, got %v", p, err)
+		}
+	}
+	if _, err := c.ReadFile("linkdir/x.txt"); !errors.Is(err, ErrSymlinkOnPath) {
+		t.Fatalf("ReadFile: want ErrSymlinkOnPath, got %v", err)
+	}
+	// A regular file on the path is not a link: nothing is beneath it.
+	if _, err := c.Examine("a.txt/x"); errors.Is(err, ErrSymlinkOnPath) || !errors.Is(err, unix.ENOTDIR) {
+		t.Fatalf("a.txt/x: want ENOTDIR only, got %v", err)
+	}
+}

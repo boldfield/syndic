@@ -116,11 +116,15 @@ func (s *search) match(path string, content []byte) {
 	if s.out.Len() > s.t.maxResultBytes {
 		return
 	}
+	if len(content) == 0 {
+		return // an empty file has no lines
+	}
 	lines := bytes.Split(content, []byte("\n"))
-	if n := len(lines); n > 1 && len(lines[n-1]) == 0 {
+	if n := len(lines); len(lines[n-1]) == 0 {
 		lines = lines[:n-1] // a final newline ends a line; it does not start one
 	}
 	for i, line := range lines {
+		line = bytes.TrimSuffix(line, []byte("\r")) // CRLF is a line terminator
 		if !s.re.Match(line) {
 			continue
 		}
@@ -128,6 +132,6 @@ func (s *search) match(path string, content []byte) {
 		if strings.ContainsAny(name, "\r\n:\"") {
 			name = strconv.Quote(name)
 		}
-		fmt.Fprintf(&s.out, "%s:%d:%s\n", name, i+1, bytes.TrimSuffix(line, []byte("\r")))
+		fmt.Fprintf(&s.out, "%s:%d:%s\n", name, i+1, line)
 	}
 }
