@@ -155,7 +155,9 @@ func (e *Engine) startAuthorStep(t *openTurn, prior transport.CompleteRequest, r
 			state = StateRevisionDispatched
 		}
 		t.toolLimited = limited
-		req, attemptID, err = e.dispatchAuthorWith(t, msgs, defs, request, state, senderEngine)
+		// A continuation is a later dispatch of a round already started: it
+		// is checked by reservation alone, never by the round's projection.
+		req, attemptID, err = e.dispatchAuthorWith(t, msgs, defs, request, state, senderEngine, false)
 	}
 	if err != nil {
 		if r, ok := asRefusal(err); ok {
@@ -212,13 +214,15 @@ func (e *Engine) dispatchAuthor(t *openTurn) (transport.CompleteRequest, string,
 		msgs = append(msgs, transport.Message{Role: "user", Content: toolLimitStatement})
 	}
 	t.toolLimited = limited
-	return e.dispatchAuthorWith(t, msgs, defs, request, state, senderUser)
+	return e.dispatchAuthorWith(t, msgs, defs, request, state, senderUser, t.revising)
 }
 
 // dispatchAuthorWith records the request message, from sender to the author,
 // and the attempt carrying msgs and the tool definitions defs, reserves its
-// budget and emits the turn state, all in one transaction. e.mu is held.
-func (e *Engine) dispatchAuthorWith(t *openTurn, msgs []transport.Message, defs []transport.Tool, request, state, sender string) (transport.CompleteRequest, string, error) {
+// budget and emits the turn state, all in one transaction. roundStart marks
+// the first author attempt of a revision round, which also requires the
+// round's projection to fit what is left of the turn budget. e.mu is held.
+func (e *Engine) dispatchAuthorWith(t *openTurn, msgs []transport.Message, defs []transport.Tool, request, state, sender string, roundStart bool) (transport.CompleteRequest, string, error) {
 	var p config.Participant
 	for _, candidate := range e.roster.Participants {
 		if candidate.ID == t.author {
@@ -236,7 +240,7 @@ func (e *Engine) dispatchAuthorWith(t *openTurn, msgs []transport.Message, defs 
 		if err != nil {
 			return err
 		}
-		if t.revising {
+		if roundStart {
 			if err := e.checkRoundFits(tx, t, msgs, defs, maxOut); err != nil {
 				return err
 			}
