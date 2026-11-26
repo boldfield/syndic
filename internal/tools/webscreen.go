@@ -1,9 +1,9 @@
-// Package tools holds web pre-send screening logic for canary and shape checks.
 package tools
 
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"net/url"
@@ -18,32 +18,65 @@ type ScreenResult struct {
 
 // URLScreener performs pre-DNS canary and shape checks on URLs.
 type URLScreener struct {
-	fileBytes    []byte
-	hostFetches  map[string]int
-	totalFetches int
-	maxPerTurn   int
+	corpusSequences [][]byte // Keep file-derived sequences separate
+	hostFetches     map[string]int
+	totalFetches    int
+	maxPerTurn      int
 }
 
 // NewURLScreener creates a new URL screener for a turn.
 func NewURLScreener(maxPerTurn int) *URLScreener {
 	return &URLScreener{
-		fileBytes:    []byte{},
-		hostFetches:  make(map[string]int),
-		totalFetches: 0,
-		maxPerTurn:   maxPerTurn,
+		corpusSequences: [][]byte{},
+		hostFetches:     make(map[string]int),
+		totalFetches:    0,
+		maxPerTurn:      maxPerTurn,
 	}
 }
 
-// AddFileBytes adds file-derived content to the canary corpus for this turn.
+// AddFileBytes adds file-derived content (file snapshot) to the canary corpus for this turn.
 func (s *URLScreener) AddFileBytes(data []byte) {
-	s.fileBytes = append(s.fileBytes, data...)
+	s.corpusSequences = append(s.corpusSequences, bytes.Clone(data))
+}
+
+// AddHistoryBytes adds history document content to the canary corpus.
+func (s *URLScreener) AddHistoryBytes(data []byte) {
+	s.corpusSequences = append(s.corpusSequences, bytes.Clone(data))
+}
+
+// AddDiffBytes adds diff content to the canary corpus.
+func (s *URLScreener) AddDiffBytes(data []byte) {
+	s.corpusSequences = append(s.corpusSequences, bytes.Clone(data))
+}
+
+// AddBaseBytes adds base content to the canary corpus.
+func (s *URLScreener) AddBaseBytes(data []byte) {
+	s.corpusSequences = append(s.corpusSequences, bytes.Clone(data))
+}
+
+// canonicalHost returns the canonical form of a hostname: lowercase with default port stripped.
+func (s *URLScreener) canonicalHost(u *url.URL) string {
+	hostname := u.Hostname()
+	if hostname == "" {
+		return ""
+	}
+	hostname = strings.ToLower(hostname)
+
+	// Strip default ports
+	port := u.Port()
+	if port == "" || (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80") {
+		return hostname
+	}
+	return hostname + ":" + port
 }
 
 // Screen performs pre-DNS checks on a URL and tracks fetch counts.
 // Rules applied in order:
 // 1. Scheme check (http/https only)
-// 2. Canary check (16+ byte sequences from file-derived content)
-// 3. Shape checks (length, entropy, host counts)
+// 2. URL length check
+// 3. Hostname validation
+// 4. Canary check (16+ byte sequences from file-derived content)
+// 5. Shape checks (entropy, host counts)
 func (s *URLScreener) Screen(urlStr string) ScreenResult {
 	// Scheme check
 	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
@@ -61,7 +94,7 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		return ScreenResult{Allowed: false, Reason: "url_length: exceeds 2048 bytes"}
 	}
 
-	// Hostname validation and canary check on hostname
+	// Hostname validation
 	hostname := u.Hostname()
 	if hostname == "" {
 		return ScreenResult{Allowed: false, Reason: "hostname: empty hostname"}
@@ -77,15 +110,33 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		if len(label) > 63 {
 			return ScreenResult{Allowed: false, Reason: "label_length: exceeds 63 bytes"}
 		}
+	}
 
-		// Canary check on hostname label
+	// Check entire percent-decoded URL for 16-byte sequences from corpus
+	decodedURL, err := url.QueryUnescape(urlStr)
+	if err != nil {
+		decodedURL = urlStr
+	}
+
+	if !s.canaryCheckURL(decodedURL) {
+		return ScreenResult{Allowed: false, Reason: "canary: match in URL"}
+	}
+
+	// Check hostname labels with bounded decoding
+	for _, label := range labels {
 		if !s.canaryCheck(label) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in hostname"}
 		}
-
-		// Shape entropy check on hostname label
 		if !s.shapeCheck(label) {
 			return ScreenResult{Allowed: false, Reason: "shape: high entropy in hostname label"}
+		}
+	}
+
+	// Check userinfo
+	if u.User != nil {
+		userinfo := u.User.String()
+		if !s.canaryCheck(userinfo) {
+			return ScreenResult{Allowed: false, Reason: "canary: match in userinfo"}
 		}
 	}
 
@@ -95,51 +146,58 @@ func (s *URLScreener) Screen(urlStr string) ScreenResult {
 		if segment == "" {
 			continue
 		}
-
-		// Canary check on path segment
 		if !s.canaryCheck(segment) {
 			return ScreenResult{Allowed: false, Reason: "canary: match in path"}
 		}
-
-		// Shape entropy check on path segment
 		if !s.shapeCheck(segment) {
 			return ScreenResult{Allowed: false, Reason: "shape: high entropy in path"}
 		}
 	}
 
-	// Check query values
-	for _, values := range u.Query() {
+	// Check query keys and values
+	for key, values := range u.Query() {
+		if !s.canaryCheck(key) {
+			return ScreenResult{Allowed: false, Reason: "canary: match in query key"}
+		}
 		for _, val := range values {
-			// Canary check on query value
 			if !s.canaryCheck(val) {
-				return ScreenResult{Allowed: false, Reason: "canary: match in query"}
+				return ScreenResult{Allowed: false, Reason: "canary: match in query value"}
 			}
-
-			// Shape entropy check on query value
 			if !s.shapeCheck(val) {
-				return ScreenResult{Allowed: false, Reason: "shape: high entropy in query"}
+				return ScreenResult{Allowed: false, Reason: "shape: high entropy in query value"}
 			}
 		}
 	}
 
-	// Track host fetch count
-	host := u.Host
-	s.hostFetches[host]++
-	if s.hostFetches[host] > 10 {
-		return ScreenResult{Allowed: false, Reason: fmt.Sprintf("host_count: exceeds 10 fetches to %s", host)}
+	// Count and check host fetch limit
+	canHost := s.canonicalHost(u)
+	s.hostFetches[canHost]++
+	if s.hostFetches[canHost] > 10 {
+		return ScreenResult{Allowed: false, Reason: fmt.Sprintf("host_count: exceeds 10 fetches to %s", canHost)}
 	}
 
-	// Track total fetch count
+	// Count and check total fetch limit
 	s.totalFetches++
-	if s.totalFetches > 20 {
-		return ScreenResult{Allowed: false, Reason: "turn_count: exceeds 20 total fetches in turn"}
+	if s.totalFetches > s.maxPerTurn {
+		return ScreenResult{Allowed: false, Reason: fmt.Sprintf("turn_count: exceeds %d total fetches in turn", s.maxPerTurn)}
 	}
 
 	return ScreenResult{Allowed: true}
 }
 
+// canaryCheckURL checks if a percent-decoded URL contains any 16-byte run from the corpus.
+func (s *URLScreener) canaryCheckURL(urlStr string) bool {
+	urlBytes := []byte(urlStr)
+	for _, seqBytes := range s.corpusSequences {
+		if s.containsRunInBytes(urlBytes, seqBytes) {
+			return false
+		}
+	}
+	return true
+}
+
 // canaryCheck checks if a string contains any 16+ byte run from file-derived content,
-// after decoding attempts (percent, base64, base64url, hex, and two-level nesting).
+// after decoding attempts (percent, base64, base64url, hex, and up to two-level nesting).
 func (s *URLScreener) canaryCheck(segment string) bool {
 	// Generate all possible decodings of the segment
 	decodings := s.allDecodings(segment)
@@ -155,33 +213,35 @@ func (s *URLScreener) canaryCheck(segment string) bool {
 }
 
 // allDecodings returns all possible decodings of a segment up to depth 2.
-func (s *URLScreener) allDecodings(segment string) []string {
-	result := []string{segment}
+func (s *URLScreener) allDecodings(segment string) [][]byte {
+	result := [][]byte{[]byte(segment)}
+	seen := make(map[string]bool)
+	seen[segment] = true
 
 	// Level 1 decodings
-	level1 := []string{
-		segment,
-		s.tryPercentDecode(segment),
-		s.tryBase64Decode(segment),
-		s.tryBase64URLDecode(segment),
-		s.tryHexDecode(segment),
+	level1 := map[string][]byte{
+		"percent": s.tryPercentDecode(segment),
+		"base64":  s.tryBase64Decode(segment),
+		"base64u": s.tryBase64URLDecode(segment),
+		"hex":     s.tryHexDecode(segment),
 	}
 
-	// Remove duplicates and add to result
-	for _, l1 := range level1 {
-		if l1 != "" && l1 != segment {
-			result = append(result, l1)
+	for _, decoded := range level1 {
+		if decoded != nil && !seen[string(decoded)] {
+			result = append(result, decoded)
+			seen[string(decoded)] = true
 
-			// Level 2 decodings (nesting)
-			level2 := []string{
-				s.tryPercentDecode(l1),
-				s.tryBase64Decode(l1),
-				s.tryBase64URLDecode(l1),
-				s.tryHexDecode(l1),
+			// Level 2 decodings (nesting) - decode only once more
+			level2 := [][]byte{
+				s.tryPercentDecodeBytes(decoded),
+				s.tryBase64DecodeBytes(decoded),
+				s.tryBase64URLDecodeBytes(decoded),
+				s.tryHexDecodeBytes(decoded),
 			}
 			for _, l2 := range level2 {
-				if l2 != "" && l2 != segment && l2 != l1 {
+				if l2 != nil && !seen[string(l2)] {
 					result = append(result, l2)
+					seen[string(l2)] = true
 				}
 			}
 		}
@@ -191,58 +251,97 @@ func (s *URLScreener) allDecodings(segment string) []string {
 }
 
 // tryPercentDecode attempts to percent-decode a string.
-func (s *URLScreener) tryPercentDecode(segment string) string {
+func (s *URLScreener) tryPercentDecode(segment string) []byte {
 	decoded, err := url.QueryUnescape(segment)
+	if err != nil || decoded == segment {
+		return nil
+	}
+	return []byte(decoded)
+}
+
+// tryPercentDecodeBytes attempts to percent-decode bytes.
+func (s *URLScreener) tryPercentDecodeBytes(b []byte) []byte {
+	return s.tryPercentDecode(string(b))
+}
+
+// tryBase64Decode attempts to base64-decode a string (both padded and unpadded).
+func (s *URLScreener) tryBase64Decode(segment string) []byte {
+	// Try padded first
+	if decoded, err := base64.StdEncoding.DecodeString(segment); err == nil {
+		return decoded
+	}
+	// Try unpadded
+	padded := segment + strings.Repeat("=", (4-len(segment)%4)%4)
+	if decoded, err := base64.StdEncoding.DecodeString(padded); err == nil {
+		return decoded
+	}
+	return nil
+}
+
+// tryBase64DecodeBytes attempts to base64-decode bytes.
+func (s *URLScreener) tryBase64DecodeBytes(b []byte) []byte {
+	return s.tryBase64Decode(string(b))
+}
+
+// tryBase64URLDecode attempts to base64url-decode a string (both padded and unpadded).
+func (s *URLScreener) tryBase64URLDecode(segment string) []byte {
+	// Try padded first
+	if decoded, err := base64.URLEncoding.DecodeString(segment); err == nil {
+		return decoded
+	}
+	// Try unpadded
+	padded := segment + strings.Repeat("=", (4-len(segment)%4)%4)
+	if decoded, err := base64.URLEncoding.DecodeString(padded); err == nil {
+		return decoded
+	}
+	return nil
+}
+
+// tryBase64URLDecodeBytes attempts to base64url-decode bytes.
+func (s *URLScreener) tryBase64URLDecodeBytes(b []byte) []byte {
+	return s.tryBase64URLDecode(string(b))
+}
+
+// tryHexDecode attempts to hex-decode a string.
+func (s *URLScreener) tryHexDecode(segment string) []byte {
+	if len(segment)%2 != 0 {
+		return nil
+	}
+	decoded, err := hex.DecodeString(segment)
 	if err != nil {
-		return ""
+		return nil
 	}
 	return decoded
 }
 
-// tryBase64Decode attempts to base64-decode a string.
-func (s *URLScreener) tryBase64Decode(segment string) string {
-	decoded, err := base64.StdEncoding.DecodeString(segment)
-	if err != nil {
-		return ""
-	}
-	return string(decoded)
+// tryHexDecodeBytes attempts to hex-decode bytes.
+func (s *URLScreener) tryHexDecodeBytes(b []byte) []byte {
+	return s.tryHexDecode(string(b))
 }
 
-// tryBase64URLDecode attempts to base64url-decode a string.
-func (s *URLScreener) tryBase64URLDecode(segment string) string {
-	decoded, err := base64.URLEncoding.DecodeString(segment)
-	if err != nil {
-		return ""
+// containsRunInBytes checks if haystack contains any 16-byte run from needle.
+func (s *URLScreener) containsRunInBytes(haystack, needle []byte) bool {
+	if len(needle) < 16 {
+		return false
 	}
-	return string(decoded)
-}
-
-// tryHexDecode attempts to hex-decode a string.
-func (s *URLScreener) tryHexDecode(segment string) string {
-	if len(segment)%2 != 0 {
-		return ""
-	}
-	var buf bytes.Buffer
-	for i := 0; i < len(segment); i += 2 {
-		var b byte
-		if n, err := fmt.Sscanf(segment[i:i+2], "%02x", &b); err != nil || n != 1 {
-			return ""
+	// Check each 16-byte run in needle
+	for i := 0; i <= len(needle)-16; i++ {
+		chunk := needle[i : i+16]
+		if bytes.Contains(haystack, chunk) {
+			return true
 		}
-		buf.WriteByte(b)
 	}
-	return buf.String()
+	return false
 }
 
 // containsFileBytes checks if decoded contains any 16-byte run from file-derived content.
-func (s *URLScreener) containsFileBytes(decoded string) bool {
+func (s *URLScreener) containsFileBytes(decoded []byte) bool {
 	if len(decoded) < 16 {
 		return false
 	}
 
-	decodedBytes := []byte(decoded)
-	for i := 0; i <= len(decodedBytes)-16; i++ {
-		chunk := decodedBytes[i : i+16]
-		if bytes.Contains(s.fileBytes, chunk) {
+	for _, seqBytes := range s.corpusSequences {
+		if s.containsRunInBytes(decoded, seqBytes) {
 			return true
 		}
 	}
