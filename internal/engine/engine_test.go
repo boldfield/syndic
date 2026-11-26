@@ -842,3 +842,21 @@ func TestStatusSurfacesRetryCommand(t *testing.T) {
 		t.Errorf("RetryCommand = %q, want to include '--roster' flag", cmd)
 	}
 }
+
+func TestDeliberatePresetRefusedAtSubmit(t *testing.T) {
+	toml := strings.ReplaceAll(enginetest.RosterTOML, `eligible_roles = ["author"]`, `eligible_roles = ["author", "reviewer"]`)
+	toml = strings.ReplaceAll(toml, `eligible_roles = ["reviewer"]`, `eligible_roles = ["author", "reviewer"]`)
+	toml += `
+[presets.deliberate]
+mode = "deliberate"
+proposers = ["author", "reviewer"]
+integrator = "author"
+`
+	h := enginetest.New(t, toml, nil)
+	name := "deliberate"
+	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q", Preset: &name})
+	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
+	if we.Detail == nil || *we.Detail != "deliberate_mode_unsupported" {
+		t.Fatalf("detail = %v", we.Detail)
+	}
+}
