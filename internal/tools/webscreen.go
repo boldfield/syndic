@@ -82,6 +82,7 @@ type URLScreener struct {
 	corpus   map[[canaryRun]byte]struct{}
 	perHost  map[string]int
 	totalNum int
+	policy   *HostPolicy
 }
 
 // NewURLScreener returns a screener whose turn-wide fetch cap is maxPerTurn
@@ -97,6 +98,14 @@ func NewURLScreener(maxPerTurn int) *URLScreener {
 	}
 }
 
+// SetHostPolicy sets the host allowlist policy for this screener.
+// If policy is nil, no allowlist checks are performed.
+func (s *URLScreener) SetHostPolicy(policy *HostPolicy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policy = policy
+}
+
 // AddBytes records file-derived bytes a participant has been exposed to this
 // turn. Each call is its own sequence: a run that would span the end of one
 // call and the start of the next is not a match. Only the sixteen-byte windows
@@ -109,7 +118,7 @@ func (s *URLScreener) AddBytes(_ Route, b []byte) {
 	}
 }
 
-// Screen applies the canary, the shape rules and the fetch counts to rawURL.
+// Screen applies the canary, the shape rules, the allowlist, and the fetch counts to rawURL.
 // Only a URL that passes every rule is counted against the per-host and
 // per-turn caps; a refused URL consumes no budget.
 func (s *URLScreener) Screen(rawURL string) Verdict {
@@ -127,6 +136,12 @@ func (s *URLScreener) Screen(rawURL string) Verdict {
 	if v != nil {
 		return *v
 	}
+
+	// Check allowlist (pre-send check 5)
+	if err := s.policy.MatchURL(rawURL); err != nil {
+		return refuse(RuleShape, err.Error())
+	}
+
 	if s.perHost[host] >= maxFetchesPerHost {
 		return refuse(RuleHostCount, "per-host fetch limit reached for this turn")
 	}

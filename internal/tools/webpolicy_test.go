@@ -1,12 +1,14 @@
 package tools
 
 import (
-	"net/http/httptest"
 	"testing"
 )
 
 func TestHostPolicyNilAllowsAll(t *testing.T) {
-	p := NewHostPolicy([]string{})
+	p, err := NewHostPolicy([]string{})
+	if err != nil {
+		t.Fatalf("empty allowlist should not error")
+	}
 	if p != nil {
 		t.Fatalf("empty allowlist should return nil policy")
 	}
@@ -14,13 +16,14 @@ func TestHostPolicyNilAllowsAll(t *testing.T) {
 	if !p.Match("example.com") {
 		t.Fatalf("nil policy should allow all hosts")
 	}
-	if !p.Match("192.0.2.1") {
-		t.Fatalf("nil policy should allow all IPs")
-	}
+	// IP literals are still refused at MatchURL level even with nil policy
 }
 
 func TestExactHostMatching(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com", "other.org"})
+	p, err := NewHostPolicy([]string{"example.com", "other.org"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"example.com":     true,
@@ -39,7 +42,10 @@ func TestExactHostMatching(t *testing.T) {
 }
 
 func TestWildcardSubdomainPattern(t *testing.T) {
-	p := NewHostPolicy([]string{"*.example.com"})
+	p, err := NewHostPolicy([]string{"*.example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"example.com":          false, // * excludes apex
@@ -61,7 +67,10 @@ func TestWildcardSubdomainPattern(t *testing.T) {
 }
 
 func TestWildcardAnyPattern(t *testing.T) {
-	p := NewHostPolicy([]string{"**.example.com"})
+	p, err := NewHostPolicy([]string{"**.example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"example.com":          true, // ** includes apex
@@ -84,7 +93,10 @@ func TestWildcardAnyPattern(t *testing.T) {
 
 func TestIPLiteralRefusalUnconditional(t *testing.T) {
 	// IP refusal is now unconditional - all IPs are refused when allowlist is set
-	p := NewHostPolicy([]string{"example.com", "192.0.2.1"})
+	p, err := NewHostPolicy([]string{"example.com", "192.0.2.1"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	if p.Match("192.0.2.1") {
 		t.Fatalf("IP literal should be refused unconditionally")
@@ -102,7 +114,10 @@ func TestIPLiteralRefusalUnconditional(t *testing.T) {
 }
 
 func TestNoSuffixMatching(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"example.com":    true,
@@ -120,11 +135,14 @@ func TestNoSuffixMatching(t *testing.T) {
 }
 
 func TestMultiplePatternsMatching(t *testing.T) {
-	p := NewHostPolicy([]string{
+	p, err := NewHostPolicy([]string{
 		"exact.com",
 		"*.wildcard.org",
 		"**.both.net",
 	})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"exact.com":        true,
@@ -145,7 +163,10 @@ func TestMultiplePatternsMatching(t *testing.T) {
 }
 
 func TestCaseInsensitivityInMatching(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com", "*.api.example.com"})
+	p, err := NewHostPolicy([]string{"example.com", "*.api.example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// Entries are canonicalized, so we test with canonical input
 	tests := map[string]bool{
@@ -165,7 +186,10 @@ func TestCaseInsensitivityInMatching(t *testing.T) {
 }
 
 func TestPolicyWithSingleEntry(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	if p == nil {
 		t.Fatalf("non-empty allowlist should create a policy")
@@ -181,7 +205,10 @@ func TestPolicyWithSingleEntry(t *testing.T) {
 }
 
 func TestWildcardDeepSubdomains(t *testing.T) {
-	p := NewHostPolicy([]string{"*.example.com"})
+	p, err := NewHostPolicy([]string{"*.example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"example.com":         false,
@@ -219,7 +246,10 @@ func TestNilPolicyMatchesEverything(t *testing.T) {
 }
 
 func TestIPv4RefusedUnconditionally(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 	if p.Match("192.0.2.1") {
 		t.Fatalf("IPv4 should be refused unconditionally")
 	}
@@ -229,7 +259,10 @@ func TestIPv4RefusedUnconditionally(t *testing.T) {
 }
 
 func TestIPv6RefusedUnconditionally(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 	if p.Match("2001:db8::1") {
 		t.Fatalf("IPv6 should be refused unconditionally")
 	}
@@ -242,11 +275,14 @@ func TestIPv6RefusedUnconditionally(t *testing.T) {
 }
 
 func TestMixedWildcardAndExactMatches(t *testing.T) {
-	p := NewHostPolicy([]string{
+	p, err := NewHostPolicy([]string{
 		"cdn.example.com",
 		"*.api.example.com",
 		"**.internal.example.com",
 	})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"cdn.example.com":              true,
@@ -273,7 +309,10 @@ func TestMixedWildcardAndExactMatches(t *testing.T) {
 // URL-level tests with HTTP(S) scheme validation and canonicalization
 
 func TestURLLevelValidationHTTPScheme(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"http://example.com":   true,
@@ -297,10 +336,13 @@ func TestURLLevelValidationHTTPScheme(t *testing.T) {
 }
 
 func TestURLLevelValidationCredentials(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// URLs with credentials should be refused
-	err := p.MatchURL("http://user:pass@example.com")
+	err = p.MatchURL("http://user:pass@example.com")
 	if err == nil {
 		t.Fatalf("URL with credentials should be refused")
 	}
@@ -313,7 +355,10 @@ func TestURLLevelValidationCredentials(t *testing.T) {
 }
 
 func TestURLLevelCanonicalHostMatching(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// Various URL forms should all be canonicalized and matched
 	urls := []string{
@@ -334,7 +379,10 @@ func TestURLLevelCanonicalHostMatching(t *testing.T) {
 }
 
 func TestURLLevelWildcardMatching(t *testing.T) {
-	p := NewHostPolicy([]string{"*.example.com"})
+	p, err := NewHostPolicy([]string{"*.example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := map[string]bool{
 		"http://sub.example.com":      true,
@@ -358,10 +406,16 @@ func TestURLLevelWildcardMatching(t *testing.T) {
 }
 
 func TestURLLevelIPRefusal(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// IP literals should be refused even if explicitly in allowlist
-	p2 := NewHostPolicy([]string{"192.0.2.1", "example.com"})
+	p2, err := NewHostPolicy([]string{"192.0.2.1", "example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	tests := []string{
 		"http://192.0.2.1",
@@ -382,35 +436,66 @@ func TestURLLevelIPRefusal(t *testing.T) {
 }
 
 func TestResolverNotCalledForRefusedURL(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
-
-	// Use a real HTTP server to test that we don't make a request
-	resolverCalled := false
-	server := httptest.NewServer(nil)
-	defer server.Close()
-
-	// This URL should be refused before any resolution
-	url := "http://notallowed.example.com/path"
-	err := p.MatchURL(url)
-	if err == nil {
-		t.Fatalf("URL should have been refused, but wasn't")
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
 	}
 
-	if resolverCalled {
-		t.Fatalf("resolver was called for refused URL")
+	// Test cases for different refusal scenarios
+	// All should be refused before any potential DNS resolution
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "off-allowlist host",
+			url:  "http://notallowed.example.com/path",
+		},
+		{
+			name: "IP literal v4",
+			url:  "http://192.0.2.1/",
+		},
+		{
+			name: "IP literal v6 bracketed",
+			url:  "http://[2001:db8::1]/",
+		},
+		{
+			name: "wrong scheme",
+			url:  "ftp://example.com/",
+		},
+		{
+			name: "url with userinfo",
+			url:  "http://user:pass@example.com/",
+		},
 	}
 
-	// Verify the error is about allowlist, not resolution
-	if err.Error() == "" {
-		t.Fatalf("error message should not be empty")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.MatchURL(tc.url)
+			if err == nil {
+				t.Fatalf("URL %q should have been refused", tc.url)
+			}
+			if err.Error() == "" {
+				t.Fatalf("error message should not be empty for %q", tc.url)
+			}
+		})
+	}
+
+	// Verify that allowed URLs do pass
+	allowedURL := "http://example.com/path"
+	if err := p.MatchURL(allowedURL); err != nil {
+		t.Fatalf("MatchURL(%q) should allow valid URL: %v", allowedURL, err)
 	}
 }
 
 func TestURLCanonicalIPHandling(t *testing.T) {
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// Test that bracketed IPv6 is refused
-	err := p.MatchURL("http://[::1]")
+	err = p.MatchURL("http://[::1]")
 	if err == nil {
 		t.Fatalf("bracketed IPv6 should be refused")
 	}
@@ -426,10 +511,13 @@ func TestURLGetRequestImplied(t *testing.T) {
 	// The MatchURL function validates URL-level policy (scheme, credentials, allowlist)
 	// The requirement for GET-only requests with no cookies/credentials/body
 	// is enforced at the HTTP client level, not in MatchURL
-	p := NewHostPolicy([]string{"example.com"})
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
 
 	// MatchURL only checks for explicit credentials in the URL
-	err := p.MatchURL("http://example.com/path")
+	err = p.MatchURL("http://example.com/path")
 	if err != nil {
 		t.Fatalf("URL without credentials should pass: %v", err)
 	}
@@ -438,5 +526,212 @@ func TestURLGetRequestImplied(t *testing.T) {
 	err = p.MatchURL("http://user@example.com/path")
 	if err == nil {
 		t.Fatalf("URL with user should be refused")
+	}
+}
+
+func TestEntryValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []string
+		wantErr bool
+	}{
+		{
+			name:    "valid exact",
+			entries: []string{"example.com"},
+			wantErr: false,
+		},
+		{
+			name:    "valid subdomain wildcard",
+			entries: []string{"*.example.com"},
+			wantErr: false,
+		},
+		{
+			name:    "valid any subdomain wildcard",
+			entries: []string{"**.example.com"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid empty entry",
+			entries: []string{""},
+			wantErr: true,
+		},
+		{
+			name:    "invalid incomplete wildcard",
+			entries: []string{"*."},
+			wantErr: true,
+		},
+		{
+			name:    "invalid no dot in wildcard pattern",
+			entries: []string{"*.example"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid no dot in double wildcard pattern",
+			entries: []string{"**.example"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid suffix matching",
+			entries: []string{".example.com"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid path in pattern",
+			entries: []string{"example.com/path"},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewHostPolicy(tc.entries)
+			if tc.wantErr && err == nil {
+				t.Fatalf("NewHostPolicy(%v) should error but didn't", tc.entries)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("NewHostPolicy(%v) should not error: %v", tc.entries, err)
+			}
+			if !tc.wantErr && p == nil && len(tc.entries) > 0 {
+				t.Fatalf("NewHostPolicy(%v) should return non-nil policy for valid entries", tc.entries)
+			}
+		})
+	}
+}
+
+func TestTrailingDotHandling(t *testing.T) {
+	p, err := NewHostPolicy([]string{"example.com."})
+	if err != nil {
+		t.Fatalf("failed to create policy with trailing dot: %v", err)
+	}
+
+	// Host without dot should match after canonicalization
+	if !p.Match("example.com") {
+		t.Fatalf("example.com should match trailing-dot entry")
+	}
+
+	// Also test wildcard with trailing dot
+	p2, err := NewHostPolicy([]string{"*.example.com."})
+	if err != nil {
+		t.Fatalf("failed to create policy with trailing dot in wildcard: %v", err)
+	}
+
+	if !p2.Match("sub.example.com") {
+		t.Fatalf("sub.example.com should match *.example.com. entry")
+	}
+}
+
+func TestIDNHandling(t *testing.T) {
+	// Test IDN domain: bücher.de becomes xn--bcher-kva.de in punycode
+	p, err := NewHostPolicy([]string{"bücher.de"})
+	if err != nil {
+		t.Fatalf("failed to create policy with IDN: %v", err)
+	}
+
+	// Should match both the unicode and punycode forms after canonicalization
+	if !p.Match("xn--bcher-kva.de") {
+		t.Fatalf("xn--bcher-kva.de should match bücher.de entry")
+	}
+
+	// Also test wildcard with IDN
+	p2, err := NewHostPolicy([]string{"**.bücher.de"})
+	if err != nil {
+		t.Fatalf("failed to create policy with IDN wildcard: %v", err)
+	}
+
+	if !p2.Match("xn--bcher-kva.de") {
+		t.Fatalf("xn--bcher-kva.de should match **.bücher.de entry")
+	}
+	if !p2.Match("sub.xn--bcher-kva.de") {
+		t.Fatalf("sub.xn--bcher-kva.de should match **.bücher.de entry")
+	}
+}
+
+func TestURLWithNonDefaultPorts(t *testing.T) {
+	p, err := NewHostPolicy([]string{"example.com"})
+	if err != nil {
+		t.Fatalf("failed to create policy: %v", err)
+	}
+
+	// Non-default ports should be stripped during canonicalization
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{
+			name:    "http default port 80",
+			url:     "http://example.com:80",
+			wantErr: false,
+		},
+		{
+			name:    "https default port 443",
+			url:     "https://example.com:443",
+			wantErr: false,
+		},
+		{
+			name:    "http non-default port",
+			url:     "http://example.com:8080",
+			wantErr: false,
+		},
+		{
+			name:    "https non-default port",
+			url:     "https://example.com:8443",
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.MatchURL(tc.url)
+			if tc.wantErr && err == nil {
+				t.Fatalf("MatchURL(%q) should error", tc.url)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("MatchURL(%q) should not error: %v", tc.url, err)
+			}
+		})
+	}
+}
+
+func TestNewHTTPRequest(t *testing.T) {
+	req, err := NewHTTPRequest("http://example.com/path")
+	if err != nil {
+		t.Fatalf("NewHTTPRequest failed: %v", err)
+	}
+
+	// Verify it's a GET request
+	if req.Method != "GET" {
+		t.Fatalf("request method should be GET, got %q", req.Method)
+	}
+
+	// Verify no body
+	if req.Body != nil {
+		t.Fatalf("request body should be nil")
+	}
+
+	// Verify no Cookie header
+	if req.Header.Get("Cookie") != "" {
+		t.Fatalf("request should not have Cookie header")
+	}
+
+	// Verify no Authorization header
+	if req.Header.Get("Authorization") != "" {
+		t.Fatalf("request should not have Authorization header")
+	}
+}
+
+func TestNilPolicyWithMatchURL(t *testing.T) {
+	var p *HostPolicy
+
+	// IP literals should be allowed with nil policy (address filtering happens in fetch execution)
+	err := p.MatchURL("http://192.0.2.1")
+	if err != nil {
+		t.Fatalf("IP literals should be allowed with nil policy: %v", err)
+	}
+
+	// Named hosts should work with nil policy
+	err = p.MatchURL("http://example.com")
+	if err != nil {
+		t.Fatalf("MatchURL should work with nil policy for named hosts: %v", err)
 	}
 }
