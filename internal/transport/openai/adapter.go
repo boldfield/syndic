@@ -1371,16 +1371,58 @@ func truncateUTF8(s string, max int) string {
 	return s[:cut]
 }
 
+// forcedToolChoiceUnsupported is the tool restriction recorded when an
+// endpoint refused the forced tool choice and the probe asked again without it.
+const forcedToolChoiceUnsupported = "forced_tool_choice_unsupported"
+
+// probeAutoOutputLimit is the output limit of the unforced tool-call probe; a
+// model that reasons before answering can spend a small limit before it emits
+// the call.
+const probeAutoOutputLimit = 1024
+
+// isForcedToolChoiceRefused reports whether a response says the endpoint
+// refused the forced tool choice: status 400 or 422 whose body names
+// "tool_choice" (case-insensitive) in its error message, code or param, e.g.
+// `tool_choice: type "tool" and "any" are not supported for this model.`
+// A body that is not JSON is matched as a whole.
+func isForcedToolChoiceRefused(status int, body []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+		return false
+	}
+	const needle = "tool_choice"
+	var parsed struct {
+		Error json.RawMessage `json:"error"`
+		Msg   string          `json:"message"`
+		Code  any             `json:"code"`
+		Param string          `json:"param"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return strings.Contains(strings.ToLower(string(body)), needle)
+	}
+	fields := []string{parsed.Msg, parsed.Param, fmt.Sprint(parsed.Code)}
+	if len(parsed.Error) > 0 {
+		var inner struct {
+			Message string `json:"message"`
+			Code    any    `json:"code"`
+			Param   string `json:"param"`
+		}
+		if err := json.Unmarshal(parsed.Error, &inner); err == nil {
+			fields = append(fields, inner.Message, inner.Param, fmt.Sprint(inner.Code))
+		} else {
+			fields = append(fields, string(parsed.Error))
+		}
+	}
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *transport.CapabilityRecord, model string, secrets *[]string, rawSteps map[string]any, opts transport.ProbeOptions, finishReasons map[string]transport.CompletionStatus) error {
 	endpoint := baseURL.JoinPath("/chat/completions")
 
-	reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
-
-	// Use a simple harmless tool for the probe.
-	// The request forces the model to call the tool by setting
-	// tool_choice to require a call, ensuring we get definitive yes/no results
-	// rather than a model that skips optional tool calls.
 	messages := []MessageInput{
 		{Role: "user", Content: "Call the probe tool with the message PROBE."},
 	}
@@ -1410,102 +1452,117 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 		},
 	}
 
-	requestBody := map[string]any{
-		"model":        model,
-		"messages":     messages,
-		"stream":       false,
-		"tools":        tools,
-		"tool_choice":  map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}},
-		maxTokensField: 50,
+	// send issues one request as step with the given tool_choice and limit.
+	send := func(step string, toolChoice any, limit int) (int, []byte, error) {
+		reqCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+
+		bodyBytes, err := json.Marshal(map[string]any{
+			"model":        model,
+			"messages":     messages,
+			"stream":       false,
+			"tools":        tools,
+			"tool_choice":  toolChoice,
+			maxTokensField: limit,
+		})
+		if err != nil {
+			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+		}
+
+		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
+		if err != nil {
+			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		if err := a.addProbeAuth(httpReq, secrets); err != nil {
+			return 0, nil, err
+		}
+
+		if opts.BeforeSend != nil {
+			if err := opts.BeforeSend(&transport.ProbeRequest{
+				Model:   model,
+				Step:    step,
+				Timeout: opts.Timeout,
+			}); err != nil {
+				return 0, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			}
+		}
+
+		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: step, Timeout: opts.Timeout})
+		if err != nil {
+			record.ToolCalls = transport.TriUnknown
+			return 0, nil, uncertainErr(err)
+		}
+
+		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		closeErr := httpResp.Body.Close()
+		if readErr != nil {
+			return 0, nil, uncertainErr(readErr)
+		}
+		if closeErr != nil {
+			return 0, nil, uncertainErr(closeErr)
+		}
+
+		recordRawStepWithRequest(rawSteps, step, "/chat/completions", httpResp.StatusCode, httpResp.Header, body, bodyBytes)
+		return httpResp.StatusCode, body, nil
 	}
 
-	bodyBytes, err := json.Marshal(requestBody)
+	// firstCall reports whether a 2xx reply carries a probe_tool call; ok is
+	// false when the reply is not usable. It records any finish reason seen.
+	firstCall := func(status int, body []byte) (called, ok bool) {
+		if status < 200 || status >= 300 {
+			return false, false
+		}
+		var respData ResponseBody
+		if err := json.Unmarshal(body, &respData); err != nil || len(respData.Choices) == 0 {
+			return false, false
+		}
+		choice := respData.Choices[0]
+		if choice.FinishReason != "" {
+			finishReasons[choice.FinishReason] = mapFinishReason(choice.FinishReason)
+		}
+		// Some servers (vLLM) finish a forced call with "stop", so a returned
+		// probe_tool call is a call whatever the finish reason.
+		for _, call := range choice.Message.ToolCalls {
+			if call.Function.Name == "probe_tool" {
+				return true, true
+			}
+		}
+		return false, true
+	}
+
+	// The first request forces the call by name, so a reply without the call
+	// is a definitive no.
+	status, body, err := send("tool_calls", map[string]any{"type": "function", "function": map[string]any{"name": "probe_tool"}}, 50)
 	if err != nil {
-		return &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
-	}
-
-	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
-	if err != nil {
-		return &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	if err := a.addProbeAuth(httpReq, secrets); err != nil {
 		return err
 	}
 
-	if opts.BeforeSend != nil {
-		if err := opts.BeforeSend(&transport.ProbeRequest{
-			Model:   model,
-			Step:    "tool_calls",
-			Timeout: opts.Timeout,
-		}); err != nil {
-			return fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+	if isForcedToolChoiceRefused(status, body) {
+		// The endpoint refuses a forced choice; ask once more and let the
+		// model choose. Not calling then shows nothing, so it is unknown.
+		record.ToolRestrictions = append(record.ToolRestrictions, forcedToolChoiceUnsupported)
+		status, body, err = send("tool_calls_auto", "auto", probeAutoOutputLimit)
+		if err != nil {
+			return err
 		}
-	}
-
-	httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: "tool_calls", Timeout: opts.Timeout})
-	if err != nil {
 		record.ToolCalls = transport.TriUnknown
-		return uncertainErr(err)
-	}
-
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
-	closeErr := httpResp.Body.Close()
-	if readErr != nil {
-		return uncertainErr(readErr)
-	}
-	if closeErr != nil {
-		return uncertainErr(closeErr)
-	}
-
-	recordRawStep(rawSteps, "tool_calls", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
-
-	if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
-		record.ToolCalls = transport.TriUnknown
-		return nil
-	}
-
-	if httpResp.StatusCode == 404 {
-		record.ToolCalls = transport.TriUnknown
-		return nil
-	}
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		record.ToolCalls = transport.TriUnknown
-		return nil
-	}
-
-	var respData ResponseBody
-	if err := json.Unmarshal(body, &respData); err != nil {
-		record.ToolCalls = transport.TriUnknown
-		return nil
-	}
-
-	if len(respData.Choices) == 0 {
-		record.ToolCalls = transport.TriUnknown
-		return nil
-	}
-
-	choice := respData.Choices[0]
-
-	// Record the finish reason for tool_calls if present
-	if choice.FinishReason != "" {
-		finishReasons[choice.FinishReason] = mapFinishReason(choice.FinishReason)
-	}
-
-	// The call is forced by name, and some servers (vLLM) finish such a call
-	// with "stop", so a returned probe_tool call is yes whatever the finish
-	// reason. A reply without that call is no.
-	// A 400 rejecting tools entirely would have been caught as a 4xx error above and returns unknown.
-	record.ToolCalls = transport.TriNo
-	for _, call := range choice.Message.ToolCalls {
-		if call.Function.Name == "probe_tool" {
+		if called, ok := firstCall(status, body); ok && called {
 			record.ToolCalls = transport.TriYes
-			break
 		}
+		return nil
 	}
 
+	called, ok := firstCall(status, body)
+	switch {
+	case !ok:
+		record.ToolCalls = transport.TriUnknown
+	case called:
+		record.ToolCalls = transport.TriYes
+	default:
+		record.ToolCalls = transport.TriNo
+	}
 	return nil
 }
 
