@@ -74,6 +74,13 @@ func (s *Store) lock(turnID string) func() {
 // once, under the turn's lock, and its result is recorded bound to attemptID,
 // so concurrent first touches yield one record and one live read. A failed
 // read or record leaves nothing recorded and the path free to retry.
+//
+// The record is one namespace: a path an earlier listing or absence rules out
+// is recorded absent without a live read, a live listing is reconciled with
+// what is already recorded beneath it, and a live observation that
+// contradicts a listed name returns *SnapshotConflictError (matching
+// ErrSnapshotConflict) after journaling the conflict, recording nothing.
+// Paths are slash-separated, with Root for the workspace root.
 func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Observation, error) {
 	defer s.lock(turnID)()
 
@@ -83,13 +90,42 @@ func (s *Store) Observe(turnID, attemptID, path string, read Reader) (journal.Ob
 		return journal.Observation{}, err
 	}
 
+	var ns namespace
+	if err := s.j.Tx(func(tx *journal.Tx) error {
+		var txErr error
+		ns, txErr = loadNamespace(tx, turnID, path)
+		return txErr
+	}); err != nil {
+		return journal.Observation{}, err
+	}
+	if ns.absent {
+		// The record already settles the name as absent; the live tree is not
+		// consulted.
+		return s.record(turnID, attemptID, path, journal.ObservationAbsent, nil)
+	}
+
 	kind, content, err := read()
 	if err != nil {
 		return journal.Observation{}, err
 	}
+	if ct := ns.conflict(kind); ct != "" {
+		c := &SnapshotConflictError{Path: path, Type: ct}
+		if err := s.journalConflict(turnID, attemptID, c); err != nil {
+			return journal.Observation{}, fmt.Errorf("journal snapshot conflict at %q (%s): %w", c.Path, c.Type, err)
+		}
+		return journal.Observation{}, c
+	}
+	if kind == journal.ObservationListing {
+		if content, err = ns.reconcileListing(content); err != nil {
+			return journal.Observation{}, err
+		}
+	}
+	return s.record(turnID, attemptID, path, kind, content)
+}
 
+func (s *Store) record(turnID, attemptID, path, kind string, content []byte) (journal.Observation, error) {
 	var o journal.Observation
-	err = s.j.Tx(func(tx *journal.Tx) error {
+	err := s.j.Tx(func(tx *journal.Tx) error {
 		var txErr error
 		o, txErr = tx.RecordObservation(turnID, attemptID, path, kind, content)
 		return txErr
