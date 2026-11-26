@@ -229,6 +229,12 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, err
 	}
 
+	if eff.Preset.Mode == config.ModeDeliberate {
+		invalid := refusal(wire.ErrorCodePresetInvalid)
+		invalid.Detail = strPtr("deliberate_mode_unsupported")
+		return wire.SubmitReply{}, invalid
+	}
+
 	for _, id := range eff.Preset.RequiredReviewers {
 		p := e.built.Participants[id]
 		if p.EligibleRequiredReviewer == transport.TriNo {

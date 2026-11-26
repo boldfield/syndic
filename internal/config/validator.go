@@ -390,8 +390,16 @@ func (r *Roster) Validate() error {
 		seenPresetNames[name] = true
 
 		// Check preset mode
-		if preset.Mode != "solo" && preset.Mode != "review" {
+		if preset.Mode != "solo" && preset.Mode != "review" && preset.Mode != ModeDeliberate {
 			errs = append(errs, fmt.Errorf("preset %q has unknown mode: %q", name, preset.Mode))
+		}
+
+		if preset.Mode == ModeDeliberate {
+			errs = append(errs, r.validateDeliberatePreset(name, preset, seenParticipantIDs)...)
+			continue
+		}
+		if len(preset.Proposers) > 0 || preset.Integrator != "" {
+			errs = append(errs, fmt.Errorf("preset %q: proposers and integrator are valid only with mode deliberate", name))
 		}
 
 		// Check if author is in required reviewers
@@ -420,42 +428,12 @@ func (r *Roster) Validate() error {
 		}
 
 		// Validate that preset participants are eligible for their roles
-		if preset.Mode == "review" {
-			// Author must be eligible for author role
-			for _, p := range r.Participants {
-				if p.ID == preset.Author {
-					if !slices.Contains(p.EligibleRoles, RoleAuthor) {
-						errs = append(errs, fmt.Errorf("preset %q: author %q is not eligible for author role",
-							name, preset.Author))
-					}
-					break
-				}
-			}
-
-			// All required reviewers must be eligible for reviewer role
-			for _, reviewerID := range preset.RequiredReviewers {
-				for _, p := range r.Participants {
-					if p.ID == reviewerID {
-						if !slices.Contains(p.EligibleRoles, RoleReviewer) {
-							errs = append(errs, fmt.Errorf("preset %q: reviewer %q is not eligible for reviewer role",
-								name, reviewerID))
-						}
-						break
-					}
-				}
-			}
+		if preset.Mode == "review" || preset.Mode == "solo" {
+			errs = append(errs, r.checkRoleEligible(name, "author", preset.Author, RoleAuthor)...)
 		}
-
-		if preset.Mode == "solo" {
-			// Author must be eligible for author role
-			for _, p := range r.Participants {
-				if p.ID == preset.Author {
-					if !slices.Contains(p.EligibleRoles, RoleAuthor) {
-						errs = append(errs, fmt.Errorf("preset %q: author %q is not eligible for author role",
-							name, preset.Author))
-					}
-					break
-				}
+		if preset.Mode == "review" {
+			for _, reviewerID := range preset.RequiredReviewers {
+				errs = append(errs, r.checkRoleEligible(name, "reviewer", reviewerID, RoleReviewer)...)
 			}
 		}
 	}
@@ -993,4 +971,62 @@ func validateHostLabels(name string) error {
 		return fmt.Errorf("top-level label %q must not be all numeric", last)
 	}
 	return nil
+}
+
+// checkRoleEligible refuses a preset member whose participant lacks the
+// eligible role (v4 section 1a). Unknown ids are reported elsewhere.
+func (r *Roster) checkRoleEligible(preset, label, id string, role Role) []error {
+	for _, p := range r.Participants {
+		if p.ID == id {
+			if !slices.Contains(p.EligibleRoles, role) {
+				return []error{fmt.Errorf("preset %q: %s %q is not eligible for %s role", preset, label, id, role)}
+			}
+			break
+		}
+	}
+	return nil
+}
+
+// validateDeliberatePreset applies the deliberate-mode rules of v8 section 1.
+func (r *Roster) validateDeliberatePreset(name string, preset Preset, known map[string]bool) []error {
+	var errs []error
+	if preset.Author != "" {
+		errs = append(errs, fmt.Errorf("preset %q: deliberate mode must not set author", name))
+	}
+	if len(preset.Proposers) < 2 {
+		errs = append(errs, fmt.Errorf("preset %q: deliberate mode needs at least two proposers", name))
+	}
+	seen := make(map[string]bool)
+	for _, id := range preset.Proposers {
+		if seen[id] {
+			errs = append(errs, fmt.Errorf("preset %q: proposer %q is listed twice", name, id))
+		}
+		seen[id] = true
+		if !known[id] {
+			errs = append(errs, fmt.Errorf("preset %q: proposer %q is not a participant", name, id))
+			continue
+		}
+		errs = append(errs, r.checkRoleEligible(name, "proposer", id, RoleReviewer)...)
+	}
+	switch {
+	case preset.Integrator == "":
+		errs = append(errs, fmt.Errorf("preset %q: deliberate mode needs an integrator", name))
+	case !slices.Contains(preset.Proposers, preset.Integrator):
+		errs = append(errs, fmt.Errorf("preset %q: integrator %q is not one of the proposers", name, preset.Integrator))
+	default:
+		errs = append(errs, r.checkRoleEligible(name, "integrator", preset.Integrator, RoleAuthor)...)
+	}
+	if preset.RequiredReviewers != nil {
+		if len(preset.RequiredReviewers) == 0 {
+			errs = append(errs, fmt.Errorf("preset %q: required_reviewers must not be empty when given", name))
+		}
+		for _, id := range preset.RequiredReviewers {
+			if id == preset.Integrator {
+				errs = append(errs, fmt.Errorf("preset %q: integrator %q must not be a required reviewer", name, id))
+			} else if !known[id] {
+				errs = append(errs, fmt.Errorf("preset %q: required reviewer %q is not a participant", name, id))
+			}
+		}
+	}
+	return errs
 }
