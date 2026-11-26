@@ -113,3 +113,8 @@ func (e *Engine) ReserveOpen(id string, msgs []transport.Message, defs []transpo
 	})
 	return est, charged, err
 }
+
+// UnifiedDiffForTest renders one path's diff as a reviewer receives it.
+func UnifiedDiffForTest(path string, create bool, base, body []byte) string {
+	return unifiedDiff(path, create, base, body)
+}
