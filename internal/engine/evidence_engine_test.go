@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -364,5 +365,92 @@ func TestAuthorOnlyEvidenceChangesCandidateHash(t *testing.T) {
 	swapped.Evidence = []candidate.EvidencePair{{CallID: id1.Evidence[0].CallID, ResultSHA256: id2.Evidence[0].ResultSHA256}}
 	if hashOf(t, swapped) == recorded1 {
 		t.Fatal("changing only the result bytes does not change the hash")
+	}
+}
+
+// A reviewer's verdict journals the results of its own calls, and a block
+// citing one of them transfers exactly that result to the author. A result the
+// block does not cite, and any result of the other reviewer, never reaches the
+// author, even when the other reviewer's block names it.
+func TestCitedReviewerResultTransfersToAuthor(t *testing.T) {
+	var h *enginetest.Harness
+	var r1Uncited string
+	r1Done := make(chan struct{})
+	record := func(attempt string, bodies ...string) []string {
+		var ids []string
+		err := h.Store.Tx(func(tx *journal.Tx) error {
+			for i, b := range bodies {
+				call, err := tx.RecordToolCall(attempt, i, fmt.Sprintf("prov_%d", i), "lookup", "read", []byte(`{"q":"`+b+`"}`))
+				if err != nil {
+					return err
+				}
+				res, err := tx.RecordToolResult(call.ID, journal.ToolCallExecuted, []byte(b), "")
+				if err != nil {
+					return err
+				}
+				ids = append(ids, res.ID)
+			}
+			return nil
+		})
+		if err != nil {
+			panic(err)
+		}
+		return ids
+	}
+	r1 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		ids := record(req.Envelope.AttemptID, "cited-result-body", "uncited-result-body")
+		r1Uncited = ids[1]
+		close(r1Done)
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "see "+ids[0], "r", "r")
+	})
+	r2 := enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		record(req.Envelope.AttemptID, "other-reviewer-body")
+		<-r1Done
+		// Names the other reviewer's uncited result, which this reviewer never received.
+		return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b2", "high", "see "+r1Uncited, "r", "r")
+	})
+	scripts := map[string][]fake.Step{
+		"author": {enginetest.Reply(authorText), enginetest.Reply(revisedText)},
+		"r1":     {r1, v2Verdict("1", "approve", "", "b1 withdrawn")},
+		"r2":     {r2, v2Verdict("1", "approve", "", "b2 withdrawn")},
+	}
+	h = enginetest.New(t, revisionRoster("2", "r1", "r2"), scripts)
+	turnID := submitReview(t, h, "s1")
+	wantEnd(t, h, turnID, engine.StateApproved, "all_approved")
+
+	calls := h.Adapters["author"].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("author calls = %d, want 2", len(calls))
+	}
+	var feedback string
+	for _, m := range calls[1].Request.Messages {
+		feedback += m.Content + "\n"
+	}
+	if strings.Count(feedback, "cited-result-body") != 1 {
+		t.Fatalf("the cited result should reach the author once:\n%s", feedback)
+	}
+	for _, leak := range []string{"uncited-result-body", "other-reviewer-body"} {
+		if strings.Contains(feedback, leak) {
+			t.Fatalf("author received %q:\n%s", leak, feedback)
+		}
+	}
+
+	verdicts, err := h.Store.ListVerdicts(turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withEvidence := 0
+	for _, v := range verdicts {
+		ev, err := h.Store.GetVerdictEvidence(v.ID)
+		if err != nil {
+			continue
+		}
+		withEvidence++
+		if len(ev.ResultIDs) > 2 {
+			t.Fatalf("verdict %s holds results beyond its own reviewer's: %+v", v.ID, ev)
+		}
+	}
+	if withEvidence != 4 {
+		t.Fatalf("verdicts with evidence = %d, want 4", withEvidence)
 	}
 }

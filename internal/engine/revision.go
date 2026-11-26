@@ -31,6 +31,11 @@ type reviewResult struct {
 	kind      string
 	attemptID string
 	text      string
+	// results are the reviewer's own tool results by id and evidence is the
+	// accepted block's evidence field; the author receives only the results
+	// that evidence cites.
+	results  map[string]string
+	evidence string
 }
 
 // authorChangeLines returns the sorted change-set lines
@@ -88,7 +93,7 @@ func (e *Engine) authorRevisionMessages(t *openTurn) ([]transport.Message, error
 		if !ok {
 			return nil, fmt.Errorf("engine: no accepted result of reviewer %s for the revision", id)
 		}
-		feedback = append(feedback, prompt.RevisionFeedback{Output: r.text})
+		feedback = append(feedback, prompt.RevisionFeedback{Output: r.text, Results: r.results, Evidence: r.evidence})
 	}
 	for range maxDelimiterTries {
 		delimiter, err := prompt.NewDelimiter(e.rand)

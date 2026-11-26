@@ -157,6 +157,49 @@ func packetFor(tx *journal.Tx, turnID, author string) (reviewerPacket, error) {
 	return p, nil
 }
 
+// recordReviewerEvidence journals what the reviewer's accepted verdict rested
+// on: the snapshot version, the results of its own calls and the observations
+// it added. It returns each result's content by id, which is what a block
+// citing one transfers to the author. Only the reviewer's own calls count;
+// the author's and the other reviewer's never appear.
+func recordReviewerEvidence(tx *journal.Tx, turnID, participant, verdictID string) (map[string]string, error) {
+	calls, err := tx.ToolCallsByTurn(turnID, participant)
+	if err != nil {
+		return nil, err
+	}
+	var resultIDs []string
+	results := map[string]string{}
+	for _, c := range calls {
+		// An abandoned or refused call has no result bytes to receive or cite.
+		if c.Result == nil || c.Result.ResultSHA256 == "" {
+			continue
+		}
+		body, err := tx.Content(c.Result.ResultSHA256)
+		if err != nil {
+			return nil, err
+		}
+		resultIDs = append(resultIDs, c.Result.ID)
+		results[c.Result.ID] = string(body)
+	}
+	obsIDs, err := tx.UnboundObservationIDs(turnID, participant)
+	if err != nil {
+		return nil, err
+	}
+	// A verdict that rested on no lookups has no evidence to journal, and
+	// recording it would add an event to turns that never used tools.
+	if len(resultIDs) == 0 && len(obsIDs) == 0 {
+		return results, nil
+	}
+	version, err := tx.SnapshotVersion(turnID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.RecordVerdictEvidence(verdictID, version, resultIDs, obsIDs); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // diffLine is one line of a file, with its newline when it has one.
 type diffLine struct {
 	text  string
