@@ -134,6 +134,7 @@ func canonicalizeEntry(s string) (string, error) {
 // The host must be in canonical form: lowercase, punycode, default port stripped.
 // IP literals are unconditionally refused when a policy is set.
 // A nil policy allows all hosts.
+// This method is primarily for testing; MatchURL should be used for validation.
 func (p *HostPolicy) Match(host string) bool {
 	if p == nil {
 		return true // no policy means all allowed

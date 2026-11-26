@@ -441,30 +441,31 @@ func TestResolverNotCalledForRefusedURL(t *testing.T) {
 		t.Fatalf("failed to create policy: %v", err)
 	}
 
-	// Test cases for different refusal scenarios
-	// All should be refused before any potential DNS resolution
+	// Test that pre-send checks (design v5 section 6) refuse URLs before any DNS resolution.
+	// MatchURL is string-based and contains no resolver calls; refused URLs are caught at this layer.
+	// Integration test with fake resolver/transport should verify complete path in web_fetch task.
 	tests := []struct {
 		name string
 		url  string
 	}{
 		{
-			name: "off-allowlist host",
+			name: "off-allowlist host - refused by allowlist check",
 			url:  "http://notallowed.example.com/path",
 		},
 		{
-			name: "IP literal v4",
+			name: "IP literal v4 - refused when allowlist is set",
 			url:  "http://192.0.2.1/",
 		},
 		{
-			name: "IP literal v6 bracketed",
+			name: "IP literal v6 bracketed - refused when allowlist is set",
 			url:  "http://[2001:db8::1]/",
 		},
 		{
-			name: "wrong scheme",
+			name: "wrong scheme - refused before allowlist check",
 			url:  "ftp://example.com/",
 		},
 		{
-			name: "url with userinfo",
+			name: "url with userinfo - refused before allowlist check",
 			url:  "http://user:pass@example.com/",
 		},
 	}
@@ -481,7 +482,7 @@ func TestResolverNotCalledForRefusedURL(t *testing.T) {
 		})
 	}
 
-	// Verify that allowed URLs do pass
+	// Verify that allowed URLs pass (and would reach resolver/fetch execution)
 	allowedURL := "http://example.com/path"
 	if err := p.MatchURL(allowedURL); err != nil {
 		t.Fatalf("MatchURL(%q) should allow valid URL: %v", allowedURL, err)
