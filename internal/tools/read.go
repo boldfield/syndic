@@ -220,7 +220,7 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 	if err != nil {
 		return view{}, classify(path, err)
 	}
-	extra := stagedChildren(staging, path)
+	extra := observation.StagedChildren(staging, path)
 	switch o.Kind {
 	case journal.ObservationFile:
 		body, err := t.content(o.ContentSHA256)
@@ -254,28 +254,6 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
 	return view{kind: journal.ObservationListing, entries: merged}, nil
-}
-
-// stagedChildren returns the entries the staging map adds directly under dir:
-// "f" for a staged file, "d" for a name with a staged path beneath it.
-func stagedChildren(staging map[string]string, dir string) map[string]string {
-	prefix := ""
-	if dir != observation.Root {
-		prefix = dir + "/"
-	}
-	out := map[string]string{}
-	for p := range staging {
-		rest, ok := strings.CutPrefix(p, prefix)
-		if !ok || rest == "" {
-			continue
-		}
-		if name, _, deeper := strings.Cut(rest, "/"); deeper {
-			out[name] = "d"
-		} else if out[name] == "" {
-			out[name] = "f"
-		}
-	}
-	return out
 }
 
 // loadStaging returns the turn's staged paths with their content hashes.
