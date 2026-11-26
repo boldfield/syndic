@@ -398,7 +398,7 @@ func checkMounts(mounts []nsMount) ([]nsMount, error) {
 			continue
 		}
 		for _, p := range out {
-			if strings.HasPrefix(m.Target, p.Target+"/") && !(p.Kind == mountBind && p.Flags&unix.MS_RDONLY != 0) {
+			if strings.HasPrefix(m.Target, p.Target+"/") && (p.Kind != mountBind || p.Flags&unix.MS_RDONLY == 0) {
 				return nil, fmt.Errorf("%s lies inside %s", m.Target, p.Target)
 			}
 		}
