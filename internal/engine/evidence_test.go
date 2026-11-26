@@ -24,22 +24,22 @@ func TestUnifiedDiffCreate(t *testing.T) {
 		{
 			name:    "simple file with trailing newline",
 			content: []byte("hello\nworld\n"),
-			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
+			want:    "--- /dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
 		},
 		{
 			name:    "file without trailing newline",
 			content: []byte("hello\nworld"),
-			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
+			want:    "--- /dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n\\ No newline at end of file\n",
 		},
 		{
 			name:    "single line with newline",
 			content: []byte("line\n"),
-			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,1 @@\n+line\n",
+			want:    "--- /dev/null\n+++ b/test.txt\n@@ -0,0 +1,1 @@\n+line\n",
 		},
 		{
 			name:    "empty file",
 			content: []byte(""),
-			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,0 @@\n",
+			want:    "--- /dev/null\n+++ b/test.txt\n@@ -0,0 +1,0 @@\n",
 		},
 	}
 
@@ -157,7 +157,7 @@ func TestUnifiedDiffDelete(t *testing.T) {
 	content := []byte("file content\n")
 	diff := unifiedDiffDelete("test.txt", content)
 
-	if !strings.HasPrefix(diff, "--- a/test.txt\n+++ b/dev/null\n") {
+	if !strings.HasPrefix(diff, "--- a/test.txt\n+++ /dev/null\n") {
 		t.Errorf("missing proper headers: %s", diff)
 	}
 	if !strings.Contains(diff, "-file content") {

@@ -290,7 +290,18 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err != nil {
 			return err
 		}
-		msgs, err := t.reviewerMessages(attemptID, delimiter, blocks)
+
+		// Build the reviewer input with diffs and evidence for round 0
+		var msgs []transport.Message
+		if t.round == 0 {
+			in, err := t.reviewInputWithEvidence(attemptID, delimiter, tx)
+			if err != nil {
+				return err
+			}
+			msgs, err = prompt.Reviewer(in)
+		} else {
+			msgs, err = t.reviewerMessages(attemptID, delimiter, blocks)
+		}
 		if err != nil {
 			return err
 		}

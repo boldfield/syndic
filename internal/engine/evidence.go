@@ -77,7 +77,7 @@ func diffPath(p journal.ChangeSetPath, getContent func(string) ([]byte, error)) 
 func unifiedDiffDelete(path string, content []byte) string {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "--- a/%s\n", path)
-	fmt.Fprintf(&buf, "+++ b/dev/null\n")
+	fmt.Fprintf(&buf, "+++ /dev/null\n")
 
 	lines := bytes.Split(content, []byte("\n"))
 	// bytes.Split on content ending in \n produces an extra empty element
@@ -97,13 +97,18 @@ func unifiedDiffDelete(path string, content []byte) string {
 		buf.WriteByte('\n')
 	}
 
+	// Add "\ No newline at end of file" marker if content doesn't end with newline
+	if len(content) > 0 && !bytes.HasSuffix(content, []byte("\n")) {
+		buf.WriteString("\\ No newline at end of file\n")
+	}
+
 	return buf.String()
 }
 
 // unifiedDiffCreate returns a unified diff for a created file.
 func unifiedDiffCreate(path string, content []byte) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "--- a/dev/null\n")
+	fmt.Fprintf(&buf, "--- /dev/null\n")
 	fmt.Fprintf(&buf, "+++ b/%s\n", path)
 
 	if len(content) == 0 {
@@ -126,6 +131,11 @@ func unifiedDiffCreate(path string, content []byte) string {
 		buf.WriteByte('\n')
 	}
 
+	// Add "\ No newline at end of file" marker if content doesn't end with newline
+	if !bytes.HasSuffix(content, []byte("\n")) {
+		buf.WriteString("\\ No newline at end of file\n")
+	}
+
 	return buf.String()
 }
 
@@ -135,31 +145,38 @@ func unifiedDiffModify(path string, base, new []byte) string {
 	fmt.Fprintf(&buf, "--- a/%s\n", path)
 	fmt.Fprintf(&buf, "+++ b/%s\n", path)
 
-	baseLines := bytes.Split(base, []byte("\n"))
-	newLines := bytes.Split(new, []byte("\n"))
+	baseLineBytes := bytes.Split(base, []byte("\n"))
+	newLineBytes := bytes.Split(new, []byte("\n"))
+
+	newNoNewline := len(new) > 0 && !bytes.HasSuffix(new, []byte("\n"))
 
 	// bytes.Split on content ending in \n produces an extra empty element
 	if len(base) > 0 && bytes.HasSuffix(base, []byte("\n")) {
-		baseLines = baseLines[:len(baseLines)-1]
+		baseLineBytes = baseLineBytes[:len(baseLineBytes)-1]
 	}
 	if len(new) > 0 && bytes.HasSuffix(new, []byte("\n")) {
-		newLines = newLines[:len(newLines)-1]
+		newLineBytes = newLineBytes[:len(newLineBytes)-1]
 	}
 
-	if len(baseLines) == 0 && len(newLines) == 0 {
+	if len(baseLineBytes) == 0 && len(newLineBytes) == 0 {
 		return buf.String()
 	}
 
-	fmt.Fprintf(&buf, "@@ -1,%d +1,%d @@\n", len(baseLines), len(newLines))
-	for _, line := range baseLines {
+	fmt.Fprintf(&buf, "@@ -1,%d +1,%d @@\n", len(baseLineBytes), len(newLineBytes))
+	for _, line := range baseLineBytes {
 		buf.WriteByte('-')
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	for _, line := range newLines {
+	for _, line := range newLineBytes {
 		buf.WriteByte('+')
 		buf.Write(line)
 		buf.WriteByte('\n')
+	}
+
+	// Add "\ No newline at end of file" marker if new content doesn't end with newline
+	if newNoNewline {
+		buf.WriteString("\\ No newline at end of file\n")
 	}
 
 	return buf.String()
@@ -179,9 +196,9 @@ func countLines(content []byte) int {
 
 // AuthorEvidence collects tool calls and results for the author's attempts
 // in a turn, excluding results cited only by reviewers.
-func AuthorEvidence(tx *journal.Tx, turnID string) ([]journal.ToolCall, error) {
+func AuthorEvidence(tx *journal.Tx, turnID, authorParticipant string) ([]journal.ToolCall, error) {
 	// Query only author calls, not all participant calls
-	calls, err := tx.ToolCallsByTurn(turnID, "author")
+	calls, err := tx.ToolCallsByTurn(turnID, authorParticipant)
 	if err != nil {
 		return nil, err
 	}

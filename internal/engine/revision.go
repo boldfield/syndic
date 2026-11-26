@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -137,6 +138,50 @@ func (t *openTurn) reviewInput(attemptID, delimiter string) prompt.ReviewInput {
 		Delimiter:     delimiter,
 		History:       t.history,
 	}
+}
+
+// reviewInputWithEvidence builds the reviewer input with diffs and author evidence populated from the journal.
+func (t *openTurn) reviewInputWithEvidence(attemptID, delimiter string, tx *journal.Tx) (prompt.ReviewInput, error) {
+	in := t.reviewInput(attemptID, delimiter)
+
+	// Build diffs from the change set if available
+	if t.candidateID != "" {
+		changeSet, err := tx.GetChangeSet(t.candidateID)
+		if err != nil && !errors.Is(err, journal.ErrNoChangeSet) {
+			return in, fmt.Errorf("get change set: %w", err)
+		}
+		if len(changeSet.Paths) > 0 {
+			diffs, err := Diffs(changeSet, func(sha string) ([]byte, error) {
+				return tx.Content(sha)
+			})
+			if err != nil {
+				return in, fmt.Errorf("generate diffs: %w", err)
+			}
+
+			var diffsText bytes.Buffer
+			for _, d := range diffs {
+				diffsText.WriteString(FormatDiff(d))
+			}
+			in.Diffs = diffsText.String()
+		}
+	}
+
+	// Build author evidence from tool calls
+	calls, err := AuthorEvidence(tx, t.id, t.author)
+	if err != nil {
+		return in, fmt.Errorf("get author evidence: %w", err)
+	}
+	if len(calls) > 0 {
+		evidence, err := FormatAuthorEvidence(calls, func(sha string) ([]byte, error) {
+			return tx.Content(sha)
+		})
+		if err != nil {
+			return in, fmt.Errorf("format author evidence: %w", err)
+		}
+		in.AuthorEvidence = evidence
+	}
+
+	return in, nil
 }
 
 func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []journal.ReviewerBlock) prompt.ReviewerRevisionInput {
