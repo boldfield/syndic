@@ -121,26 +121,32 @@ func TestDeliberationItemsOrderAndPaging(t *testing.T) {
 		if second, err = tx.SetLatestCandidate(f.turn, "answer 2", "h1", 1, f.candidate); err != nil {
 			return err
 		}
+		attemptOf := func(p string) string {
+			if p == "author" {
+				return f.author
+			}
+			return f.step[p]
+		}
 		item := func(p string, pos int, label string) journal.DeliberationItemInput {
-			return journal.DeliberationItemInput{TurnID: f.turn, Participant: p, RosterPosition: pos, AttemptID: f.author, Label: label, Content: []byte(p + label)}
+			return journal.DeliberationItemInput{TurnID: f.turn, Participant: p, RosterPosition: pos, AttemptID: attemptOf(p), Label: label, Content: []byte(p + label)}
 		}
 		// Recorded out of order on purpose.
 		if _, err := tx.RecordDisposition(item("author", 0, ""), 2, second); err != nil {
 			return err
 		}
-		if _, err := tx.RecordCritique(item("b", 1, "critique 2")); err != nil {
+		if _, err := tx.RecordCritique(item("r2", 1, "critique 2")); err != nil {
 			return err
 		}
-		if _, err := tx.RecordCritique(item("a", 0, "critique 1")); err != nil {
+		if _, err := tx.RecordCritique(item("r1", 0, "critique 1")); err != nil {
 			return err
 		}
-		if _, err := tx.RecordProposal(item("b", 1, "proposal 2")); err != nil {
+		if _, err := tx.RecordProposal(item("r2", 1, "proposal 2")); err != nil {
 			return err
 		}
 		if _, err := tx.RecordDisposition(item("author", 0, ""), 1, f.candidate); err != nil {
 			return err
 		}
-		_, err = tx.RecordProposal(item("a", 0, "proposal 1"))
+		_, err = tx.RecordProposal(item("r1", 0, "proposal 1"))
 		return err
 	})
 	if err != nil {
@@ -322,5 +328,37 @@ func TestMigration018UpgradeKeepsRows(t *testing.T) {
 	}
 	if _, err := c.Exec(`UPDATE turns SET deliberation_phase = 'bogus' WHERE id = 't1'`); err == nil {
 		t.Error("bogus phase accepted by the table")
+	}
+}
+
+func TestDispositionRoundMustMatchCandidate(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := buildToolsTurn(t, store)
+	err := store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.RecordDisposition(journal.DeliberationItemInput{TurnID: f.turn, Participant: "author", AttemptID: f.author, Content: []byte("x")}, 99, f.candidate)
+		return err
+	})
+	if err == nil {
+		t.Fatal("a disposition round that does not match its candidate was accepted")
+	}
+	items, _, err := store.DeliberationItems(f.turn, "", 10)
+	if err != nil || len(items) != 0 {
+		t.Errorf("items = %+v, %v", items, err)
+	}
+}
+
+func TestItemParticipantMustMatchAttempt(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+	f := buildToolsTurn(t, store)
+	err := store.Tx(func(tx *journal.Tx) error {
+		_, err := tx.RecordProposal(journal.DeliberationItemInput{TurnID: f.turn, Participant: "r1", RosterPosition: 1, AttemptID: f.author, Label: "proposal 2", Content: []byte("p")})
+		return err
+	})
+	if err == nil {
+		t.Fatal("a proposal naming one participant but citing another's attempt was accepted")
 	}
 }

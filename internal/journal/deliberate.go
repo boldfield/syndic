@@ -201,8 +201,8 @@ func (tx *Tx) recordDeliberationItem(kind string, in DeliberationItemInput, roun
 	if kind != DeliberationDisposition && in.Label == "" {
 		return DeliberationItem{}, fmt.Errorf("a %s needs a label", kind)
 	}
-	var attemptTurn string
-	err := tx.tx.QueryRow(`SELECT turn_id FROM attempts WHERE id = ?`, in.AttemptID).Scan(&attemptTurn)
+	var attemptTurn, attemptParticipant string
+	err := tx.tx.QueryRow(`SELECT turn_id, participant FROM attempts WHERE id = ?`, in.AttemptID).Scan(&attemptTurn, &attemptParticipant)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeliberationItem{}, fmt.Errorf("attempt %q not found", in.AttemptID)
 	}
@@ -212,10 +212,14 @@ func (tx *Tx) recordDeliberationItem(kind string, in DeliberationItemInput, roun
 	if attemptTurn != in.TurnID {
 		return DeliberationItem{}, fmt.Errorf("attempt %q belongs to turn %q, not %q", in.AttemptID, attemptTurn, in.TurnID)
 	}
+	if attemptParticipant != in.Participant {
+		return DeliberationItem{}, fmt.Errorf("attempt %q belongs to participant %q, not %q", in.AttemptID, attemptParticipant, in.Participant)
+	}
 	var exists bool
 	if kind == DeliberationDisposition {
 		var candTurn string
-		err := tx.tx.QueryRow(`SELECT turn_id FROM candidates WHERE id = ?`, candidateID).Scan(&candTurn)
+		var candRound int
+		err := tx.tx.QueryRow(`SELECT turn_id, round FROM candidates WHERE id = ?`, candidateID).Scan(&candTurn, &candRound)
 		if errors.Is(err, sql.ErrNoRows) {
 			return DeliberationItem{}, fmt.Errorf("candidate %q not found", candidateID)
 		}
@@ -231,6 +235,9 @@ func (tx *Tx) recordDeliberationItem(kind string, in DeliberationItemInput, roun
 		}
 		if exists {
 			return DeliberationItem{}, fmt.Errorf("candidate %q: %w", candidateID, ErrDeliberationItemRecorded)
+		}
+		if round != candRound+1 {
+			return DeliberationItem{}, fmt.Errorf("disposition round %d does not match candidate %q, round %d (want %d)", round, candidateID, candRound, candRound+1)
 		}
 	} else {
 		err := tx.tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM deliberation_items WHERE turn_id = ? AND participant = ? AND kind = ?)`,
