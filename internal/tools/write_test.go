@@ -652,3 +652,189 @@ func TestWorkspaceByteIdenticalAfterStaging(t *testing.T) {
 		t.Fatalf("created.txt exists on disk, but should not be materialized")
 	}
 }
+
+func TestWriteFileRejectsPathUnderFilesAncestor(t *testing.T) {
+	f := newWriteFixture(t, map[string]string{"file.txt": "content"})
+	f.observe("file.txt")
+
+	res, tc := f.write_(map[string]any{"path": "file.txt/child", "content": "nested"})
+	if res.ErrorCode != ErrCodeNotDirectory || tc.Status != journal.ToolCallError {
+		t.Fatalf("got %q (%s), want not_directory error", res.Content, res.ErrorCode)
+	}
+
+	staging := f.staged()
+	if len(staging) != 0 {
+		t.Fatalf("staging should be empty after rejection, got %v", staging)
+	}
+}
+
+func TestWriteFileRejectsPathUnderStagedFileAncestor(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+
+	f.write_(map[string]any{"path": "file.txt", "content": "base"})
+	staging := f.staged()
+	if len(staging) != 1 {
+		t.Fatalf("first write should stage file.txt, got %v", staging)
+	}
+
+	res, tc := f.write_(map[string]any{"path": "file.txt/child", "content": "nested"})
+	if res.ErrorCode != ErrCodeNotDirectory || tc.Status != journal.ToolCallError {
+		t.Fatalf("got %q (%s), want not_directory error", res.Content, res.ErrorCode)
+	}
+
+	staging = f.staged()
+	if len(staging) != 1 || staging["file.txt"] == "" {
+		t.Fatalf("staging should still have only file.txt, got %v", staging)
+	}
+}
+
+func TestWriteFileRejectsWhenStagedDescendantsExist(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+
+	f.write_(map[string]any{"path": "dir/file.txt", "content": "nested"})
+	staging := f.staged()
+	if len(staging) != 1 {
+		t.Fatalf("write should stage dir/file.txt, got %v", staging)
+	}
+
+	res, tc := f.write_(map[string]any{"path": "dir", "content": "trying to make it a file"})
+	if res.ErrorCode != ErrCodeIsDirectory || tc.Status != journal.ToolCallError {
+		t.Fatalf("got %q (%s), want is_directory error", res.Content, res.ErrorCode)
+	}
+
+	staging = f.staged()
+	if len(staging) != 1 || staging["dir/file.txt"] == "" {
+		t.Fatalf("staging should still have only dir/file.txt, got %v", staging)
+	}
+}
+
+func TestStagingPersistsAcrossAttemptsWithReadTools(t *testing.T) {
+	f := newWriteFixture(t, nil)
+	f.observe(".")
+	f.write_(map[string]any{"path": "new.txt", "content": "content v1"})
+
+	staging := f.staged()
+	if len(staging) != 1 {
+		t.Fatalf("first attempt staging: %v", staging)
+	}
+
+	var att2 string
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		var err error
+		att2, err = tx.BeginAttempt(f.turn, "author", "author", 2, nil, "")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	readTools2 := NewReadTools(f.j, f.fs, f.turn, att2, 0)
+
+	raw, err := json.Marshal(map[string]any{"path": "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 0, "call_0", "read_file", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := readTools2.ReadFile(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("read_file in second attempt failed: %q", res.ErrorCode)
+	}
+	if string(res.Content) != "content v1" {
+		t.Fatalf("read_file should see staged content across attempts, got %q", res.Content)
+	}
+
+	raw, err = json.Marshal(map[string]any{"path": "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 1, "call_1", "list_dir", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = readTools2.ListDir(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("list_dir in second attempt failed: %q", res.ErrorCode)
+	}
+	if !strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("list_dir should see staged file across attempts, got %q", res.Content)
+	}
+
+	raw, err = json.Marshal(map[string]any{"pattern": "content"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 2, "call_2", "search_files", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = readTools2.SearchFiles(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("search_files in second attempt failed: %q", res.ErrorCode)
+	}
+	if !strings.Contains(string(res.Content), "new.txt") {
+		t.Fatalf("search_files should see staged file across attempts, got %q", res.Content)
+	}
+
+	tools2 := NewWriteTools(f.j, f.fs, f.turn, att2)
+
+	raw, err = json.Marshal(map[string]any{"path": "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 3, "call_3", "unstage", "write", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools2.Unstage(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != "" {
+		t.Fatalf("unstage creation in second attempt failed: %q", res.ErrorCode)
+	}
+
+	raw, err = json.Marshal(map[string]any{"path": "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.j.Tx(func(tx *journal.Tx) error {
+		c, err := tx.RecordToolCall(att2, 4, "call_4", "read_file", "read", raw)
+		id = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = readTools2.ReadFile(id, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ErrorCode != ErrCodeNotFound {
+		t.Fatalf("read_file should return not_found after unstage, got %q (%s)", res.Content, res.ErrorCode)
+	}
+}

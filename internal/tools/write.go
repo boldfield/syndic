@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -160,6 +161,35 @@ func (t *WriteTools) unstageContent(path string) error {
 	})
 }
 
+// hasFileAncestor checks if any proper ancestor of path is a file in the
+// overlaid view (recorded observation or staged path).
+func (t *WriteTools) hasFileAncestor(path string, staging map[string]string) bool {
+	parts := strings.Split(path, "/")
+	for i := 1; i < len(parts); i++ {
+		ancestor := strings.Join(parts[:i], "/")
+		if _, staged := staging[ancestor]; staged {
+			return true
+		}
+		obs, err := t.observePath(ancestor)
+		if err == nil && obs.Kind == journal.ObservationFile {
+			return true
+		}
+	}
+	return false
+}
+
+// hasStagedDescendants checks if path has staged descendants that would make
+// it a directory in the overlay.
+func (t *WriteTools) hasStagedDescendants(path string, staging map[string]string) bool {
+	prefix := path + "/"
+	for staged := range staging {
+		if strings.HasPrefix(staged, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 type writeFileArgs struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
@@ -183,6 +213,16 @@ func (t *WriteTools) writeFile(raw json.RawMessage) ([]byte, error) {
 	}
 	if t.fs.IsProtected(path) {
 		return nil, toolErrorf(ErrCodeProtected, "%q is protected", path)
+	}
+	staging, err := t.loadStaging()
+	if err != nil {
+		return nil, err
+	}
+	if t.hasFileAncestor(path, staging) {
+		return nil, toolErrorf(ErrCodeNotDirectory, "a proper ancestor of %q is a file", path)
+	}
+	if t.hasStagedDescendants(path, staging) {
+		return nil, toolErrorf(ErrCodeIsDirectory, "%q has staged descendants", path)
 	}
 	obs, err := t.observePath(path)
 	if err != nil {
@@ -270,7 +310,7 @@ func (t *WriteTools) editFile(raw json.RawMessage) ([]byte, error) {
 	if count > 1 {
 		return nil, toolErrorf(ErrCodeBadArguments, "%q appears %d times in %q, must be exactly once", oldStr, count, path)
 	}
-	newBody := bytes.ReplaceAll(currentBody, []byte(oldStr), []byte(newStr))
+	newBody := bytes.Replace(currentBody, []byte(oldStr), []byte(newStr), 1)
 	entry, err := t.stageContent(path, newBody)
 	if err != nil {
 		return nil, fmt.Errorf("stage content: %w", err)
