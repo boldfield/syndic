@@ -198,3 +198,13 @@ func FuzzCanonicalize(f *testing.F) {
 		}
 	})
 }
+
+// TestNonFiniteRefused covers the NaN and Infinity rows of RFC 8785 Appendix B,
+// which have no JSON text: every spelling of them is refused.
+func TestNonFiniteRefused(t *testing.T) {
+	for _, in := range []string{"NaN", "Infinity", "-Infinity", "[NaN]", `{"a":Infinity}`} {
+		if _, err := Canonicalize([]byte(in)); err == nil {
+			t.Errorf("%s: accepted", in)
+		}
+	}
+}
