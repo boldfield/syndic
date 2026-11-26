@@ -62,54 +62,104 @@ func diffPath(p journal.ChangeSetPath, getContent func(string) ([]byte, error)) 
 			return diff, fmt.Errorf("fetch new content: %w", err)
 		}
 		diff.Diff = unifiedDiffModify(p.Path, baseContent, newContent)
+	case "delete":
+		baseContent, err := getContent(p.BaseSHA256)
+		if err != nil {
+			return diff, fmt.Errorf("fetch base content: %w", err)
+		}
+		diff.Diff = unifiedDiffDelete(p.Path, baseContent)
 	}
 
 	return diff, nil
 }
 
+// unifiedDiffDelete returns a unified diff for a deleted file.
+func unifiedDiffDelete(path string, content []byte) string {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "--- a/%s\n", path)
+	fmt.Fprintf(&buf, "+++ b/dev/null\n")
+
+	lines := bytes.Split(content, []byte("\n"))
+	// bytes.Split on content ending in \n produces an extra empty element
+	if len(content) > 0 && bytes.HasSuffix(content, []byte("\n")) {
+		lines = lines[:len(lines)-1]
+	}
+
+	lineCount := len(lines)
+	if lineCount == 0 && len(content) > 0 {
+		lineCount = 1
+	}
+
+	fmt.Fprintf(&buf, "@@ -1,%d +0,0 @@\n", lineCount)
+	for _, line := range lines {
+		buf.WriteByte('-')
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+
+	return buf.String()
+}
+
 // unifiedDiffCreate returns a unified diff for a created file.
 func unifiedDiffCreate(path string, content []byte) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "--- /dev/null\n")
-	fmt.Fprintf(&buf, "+++ %s\n", path)
-	fmt.Fprintf(&buf, "@@ -0,0 +1,%d @@\n", countLines(content))
-	for _, line := range bytes.Split(content, []byte("\n")) {
-		if len(line) > 0 || !bytes.Equal(line, []byte("")) {
-			buf.WriteByte('+')
-			buf.Write(line)
-			buf.WriteByte('\n')
-		} else if bytes.Equal(content, []byte("")) {
-			// empty file
-		} else {
-			buf.WriteString("+\n")
-		}
+	fmt.Fprintf(&buf, "--- a/dev/null\n")
+	fmt.Fprintf(&buf, "+++ b/%s\n", path)
+
+	if len(content) == 0 {
+		// Empty file has no lines
+		fmt.Fprintf(&buf, "@@ -0,0 +1,0 @@\n")
+		return buf.String()
 	}
+
+	lines := bytes.Split(content, []byte("\n"))
+	// bytes.Split on content ending in \n produces an extra empty element
+	if bytes.HasSuffix(content, []byte("\n")) {
+		lines = lines[:len(lines)-1]
+	}
+
+	lineCount := len(lines)
+	fmt.Fprintf(&buf, "@@ -0,0 +1,%d @@\n", lineCount)
+	for _, line := range lines {
+		buf.WriteByte('+')
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+
 	return buf.String()
 }
 
 // unifiedDiffModify returns a unified diff between base and new content.
 func unifiedDiffModify(path string, base, new []byte) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "--- %s\n", path)
-	fmt.Fprintf(&buf, "+++ %s\n", path)
+	fmt.Fprintf(&buf, "--- a/%s\n", path)
+	fmt.Fprintf(&buf, "+++ b/%s\n", path)
 
 	baseLines := bytes.Split(base, []byte("\n"))
 	newLines := bytes.Split(new, []byte("\n"))
 
-	// Simple diff: show all base lines as removed, then all new lines as added
-	// This is a minimal implementation; a real diff would use Myers' algorithm
-	if len(baseLines) > 0 || len(newLines) > 0 {
-		fmt.Fprintf(&buf, "@@ -1,%d +1,%d @@\n", len(baseLines), len(newLines))
-		for _, line := range baseLines {
-			buf.WriteByte('-')
-			buf.Write(line)
-			buf.WriteByte('\n')
-		}
-		for _, line := range newLines {
-			buf.WriteByte('+')
-			buf.Write(line)
-			buf.WriteByte('\n')
-		}
+	// bytes.Split on content ending in \n produces an extra empty element
+	if len(base) > 0 && bytes.HasSuffix(base, []byte("\n")) {
+		baseLines = baseLines[:len(baseLines)-1]
+	}
+	if len(new) > 0 && bytes.HasSuffix(new, []byte("\n")) {
+		newLines = newLines[:len(newLines)-1]
+	}
+
+	if len(baseLines) == 0 && len(newLines) == 0 {
+		return buf.String()
+	}
+
+	fmt.Fprintf(&buf, "@@ -1,%d +1,%d @@\n", len(baseLines), len(newLines))
+	for _, line := range baseLines {
+		buf.WriteByte('-')
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	for _, line := range newLines {
+		buf.WriteByte('+')
+		buf.Write(line)
+		buf.WriteByte('\n')
 	}
 
 	return buf.String()
@@ -130,16 +180,11 @@ func countLines(content []byte) int {
 // AuthorEvidence collects tool calls and results for the author's attempts
 // in a turn, excluding results cited only by reviewers.
 func AuthorEvidence(tx *journal.Tx, turnID string) ([]journal.ToolCall, error) {
-	calls, err := tx.ToolCallsByTurn(turnID, "") // empty participant means all
+	// Query only author calls, not all participant calls
+	calls, err := tx.ToolCallsByTurn(turnID, "author")
 	if err != nil {
 		return nil, err
 	}
-
-	// Filter to only author calls; reviewer calls are not included in
-	// the author evidence (they are included in revision round feedback separately).
-	// This is determined by checking if the participant is the turn's author
-	// (but we don't have direct access to the turn here, so this filtering
-	// happens at the call site in the engine).
 	return calls, nil
 }
 
@@ -149,14 +194,14 @@ func ResultContent(tx *journal.Tx, sha256 string) ([]byte, error) {
 }
 
 // FormatDiff formats a unified diff for inclusion in a prompt.
+// It includes metadata headers and the unified diff itself.
 func FormatDiff(d UnifiedDiff) string {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "--- Path: %s\n", d.Path)
-	fmt.Fprintf(&buf, "--- Op: %s\n", d.Op)
+	fmt.Fprintf(&buf, "Path: %s\nOp: %s\n", d.Path, d.Op)
 	if d.BaseHash != "" {
-		fmt.Fprintf(&buf, "--- Base: %s\n", d.BaseHash)
+		fmt.Fprintf(&buf, "Base: %s\n", d.BaseHash)
 	}
-	fmt.Fprintf(&buf, "--- New: %s\n", d.NewHash)
+	fmt.Fprintf(&buf, "New: %s\n", d.NewHash)
 	buf.WriteString(d.Diff)
 	return buf.String()
 }
@@ -166,7 +211,13 @@ func FormatToolCall(call journal.ToolCall, result *journal.ToolResult, getConten
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "Tool Call ID: %s\n", call.ID)
 	fmt.Fprintf(&buf, "Tool: %s\n", call.Name)
-	fmt.Fprintf(&buf, "Arguments hash: %s (%d bytes)\n", call.ArgsSHA256, call.ArgsByteLen)
+
+	// Include call arguments verbatim, not just the hash
+	args, err := getContent(call.ArgsSHA256)
+	if err != nil {
+		return "", fmt.Errorf("fetch tool call arguments: %w", err)
+	}
+	fmt.Fprintf(&buf, "Arguments (%d bytes):\n%s\n", len(args), args)
 
 	if result != nil {
 		fmt.Fprintf(&buf, "Result Status: %s\n", result.Status)
@@ -175,22 +226,22 @@ func FormatToolCall(call journal.ToolCall, result *journal.ToolResult, getConten
 			if err != nil {
 				return "", fmt.Errorf("fetch tool result: %w", err)
 			}
-			fmt.Fprintf(&buf, "Result (%d bytes):\n%s\n", result.ResultByteLen, content)
+			fmt.Fprintf(&buf, "Result (%d bytes):\n%s\n", len(content), content)
 		}
 	}
 
 	return buf.String(), nil
 }
 
-// FormatAuthorEvidence builds the fenced evidence block for reviewer delivery,
-// containing all author tool calls and results.
-func FormatAuthorEvidence(calls []journal.ToolCall, getContent func(string) ([]byte, error), delimiter string) (string, error) {
+// FormatAuthorEvidence builds the evidence block for reviewer delivery,
+// containing all author tool calls and results verbatim. Fencing is handled
+// by prompt.Reviewer, not here.
+func FormatAuthorEvidence(calls []journal.ToolCall, getContent func(string) ([]byte, error)) (string, error) {
 	if len(calls) == 0 {
 		return "", nil
 	}
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "===== %s BEGIN AUTHOR EVIDENCE =====\n", delimiter)
 
 	for _, call := range calls {
 		formatted, err := FormatToolCall(call, call.Result, getContent)
@@ -201,6 +252,5 @@ func FormatAuthorEvidence(calls []journal.ToolCall, getContent func(string) ([]b
 		buf.WriteString("\n")
 	}
 
-	fmt.Fprintf(&buf, "===== %s END AUTHOR EVIDENCE =====\n", delimiter)
 	return buf.String(), nil
 }

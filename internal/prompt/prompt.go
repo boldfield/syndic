@@ -164,13 +164,17 @@ func Reviewer(in ReviewInput) ([]transport.Message, error) {
 	var diffsBlock string
 	if in.Diffs != "" {
 		systemContent += "\n\nThe unified diffs below show every changed file in the candidate, regenerated from the stored base content."
-		diffsBlock = in.Diffs + "\n\n"
+		delimBeginDiffs := fmt.Sprintf("===== %s BEGIN DIFFS =====", in.Delimiter)
+		delimEndDiffs := fmt.Sprintf("===== %s END DIFFS =====", in.Delimiter)
+		diffsBlock = fmt.Sprintf("%s\n%s%s\n\n", delimBeginDiffs, in.Diffs, delimEndDiffs)
 	}
 
 	var evidenceBlock string
 	if in.AuthorEvidence != "" {
-		systemContent += "\nThe author's tool calls and results are fenced below."
-		evidenceBlock = in.AuthorEvidence + "\n\n"
+		systemContent += "\nThe author's tool calls and results are shown below."
+		delimBeginEvidence := fmt.Sprintf("===== %s BEGIN AUTHOR EVIDENCE =====", in.Delimiter)
+		delimEndEvidence := fmt.Sprintf("===== %s END AUTHOR EVIDENCE =====", in.Delimiter)
+		evidenceBlock = fmt.Sprintf("%s\n%s%s\n\n", delimBeginEvidence, in.AuthorEvidence, delimEndEvidence)
 	}
 
 	userContent := fmt.Sprintf(`%s

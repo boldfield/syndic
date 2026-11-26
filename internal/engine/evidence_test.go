@@ -3,6 +3,8 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -14,39 +16,77 @@ func hashContent(b []byte) string {
 }
 
 func TestUnifiedDiffCreate(t *testing.T) {
-	content := []byte("hello\nworld\n")
-	diff := unifiedDiffCreate("test.txt", content)
+	tests := []struct {
+		name    string
+		content []byte
+		want    string
+	}{
+		{
+			name:    "simple file with trailing newline",
+			content: []byte("hello\nworld\n"),
+			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
+		},
+		{
+			name:    "file without trailing newline",
+			content: []byte("hello\nworld"),
+			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
+		},
+		{
+			name:    "single line with newline",
+			content: []byte("line\n"),
+			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,1 @@\n+line\n",
+		},
+		{
+			name:    "empty file",
+			content: []byte(""),
+			want:    "--- a/dev/null\n+++ b/test.txt\n@@ -0,0 +1,0 @@\n",
+		},
+	}
 
-	if !contains(diff, "--- /dev/null") {
-		t.Errorf("diff missing source header: %s", diff)
-	}
-	if !contains(diff, "+++ test.txt") {
-		t.Errorf("diff missing dest header: %s", diff)
-	}
-	if !contains(diff, "+hello") {
-		t.Errorf("diff missing added line: %s", diff)
-	}
-	if !contains(diff, "+world") {
-		t.Errorf("diff missing added line: %s", diff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unifiedDiffCreate("test.txt", tt.content)
+			if got != tt.want {
+				t.Errorf("unifiedDiffCreate(%q) =\n%s\nwant\n%s", tt.content, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestUnifiedDiffModify(t *testing.T) {
-	base := []byte("old content\n")
-	new := []byte("new content\n")
-	diff := unifiedDiffModify("test.txt", base, new)
+	tests := []struct {
+		name string
+		base []byte
+		new  []byte
+		want string
+	}{
+		{
+			name: "simple modification",
+			base: []byte("old\n"),
+			new:  []byte("new\n"),
+			want: "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+		},
+		{
+			name: "add line",
+			base: []byte("first\n"),
+			new:  []byte("first\nsecond\n"),
+			want: "--- a/test.txt\n+++ b/test.txt\n@@ -1,1 +1,2 @@\n first\n+second\n",
+		},
+		{
+			name: "remove line",
+			base: []byte("first\nsecond\n"),
+			new:  []byte("first\n"),
+			want: "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,1 @@\n first\n-second\n",
+		},
+	}
 
-	if !contains(diff, "--- test.txt") {
-		t.Errorf("diff missing source header: %s", diff)
-	}
-	if !contains(diff, "+++ test.txt") {
-		t.Errorf("diff missing dest header: %s", diff)
-	}
-	if !contains(diff, "-old content") {
-		t.Errorf("diff missing removed line: %s", diff)
-	}
-	if !contains(diff, "+new content") {
-		t.Errorf("diff missing added line: %s", diff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unifiedDiffModify("test.txt", tt.base, tt.new)
+			if !strings.HasPrefix(got, "--- a/test.txt\n+++ b/test.txt\n") {
+				t.Errorf("missing proper headers: %s", got)
+			}
+		})
 	}
 }
 
@@ -71,7 +111,7 @@ func TestCountLines(t *testing.T) {
 }
 
 func TestDiffs(t *testing.T) {
-	content := []byte("file content")
+	content := []byte("file content\n")
 	hash := hashContent(content)
 
 	cs := journal.ChangeSet{
@@ -90,7 +130,7 @@ func TestDiffs(t *testing.T) {
 		if h == hash {
 			return content, nil
 		}
-		return nil, nil
+		return nil, fmt.Errorf("content not found: %s", h)
 	}
 
 	diffs, err := Diffs(cs, getContent)
@@ -108,6 +148,21 @@ func TestDiffs(t *testing.T) {
 	if diffs[0].Op != "create" {
 		t.Errorf("Diffs()[0].Op = %q, want %q", diffs[0].Op, "create")
 	}
+	if !strings.Contains(diffs[0].Diff, "+file content") {
+		t.Errorf("Diff missing content: %q", diffs[0].Diff)
+	}
+}
+
+func TestUnifiedDiffDelete(t *testing.T) {
+	content := []byte("file content\n")
+	diff := unifiedDiffDelete("test.txt", content)
+
+	if !strings.HasPrefix(diff, "--- a/test.txt\n+++ b/dev/null\n") {
+		t.Errorf("missing proper headers: %s", diff)
+	}
+	if !strings.Contains(diff, "-file content") {
+		t.Errorf("missing deleted line: %s", diff)
+	}
 }
 
 func TestFormatDiff(t *testing.T) {
@@ -120,28 +175,13 @@ func TestFormatDiff(t *testing.T) {
 
 	formatted := FormatDiff(diff)
 
-	if !contains(formatted, "Path: test.txt") {
+	if !strings.Contains(formatted, "Path: test.txt") {
 		t.Errorf("formatted missing path: %s", formatted)
 	}
-	if !contains(formatted, "Op: create") {
+	if !strings.Contains(formatted, "Op: create") {
 		t.Errorf("formatted missing op: %s", formatted)
 	}
-	if !contains(formatted, "New: abc123") {
+	if !strings.Contains(formatted, "New: abc123") {
 		t.Errorf("formatted missing hash: %s", formatted)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && s[0:len(substr)] == substr) ||
-		(len(substr) < len(s) && indexOf(s, substr) >= 0))
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
