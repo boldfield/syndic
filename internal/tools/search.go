@@ -53,7 +53,7 @@ func SearchFilesFunc(
 	scope := observation.Root
 	if args.Path != nil {
 		scope = filepath.Clean(*args.Path)
-		if filepath.IsAbs(scope) || strings.Contains(scope, "..") || strings.HasPrefix(scope, "/") {
+		if filepath.IsAbs(scope) || strings.HasPrefix(scope, "/") || strings.HasPrefix(scope, "..") || strings.Contains(scope, "/../") || strings.HasSuffix(scope, "/..") {
 			return nil, fmt.Errorf("invalid search path: %q", *args.Path)
 		}
 	}
@@ -91,21 +91,64 @@ func searchScope(
 		return nil, nil
 	}
 
-	// First, observe the scope to determine if it's a file or directory.
-	// We use readLiveFile first to check, then readLiveDir if it's not a file.
-	var obs journal.Observation
-	var err error
-
-	// Try to observe as a file first.
-	fileReader := func() (string, []byte, error) {
-		return readLiveFile(ctx.Confined, scope)
+	// Try to observe as a directory first (handles both "." and actual directories).
+	// If it's a file, dirReader will determine that and we fall back to file search.
+	dirReader := func() (string, []byte, error) {
+		return readLiveDir(ctx.Confined, scope)
 	}
-	obs, err = ctx.ObserveStore.Observe(ctx.TurnID, ctx.AttemptID, scope, fileReader)
+	obs, err := ctx.ObserveStore.Observe(ctx.TurnID, ctx.AttemptID, scope, dirReader)
 	if err != nil {
 		return nil, fmt.Errorf("observe %q: %w", scope, err)
 	}
 
 	var matches []SearchMatch
+
+	// If it's a directory listing, recursively search its entries.
+	if obs.Kind == journal.ObservationListing {
+		// Parse the directory entries from the content store.
+		listingData, err := ctx.ContentStore.Content(obs.ContentSHA256)
+		if err != nil {
+			return nil, fmt.Errorf("get directory listing: %w", err)
+		}
+
+		entries, err := observation.ParseEntries(listingData)
+		if err != nil {
+			return nil, fmt.Errorf("parse directory entries: %w", err)
+		}
+
+		// Apply staged changes to include newly staged files.
+		entries = applyStagedDirEntries(entries, scope, staging)
+
+		// Search each entry in the directory.
+		for _, entry := range entries {
+			entryPath := entry.Name
+			if scope != observation.Root {
+				entryPath = scope + "/" + entry.Name
+			}
+
+			// Check if entry is protected.
+			if isProtected(entryPath) {
+				continue
+			}
+
+			// Recursively search subdirectories.
+			if entry.Type == "d" {
+				subMatches, err := searchScope(ctx, entryPath, pattern, staging, isProtected)
+				if err != nil {
+					return nil, err
+				}
+				matches = append(matches, subMatches...)
+			} else {
+				// Search files.
+				fileMatches, err := searchFile(ctx, entryPath, pattern, staging)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+				matches = append(matches, fileMatches...)
+			}
+		}
+		return matches, nil
+	}
 
 	// If it's a file, search it.
 	if obs.Kind == journal.ObservationFile {
@@ -113,78 +156,15 @@ func searchScope(
 		if scopePath == observation.Root {
 			scopePath = "."
 		}
-		matches, err := searchFile(ctx, scopePath, pattern, staging)
+		fileMatches, err := searchFile(ctx, scopePath, pattern, staging)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		return matches, nil
+		return fileMatches, nil
 	}
 
 	// If it's absent, nothing to search.
-	if obs.Kind == journal.ObservationAbsent {
-		return nil, nil
-	}
-
-	// Now try to observe as a directory. We need a fresh observe call for directory.
-	// Since we already observed the scope as a file/absent, we won't re-observe it here.
-	// Instead, we directly try to list it.
-	dirReader := func() (string, []byte, error) {
-		return readLiveDir(ctx.Confined, scope)
-	}
-	obs, err = ctx.ObserveStore.Observe(ctx.TurnID, ctx.AttemptID, scope, dirReader)
-	if err != nil {
-		return nil, fmt.Errorf("observe %q: %w", scope, err)
-	}
-
-	// If it's not a directory, nothing to search.
-	if obs.Kind != journal.ObservationListing {
-		return nil, nil
-	}
-
-	// Parse the directory entries from the content store.
-	listingData, err := ctx.ContentStore.Content(obs.ContentSHA256)
-	if err != nil {
-		return nil, fmt.Errorf("get directory listing: %w", err)
-	}
-
-	entries, err := observation.ParseEntries(listingData)
-	if err != nil {
-		return nil, fmt.Errorf("parse directory entries: %w", err)
-	}
-
-	// Apply staged changes to include newly staged files.
-	entries = applyStagedDirEntries(entries, scope, staging)
-
-	// Search each entry in the directory.
-	for _, entry := range entries {
-		entryPath := entry.Name
-		if scope != observation.Root {
-			entryPath = scope + "/" + entry.Name
-		}
-
-		// Check if entry is protected.
-		if isProtected(entryPath) {
-			continue
-		}
-
-		// Recursively search subdirectories.
-		if entry.Type == "d" {
-			subMatches, err := searchScope(ctx, entryPath, pattern, staging, isProtected)
-			if err != nil {
-				return nil, err
-			}
-			matches = append(matches, subMatches...)
-		} else {
-			// Search files.
-			fileMatches, err := searchFile(ctx, entryPath, pattern, staging)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-			matches = append(matches, fileMatches...)
-		}
-	}
-
-	return matches, nil
+	return nil, nil
 }
 
 // searchFile searches for matches in a single file.
@@ -262,7 +242,7 @@ func applyStagedDirEntries(entries []observation.Entry, dirPath string, staging 
 
 	// Apply staged changes.
 	for stagedPath := range staging {
-		// Check if the staged path is in this directory.
+		// Check if the staged path is in this directory or below it.
 		var prefix string
 		if dirPath == "" {
 			prefix = ""
@@ -276,13 +256,18 @@ func applyStagedDirEntries(entries []observation.Entry, dirPath string, staging 
 
 		// Get the relative path within this directory.
 		rel := stagedPath[len(prefix):]
-		if strings.Contains(rel, "/") {
-			// This is a file in a subdirectory, not in this directory.
-			continue
-		}
 
-		// Add or update the entry as a file.
-		entryMap[rel] = observation.Entry{Type: "f", Name: rel}
+		// Check if this is a file in a subdirectory or directly in this directory.
+		if idx := strings.Index(rel, "/"); idx >= 0 {
+			// This is a file in a subdirectory. Synthesize the parent directory entry.
+			subdir := rel[:idx]
+			if _, exists := entryMap[subdir]; !exists {
+				entryMap[subdir] = observation.Entry{Type: "d", Name: subdir}
+			}
+		} else {
+			// This is a file directly in this directory.
+			entryMap[rel] = observation.Entry{Type: "f", Name: rel}
+		}
 	}
 
 	// Convert back to a sorted slice.

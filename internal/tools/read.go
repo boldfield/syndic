@@ -61,7 +61,7 @@ func ReadFile(
 ) (json.RawMessage, error) {
 	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if filepath.IsAbs(path) || strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "..") || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
 		return nil, fmt.Errorf("invalid path: %q", args.Path)
 	}
 
@@ -135,7 +135,7 @@ func ListDirFunc(
 ) (json.RawMessage, error) {
 	// Normalize and validate the path.
 	path := filepath.Clean(args.Path)
-	if filepath.IsAbs(path) || strings.Contains(path, "..") || strings.HasPrefix(path, "/") {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "..") || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
 		return nil, fmt.Errorf("invalid path: %q", args.Path)
 	}
 	if path == "." || path == "" {
@@ -320,7 +320,7 @@ func applyStagedChanges(entries []DirEntry, dirPath string, staging map[string]s
 
 	// Apply staged changes.
 	for stagedPath := range staging {
-		// Check if the staged path is in this directory.
+		// Check if the staged path is in this directory or below it.
 		var prefix string
 		if dirPath == "" {
 			prefix = ""
@@ -334,13 +334,18 @@ func applyStagedChanges(entries []DirEntry, dirPath string, staging map[string]s
 
 		// Get the relative path within this directory.
 		rel := stagedPath[len(prefix):]
-		if strings.Contains(rel, "/") {
-			// This is a file in a subdirectory, not in this directory.
-			continue
-		}
 
-		// Add or update the entry.
-		entryMap[rel] = DirEntry{Name: rel, Type: "f"}
+		// Check if this is a file in a subdirectory or directly in this directory.
+		if idx := strings.Index(rel, "/"); idx >= 0 {
+			// This is a file in a subdirectory. Synthesize the parent directory entry.
+			subdir := rel[:idx]
+			if _, exists := entryMap[subdir]; !exists {
+				entryMap[subdir] = DirEntry{Name: subdir, Type: "d"}
+			}
+		} else {
+			// This is a file directly in this directory.
+			entryMap[rel] = DirEntry{Name: rel, Type: "f"}
+		}
 	}
 
 	// Convert back to a sorted slice.

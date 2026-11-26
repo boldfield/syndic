@@ -6,26 +6,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/observation"
 	"github.com/boldfield/syndic/internal/workspace"
 )
 
 // setupTestWorkspace creates a temporary workspace for testing.
-func setupTestWorkspace(t *testing.T) string {
+func setupTestWorkspace(t *testing.T) *workspace.Confined {
 	t.Helper()
 
 	// Create a temporary directory.
-	tmpDir, err := os.MkdirTemp("", "tools-test-*")
-	if err != nil {
-		t.Fatalf("create temp dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	tmpDir := t.TempDir()
 
 	// Create some test files.
 	testFiles := map[string]string{
 		"README.md":       "# Project\n\nThis is a test project.\n",
 		"main.go":         "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n",
 		"subdir/file.txt": "Some content\nin multiple lines\nfor testing.\n",
+		"large.bin":       string(make([]byte, 20*1024*1024)), // 20MB file
 	}
 
 	for path, content := range testFiles {
@@ -46,43 +44,261 @@ func setupTestWorkspace(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = conf.Close() })
 
-	return tmpDir
+	return conf
+}
+
+// setupTestStore creates a journal store for testing.
+func setupTestStore(t *testing.T) (*journal.Store, string, string) {
+	t.Helper()
+
+	db, err := journal.Open(filepath.Join(t.TempDir(), "j.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := journal.NewStore(db)
+	var turnID, attemptID string
+	err = store.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun([]byte(`{}`))
+		if err != nil {
+			return err
+		}
+		if turnID, err = tx.CreateTurn(run, "review", nil); err != nil {
+			return err
+		}
+		if attemptID, err = tx.BeginAttempt(turnID, "author", "author", 1, nil, ""); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return store, turnID, attemptID
 }
 
 func TestReadFileBasic(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in -short mode")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
 	}
 
-	_ = setupTestWorkspace(t)
+	args := ReadFileArgs{Path: "README.md"}
+	result, err := ReadFile(ctx, args, nil, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
 
-	// For this test, we'll need a proper setup with a database.
-	// This is a placeholder test to verify the structure.
-	t.Skip("full test requires database setup")
+	var parsed ReadResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(parsed.Content) == 0 {
+		t.Error("content is empty")
+	}
 }
 
 func TestReadFileWithRange(t *testing.T) {
-	t.Skip("full test requires database setup")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	offset := int64(2)
+	limit := int64(5)
+	args := ReadFileArgs{Path: "README.md", Offset: &offset, Limit: &limit}
+	result, err := ReadFile(ctx, args, nil, 10*1024*1024)
+	if err != nil {
+		t.Fatalf("read_file with range: %v", err)
+	}
+
+	var parsed ReadResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(parsed.Content) != 5 {
+		t.Errorf("expected 5 bytes, got %d", len(parsed.Content))
+	}
 }
 
 func TestReadFileNotFound(t *testing.T) {
-	t.Skip("full test requires database setup")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ReadFileArgs{Path: "nonexistent.txt"}
+	_, err := ReadFile(ctx, args, nil, 10*1024*1024)
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
 }
 
 func TestReadFileDirectory(t *testing.T) {
-	t.Skip("full test requires database setup")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ReadFileArgs{Path: "subdir"}
+	_, err := ReadFile(ctx, args, nil, 10*1024*1024)
+	if err == nil {
+		t.Error("expected error when reading directory")
+	}
+}
+
+func TestReadFileOversizeReturnsError(t *testing.T) {
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ReadFileArgs{Path: "large.bin"}
+	result, err := ReadFile(ctx, args, nil, 1024*1024) // 1MB limit
+	if err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if errMsg, ok := parsed["error"]; !ok {
+		t.Error("expected size error result, got content instead")
+	} else if errMsg != "file too large" {
+		t.Errorf("expected 'file too large' error, got %q", errMsg)
+	}
 }
 
 func TestListDirBasic(t *testing.T) {
-	t.Skip("full test requires database setup")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ListDirArgs{Path: "."}
+	result, err := ListDirFunc(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("list_dir: %v", err)
+	}
+
+	var parsed ListResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(parsed.Entries) == 0 {
+		t.Error("expected entries in root directory")
+	}
+
+	// Check that expected files are present
+	names := make(map[string]bool)
+	for _, e := range parsed.Entries {
+		names[e.Name] = true
+	}
+
+	expectedEntries := map[string]bool{"README.md": true, "main.go": true, "subdir": true}
+	for name := range expectedEntries {
+		if !names[name] {
+			t.Errorf("expected entry %q not found", name)
+		}
+	}
 }
 
-func TestListDirEmpty(t *testing.T) {
-	t.Skip("full test requires database setup")
+func TestListDirSubdirectory(t *testing.T) {
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ListDirArgs{Path: "subdir"}
+	result, err := ListDirFunc(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("list_dir subdir: %v", err)
+	}
+
+	var parsed ListResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Check for file.txt
+	found := false
+	for _, e := range parsed.Entries {
+		if e.Name == "file.txt" && e.Type == "f" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected file.txt in subdir")
+	}
 }
 
 func TestListDirNotFound(t *testing.T) {
-	t.Skip("full test requires database setup")
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	args := ListDirArgs{Path: "nonexistent"}
+	_, err := ListDirFunc(ctx, args, nil)
+	if err == nil {
+		t.Error("expected error for nonexistent directory")
+	}
 }
 
 func TestReadResultMarshal(t *testing.T) {
@@ -199,11 +415,12 @@ func TestApplyStagedChanges(t *testing.T) {
 
 	result := applyStagedChanges(entries, observation.Root, staging)
 
-	// Should have the original entries plus the staged file at root level.
+	// Should have the original entries plus the staged file at root level and synthesized parent dir.
 	expectedNames := map[string]bool{
 		"existing.txt": true,
 		"subdir":       true,
 		"new.go":       true,
+		"deep":         true, // synthesized parent directory
 	}
 
 	for _, entry := range result {
@@ -213,10 +430,13 @@ func TestApplyStagedChanges(t *testing.T) {
 		if entry.Name == "new.go" && entry.Type != "f" {
 			t.Errorf("staged entry type mismatch: got %q, want f", entry.Type)
 		}
+		if entry.Name == "deep" && entry.Type != "d" {
+			t.Errorf("synthesized parent should be directory, got %q", entry.Type)
+		}
 	}
 
-	if len(result) != 3 {
-		t.Errorf("entries count: got %d, want 3", len(result))
+	if len(result) != 4 {
+		t.Errorf("entries count: got %d, want 4", len(result))
 	}
 }
 
@@ -246,5 +466,47 @@ func TestApplyStagedChangesSubdir(t *testing.T) {
 
 	if len(result) != 2 {
 		t.Errorf("entries count: got %d, want 2", len(result))
+	}
+}
+
+func TestListDirWithStagedCreations(t *testing.T) {
+	conf := setupTestWorkspace(t)
+	store, turnID, attemptID := setupTestStore(t)
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	staging := map[string]string{
+		"newfile.txt":            "abc123",
+		"newdir/nested_file.txt": "def456",
+	}
+
+	args := ListDirArgs{Path: "."}
+	result, err := ListDirFunc(ctx, args, staging)
+	if err != nil {
+		t.Fatalf("list_dir with staging: %v", err)
+	}
+
+	var parsed ListResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Check for synthesized directory
+	names := make(map[string]string) // name -> type
+	for _, e := range parsed.Entries {
+		names[e.Name] = e.Type
+	}
+
+	if names["newfile.txt"] != "f" {
+		t.Error("expected staged file newfile.txt")
+	}
+	if names["newdir"] != "d" {
+		t.Error("expected synthesized directory newdir")
 	}
 }

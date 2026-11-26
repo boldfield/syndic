@@ -2,8 +2,14 @@ package tools
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
+
+	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/observation"
+	"github.com/boldfield/syndic/internal/workspace"
 )
 
 func TestSearchMatchMarshal(t *testing.T) {
@@ -79,26 +85,240 @@ func TestSearchPatternValidation(t *testing.T) {
 	}
 }
 
-func TestSearchFilesBasic(t *testing.T) {
-	t.Skip("full test requires database setup")
+// setupSearchTestContext creates a test context for search operations.
+func setupSearchTestContext(t *testing.T) (ReadFileContext, *workspace.Confined) {
+	t.Helper()
+
+	// Create a temporary directory and workspace.
+	tmpDir := t.TempDir()
+
+	// Create test files with searchable content.
+	testFiles := map[string]string{
+		"file1.txt":           "hello world\nthis is a test\nhello again\n",
+		"file2.txt":           "goodbye world\n",
+		"subdir/file3.txt":    "hello from subdir\nmore content\n",
+		"subdir/file4.txt":    "nothing to find here\n",
+		"deep/nested/main.go": "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n",
+	}
+
+	for path, content := range testFiles {
+		fullPath := filepath.Join(tmpDir, path)
+		dir := filepath.Dir(fullPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("create directory: %v", err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+	}
+
+	// Open the workspace.
+	conf, err := workspace.OpenConfined(tmpDir, nil)
+	if err != nil {
+		t.Fatalf("open confined: %v", err)
+	}
+	t.Cleanup(func() { _ = conf.Close() })
+
+	// Set up journal store.
+	db, err := journal.Open(filepath.Join(t.TempDir(), "j.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := journal.NewStore(db)
+	var turnID, attemptID string
+	err = store.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun([]byte(`{}`))
+		if err != nil {
+			return err
+		}
+		if turnID, err = tx.CreateTurn(run, "review", nil); err != nil {
+			return err
+		}
+		if attemptID, err = tx.BeginAttempt(turnID, "author", "author", 1, nil, ""); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := ReadFileContext{
+		TurnID:       turnID,
+		AttemptID:    attemptID,
+		Confined:     conf,
+		ObserveStore: observation.NewStore(store),
+		ContentStore: store,
+	}
+
+	return ctx, conf
 }
 
-func TestSearchFilesWithPath(t *testing.T) {
-	t.Skip("full test requires database setup")
+func TestSearchFilesBasic(t *testing.T) {
+	ctx, _ := setupSearchTestContext(t)
+
+	args := SearchFilesArgs{Pattern: "hello"}
+	result, err := SearchFilesFunc(ctx, args, nil, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("search_files: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(parsed.Matches) == 0 {
+		t.Error("expected matches for 'hello' pattern")
+	}
+
+	// Count matches
+	helloCount := 0
+	for _, match := range parsed.Matches {
+		if regexp.MustCompile("hello").MatchString(match.Text) {
+			helloCount++
+		}
+	}
+
+	if helloCount != len(parsed.Matches) {
+		t.Errorf("expected all matches to contain 'hello', got %d out of %d", helloCount, len(parsed.Matches))
+	}
 }
 
 func TestSearchFilesRecursive(t *testing.T) {
-	t.Skip("full test requires database setup")
+	ctx, _ := setupSearchTestContext(t)
+
+	// Search from root - should find files in subdirectories.
+	args := SearchFilesArgs{Pattern: "hello"}
+	result, err := SearchFilesFunc(ctx, args, nil, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("search_files recursive: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Should find matches from multiple files and subdirectories.
+	fileSet := make(map[string]bool)
+	for _, match := range parsed.Matches {
+		fileSet[match.File] = true
+	}
+
+	// Check that we found files from different levels.
+	if !fileSet["file1.txt"] {
+		t.Error("expected matches from file1.txt")
+	}
+	if !fileSet["subdir/file3.txt"] {
+		t.Error("expected matches from subdir/file3.txt")
+	}
+}
+
+func TestSearchFilesWithPath(t *testing.T) {
+	ctx, _ := setupSearchTestContext(t)
+
+	// Limit search to a specific directory.
+	subdir := "subdir"
+	args := SearchFilesArgs{Pattern: "hello", Path: &subdir}
+	result, err := SearchFilesFunc(ctx, args, nil, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("search_files with path: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Should only find matches in subdir.
+	for _, match := range parsed.Matches {
+		if !regexp.MustCompile(`^subdir/`).MatchString(match.File) {
+			t.Errorf("expected match in subdir, got %q", match.File)
+		}
+	}
 }
 
 func TestSearchFilesNoMatches(t *testing.T) {
-	t.Skip("full test requires database setup")
+	ctx, _ := setupSearchTestContext(t)
+
+	args := SearchFilesArgs{Pattern: "xyznotfound"}
+	result, err := SearchFilesFunc(ctx, args, nil, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("search_files: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(parsed.Matches) != 0 {
+		t.Errorf("expected no matches, got %d", len(parsed.Matches))
+	}
 }
 
 func TestSearchFilesStagedContent(t *testing.T) {
-	t.Skip("full test requires database setup")
+	ctx, _ := setupSearchTestContext(t)
+
+	// Test with an empty staging map - the test focuses on the search completing
+	// successfully with staged files. Full staged content testing would require
+	// setting up the content store with actual SHA256 hashes, which is beyond the scope.
+	staging := map[string]string{}
+
+	args := SearchFilesArgs{Pattern: "hello"}
+	result, err := SearchFilesFunc(ctx, args, staging, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("search_files with staging: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Verify search works with empty staging
+	if len(parsed.Matches) == 0 {
+		t.Error("expected matches even with empty staging")
+	}
 }
 
 func TestSearchFilesInvalidPath(t *testing.T) {
-	t.Skip("full test requires database setup")
+	ctx, _ := setupSearchTestContext(t)
+
+	invalidPath := "../etc/passwd"
+	args := SearchFilesArgs{Pattern: "hello", Path: &invalidPath}
+	_, err := SearchFilesFunc(ctx, args, nil, func(string) bool { return false })
+	if err == nil {
+		t.Error("expected error for invalid path")
+	}
+}
+
+func TestSearchFilesProtectedPaths(t *testing.T) {
+	ctx, _ := setupSearchTestContext(t)
+
+	// Define a protection function that blocks "subdir".
+	isProtected := func(path string) bool {
+		return path == "subdir" || path == "subdir/file3.txt"
+	}
+
+	args := SearchFilesArgs{Pattern: "hello"}
+	result, err := SearchFilesFunc(ctx, args, nil, isProtected)
+	if err != nil {
+		t.Fatalf("search_files with protection: %v", err)
+	}
+
+	var parsed SearchResult
+	if err := json.Unmarshal(result, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Should not find matches from protected subdir.
+	for _, match := range parsed.Matches {
+		if regexp.MustCompile(`^subdir/`).MatchString(match.File) {
+			t.Errorf("expected protected path to be skipped, got %q", match.File)
+		}
+	}
 }
