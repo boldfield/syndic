@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -106,7 +107,27 @@ func TestPlainBackendContract(t *testing.T) {
 	if os.Getenv(plainEnv) != "1" {
 		t.Skip("run by TestSuiteDetectsNonEnforcingBackend")
 	}
+	closeInheritedOnExec(t)
 	Run(t, plainBackend{}, Fixtures{Passthrough: map[string]string{"SYNDIC_CONTRACT_PASS": "passed"}})
+}
+
+// closeInheritedOnExec marks every descriptor above 2 close-on-exec. The
+// test binary can inherit descriptors without that flag from whatever
+// started it (a CI runner does), and plain os/exec would pass them on to
+// every command, failing the descriptors clause for a reason that has
+// nothing to do with the backend.
+func closeInheritedOnExec(t *testing.T) {
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatalf("list descriptors: %v", err)
+	}
+	for _, e := range entries {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil || fd <= 2 {
+			continue
+		}
+		syscall.CloseOnExec(fd)
+	}
 }
 
 func TestHelperBuilds(t *testing.T) {
