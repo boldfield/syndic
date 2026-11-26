@@ -1299,6 +1299,30 @@ func (tx *Tx) RecordVerdictEvidence(verdictID string, snapshotVersion int, resul
 	})
 }
 
+// UnboundObservationIDs returns, in snapshot-version order, the ids of the
+// observations the participant's attempts recorded on the turn that no
+// verdict's evidence has taken yet.
+func (tx *Tx) UnboundObservationIDs(turnID, participant string) ([]string, error) {
+	rows, err := tx.tx.Query(`
+		SELECT o.id FROM observations o JOIN attempts a ON a.id = o.attempt_id
+		WHERE o.turn_id = ? AND a.participant = ?
+			AND o.id NOT IN (SELECT observation_id FROM verdict_observations)
+		ORDER BY o.snapshot_version, o.journal_seq`, turnID, participant)
+	if err != nil {
+		return nil, fmt.Errorf("query unbound observations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unbound observation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // GetVerdictEvidence returns what a verdict rested on; a verdict with no
 // evidence recorded yields ErrNoSuchContent.
 func (tx *Tx) GetVerdictEvidence(verdictID string) (VerdictEvidence, error) {

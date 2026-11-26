@@ -31,6 +31,11 @@ type reviewResult struct {
 	kind      string
 	attemptID string
 	text      string
+	// results are the reviewer's own tool results by id and evidence is the
+	// evidence of its blocks still open after the verdict; the author receives
+	// only the results that evidence cites.
+	results  map[string]string
+	evidence string
 }
 
 // authorChangeLines returns the sorted change-set lines
@@ -88,7 +93,7 @@ func (e *Engine) authorRevisionMessages(t *openTurn) ([]transport.Message, error
 		if !ok {
 			return nil, fmt.Errorf("engine: no accepted result of reviewer %s for the revision", id)
 		}
-		feedback = append(feedback, prompt.RevisionFeedback{Output: r.text})
+		feedback = append(feedback, prompt.RevisionFeedback{Output: r.text, Results: r.results, Evidence: r.evidence})
 	}
 	for range maxDelimiterTries {
 		delimiter, err := prompt.NewDelimiter(e.rand)
@@ -130,12 +135,14 @@ func (t *openTurn) repairMessages(originalAttemptID, delimiter string, blocks []
 
 func (t *openTurn) reviewInput(attemptID, delimiter string) prompt.ReviewInput {
 	return prompt.ReviewInput{
-		Request:       t.input,
-		Candidate:     t.candidate,
-		CandidateHash: t.candidateHash,
-		AttemptID:     attemptID,
-		Delimiter:     delimiter,
-		History:       t.history,
+		Request:        t.input,
+		Candidate:      t.candidate,
+		CandidateHash:  t.candidateHash,
+		AttemptID:      attemptID,
+		Delimiter:      delimiter,
+		History:        t.history,
+		Diffs:          t.pkt.diffs,
+		AuthorEvidence: t.pkt.evidence,
 	}
 }
 
@@ -145,14 +152,16 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 		open[i] = prompt.OpenBlockForRevision{BlockID: b.ReviewerBlockID, Severity: b.Severity, Evidence: b.Evidence, Remedy: b.Remedy}
 	}
 	return prompt.ReviewerRevisionInput{
-		Request:       t.input,
-		Candidate:     t.candidate,
-		CandidateHash: t.candidateHash,
-		OpenBlocks:    open,
-		AttemptID:     attemptID,
-		Delimiter:     delimiter,
-		Round:         t.round,
-		HistoryDoc:    historyOf(t),
+		Request:        t.input,
+		Candidate:      t.candidate,
+		CandidateHash:  t.candidateHash,
+		OpenBlocks:     open,
+		AttemptID:      attemptID,
+		Delimiter:      delimiter,
+		Round:          t.round,
+		HistoryDoc:     historyOf(t),
+		Diffs:          t.pkt.diffs,
+		AuthorEvidence: t.pkt.evidence,
 	}
 }
 

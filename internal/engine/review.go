@@ -54,14 +54,14 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	isToolStep := gate == nil && transport.IsToolStep(res)
 
 	var hash, candidateID string
-	var round int
+	var round, frozenVersion int
 	var lines []string
 	var quarantined, ended, exceeded bool
 	var term *terminal
 	var held *hold
 	var endReason string
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
-		hash, candidateID, round, lines = "", "", 0, nil
+		hash, candidateID, round, frozenVersion, lines = "", "", 0, 0, nil
 		quarantined, ended, exceeded, term, held = false, false, false, nil, nil
 		endReason = ""
 		accepted, err := tx.AcceptResult(attemptID, req.Envelope.Epoch, "", outputOf(res))
@@ -99,9 +99,17 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			term, err = e.endIn(tx, emit, t, StateIncomplete, endReason)
 			return err
 		}
-		if e.changeLines != nil {
+		fi, err := frozenInputsFor(tx, t.id, t.author)
+		if err != nil {
+			return err
+		}
+		frozenVersion = fi.version
+		switch {
+		case e.changeLines != nil:
 			lines = e.changeLines(res)
-		} else {
+		case len(fi.lines) > 0:
+			lines = fi.lines
+		default:
 			lines = authorChangeLines(res)
 		}
 		if t.revising && sameRevision(t.candidate, t.changeLines, res.Text, lines) {
@@ -122,6 +130,8 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 			ContextHash:     t.contextHash,
 			Round:           round,
 			Content:         []byte(res.Text),
+			Evidence:        fi.evidence,
+			ChangesHash:     fi.changesHash,
 		})
 		if err != nil {
 			return err
@@ -137,6 +147,11 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 		}
 		if err != nil {
 			return err
+		}
+		if len(fi.changes) > 0 {
+			if _, err := tx.FreezeChangeSet(t.id, candidateID, fi.snapshotHash, fi.changesHash); err != nil {
+				return err
+			}
 		}
 		if err := emit(t.id, wire.EventKindCandidateFrozen, wire.EvCandidateFrozen{TurnID: t.id, CandidateHash: hash}); err != nil {
 			return err
@@ -171,6 +186,7 @@ func (e *Engine) completeAuthorReview(t *openTurn, attemptID string, req transpo
 	t.candidate = res.Text
 	t.candidateHash = hash
 	t.candidateID = candidateID
+	t.frozenVersion = frozenVersion
 	t.changeLines = lines
 	if t.revising {
 		t.revising = false
@@ -268,6 +284,11 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		turn, err := tx.GetTurn(t.id)
 		if err != nil {
+			return err
+		}
+		// The packet is regenerated from the journal at every dispatch, never
+		// from the live workspace.
+		if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
 			return err
 		}
 		delimiter, err := e.newDelimiter(t)
@@ -507,6 +528,8 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	var quarantined, approvedNow, exceeded, revise bool
 	var endState, endReason, kind string
 	var repair bool
+	var evidenceResults map[string]string
+	var acceptedEvidence string
 	var term *terminal
 	var held *hold
 	// Everything the closure decides is held in locals and applied to the open
@@ -515,6 +538,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, revise, endState, endReason, kind = false, false, false, "", "", ""
 		repair, exceeded, term, held = false, false, nil, nil
+		evidenceResults, acceptedEvidence = nil, ""
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
 			return err
@@ -633,6 +657,12 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if err := recordAcceptedReview(tx, t, d, verdictID, v); err != nil {
 				return err
 			}
+			if evidenceResults, err = recordReviewerEvidence(tx, t.id, d.participant, verdictID, t.frozenVersion); err != nil {
+				return err
+			}
+			if acceptedEvidence, err = openBlockEvidence(tx, t.id, d.participant); err != nil {
+				return err
+			}
 			// A loop waits for every required reviewer's accepted result on
 			// the candidate before it decides, so the author is sent all the
 			// feedback at once.
@@ -692,7 +722,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if t.results == nil {
 			t.results = map[string]reviewResult{}
 		}
-		t.results[d.participant] = reviewResult{kind: kind, attemptID: d.attemptID, text: res.Text}
+		t.results[d.participant] = reviewResult{kind: kind, attemptID: d.attemptID, text: res.Text, results: evidenceResults, evidence: acceptedEvidence}
 	}
 	if endState != "" {
 		e.commitTerminal(t, term)
