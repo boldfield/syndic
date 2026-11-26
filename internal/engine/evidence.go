@@ -43,6 +43,7 @@ func frozenInputsFor(tx *journal.Tx, turnID, author string) (frozenInputs, error
 		return fi, err
 	}
 	for _, c := range calls {
+		// A refused or abandoned call has no result bytes to bind.
 		if c.Result == nil || c.Result.ResultSHA256 == "" {
 			continue
 		}
