@@ -180,6 +180,11 @@ type CompleteResult struct {
 	ToolCalls       []ToolCall
 	Usage           *Usage
 	TransportStatus string
+	// FailureClass, ServerWait and NoRetry are set by the adapter on every
+	// failed send, a Go error included.
+	FailureClass FailureClass
+	ServerWait   ServerWait
+	NoRetry      bool
 }
 
 // RefereeResult is the output of a referee decision on a tool call.

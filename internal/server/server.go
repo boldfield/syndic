@@ -44,6 +44,8 @@ type Engine interface {
 	Submit(wire.SubmitRequest) (wire.SubmitReply, error)
 	Cancel(turnID string) error
 	Override(turnID, reason string) error
+	Apply(turnID string) (wire.ApplyReply, error)
+	Discard(turnID string) (wire.DiscardReply, error)
 	Release(wire.ReleaseRequest) (wire.ReleaseReply, error)
 	Stopping() <-chan struct{}
 }
@@ -747,6 +749,20 @@ func (c *connection) handleRequest(frame wire.Frame) {
 			return
 		}
 		c.respond(frame.ID, "override", wire.OverrideReply{State: "overridden"}, c.server.engine.Override(req.TurnID, req.Reason))
+	case wire.RequestApply:
+		var req wire.ApplyRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		reply, err := c.server.engine.Apply(req.TurnID)
+		c.respond(frame.ID, "apply", reply, err)
+	case wire.RequestDiscard:
+		var req wire.DiscardRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		reply, err := c.server.engine.Discard(req.TurnID)
+		c.respond(frame.ID, "discard", reply, err)
 	case wire.RequestRelease:
 		var req wire.ReleaseRequest
 		if !c.decode(frame, &req, "pool", "reason") {
