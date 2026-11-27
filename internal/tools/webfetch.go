@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,17 +53,14 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 		return Result{ErrorCode: ErrCodeBadArguments}, nil
 	}
 
-	// Follow redirects up to 3 hops; refuse the 4th.
-	for hop := 0; hop < 4; hop++ {
-		if hop == 3 {
-			return Result{ErrorCode: "redirect_limit"}, nil
-		}
-
+	// Follow redirects up to 3 hops (4 requests total); refuse the 4th hop.
+	for hop := 0; hop <= 3; hop++ {
 		// Fetch through the WebFetcher, which applies screening, refereeing and
 		// address validation.
 		resp, err := w.fetcher.Fetch(ctx, parsed.URL)
 		if err != nil {
-			if refErr, ok := err.(*RefusalError); ok {
+			var refErr *RefusalError
+			if errors.As(err, &refErr) {
 				return Result{ErrorCode: refErr.Rule}, nil
 			}
 			return Result{ErrorCode: "fetch_error"}, nil
@@ -76,6 +74,11 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 				return Result{ErrorCode: "invalid_redirect"}, nil
 			}
 
+			// If we're already at hop 3, refuse the 4th.
+			if hop >= 3 {
+				return Result{ErrorCode: "redirect_limit"}, nil
+			}
+
 			// Parse the redirect target as an absolute URL.
 			targetURL, err := url.Parse(location)
 			if err != nil {
@@ -83,7 +86,10 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 			}
 			if !targetURL.IsAbs() {
 				// Relative redirect: resolve relative to current URL.
-				currentURL, _ := url.Parse(parsed.URL)
+				currentURL, err := url.Parse(parsed.URL)
+				if err != nil {
+					return Result{ErrorCode: "invalid_redirect"}, nil
+				}
 				targetURL = currentURL.ResolveReference(targetURL)
 			}
 			redirectTarget := targetURL.String()
@@ -92,8 +98,12 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 			currentHost := getCanonicalHost(parsed.URL)
 			redirectHost := getCanonicalHost(redirectTarget)
 			if currentHost != redirectHost {
-				// Cross-host redirect: return as data.
-				return Result{Content: []byte(redirectTarget)}, nil
+				// Cross-host redirect: return as data with size check.
+				resultBytes := []byte("redirect to a different host: " + redirectTarget)
+				if len(resultBytes) > w.maxResultBytes {
+					return Result{ErrorCode: ErrCodeTooLarge, Content: []byte(fmt.Sprintf("redirect target exceeds %d bytes", w.maxResultBytes))}, nil
+				}
+				return Result{Content: resultBytes}, nil
 			}
 
 			// Same-host redirect: loop to fetch again with the new URL.
@@ -108,10 +118,16 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 			return Result{ErrorCode: "read_error"}, nil
 		}
 
-		// Check result size.
+		// Check result size and status code.
 		if len(body) > w.maxResultBytes {
-			msg := fmt.Sprintf("result too large (%d > %d bytes)", len(body)-1, w.maxResultBytes)
+			msg := fmt.Sprintf("result exceeds %d bytes", w.maxResultBytes)
 			return Result{ErrorCode: ErrCodeTooLarge, Content: []byte(msg)}, nil
+		}
+
+		// Non-2xx responses are an error.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			msg := fmt.Sprintf("HTTP %d", resp.StatusCode)
+			return Result{ErrorCode: "http_error", Content: []byte(msg)}, nil
 		}
 
 		return Result{Content: body}, nil
