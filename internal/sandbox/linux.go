@@ -51,7 +51,7 @@ const containNamespaces = "linux_namespaces"
 
 // LinuxNamespaces is the Linux backend of the v7 delta, section 3,
 // "Backends": user, mount, PID and network namespaces. It enforces F, N1, P
-// and D, and not N2.
+// and D, and N2 when a call has a proxy listener.
 //
 // Each command's supervisor starts in a new user, mount, PID and network
 // namespace, as process 1 of the PID namespace; the command is its child,
@@ -61,8 +61,10 @@ const containNamespaces = "linux_namespaces"
 // the per-call temporary directory at its own path, the system locations
 // read-only at their own paths, the device nodes, and a proc of the new PID
 // namespace; the host's root is detached. The network namespace has no
-// interface up, loopback included. The command starts with no capability
-// and no_new_privs set.
+// interface up, loopback included, unless the call has a proxy listener:
+// then its Unix socket is mounted in the root and a forwarder on the
+// namespace's own loopback, its one interface, reaches it. The command
+// starts with no capability and no_new_privs set.
 //
 // Where namespaces cannot be created the backend is unsupported, with the
 // reason; it never falls back to anything weaker.
@@ -216,13 +218,13 @@ func (b *LinuxNamespaces) Config() map[string]string {
 	}
 }
 
-// Capabilities implements Backend: F, N1, P and D when the sandbox can be
-// built here, and nothing otherwise. Never N2.
+// Capabilities implements Backend: F, N1, N2, P and D when the sandbox can
+// be built here, and nothing otherwise.
 func (b *LinuxNamespaces) Capabilities() (CapSet, string) {
 	if b.reason != "" {
 		return 0, b.reason
 	}
-	return Caps(F, N1, P, D), ""
+	return Caps(F, N1, N2, P, D), ""
 }
 
 // Start implements Backend.
@@ -233,6 +235,11 @@ func (b *LinuxNamespaces) Start(ctx context.Context, spec Spec) (Process, error)
 	plan, _, err := planMounts(spec.ScratchDir, spec.TempDir, spec.System)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %w", err)
+	}
+	if spec.Proxy != nil {
+		if plan, err = planProxy(plan, *spec.Proxy); err != nil {
+			return nil, fmt.Errorf("sandbox: %w", err)
+		}
 	}
 	return b.sup.start(ctx, b.launch(plan), spec)
 }
@@ -248,9 +255,10 @@ func (b *LinuxNamespaces) launch(plan nsPlan) launch {
 			a.GidMappingsEnableSetgroups = false
 			// The supervisor runs as sandboxID, which keeps no capability
 			// across exec but an ambient one: it needs CAP_SYS_ADMIN in its
-			// own user namespace to build the root, and drops it before the
+			// own user namespace to build the root, and CAP_NET_ADMIN to bring
+			// the loopback up for a proxy listener, and drops it before the
 			// command starts.
-			a.AmbientCaps = []uintptr{unix.CAP_SYS_ADMIN}
+			a.AmbientCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_NET_ADMIN}
 		},
 	}
 }
@@ -283,6 +291,8 @@ type nsPlan struct {
 	Mounts []nsMount `json:"mounts"`
 	// Workdir is the command's working directory.
 	Workdir string `json:"workdir"`
+	// Proxy is the call's listener, or nil for none.
+	Proxy *nsProxy `json:"proxy,omitempty"`
 }
 
 // Mount flags of each kind of mount.
