@@ -1,12 +1,17 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
@@ -557,5 +562,96 @@ func TestValidateToolArgs(t *testing.T) {
 	got, err := validateToolArgs(write.Function.Parameters, `{"content":"line\n\ttab","path":"p"}`)
 	if err != nil || string(got) != `{"content":"line\n\ttab","path":"p"}` {
 		t.Fatalf("write args: %s, %v", got, err)
+	}
+}
+
+// stubSearchProvider is a fake SearchProvider for testing web_search integration.
+type stubSearchProvider struct {
+	queries []string
+	results map[string]string
+	err     error
+}
+
+func (s *stubSearchProvider) Search(ctx context.Context, query string) (*http.Response, error) {
+	s.queries = append(s.queries, query)
+	if s.err != nil {
+		return nil, s.err
+	}
+	result, ok := s.results[query]
+	if !ok {
+		result = "No results found"
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(result)),
+	}, nil
+}
+
+func TestWebSearchNotOfferedWithoutProvider(t *testing.T) {
+	f := newStepFixture(t)
+	e := &Engine{store: f.store, searchProviderInst: nil, roster: &config.Roster{}}
+	defs, _, _ := e.authorToolDefs(&openTurn{
+		eff: config.Effective{Preset: config.Preset{Tools: []string{tools.GroupWeb}}},
+	})
+	for _, d := range defs {
+		if d.Function.Name == tools.NameWebSearch {
+			t.Fatal("web_search offered when no provider configured")
+		}
+	}
+}
+
+func TestWebSearchIsIncludedInForGroups(t *testing.T) {
+	defs, err := tools.ForGroups([]string{tools.GroupWeb}, true)
+	if err != nil {
+		t.Fatalf("ForGroups failed: %v", err)
+	}
+	var found bool
+	for _, d := range defs {
+		if d.Function.Name == tools.NameWebSearch {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("web_search not included in ForGroups output with provider=true")
+	}
+}
+
+func TestWebSearchEffectReturnsResultFromProvider(t *testing.T) {
+	f := newStepFixture(t)
+	provider := &stubSearchProvider{
+		results: map[string]string{
+			"go language": "Title: Go\nURL: https://golang.org",
+		},
+	}
+	e := &Engine{store: f.store, searchProviderInst: provider}
+	effect := e.webSearchEffect("", "", nil)
+	args := json.RawMessage(`{"query":"go language"}`)
+	result, err := effect(journal.ToolCall{ID: "call1", Name: tools.NameWebSearch}, args, func() error { return nil })
+	if err != nil {
+		t.Fatalf("effect failed: %v", err)
+	}
+	if result.ErrorCode != "" {
+		t.Fatalf("got error code %q", result.ErrorCode)
+	}
+	if !strings.Contains(string(result.Content), "golang.org") {
+		t.Fatalf("result missing expected content: %s", result.Content)
+	}
+	if len(provider.queries) != 1 || provider.queries[0] != "go language" {
+		t.Fatalf("provider not called with correct query: %v", provider.queries)
+	}
+}
+
+func TestWebSearchEffectReturnsErrorWithoutProvider(t *testing.T) {
+	f := newStepFixture(t)
+	e := &Engine{store: f.store, searchProviderInst: nil}
+	effect := e.webSearchEffect("", "", nil)
+	args := json.RawMessage(`{"query":"test"}`)
+	result, err := effect(journal.ToolCall{ID: "call1", Name: tools.NameWebSearch}, args, func() error { return nil })
+	if err != nil {
+		t.Fatalf("effect failed: %v", err)
+	}
+	if result.ErrorCode != tools.ErrCodeSearchRefused {
+		t.Fatalf("got error code %q, want %q", result.ErrorCode, tools.ErrCodeSearchRefused)
 	}
 }
