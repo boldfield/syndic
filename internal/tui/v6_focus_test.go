@@ -207,6 +207,45 @@ func TestV6DrawerLongListPages(t *testing.T) {
 	}
 }
 
+// End, sent through the App, returns the drawer to its last row: the header
+// says 100% with no count, and rows that arrive afterwards are followed.
+func TestV6DrawerEndKeyThroughUpdateAndView(t *testing.T) {
+	asciiProfile(t)
+	a := chatApp(t)
+	addTurn(a, "t1", 1, "approved", "q", "a")
+	reviewers := func(n int) []wire.ReviewItem {
+		var items []wire.ReviewItem
+		for i := range n {
+			items = append(items, wire.ReviewItem{Round: 0, Participant: fmt.Sprintf("p%02d", i), Kind: "approve"})
+		}
+		return items
+	}
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(60)})
+	openDrawerSettled(t, a)
+	for range 3 {
+		keys(a, tea.KeyPgUp)
+	}
+	v := a.View()
+	if strings.Contains(v, "p59 (approve)") || strings.Contains(v, "100%") {
+		t.Fatalf("PgUp did not move away from the bottom:\n%s", v)
+	}
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(65)})
+	if v = a.View(); !strings.Contains(v, "new lines") || strings.Contains(v, "p64 (approve)") {
+		t.Fatalf("held away from the bottom, the drawer does not count the new rows:\n%s", v)
+	}
+
+	keys(a, tea.KeyEnd)
+	v = a.View()
+	if !strings.Contains(v, "p64 (approve)") || !strings.Contains(v, "100%") || strings.Contains(v, "new lines") {
+		t.Fatalf("End did not show the last row at 100%% with no count:\n%s", v)
+	}
+
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(70)})
+	if v = a.View(); !strings.Contains(v, "p69 (approve)") || !strings.Contains(v, "100%") || strings.Contains(v, "new lines") {
+		t.Fatalf("after End, the drawer does not follow new rows:\n%s", v)
+	}
+}
+
 // An oversized verdict whose record could not be fetched stays in its short
 // form: reviewer and kind, no blocks, and the engine's refusal is said.
 func TestV6DrawerOversizedShortForm(t *testing.T) {
