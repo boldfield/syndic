@@ -84,11 +84,8 @@ func TestNamespacesSupported(t *testing.T) {
 	deps, _ := fakeNamespaceDeps("6.8.0-1017-azure", nil, nil)
 	b := newLinuxNamespaces(context.Background(), Supervisor{}, SystemLocations{ReadOnlyPaths: []string{dir, missing}}, deps)
 	enforced, reason := b.Capabilities()
-	if enforced != Caps(F, N1, P, D) || reason != "" {
-		t.Errorf("Capabilities() = %v, %q; want F, N1, P and D", enforced, reason)
-	}
-	if enforced.Has(N2) {
-		t.Error("N2 reported")
+	if enforced != Caps(F, N1, N2, P, D) || reason != "" {
+		t.Errorf("Capabilities() = %v, %q; want F, N1, N2, P and D", enforced, reason)
 	}
 	if b.Name() != "linux-namespaces" {
 		t.Errorf("Name() = %q", b.Name())
