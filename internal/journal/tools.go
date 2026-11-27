@@ -1095,6 +1095,22 @@ func (s *Store) GetChangeSet(changeSetID string) (cs ChangeSet, err error) {
 	return cs, err
 }
 
+// GetCandidateChangeSetID returns the change set ID for a candidate, or
+// ErrNoChangeSet when the candidate has no change set.
+func (s *Store) GetCandidateChangeSetID(candidateID string) (string, error) {
+	var changeSetID string
+	err := s.Tx(func(tx *Tx) error {
+		return tx.tx.QueryRow(`SELECT id FROM change_sets WHERE candidate_id = ?`, candidateID).Scan(&changeSetID)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("candidate %q: %w", candidateID, ErrNoChangeSet)
+	}
+	if err != nil {
+		return "", fmt.Errorf("query change set: %w", err)
+	}
+	return changeSetID, nil
+}
+
 // ChangeSetForTurn returns the change set of the turn's current candidate, or
 // ErrNoChangeSet when the turn has no candidate or its candidate none.
 func (tx *Tx) ChangeSetForTurn(turnID string) (ChangeSet, error) {

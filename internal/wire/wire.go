@@ -409,6 +409,30 @@ type ReleaseReply struct {
 	Released []string `json:"released"`
 }
 
+type ApplyRequest struct {
+	TurnID string `json:"turn_id"`
+}
+
+type ApplyReply struct {
+	State string `json:"state"`
+	// Paths holds the per-path outcome after apply:
+	// applied, not_applied (pending), or conflict.
+	Paths []ApplyPathReply `json:"paths,omitempty"`
+}
+
+type ApplyPathReply struct {
+	Path    string `json:"path"`
+	Outcome string `json:"outcome"`
+}
+
+type DiscardRequest struct {
+	TurnID string `json:"turn_id"`
+}
+
+type DiscardReply struct {
+	State string `json:"state"`
+}
+
 type TurnRequest struct {
 	TurnID string `json:"turn_id"`
 }
