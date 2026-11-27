@@ -136,7 +136,8 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 
 // chatRows is chatLinesWithStarts with, for every line, the item it belongs to and the
 // characters of that item it shows. Item ids are stable across renders and widths; the
-// characters are counted in cells of text, a line break counting one.
+// characters are counted in runes of the item's own text: a row's indent or mark and the
+// break between rows are not counted, so a character keeps its offset at every width.
 func chatRows(s State, in chatInput) (lines []string, rows []FollowRow, lastTurn int, starts []int) {
 	ids := chatTurns(s)
 	trimmed := trimmedTurns(s, ids)
@@ -217,12 +218,23 @@ func chatRows(s State, in chatInput) (lines []string, rows []FollowRow, lastTurn
 			id := id + "/" + name
 			char := 0
 			for _, l := range strings.Split(strings.Join(it.lines, "\n"), "\n") {
-				n := utf8.RuneCountInString(ansi.Strip(l))
+				n := rowChars(l)
 				lines = append(lines, l)
 				rows = append(rows, FollowRow{Item: id, Char: char, End: char + n})
-				char += n + 1
+				char += n
 			}
 		}
 	}
 	return lines, rows, lastTurn, starts
+}
+
+// rowChars counts the runes of text a drawn row holds, without its indent or mark.
+func rowChars(l string) int {
+	l = ansi.Strip(l)
+	if strings.HasPrefix(l, userMark) {
+		l = strings.TrimPrefix(l, userMark)
+	} else {
+		l = strings.TrimPrefix(l, contentPrefix)
+	}
+	return utf8.RuneCountInString(l)
 }

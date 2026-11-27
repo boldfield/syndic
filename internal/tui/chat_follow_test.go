@@ -285,3 +285,32 @@ func TestChatFollowCases(t *testing.T) {
 		return v
 	})
 }
+
+func TestChatNarrowerHoldsADeepAnchor(t *testing.T) {
+	words := make([]string, 200)
+	for i := range words {
+		words[i] = fmt.Sprintf("w%03d", i)
+	}
+	a := chatFollowApp(t)
+	a.update(tea.WindowSizeMsg{Width: 80, Height: 14})
+	addTurn(a, "t1", 1, "approved", strings.Join(words, " "), numbered("ans line", 20))
+	_, rows, _, _ := chatRows(a.state, a.chatIn())
+	first := -1
+	for i, r := range rows {
+		if r.Item == "t1/input" && r.Char > 700 {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		t.Fatal("no deep input row")
+	}
+	chatScrollTo(a, first)
+	at := rows[first]
+	a.update(tea.WindowSizeMsg{Width: 30, Height: 14})
+	_, rows, _, _ = chatRows(a.state, a.chatIn())
+	l := a.layoutChat()
+	if got := rows[l.first]; l.bottom || got.Item != at.Item || got.Char > at.Char || got.End <= at.Char {
+		t.Fatalf("first row after narrowing is %+v, want the row of %s holding character %d", got, at.Item, at.Char)
+	}
+}
