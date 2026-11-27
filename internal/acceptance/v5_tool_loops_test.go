@@ -36,22 +36,84 @@ func toolLoopsRoster(authorTools, reviewerTools []string) string {
 		for _, t := range authorTools {
 			quoted = append(quoted, fmt.Sprintf(`"%s"`, t))
 		}
-		toolLine = fmt.Sprintf("tools = [%s]\n", strings.Join(quoted, ", "))
+		toolLine = fmt.Sprintf("tools = [%s]", strings.Join(quoted, ", "))
 	}
 	if len(reviewerTools) > 0 {
 		var quoted []string
 		for _, t := range reviewerTools {
 			quoted = append(quoted, fmt.Sprintf(`"%s"`, t))
 		}
-		reviewerToolLine = fmt.Sprintf("reviewer_tools = [%s]\n", strings.Join(quoted, ", "))
+		reviewerToolLine = fmt.Sprintf("reviewer_tools = [%s]", strings.Join(quoted, ", "))
 	}
-	presetLines := fmt.Sprintf(`[[presets]]
-name = "review-with-tools"
+
+	var toolSection string
+	if toolLine != "" || reviewerToolLine != "" {
+		var toolFields []string
+		if toolLine != "" {
+			toolFields = append(toolFields, toolLine)
+		}
+		if reviewerToolLine != "" {
+			toolFields = append(toolFields, reviewerToolLine)
+		}
+		toolSection = "\n" + strings.Join(toolFields, "\n")
+	}
+
+	presetLines := fmt.Sprintf(`[presets.review]
 mode = "review"
-max_rounds = 2
-%s%s
-`, toolLine, reviewerToolLine)
-	toml = strings.Replace(toml, "[[presets]]", presetLines, 1)
+author = "author"
+required_reviewers = ["reviewer"]%s
+
+[presets.review.revision]
+max_rounds = 2`, toolSection)
+	toml = strings.Replace(toml, `[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+
+[presets.solo]`, presetLines+`
+
+[presets.solo]`, 1)
+
+	// If web tools are needed, add referee_model to the endpoint
+	hasWeb := false
+	for _, t := range reviewerTools {
+		if t == "web" {
+			hasWeb = true
+			break
+		}
+	}
+	if !hasWeb {
+		for _, t := range authorTools {
+			if t == "web" {
+				hasWeb = true
+				break
+			}
+		}
+	}
+
+	if hasWeb {
+		toml = strings.Replace(toml, `[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0`, `[[endpoints]]
+name = "local"
+base_url = "http://localhost:11434/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama2", "llama3"]
+tokens_per_byte_max = 1.0
+referee_model = "llama3"`, 1)
+	}
+
 	return toml
 }
 
@@ -83,13 +145,11 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 						}
 					}
 					if !hasRead || !hasWrite || hasWeb {
-						return fmt.Sprintf("ERROR: author tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+						t.Errorf("ERROR: author tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
 					}
 					return "answer"
 				},
 			},
-			enginetest.Reply("ok"),
-			enginetest.Reply("ok"),
 		},
 		"reviewer": {
 			{
@@ -111,13 +171,11 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 						}
 					}
 					if !hasRead || hasWrite || !hasWeb {
-						return fmt.Sprintf("ERROR: reviewer tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+						t.Errorf("ERROR: reviewer tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
 					}
-					return fake.VerdictApprove("hash", "att")
+					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
 			},
-			enginetest.Reply("ok"),
-			enginetest.Reply("ok"),
 		},
 	})
 
