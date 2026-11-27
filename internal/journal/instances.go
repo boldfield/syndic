@@ -115,12 +115,20 @@ func (tx *Tx) RecordMCPInstanceEnded(instanceID string) error {
 }
 
 // RecordMCPContainmentFailure journals that the instance and everything it
-// started were not confirmed gone. The instance stays unresolved. It emits
+// started were not confirmed gone. The instance stays unresolved; a failure for
+// an instance that has already ended is refused with ErrMCPInstanceEnded. It emits
 // mcp_containment_unverified.
 func (tx *Tx) RecordMCPContainmentFailure(instanceID, detail string) error {
 	server, err := tx.mcpInstanceServer(instanceID)
 	if err != nil {
 		return err
+	}
+	var ended bool
+	if err := tx.tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM mcp_instance_ends WHERE instance_id = ?)`, instanceID).Scan(&ended); err != nil {
+		return fmt.Errorf("query mcp instance end: %w", err)
+	}
+	if ended {
+		return ErrMCPInstanceEnded
 	}
 	id, err := generateID()
 	if err != nil {

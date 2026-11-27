@@ -47,6 +47,9 @@ func TestMCPInstanceLifecycle(t *testing.T) {
 		if err := tx.RecordMCPInstanceEnded(a.ID); !errors.Is(err, journal.ErrMCPInstanceEnded) {
 			t.Errorf("second end err = %v", err)
 		}
+		if err := tx.RecordMCPContainmentFailure(a.ID, "late"); !errors.Is(err, journal.ErrMCPInstanceEnded) {
+			t.Errorf("failure after end err = %v", err)
+		}
 		if got, _ := tx.UnresolvedMCPInstances(""); len(got) != 1 || got[0].ID != b.ID {
 			t.Errorf("after end = %+v", got)
 		}
