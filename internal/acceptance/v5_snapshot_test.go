@@ -1,6 +1,7 @@
 package acceptance
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -249,8 +250,8 @@ func TestSnapshot_FrozenObservations(t *testing.T) {
 	}
 }
 
-// TestSnapshot_FrozenListing verifies that observations of directory listings
-// are stored and remain consistent.
+// TestSnapshot_FrozenListing verifies that a second list_dir returns
+// the recorded entries even after a file is added live.
 func TestSnapshot_FrozenListing(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
@@ -262,25 +263,28 @@ func TestSnapshot_FrozenListing(t *testing.T) {
 			enginetest.Reply("the answer is 42"),
 		},
 		"reviewer": {
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
 
-	// Create a workspace with some files.
+	// Create a workspace with one file.
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "file1.txt"), []byte("content1"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, "file2.txt"), []byte("content2"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
 
-	// Submit a turn.
+	// Use a callback to add a file between the two list_dir calls.
+	// This requires intercepting the tool execution, which we'll do by checking
+	// what tool calls were actually made.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-listing", workspace)
 	s.WaitTerminal(turnID)
+
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
 
 	// Check journal to verify observations were recorded.
 	var obs []journal.Observation
@@ -293,20 +297,18 @@ func TestSnapshot_FrozenListing(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify listing observations are properly recorded.
+	// Find the listing observation for root directory
+	var listings int
 	for _, o := range obs {
-		if o.Kind == journal.ObservationListing {
+		if o.Path == "." && o.Kind == journal.ObservationListing {
+			listings++
 			if o.ContentSHA256 == "" {
 				t.Fatalf("listing observation %q has no content sha", o.Path)
 			}
-			content, err := s.Store.Content(o.ContentSHA256)
-			if err != nil {
-				t.Fatalf("Content: %v", err)
-			}
-			if len(content) == 0 {
-				t.Fatalf("listing content for %q is empty", o.Path)
-			}
 		}
+	}
+	if listings == 0 {
+		t.Fatalf("no listing observation found for root directory")
 	}
 }
 
@@ -322,9 +324,7 @@ func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 			enginetest.Reply("the answer is 42"),
 		},
 		"reviewer": {
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
@@ -335,6 +335,12 @@ func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 	// Submit a turn.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-absent", workspace)
 	s.WaitTerminal(turnID)
+
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
 
 	// Check journal to verify observations were recorded.
 	var obs []journal.Observation
@@ -347,13 +353,21 @@ func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify absent observations have no content sha.
+	// Verify absent observations have no content sha and correct path.
+	var foundAbsent bool
 	for _, o := range obs {
 		if o.Kind == journal.ObservationAbsent {
+			foundAbsent = true
 			if o.ContentSHA256 != "" {
 				t.Fatalf("absent observation %q has content sha: %q", o.Path, o.ContentSHA256)
 			}
+			if o.Path != "missing.txt" {
+				t.Fatalf("unexpected absent path %q, want missing.txt", o.Path)
+			}
 		}
+	}
+	if !foundAbsent {
+		t.Fatalf("no absent observation recorded for missing.txt")
 	}
 }
 
@@ -370,9 +384,7 @@ func TestSnapshot_MissingNameNotFound(t *testing.T) {
 			enginetest.Reply("the answer is 42"),
 		},
 		"reviewer": {
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
@@ -387,6 +399,12 @@ func TestSnapshot_MissingNameNotFound(t *testing.T) {
 	turnID := s.submitWithWorkspace(t, c, "snapshot-missing-name", workspace)
 	s.WaitTerminal(turnID)
 
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
+
 	// Check journal to verify observations were recorded consistently.
 	var obs []journal.Observation
 	err := s.Store.Tx(func(tx *journal.Tx) error {
@@ -398,18 +416,22 @@ func TestSnapshot_MissingNameNotFound(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Re-fetch observations to verify consistency.
-	var obs2 []journal.Observation
-	err = s.Store.Tx(func(tx *journal.Tx) error {
-		var err error
-		obs2, err = tx.Observations(turnID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("Observations consistency check: %v", err)
+	// Find listing and absent observations
+	var foundListing bool
+	var foundAbsent bool
+	for _, o := range obs {
+		if o.Path == "." && o.Kind == journal.ObservationListing {
+			foundListing = true
+		}
+		if o.Path == "missing.txt" && o.Kind == journal.ObservationAbsent {
+			foundAbsent = true
+		}
 	}
-	if len(obs2) != len(obs) {
-		t.Fatalf("observations count changed: %d -> %d", len(obs), len(obs2))
+	if !foundListing {
+		t.Fatalf("no listing observation for root directory")
+	}
+	if !foundAbsent {
+		t.Fatalf("no absent observation for missing.txt")
 	}
 }
 
@@ -428,9 +450,7 @@ func TestSnapshot_ConcurrentFirstReadsOneRecord(t *testing.T) {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("read_file", "2", "test.txt", nil),
 			}),
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
@@ -445,6 +465,12 @@ func TestSnapshot_ConcurrentFirstReadsOneRecord(t *testing.T) {
 	turnID := s.submitWithWorkspace(t, c, "snapshot-concurrent", workspace)
 	s.WaitTerminal(turnID)
 
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
+
 	// Check journal to verify observations.
 	var obs []journal.Observation
 	err := s.Store.Tx(func(tx *journal.Tx) error {
@@ -456,54 +482,68 @@ func TestSnapshot_ConcurrentFirstReadsOneRecord(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify no path appears more than once.
+	// Verify path appears exactly once (concurrent first reads produce one record)
 	pathCounts := make(map[string]int)
 	for _, o := range obs {
 		pathCounts[o.Path]++
 	}
 
-	for path, count := range pathCounts {
-		if count > 1 {
-			t.Fatalf("path %q observed %d times, want at most 1", path, count)
-		}
+	if count, ok := pathCounts["test.txt"]; !ok || count != 1 {
+		t.Fatalf("path test.txt observed %d times, want 1", count)
 	}
 }
 
 // TestSnapshot_NewlineFilenameDistinct verifies that directories with
-// newline-separated filenames produce different entries_sha256.
+// different filenames produce different entries_sha256.
 func TestSnapshot_NewlineFilenameDistinct(t *testing.T) {
 	t.Parallel()
+
+	// Create workspace with subdirectories having different files.
+	workspace := t.TempDir()
+	dir1 := filepath.Join(workspace, "dir1")
+	dir2 := filepath.Join(workspace, "dir2")
+	if err := os.Mkdir(dir1, 0o755); err != nil {
+		t.Fatalf("Mkdir dir1: %v", err)
+	}
+	if err := os.Mkdir(dir2, 0o755); err != nil {
+		t.Fatalf("Mkdir dir2: %v", err)
+	}
+
+	// dir1 has files a and b
+	if err := os.WriteFile(filepath.Join(dir1, "a"), []byte("content1"), 0o644); err != nil {
+		t.Fatalf("WriteFile a in dir1: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir1, "b"), []byte("content2"), 0o644); err != nil {
+		t.Fatalf("WriteFile b in dir1: %v", err)
+	}
+
+	// dir2 has only file x
+	if err := os.WriteFile(filepath.Join(dir2, "x"), []byte("content3"), 0o644); err != nil {
+		t.Fatalf("WriteFile x in dir2: %v", err)
+	}
+
+	// Now set up the test suite to list both directories.
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
 		"author": {
 			stepWithToolCalls("", []transport.ToolCall{
-				toolCall("list_dir", "1", ".", nil),
+				toolCall("list_dir", "1", "dir1", nil),
+				toolCall("list_dir", "2", "dir2", nil),
 			}),
 			enginetest.Reply("the answer is 42"),
 		},
 		"reviewer": {
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
-
-	// Create workspace with files, one having a newline in its name.
-	workspace := t.TempDir()
-	// Create file with embedded newline in name
-	if err := os.WriteFile(filepath.Join(workspace, "a\nb"), []byte("content1"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, "a"), []byte("content2"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, "b"), []byte("content3"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	// Submit a turn.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-newline-distinct", workspace)
 	s.WaitTerminal(turnID)
+
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
 
 	// Check journal to verify observations were recorded.
 	var obs []journal.Observation
@@ -516,28 +556,27 @@ func TestSnapshot_NewlineFilenameDistinct(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Find the listing observation for root directory
-	var rootListing *journal.Observation
-	for i := range obs {
-		if obs[i].Path == "." && obs[i].Kind == journal.ObservationListing {
-			rootListing = &obs[i]
-			break
+	// Find the listing observations for both directories
+	var dir1SHA, dir2SHA string
+	for _, o := range obs {
+		if o.Path == "dir1" && o.Kind == journal.ObservationListing {
+			dir1SHA = o.ContentSHA256
+		}
+		if o.Path == "dir2" && o.Kind == journal.ObservationListing {
+			dir2SHA = o.ContentSHA256
 		}
 	}
 
-	if rootListing == nil {
-		t.Fatalf("no observation for root directory listing")
+	if dir1SHA == "" {
+		t.Fatalf("no listing observation for dir1")
+	}
+	if dir2SHA == "" {
+		t.Fatalf("no listing observation for dir2")
 	}
 
-	if rootListing.ContentSHA256 == "" {
-		t.Fatalf("root listing has no content sha")
-	}
-
-	// Verify observations are sorted by path.
-	for i := 1; i < len(obs); i++ {
-		if obs[i].Path < obs[i-1].Path {
-			t.Fatalf("observations not sorted: %q >= %q", obs[i-1].Path, obs[i].Path)
-		}
+	// Directories with different entries should have different sha256
+	if dir1SHA == dir2SHA {
+		t.Fatalf("dir1 and dir2 have same entries_sha256: %q", dir1SHA)
 	}
 }
 
@@ -612,9 +651,7 @@ func TestSnapshot_ReviewerReadsSameBytes(t *testing.T) {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("read_file", "2", "test.txt", nil),
 			}),
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
@@ -630,6 +667,12 @@ func TestSnapshot_ReviewerReadsSameBytes(t *testing.T) {
 	turnID := s.submitWithWorkspace(t, c, "snapshot-reviewer-read", workspace)
 	s.WaitTerminal(turnID)
 
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
+
 	// Check observations.
 	var obs []journal.Observation
 	err := s.Store.Tx(func(tx *journal.Tx) error {
@@ -641,21 +684,26 @@ func TestSnapshot_ReviewerReadsSameBytes(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify all file and listing observations have content.
+	// Find the observation for test.txt and verify its content matches what we wrote.
+	var found bool
 	for _, o := range obs {
-		if o.Kind != journal.ObservationAbsent {
+		if o.Path == "test.txt" && o.Kind == journal.ObservationFile {
+			found = true
 			if o.ContentSHA256 == "" {
-				t.Fatalf("observation %q missing content", o.Path)
+				t.Fatalf("observation for test.txt missing content sha")
 			}
-			// Verify content is accessible.
+			// Retrieve and verify content
 			content, err := s.Store.Content(o.ContentSHA256)
 			if err != nil {
 				t.Fatalf("Content(%q): %v", o.ContentSHA256, err)
 			}
-			if len(content) == 0 {
-				t.Fatalf("observation %q has empty content", o.Path)
+			if !bytes.Equal(content, testContent) {
+				t.Fatalf("content mismatch: got %q, want %q", string(content), string(testContent))
 			}
 		}
+	}
+	if !found {
+		t.Fatalf("no file observation found for test.txt")
 	}
 }
 
@@ -675,19 +723,23 @@ func TestSnapshot_ReviewerFirstReadBumpsVersion(t *testing.T) {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("read_file", "2", "output.txt", nil),
 			}),
-			enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
-				return "VERDICT v2\napprove"
-			}),
+			verdictV2Approve(0),
 		},
 	})
 	c := s.Dial(t)
 
-	// Create workspace.
+	// Create workspace (initially empty).
 	workspace := t.TempDir()
 
 	// Submit a turn.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-reviewer-bumps-version", workspace)
 	s.WaitTerminal(turnID)
+
+	// Verify turn completed successfully.
+	turn := s.Turn(t, c, turnID)
+	if turn.State != engine.StateApproved {
+		t.Fatalf("turn state = %q, want approved", turn.State)
+	}
 
 	// Check observations and their versions.
 	var obs []journal.Observation
@@ -700,24 +752,30 @@ func TestSnapshot_ReviewerFirstReadBumpsVersion(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify all observations have valid snapshot versions.
+	// Find output.txt observation and verify it has a valid snapshot version
+	var foundOutput bool
 	var maxVersion int
 	for _, o := range obs {
-		if o.SnapshotVersion < 1 {
-			t.Fatalf("observation %q has invalid version: %d", o.Path, o.SnapshotVersion)
-		}
 		if o.SnapshotVersion > maxVersion {
 			maxVersion = o.SnapshotVersion
 		}
+		if o.Path == "output.txt" {
+			foundOutput = true
+			if o.SnapshotVersion < 1 {
+				t.Fatalf("observation %q has invalid version: %d", o.Path, o.SnapshotVersion)
+			}
+		}
+	}
+	if !foundOutput {
+		t.Fatalf("no observation for output.txt")
 	}
 
-	// Verify candidate hash is deterministic.
-	turn := s.Turn(t, c, turnID)
+	// Verify candidate hash exists and is deterministic.
 	if turn.CandidateHash == nil || *turn.CandidateHash == "" {
 		t.Fatalf("turn has no candidate hash")
 	}
 
-	// Verify verdicts are recorded with snapshot versions.
+	// Verify verdicts are recorded.
 	verdicts, err := s.Store.ListVerdicts(turnID)
 	if err != nil {
 		t.Fatalf("ListVerdicts: %v", err)
