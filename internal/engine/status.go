@@ -262,6 +262,11 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 	if e.exceeded[p.ID] {
 		ws.Estimate = estimateExceeded
 	}
+	if e.participantHoldsWeb(p.ID) {
+		if reason := e.webOffReason(p.Endpoint); reason != "" {
+			ws.WebOff = &reason
+		}
+	}
 	return ws
 }
 

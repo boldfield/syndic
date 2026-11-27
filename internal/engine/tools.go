@@ -402,7 +402,7 @@ var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: 
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
 	var groups []string
 	for _, g := range t.eff.Preset.Tools {
-		if executableGroups[g] && t.workspace != "" {
+		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author) {
 			groups = append(groups, g)
 		}
 	}
@@ -414,6 +414,14 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 	}
 	defs, err = tools.ForGroups(groups, e.searchProvider())
 	return defs, false, err
+}
+
+// groupOffered reports whether the caller may be offered the group's tools:
+// the web group only when the referee of the caller's endpoint is usable, so
+// no web call can reach the network without a referee to decide it. e.mu is
+// held.
+func (e *Engine) groupOffered(group, caller string) bool {
+	return group != tools.GroupWeb || e.webOffReason(e.participantConfig(caller).Endpoint) == ""
 }
 
 // authorCallsRemaining is how many calls the author has left under

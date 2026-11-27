@@ -50,12 +50,38 @@ type Participant struct {
 	ServerStatus            *string
 }
 
+// Referee describes the manifest state of the referee an endpoint profile
+// names (v5 delta section 6). A referee is no participant: it has a model and
+// a probe record, read exactly as a participant on its endpoint would be.
+type Referee struct {
+	// Endpoint is the profile that names the referee model; its callers'
+	// web calls are refereed. RunEndpoint is where the referee runs: the
+	// same profile, or the local one its referee_endpoint names.
+	Endpoint    string
+	RunEndpoint string
+	Model       string
+	// TemplateHash is the hash of the fixed referee prompt template.
+	TemplateHash string
+	// Participant carries the probe record state: usability, detail, the
+	// expected identity and the bounds, as for a participant.
+	Participant
+}
+
+// RefereeLabel names a referee identity in probe records and events, as
+// "referee:<endpoint>:<model>".
+func RefereeLabel(endpoint, model string) string {
+	return "referee:" + endpoint + ":" + model
+}
+
 // Built is the output of Build.
 type Built struct {
 	JSON             json.RawMessage
 	RosterHash       string
 	RosterFileSHA256 string
 	Participants     map[string]Participant
+	// Referees is each endpoint profile's referee, by the profile's name, for
+	// every profile that names a referee model.
+	Referees map[string]Referee
 }
 
 // Build constructs an engine run manifest from the roster and probe records.
@@ -74,7 +100,23 @@ func Build(in Input) (Built, error) {
 		}
 	}
 
-	manifestJSON, rosterHash, rosterFileSHA256, err := buildManifestJSON(in, participants, probeManifests)
+	referees := make(map[string]Referee)
+	refereeRecords := make(map[string]*evidence.ProbeManifest)
+	for _, ep := range in.Roster.Endpoints {
+		if ep.RefereeModel == "" {
+			continue
+		}
+		ref, probeManifest, err := buildReferee(in, ep)
+		if err != nil {
+			return Built{}, err
+		}
+		referees[ep.Name] = ref
+		if probeManifest != nil {
+			refereeRecords[ep.Name] = probeManifest
+		}
+	}
+
+	manifestJSON, rosterHash, rosterFileSHA256, err := buildManifestJSON(in, participants, probeManifests, refereeRecords)
 	if err != nil {
 		return Built{}, err
 	}
@@ -84,7 +126,36 @@ func Build(in Input) (Built, error) {
 		RosterHash:       rosterHash,
 		RosterFileSHA256: rosterFileSHA256,
 		Participants:     participants,
+		Referees:         referees,
 	}, nil
+}
+
+// buildReferee reads the probe record of the referee the endpoint profile
+// names, as buildParticipant reads a participant's. The referee runs on the
+// profile itself or on its referee_endpoint.
+func buildReferee(in Input, ep config.EndpointProfile) (Referee, *evidence.ProbeManifest, error) {
+	run := ep.Name
+	if ep.RefereeEndpoint != "" {
+		run = ep.RefereeEndpoint
+	}
+	identity := config.Participant{ID: RefereeLabel(run, ep.RefereeModel), Endpoint: run, Model: ep.RefereeModel, Route: "api"}
+	if findEndpoint(in.Roster, run) == nil {
+		// Roster validation refuses this; a referee that cannot be read has
+		// no usable record.
+		return Referee{Endpoint: ep.Name, RunEndpoint: run, Model: ep.RefereeModel, TemplateHash: referee.TemplateHash(),
+			Participant: Participant{ID: identity.ID, Detail: "endpoint_not_found"}}, nil, nil
+	}
+	p, probeManifest, err := buildParticipant(in, identity)
+	if err != nil {
+		return Referee{}, nil, err
+	}
+	return Referee{
+		Endpoint:     ep.Name,
+		RunEndpoint:  run,
+		Model:        ep.RefereeModel,
+		TemplateHash: referee.TemplateHash(),
+		Participant:  p,
+	}, probeManifest, nil
 }
 
 // buildParticipant constructs a Participant from a roster entry and probe records.
@@ -180,7 +251,7 @@ func findEndpoint(roster *config.Roster, name string) *config.EndpointProfile {
 }
 
 // buildManifestJSON builds the canonical manifest JSON with sorted keys.
-func buildManifestJSON(in Input, participants map[string]Participant, probeManifests map[string]*evidence.ProbeManifest) (json.RawMessage, string, string, error) {
+func buildManifestJSON(in Input, participants map[string]Participant, probeManifests map[string]*evidence.ProbeManifest, refereeRecords map[string]*evidence.ProbeManifest) (json.RawMessage, string, string, error) {
 	rosterFileSHA256 := hashBytes(in.RosterFile)
 
 	rosterMap, err := rosterToMap(in.Roster)
@@ -208,6 +279,17 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 		}
 	}
 
+	// The referee's probe record, by the endpoint profile that names it. The
+	// referee model and template hash are in that profile's roster entry.
+	refereeProbeRecords := make(map[string]json.RawMessage)
+	for name, probeManifest := range refereeRecords {
+		probeData, err := json.Marshal(probeManifest)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("marshal referee probe manifest for %s: %w", name, err)
+		}
+		refereeProbeRecords[name] = json.RawMessage(probeData)
+	}
+
 	manifest := map[string]interface{}{
 		"kind":               "engine",
 		"engine_version":     in.EngineVersion,
@@ -221,6 +303,9 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 		// whatever the presets enable, so a change to any tool definition
 		// changes the manifest.
 		"tool_definitions_hash": tools.DefinitionsHash(),
+	}
+	if len(refereeProbeRecords) > 0 {
+		manifest["referee_probe_records"] = refereeProbeRecords
 	}
 
 	manifestJSON, err := canonicalJSON(manifest)

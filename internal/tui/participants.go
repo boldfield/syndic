@@ -274,6 +274,9 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 	if p.RetryCommand != "" {
 		lines = append(lines, "  retry: "+plain(p.RetryCommand))
 	}
+	if p.WebOff != "" {
+		lines = append(lines, "  web: not offered, "+plain(p.WebOff))
+	}
 	// The design takes the output bound from the probe record alone.
 	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource)+"  output bound: "+bound(p.OutputBound, "probe"))
 	bpt := "-"

@@ -43,6 +43,10 @@ type hold struct {
 	// which case its pool slot is already counted as running.
 	calling bool
 	stop    func() bool
+	// adapter is the adapter the attempt was sent through when it is not its
+	// participant's: a referee's. The hold carries it so a cancel started for
+	// the hold reaches the right endpoint however the hold ends meanwhile.
+	adapter transport.Adapter
 }
 
 // terminal is what the terminal Tx decided, for the engine to apply once the
@@ -120,7 +124,7 @@ func (e *Engine) holdIn(tx *journal.Tx, emit hub.Emit, attemptID, participant st
 	}); err != nil {
 		return nil, err
 	}
-	return &hold{attemptID: attemptID, pool: pool, appliedPools: []string{pool}, participant: participant, since: now, group: group}, nil
+	return &hold{attemptID: attemptID, pool: pool, appliedPools: []string{pool}, participant: participant, since: now, group: group, adapter: e.refereeAdapters[attemptID]}, nil
 }
 
 // endIn is the one terminal path, run inside the Tx that ends the turn:
@@ -356,7 +360,7 @@ func (e *Engine) cancelAttempts(holds []*hold) error {
 		if e.crashHook != nil && e.crashHook() {
 			return nil
 		}
-		status, err := e.adapterFor(h.participant).Cancel(context.Background(), h.attemptID)
+		status, err := e.adapterForAttempt(h).Cancel(context.Background(), h.attemptID)
 		confirmed := err == nil && status.ServerConfirmed == transport.TriYes
 		if err := e.afterCancel(h, confirmed); err != nil && first == nil {
 			first = err

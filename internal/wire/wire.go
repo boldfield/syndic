@@ -282,6 +282,10 @@ type Participant struct {
 	ProbeAtStart             bool     `json:"probe_at_start,omitempty"`
 	AcceptUnknownTruncation  bool     `json:"accept_unknown_truncation,omitempty"`
 	InDefaultPreset          bool     `json:"in_default_preset,omitempty"`
+	// WebOff is why the web tools are not offered to a participant that a
+	// preset gives them: its endpoint's referee is missing or has no usable
+	// probe record (v5 delta section 6).
+	WebOff *string `json:"web_off,omitempty"`
 }
 
 // ProbeSubject represents a probe target that is not a participant (e.g., a referee).
