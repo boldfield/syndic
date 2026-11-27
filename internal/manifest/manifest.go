@@ -314,6 +314,12 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 			"mode":   preset.Mode,
 			"author": preset.Author,
 		}
+		if len(preset.Proposers) > 0 {
+			pMap["proposers"] = preset.Proposers
+		}
+		if preset.Integrator != "" {
+			pMap["integrator"] = preset.Integrator
+		}
 		if len(preset.RequiredReviewers) > 0 {
 			pMap["required_reviewers"] = preset.RequiredReviewers
 		}

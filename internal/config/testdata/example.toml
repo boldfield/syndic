@@ -95,6 +95,13 @@ mode = "solo"
 author = "author"
 required_reviewers = []
 
+# The participants below are not defined in this file, so the deliberate
+# preset is shown commented out.
+# [presets.deliberate]
+# mode = "deliberate"
+# proposers = ["claude", "codex", "muse"]
+# integrator = "claude"
+
 [presets.solo.deadlines]
 attempt = "150s"
 
