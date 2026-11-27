@@ -32,7 +32,7 @@ func (a *App) openConversation(id string, turnIDs []string) {
 	}
 	a.state.Scope = scope
 	a.state.ContextFrom = ""
-	a.answerScrollRow, a.answerFollow = 0, true
+	a.chatFollow.End()
 }
 
 // runningElsewhere names the open turn when it belongs to a conversation

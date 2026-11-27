@@ -170,16 +170,34 @@ func firstLine(s string) string {
 
 // renderAnswer returns the answer tab for a turn, unclipped; the App scrolls it.
 func renderAnswer(s State, turnID string, in answerInput) string {
+	var lines []string
+	for _, it := range answerItems(s, turnID, in) {
+		lines = append(lines, it.lines...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// chatItem is a run of a turn's lines that scrolling keeps together: an input, an answer, a
+// block, an outcome, a progress line. Its id is stable across renders and widths and is
+// unique within the turn.
+type chatItem struct {
+	id    string
+	lines []string
+}
+
+// answerItems is renderAnswer by item.
+func answerItems(s State, turnID string, in answerInput) []chatItem {
 	ti, ok := s.Turns[turnID]
 	if !ok {
-		return ""
+		return nil
 	}
-	var lines []string
+	var items []chatItem
+	add := func(id string, lines ...string) { items = append(items, chatItem{id, lines}) }
 	candidate := func() {
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
+			add("answer", shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else if ti.CandidateHash != nil {
-			lines = append(lines, "loading…")
+			add("answer", "loading…")
 		}
 	}
 
@@ -196,26 +214,28 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			case ti.Round > 1:
 				by += fmt.Sprintf(" after %d revisions", ti.Round)
 			}
-			lines = append(lines, outcomeLines(markApproved, fmt.Sprintf("approved by %s against %s", by, hash), in)...)
+			add("outcome", outcomeLines(markApproved, fmt.Sprintf("approved by %s against %s", by, hash), in)...)
 		}
 
 	case "solo_complete":
-		lines = append(lines, outcomeLines(markSolo, "UNREVIEWED (solo)", in)...)
+		add("outcome", outcomeLines(markSolo, "UNREVIEWED (solo)", in)...)
 		if refs := answerRefs(s, turnID, in); len(refs) > 0 {
-			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
+			add("answer", shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		} else {
-			lines = append(lines, "loading…")
+			add("answer", "loading…")
 		}
 
 	case "incomplete":
 		if ti.TerminalReason != nil {
-			lines = append(lines, shownPlain(*ti.TerminalReason, in.width))
+			add("reason", shownPlain(*ti.TerminalReason, in.width))
 		}
-		lines = append(lines, blockLines(in.openBlocks, in.width)...)
+		for _, b := range blockItems(in.openBlocks, in.width) {
+			add(b.id, b.lines...)
+		}
 		if ti.CandidateHash != nil {
-			lines = append(lines, outcomeLines(markIncomplete, "INCOMPLETE, not approved", in)...)
+			add("outcome", outcomeLines(markIncomplete, "INCOMPLETE, not approved", in)...)
 		}
-		lines = append(lines, noApprovedAnswer(ti.State))
+		add("no-answer", noApprovedAnswer(ti.State))
 		if ti.CandidateHash != nil {
 			candidate()
 		}
@@ -225,18 +245,20 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 		if reason == "" && ti.TerminalReason != nil && *ti.TerminalReason != "override" {
 			reason = *ti.TerminalReason
 		}
-		lines = append(lines, outcomeLines(markIncomplete, "HUMAN OVERRIDE: "+reason, in)...)
+		add("outcome", outcomeLines(markIncomplete, "HUMAN OVERRIDE: "+reason, in)...)
 		candidate()
 
 	case "cancelled":
 		if ti.CandidateHash == nil {
-			lines = append(lines, outcomeLines(markCancelled, "cancelled before candidate", in)...)
-			lines = append(lines, noApprovedAnswer(ti.State))
+			add("outcome", outcomeLines(markCancelled, "cancelled before candidate", in)...)
+			add("no-answer", noApprovedAnswer(ti.State))
 			break
 		}
-		lines = append(lines, outcomeLines(markCancelled, "CANCELLED, not approved", in)...)
-		lines = append(lines, noApprovedAnswer(ti.State))
-		lines = append(lines, blockLines(in.openBlocks, in.width)...)
+		add("outcome", outcomeLines(markCancelled, "CANCELLED, not approved", in)...)
+		add("no-answer", noApprovedAnswer(ti.State))
+		for _, b := range blockItems(in.openBlocks, in.width) {
+			add(b.id, b.lines...)
+		}
 		candidate()
 
 	default:
@@ -245,12 +267,12 @@ func renderAnswer(s State, turnID string, in answerInput) string {
 			if in.plainMode {
 				draftText = "!! UNREVIEWED DRAFT !!"
 			}
-			lines = append(lines, styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
-			lines = append(lines, shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
+			add("draft", styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
+			add("answer", shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
-		lines = append(lines, progressLine(s, turnID, in.now, in.plainMode))
+		add("progress", progressLine(s, turnID, in.now, in.plainMode))
 	}
-	return strings.Join(lines, "\n")
+	return items
 }
 
 // noApprovedAnswer is the line later turns see in place of the answer of a
@@ -278,6 +300,18 @@ func blockLines(blocks []wire.OpenBlock, width int) []string {
 		}
 	}
 	return lines
+}
+
+// blockItems is blockLines by block: each open block is one item.
+func blockItems(blocks []wire.OpenBlock, width int) []chatItem {
+	var items []chatItem
+	for _, b := range blocks {
+		if b.State != "open" {
+			continue
+		}
+		items = append(items, chatItem{"block:" + b.ID, blockLines([]wire.OpenBlock{b}, width)})
+	}
+	return items
 }
 
 // shownLabelledPlain renders a labelled value as plain safe text without Markdown.

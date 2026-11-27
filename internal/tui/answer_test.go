@@ -293,7 +293,8 @@ func TestAnswerLongCandidateScrollsToTheLastLine(t *testing.T) {
 	h := scripted(t, enginetest.Reply(strings.TrimRight(text.String(), "\n")), approve())
 	r := startAnswerRig(t, h)
 	r.typeLine("question")
-	untilView(t, r, "line 0\n", "line 1\n")
+	// The chat starts at the bottom, so the approval line is shown (addendum 1, section 3).
+	untilView(t, r, "approved by")
 
 	// A waiter on the program's goroutine records every line any View showed.
 	seenLines := map[string]bool{}
@@ -310,7 +311,7 @@ func TestAnswerLongCandidateScrollsToTheLastLine(t *testing.T) {
 	}}
 	r.tm.Send(waitMsg{w})
 	for i := 0; i < 700; i++ {
-		send(r, tea.KeyMsg{Type: tea.KeyPgDown})
+		send(r, tea.KeyMsg{Type: tea.KeyPgUp})
 	}
 	select {
 	case <-w.done:
@@ -318,6 +319,9 @@ func TestAnswerLongCandidateScrollsToTheLastLine(t *testing.T) {
 		t.Fatal("not every line became visible")
 	}
 
+	for i := 0; i < 700; i++ {
+		send(r, tea.KeyMsg{Type: tea.KeyPgDown})
+	}
 	// Past the end: the approval line stays, nothing panics, and Up moves at once.
 	for i := 0; i < 50; i++ {
 		send(r, tea.KeyMsg{Type: tea.KeyDown})

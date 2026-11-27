@@ -17,6 +17,9 @@ import (
 // Every click is mapped from the lines View draws, using the same layout, so
 // a click lands on what is on screen; nothing here is a second keyboard.
 
+// wheelRows is how many rows one notch of the mouse wheel scrolls the chat.
+const wheelRows = 3
+
 // drawerFrameMsg is one frame of the reviews drawer sliding open or shut.
 type drawerFrameMsg struct{}
 
@@ -30,6 +33,16 @@ func (a *App) mouseAllowed() bool {
 func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !a.mouseEnabled || a.plainMode() || a.isTerminalTooSmall() {
 		return a, nil
+	}
+	if a.tab == tabChat && len(a.panel) == 0 && msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			a.scrollAnswer(-wheelRows)
+			return a, nil
+		case tea.MouseButtonWheelDown:
+			a.scrollAnswer(wheelRows)
+			return a, nil
+		}
 	}
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return a, nil
@@ -86,13 +99,14 @@ func (a *App) reviewCountAt(x, y int, hs heights) (string, bool) {
 	if a.tab != tabChat || len(a.panel) > 0 {
 		return "", false
 	}
-	lines, lastTurn, starts := chatLinesWithStarts(a.state, a.chatIn())
+	chat := a.layoutChat()
+	lines, starts := chat.lines, chat.starts
 	// Below the tab bar the chat's first line names the conversation.
 	row := y - hs.TabBar - 1
 	if row < 0 || row >= a.answerHeight() {
 		return "", false
 	}
-	idx := a.chatStart(len(lines), lastTurn) + row
+	idx := chat.first + row
 	if idx >= len(lines) {
 		return "", false
 	}
@@ -128,7 +142,7 @@ func (a *App) reviewCountAt(x, y int, hs heights) (string, bool) {
 func (a *App) setTab(t tab) tea.Cmd {
 	a.panel = nil
 	a.tab = t
-	a.answerScrollRow, a.answerFollow = 0, true
+	a.chatFollow.End()
 	if a.tab != tabChat {
 		a.reviewsDrawer.ForceClose()
 		a.syncDrawerWant()
