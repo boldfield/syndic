@@ -135,8 +135,8 @@ func TestChatRoundCountComesFromRevisionEvents(t *testing.T) {
 	if ti := s.Turns["t1"]; ti.Round != 2 || ti.MaxRounds != 2 {
 		t.Fatalf("after two revisions: round %d of %d, want 2 of 2", ti.Round, ti.MaxRounds)
 	}
-	if strip := renderStrip(s, 200, chatNow, false); !strings.Contains(strip, "[round 2/2]") {
-		t.Errorf("strip = %q, want [round 2/2]", strip)
+	if strip := renderStrip(s, 200, chatNow, false); !strings.Contains(strip, "round 2/2") {
+		t.Errorf("strip = %q, want round 2/2", strip)
 	}
 	// A limit this process set wins over the roster default.
 	limit := 4
@@ -207,7 +207,7 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 	lines := chatView(a)
 	ti.EstimatedTokens = 24260
 	a.state.Turns["t2"] = ti
-	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.HasPrefix(last, "[review] [reviewers_dispatched] [30s] [est. 24260]") || strings.Contains(last, "writer") {
+	if last := chatView(a)[23]; !strings.HasSuffix(last, keyHint) || !strings.HasPrefix(last, "review · reviewers_dispatched · 30s · est. 24260") || strings.Contains(last, "writer") {
 		t.Errorf("status line = %q, want the turn state, elapsed time, tokens and the key hint, and no participant states", last)
 	}
 	lineOf(t, lines, "› running question")
@@ -217,7 +217,7 @@ func TestChatRunningTurnStaysIdentifiedAcrossViews(t *testing.T) {
 		a.Update(tea.KeyMsg{Type: key})
 		v := a.View()
 		// At 80 columns round n/m is shed before the turn state; wider, it stays.
-		if !strings.Contains(v, "[reviewers_dispatched]") || !strings.Contains(a.statusLine(120), "[round 1/2]") {
+		if !strings.Contains(v, "reviewers_dispatched") || !strings.Contains(a.statusLine(120), "round 1/2") {
 			t.Errorf("status line lost the running turn on tab %d:\n%s", a.tab, v)
 		}
 	}
@@ -245,7 +245,7 @@ func TestChatStatusLineIsLastAt80x24(t *testing.T) {
 			t.Fatalf("tab %d: %d lines, want 24", tab, len(lines))
 		}
 		last := lines[23]
-		if !strings.HasPrefix(last, "[review]") || !strings.HasSuffix(last, keyHint) {
+		if !strings.HasPrefix(last, "review") || !strings.HasSuffix(last, keyHint) {
 			t.Errorf("tab %d: last line = %q, want the status line ending %q", tab, last, keyHint)
 		}
 		if !strings.HasPrefix(lines[22], defaultPrompt) {
@@ -437,7 +437,7 @@ func TestChatRoundSurvivesRecordBetweenReplayedEvents(t *testing.T) {
 	if got := s.Turns["t1"].Round; got != 1 {
 		t.Fatalf("round after the terminal record = %d, want 1", got)
 	}
-	if strip := renderStrip(s, 200, chatNow, false); strings.Contains(strip, "[round 2/") {
+	if strip := renderStrip(s, 200, chatNow, false); strings.Contains(strip, "round 2/") {
 		t.Errorf("strip = %q, want no doubled round", strip)
 	}
 

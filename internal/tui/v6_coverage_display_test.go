@@ -463,7 +463,7 @@ func TestV6StatusLineFieldsInOrderWithoutParticipantStates(t *testing.T) {
 	line := a.statusLine(140)
 	assertStatusLine(t, 140, line)
 	prev := -1
-	for _, part := range []string{"[review]", "[quick:fast]", "[reviewers_dispatched]", "/ 15m0s]", "█", "500 / 1000", "[round 1/3]", reviewsHint, keyHint} {
+	for _, part := range []string{"review", "quick:fast", "reviewers_dispatched", "/ 15m0s", "█", "500 / 1000", "round 1/3", reviewsHint, keyHint} {
 		i := strings.Index(line, part)
 		if i <= prev {
 			t.Errorf("%q at %d, want after %d in %q", part, i, prev, line)
@@ -487,7 +487,7 @@ func TestV6StatusLineFieldsInOrderWithoutParticipantStates(t *testing.T) {
 	}
 	a.state.CurrentTurn = ""
 	a.tab = tabChat
-	if got := a.statusLine(140); !strings.Contains(got, "[idle]") || strings.Contains(got, " / ") {
+	if got := a.statusLine(140); !strings.Contains(got, "idle") || strings.Contains(got, " / ") {
 		t.Errorf("idle status line: %q", got)
 	}
 }

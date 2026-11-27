@@ -290,8 +290,8 @@ func TestRegionsAndTabs(t *testing.T) {
 		t.Errorf("input region = %q", lines[22])
 	}
 	last := lines[23]
-	if !strings.HasPrefix(last, "[") || !strings.Contains(last, "idle") || !strings.HasSuffix(last, "tab: switch  /help") {
-		t.Errorf("status line = %q, want [<preset>] [idle] ... tab: switch  /help", last)
+	if !strings.HasPrefix(last, "review") || !strings.Contains(last, "idle") || !strings.HasSuffix(last, "tab: switch  /help") {
+		t.Errorf("status line = %q, want <preset> · idle ... tab: switch  /help", last)
 	}
 }
 
