@@ -509,14 +509,14 @@ func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confin
 			}
 			// What the call stages is canary material for the turn's
 			// searches, whatever the call's outcome: a write's content and
-			// an edit's arguments carry workspace bytes. A read's arguments
-			// are the model's own paths and patterns; only what it returns
-			// is snapshot content.
+			// an edit's replacement text. Paths are the model's own, as are
+			// a read's arguments; only what a read returns is snapshot
+			// content, and a write's result is status text.
 			if route == tools.RouteStagedWrite {
-				e.exposeToSearch(t, route, args)
+				e.exposeToSearch(t, route, stagedContent(call.Name, args))
 			}
 			res, err := run(call.ID, args)
-			if err == nil {
+			if err == nil && route == tools.RouteSnapshotRead {
 				e.exposeToSearch(t, route, res.Content)
 			}
 			if route == tools.RouteStagedWrite {
@@ -531,6 +531,26 @@ func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confin
 	effects[tools.NameWriteFile] = wrap(tools.RouteStagedWrite, write.WriteFile)
 	effects[tools.NameEditFile] = wrap(tools.RouteStagedWrite, write.EditFile)
 	effects[tools.NameUnstage] = wrap(tools.RouteStagedWrite, write.Unstage)
+}
+
+// stagedContent is the content a write-group call stages, from its
+// arguments: write_file's content and edit_file's replacement text. It is
+// nil for unstage and for arguments that do not parse.
+func stagedContent(name string, args json.RawMessage) []byte {
+	var a struct {
+		Content string `json:"content"`
+		New     string `json:"new"`
+	}
+	if json.Unmarshal(args, &a) != nil {
+		return nil
+	}
+	switch name {
+	case tools.NameWriteFile:
+		return []byte(a.Content)
+	case tools.NameEditFile:
+		return []byte(a.New)
+	}
+	return nil
 }
 
 // toolStepMessages renders the next author attempt's messages from the

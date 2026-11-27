@@ -487,3 +487,74 @@ func TestWebSearchQueryCarryingReadPathReachesReferee(t *testing.T) {
 		t.Fatalf("denied query: %d lookups, %d secret reads", res.lookups(), secrets.reads())
 	}
 }
+
+// A staged write's content is exposed: a query carrying bytes only a
+// write_file's content holds is refused by the canary.
+func TestWebSearchQueryCarryingStagedWriteBytesRefused(t *testing.T) {
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		toolStepWith(call("w1", tools.NameWriteFile, `{"path":"n.txt","content":"brand new staged secret content xyz\n"}`)),
+		searchCall("s1", "new staged secret content"),
+		enginetest.Reply(authorText),
+	}
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, webReviewRoster(), map[string][]fake.Step{"author": script, "reviewer": {approveStep()}}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "webreview", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+	wantCalls(t, toolCalls(t, h, reply.TurnID), [2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
+	wantCanaryRefused(t, h, reply.TurnID, res, secrets)
+}
+
+// An edit's replacement text is staged content: a query carrying bytes only
+// an edit_file's new text holds is refused by the canary.
+func TestWebSearchQueryCarryingStagedEditBytesRefused(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("short\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		toolStepWith(call("e1", tools.NameEditFile, `{"path":"a.txt","old":"short","new":"edited replacement secret text xyz"}`)),
+		searchCall("s1", "replacement secret text"),
+		enginetest.Reply(authorText),
+	}
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, webReviewRoster(), map[string][]fake.Step{"author": script, "reviewer": {approveStep()}}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "webreview", dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+	wantCalls(t, toolCalls(t, h, reply.TurnID), [2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
+	wantCanaryRefused(t, h, reply.TurnID, res, secrets)
+}
+
+// A write's path is the model's own, not staged content: a query carrying
+// the path of a write (whose content is unrelated) is not refused by the
+// canary and goes to the referee.
+func TestWebSearchQueryCarryingWritePathReachesReferee(t *testing.T) {
+	const name = "ordinary-write-topic-123.txt"
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		toolStepWith(call("w1", tools.NameWriteFile, `{"path":"`+name+`","content":"x"}`)),
+		searchCall("s1", name),
+		enginetest.Reply("deny the query is not about the task"),
+		enginetest.Reply(authorText),
+	}
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, webReviewRoster(), map[string][]fake.Step{"author": script, "reviewer": {approveStep()}}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "webreview", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+	if n := len(refereeAttempts(t, h, reply.TurnID)); n != 1 {
+		t.Fatalf("%d referee attempts, want the query refereed once", n)
+	}
+	if res.lookups() != 0 || secrets.reads() != 0 {
+		t.Fatalf("denied query: %d lookups, %d secret reads", res.lookups(), secrets.reads())
+	}
+}
