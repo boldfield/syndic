@@ -44,50 +44,37 @@ func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (strin
 	return reply.TurnID, s.Turn(t, c, reply.TurnID)
 }
 
-// toolLoopsRoster returns a roster with the given tools enabled for author and reviewers.
+// toolLoopsRoster returns a roster with the given tools enabled for author and reviewers,
+// with revision rounds enabled (max_rounds = 2), and with both participants having tool capability.
 func toolLoopsRoster(authorTools, reviewerTools []string) string {
 	toml := enginetest.RosterTOML
-	var toolLine, reviewerToolLine string
-	if len(authorTools) > 0 {
-		var quoted []string
-		for _, t := range authorTools {
-			quoted = append(quoted, fmt.Sprintf(`"%s"`, t))
-		}
-		toolLine = fmt.Sprintf("tools = [%s]", strings.Join(quoted, ", "))
-	}
-	if len(reviewerTools) > 0 {
-		var quoted []string
-		for _, t := range reviewerTools {
-			quoted = append(quoted, fmt.Sprintf(`"%s"`, t))
-		}
-		reviewerToolLine = fmt.Sprintf("reviewer_tools = [%s]", strings.Join(quoted, ", "))
-	}
 
-	var toolSection string
-	if toolLine != "" || reviewerToolLine != "" {
-		var toolFields []string
-		if toolLine != "" {
-			toolFields = append(toolFields, toolLine)
-		}
-		if reviewerToolLine != "" {
-			toolFields = append(toolFields, reviewerToolLine)
-		}
-		toolSection = "\n" + strings.Join(toolFields, "\n")
-	}
-
-	presetLines := fmt.Sprintf(`[presets.review]
+	// Build the full [presets.review] section with tools, reviewer_tools, and revision settings
+	var presetLines []string
+	presetLines = append(presetLines, `[presets.review]
 mode = "review"
 author = "author"
-required_reviewers = ["reviewer"]%s
+required_reviewers = ["reviewer"]`)
 
+	if len(authorTools) > 0 {
+		presetLines = append(presetLines, `tools = ["`+strings.Join(authorTools, `", "`)+`"]`)
+	}
+	if len(reviewerTools) > 0 {
+		presetLines = append(presetLines, `reviewer_tools = ["`+strings.Join(reviewerTools, `", "`)+`"]`)
+	}
+
+	presetLines = append(presetLines, `
 [presets.review.revision]
-max_rounds = 2`, toolSection)
+max_rounds = 2`)
+
+	newPreset := strings.Join(presetLines, "\n")
+
 	toml = strings.Replace(toml, `[presets.review]
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
 
-[presets.solo]`, presetLines+`
+[presets.solo]`, newPreset+`
 
 [presets.solo]`, 1)
 
@@ -109,7 +96,7 @@ required_reviewers = ["reviewer"]
 	}
 
 	if hasWeb {
-		toml = strings.Replace(toml, `[[endpoints]]
+		oldEndpoint := `[[endpoints]]
 name = "local"
 base_url = "http://localhost:11434/v1"
 declared_location = "local"
@@ -118,20 +105,32 @@ declared_billing = "none"
 network_dependency = "none"
 dialect = "chat_completions_v1"
 models = ["llama2", "llama3"]
-tokens_per_byte_max = 1.0`, `[[endpoints]]
-name = "local"
-base_url = "http://localhost:11434/v1"
-declared_location = "local"
-declared_execution = "local"
-declared_billing = "none"
-network_dependency = "none"
-dialect = "chat_completions_v1"
-models = ["llama2", "llama3"]
-tokens_per_byte_max = 1.0
-referee_model = "llama3"`, 1)
+tokens_per_byte_max = 1.0`
+
+		newEndpoint := oldEndpoint + `
+referee_model = "llama3"`
+
+		toml = strings.Replace(toml, oldEndpoint, newEndpoint, 1)
 	}
 
 	return toml
+}
+
+// withToolCallBounds adds max_calls_per_turn and/or max_reviewer_calls to the
+// global [tools] section of a roster TOML. The limits control budget on the
+// author and reviewer tool call counts.
+func withToolCallBounds(roster string, authorCallsPerTurn, reviewerCalls *int) string {
+	var fields []string
+	if authorCallsPerTurn != nil {
+		fields = append(fields, fmt.Sprintf("max_calls_per_turn = %d", *authorCallsPerTurn))
+	}
+	if reviewerCalls != nil {
+		fields = append(fields, fmt.Sprintf("max_reviewer_calls = %d", *reviewerCalls))
+	}
+	if len(fields) == 0 {
+		return roster
+	}
+	return strings.Replace(roster, "[tools]\n", "[tools]\n"+strings.Join(fields, "\n")+"\n", 1)
 }
 
 // TestToolLoops_ToolDefinitionsForRoles tests that tool definitions include
@@ -188,7 +187,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 						}
 					}
 					if !hasRead || hasWrite || !hasWeb {
-						t.Errorf("ERROR: reviewer tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+						t.Errorf("reviewer tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
 					}
 					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
@@ -214,8 +213,8 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 	t.Parallel()
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
-	roster = strings.Replace(roster, `max_rounds = 2`, `max_rounds = 2
-max_calls_per_turn = 2`, 1)
+	callsPerTurn := 2
+	roster = withToolCallBounds(roster, &callsPerTurn, nil)
 
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
@@ -223,7 +222,7 @@ max_calls_per_turn = 2`, 1)
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) == 0 {
-						return "ERROR: expected tool definitions on first request"
+						t.Errorf("expected tool definitions on first request")
 					}
 					return "TOOL_CALLS_RESPONSE"
 				},
@@ -232,12 +231,12 @@ max_calls_per_turn = 2`, 1)
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("result1"),
+			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) == 0 {
-						return "ERROR: expected tool definitions on second request"
+						t.Errorf("expected tool definitions on second request")
 					}
 					return "TOOL_CALLS_RESPONSE_2"
 				},
@@ -246,12 +245,12 @@ max_calls_per_turn = 2`, 1)
 					{ID: "c2", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"b"}`}},
 				},
 			},
-			enginetest.Reply("result2"),
+			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) > 0 {
-						return "ERROR: expected no tool definitions on third request (at bound)"
+						t.Errorf("expected no tool definitions on third request (at bound)")
 					}
 					return "FINAL_ANSWER"
 				},
@@ -260,7 +259,7 @@ max_calls_per_turn = 2`, 1)
 			enginetest.Reply("ok"),
 		},
 		"reviewer": {
-			enginetest.Reply(fake.VerdictApprove("h", "a")),
+			verdict(fake.VerdictApprove),
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
@@ -280,8 +279,8 @@ func TestToolLoops_AuthorToolLimitEndsWithToolCalls(t *testing.T) {
 	t.Parallel()
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
-	roster = strings.Replace(roster, `max_rounds = 2`, `max_rounds = 2
-max_calls_per_turn = 1`, 1)
+	callsPerTurn := 1
+	roster = withToolCallBounds(roster, &callsPerTurn, nil)
 
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
@@ -292,12 +291,12 @@ max_calls_per_turn = 1`, 1)
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("result1"),
+			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) > 0 {
-						return "ERROR: expected no tools"
+						t.Errorf("expected no tools on final attempt (at limit)")
 					}
 					return "TOOL_CALLS_RESPONSE"
 				},
@@ -330,8 +329,8 @@ func TestToolLoops_AuthorFinalNoToolIsCandidate(t *testing.T) {
 	t.Parallel()
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
-	roster = strings.Replace(roster, `max_rounds = 2`, `max_rounds = 2
-max_calls_per_turn = 1`, 1)
+	callsPerTurn := 1
+	roster = withToolCallBounds(roster, &callsPerTurn, nil)
 
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
@@ -342,13 +341,13 @@ max_calls_per_turn = 1`, 1)
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("result1"),
+			enginetest.Reply("ok"),
 			enginetest.Reply("the final answer"),
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
 		"reviewer": {
-			enginetest.Reply(fake.VerdictApprove("h", "a")),
+			verdict(fake.VerdictApprove),
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
@@ -368,8 +367,8 @@ func TestToolLoops_ReviewerAtBoundNoDefinitions(t *testing.T) {
 	t.Parallel()
 
 	roster := toolLoopsRoster([]string{"read"}, []string{"read"})
-	roster = strings.Replace(roster, `max_rounds = 2`, `max_rounds = 2
-max_reviewer_calls = 1`, 1)
+	reviewerCalls := 1
+	roster = withToolCallBounds(roster, nil, &reviewerCalls)
 
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
@@ -382,7 +381,7 @@ max_reviewer_calls = 1`, 1)
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) == 0 {
-						return "ERROR: expected tool definitions on first reviewer attempt"
+						t.Errorf("expected tool definitions on first reviewer attempt")
 					}
 					return "TOOL_CALLS"
 				},
@@ -391,14 +390,14 @@ max_reviewer_calls = 1`, 1)
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("file content"),
+			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) > 0 {
-						return "ERROR: expected no tool definitions at bound"
+						t.Errorf("expected no tool definitions at bound")
 					}
-					return fake.VerdictApprove("h", "a")
+					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
 			},
 			enginetest.Reply("ok"),
@@ -429,7 +428,7 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("result1"),
+			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 			{
 				Kind:  fake.StepKindHang,
@@ -450,6 +449,17 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 
 	if turn.State == "" {
 		t.Fatal("turn has no state")
+	}
+
+	// Verify the late tool step was quarantined by checking journal for tool calls
+	calls, err := s.Store.ToolCallsByTurn(turnID, "")
+	if err != nil {
+		t.Fatalf("listing tool calls: %v", err)
+	}
+
+	// Should have one tool call (the initial one), no late ones executed
+	if len(calls) > 1 {
+		t.Fatalf("expected at most 1 tool call, got %d", len(calls))
 	}
 }
 
@@ -496,6 +506,16 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 	if turn.State != engine.StateCancelled {
 		t.Fatalf("expected cancelled, got %s", turn.State)
 	}
+
+	// Verify no tool calls were executed during cancellation
+	calls, err := s.Store.ToolCallsByTurn(turnID, "")
+	if err != nil {
+		t.Fatalf("listing tool calls: %v", err)
+	}
+
+	if len(calls) != 0 {
+		t.Fatalf("expected no tool calls during cancellation, got %d", len(calls))
+	}
 }
 
 // TestToolLoops_RevisionCarriesCitedResultsOnly tests that in a revision round,
@@ -514,22 +534,23 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 					{ID: "call_a", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("result_a"),
+			enginetest.Reply("ok"),
 			enginetest.Reply("the answer"),
 			enginetest.Reply("revised answer"),
 			enginetest.Reply("ok"),
 		},
 		"reviewer": {
-			fake.Step{
+			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
-					return fake.VerdictBlock("hash", "attempt", "b1", "high", "result:call_a", "revise", "needs work")
+					return fake.VerdictBlock(req.Envelope.CandidateHash, req.Envelope.AttemptID, "b1", "high", "result:call_a", "revise", "needs work")
 				},
 			},
-			fake.Step{
+			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
-					return "VERDICT v2\ncandidate: hash\nattempt: att\nround: 1\nblock-state: b1 withdrawn\nverdict: approve\nreason: OK\nEND VERDICT"
+					return fmt.Sprintf("VERDICT v2\ncandidate: %s\nattempt: %s\nround: 1\nblock-state: b1 withdrawn\nverdict: approve\nreason: OK\nEND VERDICT",
+						req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
 			},
 			enginetest.Reply("ok"),
@@ -564,9 +585,9 @@ func TestToolLoops_RepairNoToolDefinitions(t *testing.T) {
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					if len(req.Tools) > 0 {
-						return "ERROR: repair should have no tools"
+						t.Errorf("repair should have no tools, but got %d", len(req.Tools))
 					}
-					return fake.VerdictApprove("hash", "att")
+					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
 			},
 			enginetest.Reply("ok"),
