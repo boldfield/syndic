@@ -273,6 +273,35 @@ func openBlockEvidence(tx *journal.Tx, turnID, participant string) (string, erro
 	return strings.Join(parts, "\n"), nil
 }
 
+// citedResultsOnly returns a filtered map of tool results, keeping only those
+// cited in the evidence field of open blocks. Evidence is split on whitespace
+// and punctuation; each token that matches a known result id is included.
+func citedResultsOnly(evidence string, all map[string]string) map[string]string {
+	if evidence == "" || len(all) == 0 {
+		return map[string]string{}
+	}
+	tokens := strings.FieldsFunc(evidence, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', '\r', ',', ';', '(', ')', '[', ']', '{', '}', '"', '\'', '`', '<', '>':
+			return true
+		}
+		return false
+	})
+	result := make(map[string]string)
+	seen := make(map[string]bool)
+	for _, tok := range tokens {
+		id := tok
+		if _, ok := all[id]; !ok {
+			id = strings.TrimRight(tok, ".:!?")
+		}
+		if v, ok := all[id]; ok && !seen[id] {
+			seen[id] = true
+			result[id] = v
+		}
+	}
+	return result
+}
+
 // diffLine is one line of a file, with its newline when it has one.
 type diffLine struct {
 	text  string
