@@ -21,4 +21,4 @@ Reviews · Turn 1 · Round 1                                                  10
   i6
   i7
   i8
-[review] [idle]                              ctrl+o: reviews  tab: switch  /help
+review · idle                                ctrl+o: reviews  tab: switch  /help

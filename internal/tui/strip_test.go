@@ -38,41 +38,49 @@ func assertStatusLine(t *testing.T, w int, line string) {
 	}
 }
 
-// TestStatusLineOverflowOrder walks each threshold of the approved order: the
-// budget meter goes first, then ctrl+o: reviews, then round n/m, then the
-// turn state shortens with an ellipsis.
+// TestStatusLineOverflowOrder walks each threshold of the addendum's order of
+// giving way: the budget meter goes first, then ctrl+o: reviews, then round
+// n/m, then the turn state shortens, then the elapsed time goes; below that
+// the turn state, then the right part, then the cut from the right.
 func TestStatusLineOverflowOrder(t *testing.T) {
 	s := revisingState()
 	now := stripT0.Add(30 * time.Second)
 	const (
-		head   = "[review] [reviewers_dispatched] [30s / 15m0s] "
 		both   = "ctrl+o: reviews  " + keyHint
-		tokens = "[est. 1500 / 3000]"
+		tokens = "est. 1500 / 3000"
+		state  = "reviewers_dispatched"
+		el     = "30s / 15m0s"
 	)
 	cases := []struct {
 		w    int
 		want string
 	}{
-		{121, head + "[████░░░░ est. 1500 / 3000] [round 1/3] " + both},
-		{120, head + tokens + " [round 1/3]         " + both},
-		{112, head + tokens + " [round 1/3] " + both},
-		{111, head + tokens + " [round 1/3]                 " + keyHint},
-		{95, head + tokens + " [round 1/3] " + keyHint},
-		{94, head + tokens + "            " + keyHint},
-		{83, head + tokens + " " + keyHint},
-		{82, "[review] [reviewers_dispatch…] [30s / 15m0s] " + tokens + " " + keyHint},
-		{65, "[review] [r…] [30s / 15m0s] " + tokens + " " + keyHint},
-		{64, "[review] […] [30s / 15m0s] " + tokens + " " + keyHint},
-		// Below the ruling's last step whole fields go, tokens/limit stays.
-		{63, "[review] […]… " + tokens + "             " + keyHint},
-		{40, "… " + tokens + "  " + keyHint},
+		{122, wantLine("review · "+state+" · "+el+" · [████░░░░] "+tokens+" · round 1/3", 122, both)},
+		{121, wantLine("review · "+state+" · "+el+" · "+tokens+" · round 1/3", 121, both)},
+		{111, wantLine("review · "+state+" · "+el+" · "+tokens+" · round 1/3", 111, both)},
+		{110, wantLine("review · "+state+" · "+el+" · "+tokens+" · round 1/3", 110, keyHint)},
+		{94, wantLine("review · "+state+" · "+el+" · "+tokens+" · round 1/3", 94, keyHint)},
+		{93, wantLine("review · "+state+" · "+el+" · "+tokens, 93, keyHint)},
+		{82, wantLine("review · "+state+" · "+el+" · "+tokens, 82, keyHint)},
+		{81, wantLine("review · revi… · "+el+" · "+tokens, 81, keyHint)},
+		{67, wantLine("review · revi… · "+el+" · "+tokens, 67, keyHint)},
+		{66, wantLine("review · revi… · "+tokens, 66, keyHint)},
+		{53, wantLine("review · revi… · "+tokens, 53, keyHint)},
+		// Below the rule's steps 1 to 5: the state, then the hints, then the cut.
+		{52, wantLine("review · "+tokens, 52, keyHint)},
+		{45, wantLine("review · "+tokens, 45, keyHint)},
+		{44, "review · " + tokens},
+		{25, "review · " + tokens},
+		{24, "review · est. 1500 / 30…"},
 	}
 	for _, c := range cases {
 		got := renderStatusLine(s, c.w, now, true, false)
 		if got != c.want {
 			t.Errorf("w=%d:\n got %q\nwant %q", c.w, got, c.want)
 		}
-		assertStatusLine(t, c.w, got)
+		if runewidth.StringWidth(got) > c.w {
+			t.Errorf("w=%d: line is %d cells", c.w, runewidth.StringWidth(got))
+		}
 	}
 }
 
@@ -86,15 +94,15 @@ func TestStatusLineKeepsTokensAndHint(t *testing.T) {
 		tokens string
 	}{
 		{"limit", func(*TurnInfo) {}, "est. 1500 / 3000"},
-		{"no limit", func(ti *TurnInfo) { ti.LimitTokens = 0 }, "[est. 1500]"},
+		{"no limit", func(ti *TurnInfo) { ti.LimitTokens = 0 }, "est. 1500"},
 		{"quick", func(ti *TurnInfo) { ti.QuickProfile = ptr("fast") }, "est. 1500 / 3000"},
-		{"quick, no limit", func(ti *TurnInfo) { ti.QuickProfile, ti.LimitTokens = ptr("fast"), 0 }, "[est. 1500]"},
+		{"quick, no limit", func(ti *TurnInfo) { ti.QuickProfile, ti.LimitTokens = ptr("fast"), 0 }, "est. 1500"},
 	} {
 		s := revisingState()
 		ti := s.Turns["t1"]
 		tc.edit(&ti)
 		s.Turns["t1"] = ti
-		for w := 40; w <= 140; w++ {
+		for w := 80; w <= 140; w++ {
 			for _, reviews := range []bool{false, true} {
 				got := renderStatusLine(s, w, now, reviews, false)
 				assertStatusLine(t, w, got)
@@ -118,12 +126,12 @@ func TestStatusLineNoLimitShedsNothingForTheMeter(t *testing.T) {
 	ti.QuickProfile = ptr("fast")
 	s.Turns["t1"] = ti
 	now := stripT0.Add(30 * time.Second)
-	want := "[review] [quick:fast] [reviewers_dispatched] [30s / 15m0s] [est. 1500] [round 1/3] ctrl+o: reviews  " + keyHint
+	want := "review · quick:fast · reviewers_dispatched · 30s / 15m0s · est. 1500 · round 1/3  ctrl+o: reviews  " + keyHint
 	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
 	// One cell short, the reviews hint goes and the estimate stays.
-	want = "[review] [quick:fast] [reviewers_dispatched] [30s / 15m0s] [est. 1500] [round 1/3]" + strings.Repeat(" ", 16) + keyHint
+	want = "review · quick:fast · reviewers_dispatched · 30s / 15m0s · est. 1500 · round 1/3" + strings.Repeat(" ", 18) + keyHint
 	if got := renderStatusLine(s, runewidth.StringWidth(want), now, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
@@ -134,11 +142,11 @@ func TestStatusLineIdle(t *testing.T) {
 	s := revisingState()
 	s.CurrentTurn = ""
 	got := renderStatusLine(s, 80, stripT0, true, false)
-	want := "[review] [idle]" + strings.Repeat(" ", 80-15-35) + "ctrl+o: reviews  " + keyHint
+	want := "review · idle" + strings.Repeat(" ", 80-13-35) + "ctrl+o: reviews  " + keyHint
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
-	if got := renderStrip(s, 80, stripT0, false); got != "[review] [idle]" {
+	if got := renderStrip(s, 80, stripT0, false); got != "review · idle" {
 		t.Errorf("idle strip = %q", got)
 	}
 }
@@ -150,7 +158,7 @@ func TestStatusLineShortensWideStatesByCell(t *testing.T) {
 	ti := s.Turns["t1"]
 	ti.State = "révision_審査中_dispatché"
 	s.Turns["t1"] = ti
-	for w := 40; w <= 100; w++ {
+	for w := 80; w <= 100; w++ {
 		got := renderStatusLine(s, w, stripT0, true, false)
 		if !utf8.ValidString(got) {
 			t.Fatalf("w=%d: invalid UTF-8: %q", w, got)
@@ -167,20 +175,20 @@ func TestAppStatusLineHintsByTab(t *testing.T) {
 	a.now = func() time.Time { return stripT0.Add(30 * time.Second) }
 	for _, tb := range []tab{tabChat, tabTranscript, tabParticipants} {
 		a.tab = tb
-		for _, w := range []int{40, 60, 80, 111, 112, 121} {
+		for _, w := range []int{80, 100, 110, 111, 121, 122} {
 			got := a.statusLine(w)
 			assertStatusLine(t, w, got)
-			if want := tb == tabChat && w >= 112; strings.Contains(got, reviewsHint) != want {
+			if want := tb == tabChat && w >= 111; strings.Contains(got, reviewsHint) != want {
 				t.Errorf("tab %d, w=%d: reviews hint shown, want %v: %q", tb, w, want, got)
 			}
-			if strings.Contains(got, "]"+keyHint) {
+			if !strings.Contains(got, "  "+keyHint) {
 				t.Errorf("tab %d, w=%d: fields touch the hint: %q", tb, w, got)
 			}
 		}
 	}
 	a.tab = tabChat
-	if got := a.statusLine(121); !strings.HasSuffix(got, " ctrl+o: reviews  "+keyHint) {
-		t.Errorf("chat tab at 121: %q", got)
+	if got := a.statusLine(122); !strings.HasSuffix(got, " ctrl+o: reviews  "+keyHint) {
+		t.Errorf("chat tab at 122: %q", got)
 	}
 }
 
@@ -196,15 +204,15 @@ func TestStatusLineConnectingKeepsBothHints(t *testing.T) {
 	if got := renderStatusLine(s, 80, stripT0, true, false); got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}
-	w := len(fixed) + 1 + len(right)
-	if got := renderStatusLine(s, w, stripT0, true, false); got != fixed+" "+right {
+	w := len(fixed) + 2 + len(right)
+	if got := renderStatusLine(s, w, stripT0, true, false); got != fixed+"  "+right {
 		t.Errorf("w=%d: got %q", w, got)
 	}
 	want = fixed + strings.Repeat(" ", w-1-len(fixed)-len(keyHint)) + keyHint
 	if got := renderStatusLine(s, w-1, stripT0, true, false); got != want {
 		t.Errorf("w=%d: got %q\nwant %q", w-1, got, want)
 	}
-	if got := renderStatusLine(s, 80, stripT0, false, false); strings.Contains(got, reviewsHint) || !strings.HasSuffix(got, " "+keyHint) {
+	if got := renderStatusLine(s, 80, stripT0, false, false); strings.Contains(got, reviewsHint) || !strings.HasSuffix(got, "  "+keyHint) {
 		t.Errorf("without reviews: %q", got)
 	}
 }

@@ -78,14 +78,14 @@ func TestV5StatusLineIsLastAtEverySize(t *testing.T) {
 				t.Fatalf("%dx%d tab %d: %d lines, want %d", w, h, tb, len(lines), h)
 			}
 			last := lines[h-1]
-			if !strings.HasPrefix(last, "[review]") {
-				t.Errorf("%dx%d tab %d: last line = %q, want the status line starting [review]", w, h, tb, last)
+			if !strings.HasPrefix(last, "review") {
+				t.Errorf("%dx%d tab %d: last line = %q, want the status line starting review", w, h, tb, last)
 			}
 			if !strings.HasPrefix(lines[h-2], defaultPrompt) {
 				t.Errorf("%dx%d tab %d: the line above the status line = %q, want the input", w, h, tb, lines[h-2])
 			}
 			for i, l := range lines[:h-1] {
-				if strings.HasPrefix(l, "[review]") {
+				if strings.HasPrefix(l, "review") {
 					t.Errorf("%dx%d tab %d: a status line at line %d, not last", w, h, tb, i)
 				}
 			}

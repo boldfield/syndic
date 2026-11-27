@@ -433,7 +433,7 @@ func TestRenderStripTruncatesWithEllipsis(t *testing.T) {
 	if displayWidth > 15 {
 		t.Errorf("strip display width = %d, want <= 15", displayWidth)
 	}
-	if strip != "[review] [sub…]" {
+	if strip != "review · submi…" {
 		t.Errorf("strip = %q, want the turn state shortened with an ellipsis", strip)
 	}
 	if strings.Count(strip, "\n") > 0 {

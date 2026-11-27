@@ -346,7 +346,7 @@ func TestQuickFirstRunPromptsAndYesApplies(t *testing.T) {
 	if !quickIs(quick, "fast") || presetOf(t, r, turn) != "solo" {
 		t.Fatalf("turn carried quick=%v preset=%q", quick, presetOf(t, r, turn))
 	}
-	if strip := stripOf(t, r, turn); !strings.Contains(strip, "[quick:fast]") {
+	if strip := stripOf(t, r, turn); !strings.Contains(strip, "quick:fast") {
 		t.Errorf("strip = %q", strip)
 	}
 	if v := view(t, r); strings.Contains(v, "quick: unapproved") {
@@ -491,12 +491,12 @@ func TestQuickWithModeShowsTheOverride(t *testing.T) {
 	r.typeLine("/quick fast")
 	untilView(t, r, "quick profile fast selected")
 	r.typeLine("/mode review")
-	untilView(t, r, "[next: review]")
+	untilView(t, r, "next: review")
 	turn, quick := submitAndWait(t, r, "hello", "approved")
 	if !quickIs(quick, "fast") || presetOf(t, r, turn) != "review" {
 		t.Fatalf("quick = %v preset = %q", quick, presetOf(t, r, turn))
 	}
-	if strip := stripOf(t, r, turn); !strings.Contains(strip, "[quick:fast (mode set by /mode)]") {
+	if strip := stripOf(t, r, turn); !strings.Contains(strip, "quick:fast (mode set by /mode)") {
 		t.Errorf("strip = %q", strip)
 	}
 }

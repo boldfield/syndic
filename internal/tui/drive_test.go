@@ -86,7 +86,7 @@ func (d *driver) until(what string, cond func(view string) bool) {
 func (d *driver) strip() string {
 	lines := strings.Split(d.app.View(), "\n")
 	last := lines[len(lines)-1]
-	if strings.HasPrefix(last, "[") || strings.HasPrefix(last, "engine: connecting") {
+	if last != "" && !strings.HasPrefix(last, " ") {
 		return last
 	}
 	return ""

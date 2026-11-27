@@ -24,6 +24,28 @@ type statusItems struct {
 
 const statusSep = " · "
 
+// left joins the items present, in v6 section 1's order, by statusSep.
+func (it statusItems) left() string {
+	var parts []string
+	add := func(s string) {
+		if s != "" {
+			parts = append(parts, s)
+		}
+	}
+	add(it.preset)
+	add(it.next)
+	add(it.quick)
+	add(it.state)
+	add(it.elapsed)
+	if it.meter != "" && it.tokens != "" {
+		add(it.meter + " " + it.tokens)
+	} else {
+		add(it.tokens)
+	}
+	add(it.round)
+	return strings.Join(parts, statusSep)
+}
+
 // cellWidth is the width of s in terminal cells.
 func cellWidth(s string) int { return runewidth.StringWidth(s) }
 
@@ -58,26 +80,10 @@ func fitStatusLine(it statusItems, width int) string {
 	state, elapsed := it.state, it.elapsed
 
 	build := func(withState, withRight bool) (string, string) {
-		var parts []string
-		add := func(s string) {
-			if s != "" {
-				parts = append(parts, s)
-			}
-		}
-		add(it.preset)
-		add(next)
-		add(it.quick)
-		if withState {
-			add(state)
-			add(elapsed)
-		}
-		if meter != "" && it.tokens != "" {
-			add(meter + " " + it.tokens)
-		} else {
-			add(it.tokens)
-		}
-		if withState {
-			add(round)
+		cur := it
+		cur.next, cur.meter, cur.round, cur.state, cur.elapsed = next, meter, round, state, elapsed
+		if !withState {
+			cur.state, cur.elapsed, cur.round = "", "", ""
 		}
 		right := ""
 		if withRight {
@@ -86,7 +92,7 @@ func fitStatusLine(it statusItems, width int) string {
 				right = reviewsHint + "  " + keyHint
 			}
 		}
-		return strings.Join(parts, statusSep), right
+		return cur.left(), right
 	}
 	try := func(withState bool) (string, bool) {
 		l, r := build(withState, true)
