@@ -138,6 +138,37 @@ func (g *searchRig) withResolver(t *testing.T, r Resolver) {
 	g.s = s
 }
 
+// withCredential rebuilds the rig's searcher over c, keeping its screener,
+// referee, provider, resolver and dial seam.
+func (g *searchRig) withCredential(t *testing.T, c CredentialSource) {
+	t.Helper()
+	s, err := NewPinnedSearcher(g.screener, g.ref, g.provider, searchHost, c, &g.net)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.s = s
+}
+
+// blockingCredential is a CredentialSource that waits: entered is closed when
+// the read starts, and the read answers (through inner) once release is
+// closed. It stands in for a slow secret read during which the step can end.
+type blockingCredential struct {
+	inner   CredentialSource
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingCredential(inner CredentialSource) *blockingCredential {
+	return &blockingCredential{inner: inner, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (c *blockingCredential) read() (string, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-c.release
+	return c.inner()
+}
+
 // blockingResolver is a stubResolver whose lookup waits: entered is closed
 // when the lookup starts, and the lookup answers once release is closed. It
 // stands in for a slow DNS during which the step can end.
@@ -352,6 +383,62 @@ func TestSearchRecheckAfterResolutionStopsBeforeCredential(t *testing.T) {
 	}
 	if len(g.dials) != 0 || g.creds.Load() != 0 {
 		t.Fatalf("dials %v credential reads %d; a step that ended during DNS sends nothing", g.dials, g.creds.Load())
+	}
+}
+
+// Resolving the credential is a wait too. When the step ends while the
+// credential source is still answering, the re-check immediately before the
+// send stops the query after the request is built and checked but before any
+// connection: the referee allowed, the lookup happened, the credential was
+// read once, and the provider received nothing.
+func TestSearchRecheckBeforeSendStopsAfterCredential(t *testing.T) {
+	ps := newProviderServer(t, http.StatusOK, `{"results":[]}`)
+	g := newSearchRig(t, NewURLScreener(0), ps.ts.Listener.Addr().String(), searchAddrs, true)
+	cred := newBlockingCredential(g.cred)
+	g.withCredential(t, cred.read)
+	stale := errors.New("step ended")
+	var ended atomic.Bool
+	recheck := func() error {
+		if ended.Load() {
+			return stale
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.s.Search(context.Background(), "go testing", recheck)
+		done <- err
+	}()
+	select {
+	case <-cred.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the credential read never started: the referee's allow, the resolution and the re-checks should lead to it")
+	}
+	// The step ends while the credential source is still waiting; then the
+	// source answers.
+	ended.Store(true)
+	close(cred.release)
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Search did not return after the credential source was released")
+	}
+	if !errors.Is(err, stale) {
+		t.Fatalf("err = %v, want the recheck's error", err)
+	}
+	var r *RefusalError
+	if errors.As(err, &r) {
+		t.Fatalf("recheck error became a refusal %v", r)
+	}
+	if len(g.ref.calls) != 1 || len(g.res.hosts) != 1 || g.creds.Load() != 1 {
+		t.Fatalf("referee %v lookups %v credential reads %d, want one each before the step ended", g.ref.calls, g.res.hosts, g.creds.Load())
+	}
+	if len(g.dials) != 0 {
+		t.Fatalf("dials %v; a step that ended during the credential's resolution sends nothing", g.dials)
+	}
+	if seen := ps.requests(); len(seen) != 0 {
+		t.Fatalf("the provider received %d requests, want none", len(seen))
 	}
 }
 

@@ -58,7 +58,9 @@ type SearchProvider interface {
 // once per query, only after the referee has allowed the query, the
 // provider's address has passed the address rule and the step's re-check has
 // passed again after that wait, and the value goes into that query's request
-// alone; it is never journaled.
+// alone; it is never journaled. Resolving it is itself a wait (a secret may
+// be read from a file), so the request it is placed in is sent only after the
+// step's re-check has passed once more.
 type CredentialSource func() (string, error)
 
 // SearchNetwork is the network under a searcher: the resolver of the provider
@@ -108,10 +110,12 @@ func SearchHostAllowed(host string, policy *HostPolicy) *RefusalError {
 // allowlist, counts), the referee, the caller's re-check, and only then name
 // resolution of the provider host (once), the address rule over every
 // resolved address, the caller's re-check again, the credential, the
-// provider's request, and a connection to an address that passed. A refused
-// query causes no resolution, no connection and no credential read; a step
-// that ends during the resolution causes no connection and no credential
-// read either.
+// provider's request held to the rules, the caller's re-check a third time,
+// and a connection to an address that passed. Every wait is followed by a
+// re-check before the next effect. A refused query causes no resolution, no
+// connection and no credential read; a step that ends during the resolution
+// causes no connection and no credential read; a step that ends during the
+// credential's resolution causes no connection and sends nothing.
 type PinnedSearcher struct {
 	screener   *URLScreener
 	referee    Referee
@@ -143,10 +147,13 @@ func NewPinnedSearcher(s *URLScreener, r Referee, p SearchProvider, host string,
 // request that breaks the rules are each a *RefusalError. An error from the
 // referee itself is returned as is: the engine's referee reports an ended
 // turn that way, and the caller must not answer the call. recheck, when set,
-// runs after the referee's allow and before any resolution, and again after
-// the resolution and before the credential is read: resolution is a wait,
-// and the step may have ended during it. Its error is returned as is. The
-// caller reads the body, re-checks again after that wait, and journals.
+// runs after the referee's allow and before any resolution, again after the
+// resolution and before the credential is read, and once more after the
+// credential is resolved and the provider's request is built and checked,
+// immediately before the request is sent: the resolution and the credential's
+// resolution are waits, and the step may have ended during either. Its error
+// is returned as is. The caller reads the body, re-checks again after that
+// wait, and journals.
 func (s *PinnedSearcher) Search(ctx context.Context, query string, recheck func() error) (*http.Response, error) {
 	if v := s.screener.Screen(QueryURL(s.host, query)); !v.Allowed {
 		return nil, refusal(v.Rule, v.Reason)
@@ -184,6 +191,15 @@ func (s *PinnedSearcher) Search(ctx context.Context, query string, recheck func(
 	}
 	if r := s.checkRequest(req, cred); r != nil {
 		return nil, r
+	}
+	// Resolving the credential and building the request were waits too (the
+	// secret may come from a file; the provider is injected code): the step
+	// may have ended during them, and an ended step must not dial or send.
+	// This is the last re-check before the request leaves.
+	if recheck != nil {
+		if err := recheck(); err != nil {
+			return nil, err
+		}
 	}
 	tr := &http.Transport{
 		Proxy:             nil,
@@ -297,10 +313,12 @@ type webSearchArgs struct {
 }
 
 // Search executes web_search for the accepted call callID. recheck is the
-// step's re-check: it runs after the referee's allow, after the resolution
-// and after the network wait, and when it fails the call is abandoned,
-// nothing is journaled here, and its error is returned. A refusal is journaled as an error result naming
-// the rule; an executed call's result is the bounded raw body.
+// step's re-check: it runs after the referee's allow, after the resolution,
+// after the credential is resolved and the request built (immediately before
+// the send) and after the network wait, and when it fails the call is
+// abandoned, nothing is journaled here, and its error is returned. A refusal
+// is journaled as an error result naming the rule; an executed call's result
+// is the bounded raw body.
 func (t *WebSearchTools) Search(ctx context.Context, callID string, raw json.RawMessage, recheck func() error) (Result, error) {
 	var args webSearchArgs
 	if err := decodeArgs(raw, &args); err != nil {
