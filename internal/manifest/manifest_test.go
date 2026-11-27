@@ -15,6 +15,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/transport"
 )
 
@@ -1851,5 +1852,108 @@ func TestRosterToMap_QuickProfileDeliberateBounds(t *testing.T) {
 		if b[k] != want {
 			t.Errorf("%s = %v, want %d", k, b[k], want)
 		}
+	}
+}
+
+func buildWithSandbox(t *testing.T, sb *Sandbox) map[string]interface{} {
+	t.Helper()
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	roster := &config.Roster{
+		Participants:  []config.Participant{{ID: "p1", Endpoint: "ep1", Model: "m1"}},
+		Endpoints:     []config.EndpointProfile{{Name: "ep1", BaseURL: "http://test"}},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Pools:         map[string]config.Pool{},
+	}
+	built, err := Build(Input{
+		Store:          journal.NewStore(db),
+		Roster:         roster,
+		RosterFile:     []byte("content"),
+		EngineVersion:  "1.0",
+		StartedAt:      time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+		Sandbox:        sb,
+	})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(built.JSON, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestBuild_SandboxPolicyObjectAndHash(t *testing.T) {
+	policy := sandbox.Policy{
+		Path:          "/usr/bin:/bin",
+		ReadOnlyPaths: []string{"/opt/tool"},
+		Devices:       []string{"/dev/null"},
+		EnvNames:      []string{"PATH", "HOME", "MY_PASS"},
+		Capabilities:  sandbox.Caps(sandbox.D),
+		NetworkAllow:  []string{"*.example.com"},
+	}
+	out := buildWithSandbox(t, &Sandbox{Backend: sandbox.NewFake(sandbox.Caps(sandbox.D)), Policy: policy, ProxyInUse: true})
+	rec, ok := out["exec_sandbox"].(map[string]interface{})
+	if !ok {
+		t.Fatal("manifest has no exec_sandbox")
+	}
+	obj := rec["policy"].(map[string]interface{})
+	if obj["path"] != "/usr/bin:/bin" {
+		t.Errorf("path = %v", obj["path"])
+	}
+	for _, k := range []string{"read_only_paths", "devices", "env_names", "network_allow"} {
+		if _, ok := obj[k].([]interface{}); !ok {
+			t.Errorf("policy lacks list %s", k)
+		}
+	}
+	if got := obj["env_names"].([]interface{}); len(got) != 3 {
+		t.Errorf("env_names = %v", got)
+	}
+	canonical, err := policy.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	if rec["policy_hash"] != hex.EncodeToString(sum[:]) {
+		t.Errorf("policy_hash %v is not the SHA-256 of the canonical JSON", rec["policy_hash"])
+	}
+	if rec["proxy_in_use"] != true {
+		t.Error("proxy_in_use should be true")
+	}
+	if nl := rec["network_allow"].([]interface{}); len(nl) != 1 || nl[0] != "*.example.com" {
+		t.Errorf("network_allow = %v", nl)
+	}
+	if _, ok := rec["notice"]; ok {
+		t.Error("enforced backend must not carry the opt-out line")
+	}
+	if _, ok := rec["backend"].(string); !ok {
+		t.Error("backend name missing")
+	}
+	if _, ok := rec["backend_config"].(map[string]interface{}); !ok {
+		t.Error("backend config missing")
+	}
+}
+
+func TestBuild_SandboxNoneCarriesNotice(t *testing.T) {
+	sb := &Sandbox{Backend: sandbox.NewNone(sandbox.Supervisor{}), Policy: sandbox.Policy{Capabilities: sandbox.Caps(sandbox.D)}}
+	out := buildWithSandbox(t, sb)
+	rec := out["exec_sandbox"].(map[string]interface{})
+	const line = "exec: sandbox none; filesystem and network confinement are unenforced"
+	if rec["notice"] != line || rec["backend"] != "none" {
+		t.Errorf("record = %v", rec)
+	}
+	if SandboxNotice(sb) != line {
+		t.Errorf("start log line = %q", SandboxNotice(sb))
+	}
+	if SandboxNotice(nil) != "" {
+		t.Error("nil sandbox has no notice")
+	}
+}
+
+func TestBuild_NoSandboxNoKey(t *testing.T) {
+	if _, ok := buildWithSandbox(t, nil)["exec_sandbox"]; ok {
+		t.Error("exec_sandbox present without a sandbox")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 )
@@ -27,6 +28,67 @@ type Input struct {
 	EngineVersion  string
 	StartedAt      time.Time
 	AdapterVersion func(p config.Participant) string
+	// Sandbox is how commands are confined; nil when the run offers no exec.
+	Sandbox *Sandbox
+}
+
+// Sandbox is the confinement the run manifest records (v7 delta, section 3,
+// "Manifest", and section 4, last bullet).
+type Sandbox struct {
+	// Backend is the backend that confines commands.
+	Backend sandbox.Backend
+	// Policy is the policy a command gets.
+	Policy sandbox.Policy
+	// ProxyInUse is whether the per-call network proxy is in use.
+	ProxyInUse bool
+}
+
+// sandboxRecord builds the manifest's record of the sandbox: the backend's
+// name and configuration, the policy as one object and its hash, the network
+// list and whether the proxy is in use, and under the none backend the
+// opt-out line.
+func sandboxRecord(sb *Sandbox) (map[string]interface{}, error) {
+	hash, err := sb.Policy.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("hash sandbox policy: %w", err)
+	}
+	canonical, err := sb.Policy.CanonicalJSON()
+	if err != nil {
+		return nil, fmt.Errorf("encode sandbox policy: %w", err)
+	}
+	var policy interface{}
+	if err := json.Unmarshal(canonical, &policy); err != nil {
+		return nil, fmt.Errorf("decode sandbox policy: %w", err)
+	}
+	network := sb.Policy.NetworkAllow
+	if network == nil {
+		network = []string{}
+	}
+	cfg := map[string]string{}
+	for k, v := range sb.Backend.Config() {
+		cfg[k] = v
+	}
+	rec := map[string]interface{}{
+		"backend":        sb.Backend.Name(),
+		"backend_config": cfg,
+		"policy":         policy,
+		"policy_hash":    hash,
+		"network_allow":  network,
+		"proxy_in_use":   sb.ProxyInUse,
+	}
+	if sb.Backend.Name() == sandbox.NoneName {
+		rec["notice"] = sandbox.NoneNotice
+	}
+	return rec, nil
+}
+
+// SandboxNotice returns the line the engine's start log carries under the
+// none backend, and "" under any other.
+func SandboxNotice(sb *Sandbox) string {
+	if sb != nil && sb.Backend != nil && sb.Backend.Name() == sandbox.NoneName {
+		return sandbox.NoneNotice
+	}
+	return ""
 }
 
 // Participant describes the manifest state of a roster participant.
@@ -308,6 +370,13 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 		// whatever the presets enable, so a change to any tool definition
 		// changes the manifest.
 		"tool_definitions_hash": tools.DefinitionsHash(),
+	}
+	if in.Sandbox != nil {
+		rec, err := sandboxRecord(in.Sandbox)
+		if err != nil {
+			return nil, "", "", err
+		}
+		manifest["exec_sandbox"] = rec
 	}
 	if len(refereeProbeRecords) > 0 {
 		manifest["referee_probe_records"] = refereeProbeRecords
