@@ -164,6 +164,35 @@ func (l *LegacyStdio) Send(id int64, method string, params json.RawMessage) (wir
 	return l.s.Await(id)
 }
 
+// SendContext is Send that stops writing and reading when ctx ends and
+// returns ctx's error. A message read after that is kept for the next
+// request in the session (wire.Stream.AwaitContext). The session's writer
+// must keep concurrent writes whole (wire.WriteLineContext).
+func (l *LegacyStdio) SendContext(ctx context.Context, id int64, method string, params json.RawMessage) (wire.Response, error) {
+	if l.ended {
+		return wire.Response{}, errEnded
+	}
+	if err := wire.WriteLineContext(ctx, l.w, wire.NewRequest(id, method, params)); err != nil {
+		if ctx.Err() != nil {
+			return wire.Response{}, err
+		}
+		return wire.Response{}, fmt.Errorf("mcp: writing request: %w", err)
+	}
+	return l.s.AwaitContext(ctx, id)
+}
+
+// CancelContext is Cancel that returns ctx's error when ctx ends before the
+// write does.
+func (l *LegacyStdio) CancelContext(ctx context.Context, id int64, reason string) error {
+	if l.ended {
+		return errEnded
+	}
+	if err := wire.WriteLineContext(ctx, l.w, wire.NewNotification("notifications/cancelled", cancelParams(id, reason))); err != nil {
+		return fmt.Errorf("mcp: writing notification: %w", err)
+	}
+	return nil
+}
+
 // Cancel sends notifications/cancelled for the request sent under id, which
 // is how this revision cancels a request.
 func (l *LegacyStdio) Cancel(id int64, reason string) error {
