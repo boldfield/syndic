@@ -15,7 +15,8 @@ import (
 )
 
 // The two revisions detection chooses between. This package carries no
-// network code, so it does not import the clients that send.
+// network code, so it does not import the clients that send; package client
+// has DiscoverHTTP and DiscoverStdio, which do.
 const (
 	CurrentRevision = "2026-07-28"
 	LegacyRevision  = "2025-11-25"
@@ -239,21 +240,29 @@ func DetectHTTP(ctx context.Context, protocol string, send func(context.Context)
 		return failed(err)
 	}
 	ok2xx := a.Status >= 200 && a.Status < 300
-	if a.Error != nil || (ok2xx && a.Result != nil) {
-		if d, ok := fromAnswer(a); ok {
-			return d
-		}
+	// A 401, a 403, a 5xx and anything else but a success or a 400, 404 or
+	// 405 is no evidence of era, whatever its body says.
+	if !ok2xx && !legacyStatus(a.Status) {
+		return failed(&StatusFailure{Status: a.Status, Err: statusCause(a)})
+	}
+	if d, ok := fromAnswer(a); ok {
+		return d
 	}
 	if legacyStatus(a.Status) {
 		return legacy()
 	}
-	switch {
-	case a.Error != nil:
-		return failed(&StatusFailure{Status: a.Status, Err: a.Error})
-	case ok2xx && a.Err == nil:
+	if a.Err == nil {
 		return failed(errors.New("mcp: empty server/discover answer"))
 	}
 	return failed(&StatusFailure{Status: a.Status, Err: a.Err})
+}
+
+// statusCause is what to report with a status that shows nothing.
+func statusCause(a Answer) error {
+	if a.Error != nil {
+		return a.Error
+	}
+	return a.Err
 }
 
 // DetectStdio chooses the revision of a stdio server. With protocol "auto"
@@ -267,8 +276,8 @@ func DetectHTTP(ctx context.Context, protocol string, send func(context.Context)
 // Of the current revision's errors, unknown method (-32601) shows a legacy
 // server here, since a legacy server answers an unknown method that way.
 //
-// After a timeout the read is still pending; the caller should not reuse the
-// stream for the legacy initialize without dealing with it.
+// After a timeout the exchange's read may still be pending. client.DiscoverStdio
+// hands the stream on safely; a caller of DetectStdio must do so itself.
 func DetectStdio(protocol string, timeout time.Duration, exchange func() (Answer, error)) Decision {
 	if d, ok, err := Named(protocol); err != nil {
 		return failed(err)
