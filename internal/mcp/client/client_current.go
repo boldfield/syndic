@@ -179,16 +179,21 @@ func (c *CurrentHTTP) Send(ctx context.Context, id int64, method string, params 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// A redirect is not followed, but a JSON-RPC response it carries is read
+	// like that of any other status that is not a success.
 	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return HTTPReply{}, &StatusError{Status: resp.StatusCode, Err: errors.New("redirect not followed")}
+	failure := func(err error) error {
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			err = fmt.Errorf("redirect not followed: %w", err)
+		}
+		return &StatusError{Status: resp.StatusCode, Err: err}
 	}
 	mr, err := wire.NewResponseReader(resp, c.Limits)
 	if err != nil {
 		if ok {
 			return HTTPReply{}, err
 		}
-		return HTTPReply{}, &StatusError{Status: resp.StatusCode, Err: err}
+		return HTTPReply{}, failure(err)
 	}
 	s := &wire.Stream{Messages: mr, Closer: resp.Body, Limits: c.Limits}
 	r, err := s.Await(id)
@@ -196,7 +201,7 @@ func (c *CurrentHTTP) Send(ctx context.Context, id int64, method string, params 
 		if ok {
 			return HTTPReply{}, err
 		}
-		return HTTPReply{}, &StatusError{Status: resp.StatusCode, Err: err}
+		return HTTPReply{}, failure(err)
 	}
 	return HTTPReply{Status: resp.StatusCode, Response: r}, nil
 }

@@ -109,6 +109,22 @@ func TestCurrentHTTPFollowsNoRedirectAndRetriesNothing(t *testing.T) {
 	}
 }
 
+func TestCurrentHTTPReadsResponseOnRedirect(t *testing.T) {
+	srv := mcptest.New(mcptest.Config{Statuses: map[string]int{"server/discover": http.StatusFound}})
+	ts := srv.HTTP(t)
+	c := &CurrentHTTP{URL: ts.URL, Transport: http.DefaultTransport, Info: DefaultClientInfo()}
+	rep, err := c.Send(context.Background(), 1, "server/discover", nil)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if rep.Status != http.StatusFound || len(rep.Response.Result) == 0 {
+		t.Fatalf("reply = %+v", rep)
+	}
+	if n := len(srv.Requests()); n != 1 {
+		t.Errorf("%d requests", n)
+	}
+}
+
 func TestCurrentHTTPErrorBodyAndEmpty404(t *testing.T) {
 	srv := mcptest.New(mcptest.Config{Statuses: map[string]int{"tools/list": 404}})
 	ts := srv.HTTP(t)
