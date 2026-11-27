@@ -1,0 +1,1 @@
+{"type":"error","error":{"type":"rate_limit_error","message":"enforced_spend_limit_reached","code":"enforced_spend_limit_reached","details":{"error_code":"other"}}}
