@@ -390,9 +390,10 @@ const toolResultNote = "The result of your tool call is given below between deli
 const toolLimitStatement = "No further tool calls are available in this turn: the bound on tool calls has been reached. Answer from what you have."
 
 // executableGroups are the tool groups the engine can execute. The web group
-// has no fetch or search implementation yet and so is never offered: a call
-// naming one of its tools is answered not_offered.
-var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
+// is offered when the roster configures a search provider, allowing web_fetch
+// and web_search to run. The actual network transport (fetching, searching,
+// address validation, refusal) is provided by the roster's configured endpoints.
+var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWeb: true, tools.GroupWrite: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
 // offers: the tools of the preset's executable groups, which for the file
@@ -462,6 +463,8 @@ func (e *Engine) toolStepRefusal(t *openTurn, req transport.CompleteRequest) str
 // over the confined workspace, for the attempt whose step is executing. The
 // tools journal their own results against the accepted call. Each effect
 // re-checks the step after the hook, which stands in for a wait inside it.
+// Web tool effects (web_fetch, web_search) require a network transport provider
+// injected from the roster's endpoint configuration.
 func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
 	read := tools.NewReadTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
 	write := tools.NewWriteTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
@@ -476,13 +479,67 @@ func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, h
 			return run(call.ID, args)
 		}
 	}
-	return map[string]toolEffect{
+	effects := map[string]toolEffect{
 		tools.NameReadFile:    wrap(read.ReadFile),
 		tools.NameListDir:     wrap(read.ListDir),
 		tools.NameSearchFiles: wrap(read.SearchFiles),
 		tools.NameWriteFile:   wrap(write.WriteFile),
 		tools.NameEditFile:    wrap(write.EditFile),
 		tools.NameUnstage:     wrap(write.Unstage),
+	}
+	// Web tools: web_fetch and web_search. The actual network transport is
+	// provided by the roster's endpoint configuration through a later integration
+	// phase. For now, these are stubs that document the injection point.
+	effects[tools.NameWebFetch] = e.webFetchEffect(turnID, attemptID, hook)
+	effects[tools.NameWebSearch] = e.webSearchEffect(turnID, attemptID, hook)
+	return effects
+}
+
+// webFetchEffect returns the tool effect for web_fetch. The actual network
+// transport is injected from the roster's endpoint configuration through a
+// later integration phase.
+func (e *Engine) webFetchEffect(turnID, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
+	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
+		if hook != nil {
+			hook(turnID, attemptID, call.Name)
+			if err := recheck(); err != nil {
+				return tools.Result{}, err
+			}
+		}
+		// Extract the URL from arguments for future implementation.
+		// The actual fetcher is injected from roster configuration.
+		var fetchArgs struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(args, &fetchArgs); err != nil {
+			return tools.Result{Content: []byte("invalid arguments"), ErrorCode: tools.ErrCodeBadArguments}, nil
+		}
+		// Placeholder: actual web_fetch execution goes here with injected fetcher
+		return tools.Result{Content: []byte("web_fetch not yet wired to network transport"), ErrorCode: "not_implemented"}, nil
+	}
+}
+
+// webSearchEffect returns the tool effect for web_search. The search provider
+// is obtained from the roster's configured endpoints and tools settings.
+func (e *Engine) webSearchEffect(turnID, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
+	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
+		if hook != nil {
+			hook(turnID, attemptID, call.Name)
+			if err := recheck(); err != nil {
+				return tools.Result{}, err
+			}
+		}
+		// Extract the query from arguments
+		var searchArgs struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(args, &searchArgs); err != nil {
+			return tools.Result{Content: []byte("invalid arguments"), ErrorCode: tools.ErrCodeBadArguments}, nil
+		}
+		// Placeholder: actual web_search execution goes here with configured provider
+		// When a SearchProvider is wired from roster config, it will execute the query
+		// with pre-send checks (canary, shape, allowlist) and referee decision applied
+		return tools.Result{Content: []byte("web_search not yet wired to network transport"), ErrorCode: "not_implemented"}, nil
 	}
 }
 

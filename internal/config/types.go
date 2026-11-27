@@ -252,8 +252,16 @@ type RoutingPolicy struct {
 	AllowedDestinations []string `toml:"allowed_destinations"`
 }
 
+type SearchConfig struct {
+	Host    string    `toml:"host"`    // hostname and port of the search provider
+	Auth    SecretRef `toml:"auth"`    // secret reference for API key/credentials
+	Path    string    `toml:"path"`    // request path and query template
+	Results int       `toml:"results"` // max results per search, 0 for provider default
+}
+
 type WebConfig struct {
-	AllowedHosts []string `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	AllowedHosts []string      `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	Search       *SearchConfig `toml:"search"`        // search provider configuration
 }
 
 type RefereeConfig struct {

@@ -223,9 +223,12 @@ func budgetError(kind string) *wire.Error {
 }
 
 // searchProvider reports whether the roster configures a web search provider.
-// The roster has no search provider setting yet, so none is configured and
-// web_search is never among a role's definitions.
-func (e *Engine) searchProvider() bool { return false }
+func (e *Engine) searchProvider() bool {
+	if e.roster == nil || e.roster.Tools == nil || e.roster.Tools.Web == nil {
+		return false
+	}
+	return e.roster.Tools.Web.Search != nil
+}
 
 // roleTools are the tool definitions the effective preset gives the author
 // and the reviewers, from internal/tools.
