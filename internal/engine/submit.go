@@ -193,10 +193,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, refusal(wire.ErrorCodeStopping)
 	}
 
+	if e.applying != "" {
+		return wire.SubmitReply{}, busyRefusal(busyApply, e.applying)
+	}
 	if e.open != nil {
-		busy := refusal(wire.ErrorCodeBusy)
-		busy.TurnID = strPtr(e.open.id)
-		return wire.SubmitReply{}, busy
+		return wire.SubmitReply{}, busyRefusal(busyTurn, e.open.id)
 	}
 
 	if len(e.orphanedHolds) > 0 {
