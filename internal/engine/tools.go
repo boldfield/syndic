@@ -390,18 +390,17 @@ const toolResultNote = "The result of your tool call is given below between deli
 // has reached its call bound.
 const toolLimitStatement = "No further tool calls are available in this turn: the bound on tool calls has been reached. Answer from what you have."
 
-// executableGroups are the tool groups the engine can execute. web_search is
-// offered when the roster configures a search provider. web_fetch is not yet
-// wired and so is not offered. The actual network transport (fetching, searching,
-// address validation, refusal) is provided by the roster's configured endpoints.
-var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true, tools.GroupWeb: true}
+// executableGroups are the tool groups the engine can execute. web_fetch and
+// web_search are handled separately: web_search is offered only when a search
+// provider is injected; web_fetch is not yet wired.
+var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
 // offers: the tools of the preset's executable groups. File groups need a
-// workspace. Web is only offered when a search provider is configured. None
-// are offered once the author has no calls remaining under its bound; limited
-// reports that case, and the caller then sends the statement in their place.
-// e.mu is held.
+// workspace. Web_search is only offered when a search provider is configured.
+// None are offered once the author has no calls remaining under its bound;
+// limited reports that case, and the caller then sends the statement in their
+// place. e.mu is held.
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
 	var groups []string
 	for _, g := range t.eff.Preset.Tools {
@@ -409,10 +408,6 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 			continue
 		}
 		switch g {
-		case tools.GroupWeb:
-			if !e.searchProvider() || !e.groupOffered(g, t.author) {
-				continue
-			}
 		case tools.GroupRead, tools.GroupWrite:
 			if t.workspace == "" {
 				continue
@@ -427,6 +422,10 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 		}
 		groups = append(groups, g)
 	}
+	// Add web_search separately if configured and offered.
+	if e.hasPresetTool(t.eff.Preset.Tools, tools.GroupWeb) && e.searchProvider() && e.groupOffered(tools.GroupWeb, t.author) {
+		groups = append(groups, tools.GroupWeb)
+	}
 	if len(groups) == 0 {
 		return nil, false, nil
 	}
@@ -435,6 +434,16 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 	}
 	defs, err = tools.ForGroups(groups, e.searchProvider())
 	return defs, false, err
+}
+
+// hasPresetTool reports whether the preset tool list includes the given tool group.
+func (e *Engine) hasPresetTool(tools []string, group string) bool {
+	for _, g := range tools {
+		if g == group {
+			return true
+		}
+	}
+	return false
 }
 
 // groupOffered reports whether the caller may be offered the group's tools:

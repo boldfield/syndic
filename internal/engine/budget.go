@@ -222,8 +222,13 @@ func budgetError(kind string) *wire.Error {
 	return err
 }
 
-// searchProvider reports whether the roster configures a web search provider.
+// searchProvider reports whether a search provider is configured and available.
+// It first checks for an injected provider (the documented injection seam);
+// if none is injected, it checks the roster configuration.
 func (e *Engine) searchProvider() bool {
+	if e.searchProviderInst != nil {
+		return true
+	}
 	if e.roster == nil || e.roster.Tools == nil || e.roster.Tools.Web == nil {
 		return false
 	}

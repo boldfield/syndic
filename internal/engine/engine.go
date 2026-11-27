@@ -125,6 +125,11 @@ type Options struct {
 	Rand          io.Reader // nil means crypto/rand.Reader
 	NewAdapter    func(p config.Participant, ep config.EndpointProfile) (adapter transport.Adapter, adapterVersion string, err error)
 
+	// SearchProvider, when set, is injected into the engine for use by web_search.
+	// With it nil, search is not offered. This is the documented injection seam
+	// for operator-selected search provider integration.
+	SearchProvider tools.SearchProvider
+
 	// ProbeMissing lets start-time probing probe participants on endpoints
 	// declared metered or unknown (--probe-missing); none and flat endpoints
 	// are probed without it.
@@ -253,40 +258,41 @@ func New(o Options) (*Engine, error) {
 		return nil, errors.New("engine: NewAdapter is required")
 	}
 	e := &Engine{
-		store:           o.Store,
-		hub:             o.Hub,
-		rosterPath:      o.RosterPath,
-		version:         o.EngineVersion,
-		clock:           o.Clock,
-		rand:            o.Rand,
-		retryDelay:      retryDelay,
-		noDelivery:      deliveryOff,
-		probeMissing:    o.ProbeMissing,
-		probeTimeout:    probeTimeoutOf(o.ProbeTimeout),
-		probeRawDir:     o.ProbeRawDir,
-		probeExportDir:  o.ProbeExportDir,
-		journalPath:     o.JournalPath,
-		secretsDir:      o.SecretsDir,
-		noStartupProbes: o.NoStartupProbes,
-		onRunOpened:     o.OnRunOpened,
-		newAdapter:      o.NewAdapter,
-		changeLines:     o.AuthorChangeLines,
-		beforeEffect:    o.BeforeToolEffect,
-		running:         make(map[string]bool),
-		inflight:        make(map[string]int),
-		queued:          make(map[string]bool),
-		pools:           make(map[string]*pool),
-		holds:           make(map[string]*hold),
-		refereeAdapters: make(map[string]transport.Adapter),
-		orphanedHolds:   make(map[string]*hold),
-		calling:         make(map[string]bool),
-		cancelled:       make(map[string]bool),
-		cancelling:      make(map[string]int),
-		pstate:          make(map[string]string),
-		failed:          make(map[string]string),
-		deliveries:      make(map[string]*openTurn),
-		probed:          make(map[string]bool),
-		stoppingCh:      make(chan struct{}),
+		store:              o.Store,
+		hub:                o.Hub,
+		rosterPath:         o.RosterPath,
+		version:            o.EngineVersion,
+		clock:              o.Clock,
+		rand:               o.Rand,
+		retryDelay:         retryDelay,
+		noDelivery:         deliveryOff,
+		probeMissing:       o.ProbeMissing,
+		probeTimeout:       probeTimeoutOf(o.ProbeTimeout),
+		probeRawDir:        o.ProbeRawDir,
+		probeExportDir:     o.ProbeExportDir,
+		journalPath:        o.JournalPath,
+		secretsDir:         o.SecretsDir,
+		noStartupProbes:    o.NoStartupProbes,
+		onRunOpened:        o.OnRunOpened,
+		newAdapter:         o.NewAdapter,
+		changeLines:        o.AuthorChangeLines,
+		beforeEffect:       o.BeforeToolEffect,
+		searchProviderInst: o.SearchProvider,
+		running:            make(map[string]bool),
+		inflight:           make(map[string]int),
+		queued:             make(map[string]bool),
+		pools:              make(map[string]*pool),
+		holds:              make(map[string]*hold),
+		refereeAdapters:    make(map[string]transport.Adapter),
+		orphanedHolds:      make(map[string]*hold),
+		calling:            make(map[string]bool),
+		cancelled:          make(map[string]bool),
+		cancelling:         make(map[string]int),
+		pstate:             make(map[string]string),
+		failed:             make(map[string]string),
+		deliveries:         make(map[string]*openTurn),
+		probed:             make(map[string]bool),
+		stoppingCh:         make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
 	if e.clock == nil {
