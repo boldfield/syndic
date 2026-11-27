@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -114,9 +115,15 @@ type EndpointProfile struct {
 	RefereeEndpoint   string               `toml:"referee_endpoint"` // optional local endpoint for referee
 }
 
+// ModeDeliberate is the preset mode in which proposers draft and an
+// integrator merges (v8 section 1).
+const ModeDeliberate = "deliberate"
+
 type Preset struct {
-	Mode              string     `toml:"mode"` // "solo" or "review"
+	Mode              string     `toml:"mode"` // "solo", "review" or "deliberate"
 	Author            string     `toml:"author"`
+	Proposers         []string   `toml:"proposers"`  // deliberate only
+	Integrator        string     `toml:"integrator"` // deliberate only
 	RequiredReviewers []string   `toml:"required_reviewers"`
 	Tools             []string   `toml:"tools"`               // subset of ["read", "web", "write"] for author
 	ReviewerTools     []string   `toml:"reviewer_tools"`      // subset of ["read", "web"] for reviewers
@@ -124,6 +131,39 @@ type Preset struct {
 	Deadlines         *Deadlines `toml:"deadlines"`
 	Budgets           *Budgets   `toml:"budgets"`
 	Revision          *Revision  `toml:"revision"`
+}
+
+// EffectiveRequiredReviewers is the explicit required_reviewers, or, when
+// absent, every proposer other than the integrator in proposer order.
+func (p Preset) EffectiveRequiredReviewers() []string {
+	if p.RequiredReviewers != nil {
+		return slices.Clone(p.RequiredReviewers)
+	}
+	out := []string{}
+	for _, id := range p.Proposers {
+		if id != p.Integrator {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// DeliberateProposers returns the proposers in roster order.
+func (p Preset) DeliberateProposers() []string { return slices.Clone(p.Proposers) }
+
+// DeliberateIntegrator returns the integrator id.
+func (p Preset) DeliberateIntegrator() string { return p.Integrator }
+
+// ProposersWithoutVote returns the proposers that are not required reviewers.
+func (p Preset) ProposersWithoutVote() []string {
+	reviewers := p.EffectiveRequiredReviewers()
+	out := []string{}
+	for _, id := range p.Proposers {
+		if !slices.Contains(reviewers, id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 type QuickProfile struct {

@@ -1,0 +1,13 @@
+syndic-deliberation/v1
+proposal 14
+first
+proposal
+proposal 0
+
+critique 9
+critique
+
+critique 15
+second critique
+disposition 9
+integrate
