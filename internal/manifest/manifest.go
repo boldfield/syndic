@@ -497,6 +497,15 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 			if qp.Budgets.ReviewerMaxOutputTokens != nil {
 				bMap["reviewer_max_output_tokens"] = *qp.Budgets.ReviewerMaxOutputTokens
 			}
+			if qp.Budgets.ProposerMaxOutputTokens != nil {
+				bMap["proposer_max_output_tokens"] = *qp.Budgets.ProposerMaxOutputTokens
+			}
+			if qp.Budgets.CritiqueMaxOutputTokens != nil {
+				bMap["critique_max_output_tokens"] = *qp.Budgets.CritiqueMaxOutputTokens
+			}
+			if qp.Budgets.IntegratorMaxOutputTokens != nil {
+				bMap["integrator_max_output_tokens"] = *qp.Budgets.IntegratorMaxOutputTokens
+			}
 			if qp.Budgets.DeliveryMaxTokens != nil {
 				bMap["delivery_max_tokens"] = *qp.Budgets.DeliveryMaxTokens
 			}

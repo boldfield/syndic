@@ -1766,3 +1766,33 @@ func TestBuild_DeliberatePresetAffectsRosterHash(t *testing.T) {
 		t.Error("different proposers should produce different roster hash")
 	}
 }
+
+func TestRosterToMap_QuickProfileDeliberateBounds(t *testing.T) {
+	p, c, i := 111, 222, 333
+	roster := &config.Roster{
+		Quick: map[string]config.QuickProfile{
+			"fast": {Preset: "x", Budgets: &config.Budgets{
+				ProposerMaxOutputTokens:   &p,
+				CritiqueMaxOutputTokens:   &c,
+				IntegratorMaxOutputTokens: &i,
+			}},
+		},
+	}
+	m, err := rosterToMap(roster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, ok := m["quick"].(map[string]map[string]interface{})["fast"]["budgets"].(map[string]interface{})
+	if !ok {
+		t.Fatal("quick profile budgets not serialized")
+	}
+	for k, want := range map[string]int{
+		"proposer_max_output_tokens":   111,
+		"critique_max_output_tokens":   222,
+		"integrator_max_output_tokens": 333,
+	} {
+		if b[k] != want {
+			t.Errorf("%s = %v, want %d", k, b[k], want)
+		}
+	}
+}
