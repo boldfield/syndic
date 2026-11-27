@@ -11,8 +11,10 @@ import (
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
+	"github.com/boldfield/syndic/internal/tui/followtest"
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest"
 )
 
@@ -282,11 +284,15 @@ func TestTranscriptLargeOutputReachableByScrolling(t *testing.T) {
 	r := startAnswerRig(t, h)
 	submit(t, r, wire.SubmitRequest{SubmissionID: "big", Input: "question", Preset: ptr("solo")})
 	turn := turnIn(t, r, "solo_complete")
-	// Opened once the turn is over, so the view starts at the top.
+	// A view starts at the bottom (addendum 1, section 3), so the last line is shown.
 	openTranscript(t, r, settled(t, r, turn), 80, 24)
 	var v string
+	if v = view(t, r); !strings.Contains(v, "row-19999") {
+		t.Fatalf("the last line is not visible at the start:\n%s", v)
+	}
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	if v = view(t, r); strings.Contains(v, "row-19999") {
-		t.Fatal("the last line is visible at the top")
+		t.Fatal("the last line is visible after Home")
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyEnd})
 	if v = view(t, r); !strings.Contains(v, "row-19999") {
@@ -394,18 +400,19 @@ func seedItems(a *App, from, to int) []wire.TranscriptItem {
 func TestTranscriptViewStaysPutWhileScrolledUp(t *testing.T) {
 	a := transcriptApp(80, 24)
 	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 40)})
-	a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	a.Update(tea.KeyMsg{Type: tea.KeyHome})
-	top := a.View()
+	// Below the tab bar, which shows the count and the percentage.
+	below := func() string { return strings.SplitN(a.View(), "\n", 2)[1] }
+	top := below()
 	if !strings.Contains(top, "body 000") {
 		t.Fatalf("not at the top:\n%s", top)
 	}
 	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 60)})
-	if a.View() != top {
+	if below() != top {
 		t.Fatalf("the view moved when items arrived:\n%s", a.View())
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
-	if a.View() == top {
+	if below() == top {
 		t.Fatal("PgDown did not scroll")
 	}
 }
@@ -454,7 +461,16 @@ func TestTranscriptScrollKeys(t *testing.T) {
 	a := transcriptApp(80, 24)
 	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 100)})
 	body := a.bodyHeight()
-	row := func() int { return a.tRow }
+	last := len(a.tLines) - body
+	row := func() int { first, _, _ := a.layoutTranscript(); return first }
+	// The tab starts at the bottom (addendum 1, section 3: a view starts at the bottom).
+	if row() != last {
+		t.Fatalf("start: row %d, want the bottom %d", row(), last)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyHome})
+	if row() != 0 {
+		t.Fatalf("home: row %d", row())
+	}
 	a.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if row() != 1 {
 		t.Fatalf("down: row %d", row())
@@ -473,17 +489,99 @@ func TestTranscriptScrollKeys(t *testing.T) {
 		t.Fatalf("page up: row %d", row())
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
-	if row() != len(a.tLines)-body {
-		t.Fatalf("end: row %d, want %d", row(), len(a.tLines)-body)
+	if row() != last {
+		t.Fatalf("end: row %d, want %d", row(), last)
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if row() != len(a.tLines)-body {
+	if row() != last {
 		t.Fatalf("down past the end: row %d", row())
 	}
-	a.Update(tea.KeyMsg{Type: tea.KeyHome})
-	if row() != 0 {
-		t.Fatalf("home: row %d", row())
+}
+
+// While away from the bottom, an entry above the view loads its body and grows: the first
+// shown row does not change (addendum 1, section 4).
+func TestTranscriptHoldsItsPlaceWhileAnEntryAboveLoads(t *testing.T) {
+	a := transcriptApp(80, 24)
+	items := seedItems(a, 0, 40)
+	long := wire.TranscriptItem{ID: "mlong", Ref: "msg:mlong", ByteLen: 100}
+	items[2] = long
+	a.Update(transcriptMsg{turn: "t1", items: items})
+	a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	first, bottom, _ := a.layoutTranscript()
+	if bottom || first <= len(a.tLines)/4 {
+		t.Fatalf("setup: first %d of %d, bottom %t", first, len(a.tLines), bottom)
 	}
+	at := a.tRows[first]
+	before := len(a.tLines)
+	a.content.Store(long.Ref, strings.Repeat("grown\n", 15), nil)
+	a.Update(contentMsg{})
+	if len(a.tLines) <= before {
+		t.Fatalf("the entry did not grow: %d lines, was %d", len(a.tLines), before)
+	}
+	now, bottom, _ := a.layoutTranscript()
+	if bottom || a.tRows[now] != at {
+		t.Fatalf("first shown row is %+v at %d, was %+v at %d", a.tRows[now], now, at, first)
+	}
+}
+
+func TestTranscriptCountIsOnTheHeaderLine(t *testing.T) {
+	a := transcriptApp(80, 24)
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 40)})
+	a.Update(tea.KeyMsg{Type: tea.KeyHome})
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 50)})
+	head := strings.Split(ansi.Strip(a.View()), "\n")[0]
+	if !strings.Contains(head, "↓ ") || !strings.Contains(head, " new lines · ") || !strings.HasSuffix(strings.TrimRight(head, " "), "%") {
+		t.Fatalf("header line %q", head)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if head := strings.Split(ansi.Strip(a.View()), "\n")[0]; strings.Contains(head, "new lines") {
+		t.Fatalf("count at the bottom: %q", head)
+	}
+}
+
+// transcriptView adapts the transcript tab to the shared case table.
+type transcriptView struct {
+	a    *App
+	rows []FollowRow
+}
+
+// place puts the case's rows in the tab, over what a message refreshed from the empty state.
+func (v *transcriptView) place() {
+	v.a.tRows = slices.Clone(v.rows)
+	v.a.layoutTranscript()
+}
+
+func (v *transcriptView) SetRows(rows []followtest.Row) {
+	v.rows = v.rows[:0:0]
+	for _, r := range rows {
+		v.rows = append(v.rows, FollowRow{r.Item, r.Char, r.End})
+	}
+	v.place()
+}
+
+func (v *transcriptView) SetHeight(h int) {
+	v.a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	chrome := 24 - v.a.bodyHeight()
+	v.a.Update(tea.WindowSizeMsg{Width: 80, Height: h + chrome})
+	if v.a.bodyHeight() != h {
+		panic(fmt.Sprintf("body height %d, want %d", v.a.bodyHeight(), h))
+	}
+	v.place()
+}
+
+func (v *transcriptView) Press(k followtest.Key) {
+	keys := map[followtest.Key]string{followtest.Up: "up", followtest.Down: "down", followtest.PageUp: "pgup",
+		followtest.PageDown: "pgdown", followtest.Home: "home", followtest.End: "end"}
+	v.a.scrollTranscript(keys[k])
+}
+
+func (v *transcriptView) First() int     { first, _, _ := v.a.layoutTranscript(); return first }
+func (v *transcriptView) AtBottom() bool { _, bottom, _ := v.a.layoutTranscript(); return bottom }
+func (v *transcriptView) Count() int     { _, _, count := v.a.layoutTranscript(); return count }
+
+func TestTranscriptFollowCases(t *testing.T) {
+	followtest.Run(t, func() followtest.View { return &transcriptView{a: transcriptApp(80, 24)} })
 }
 
 func TestTranscriptBodyStates(t *testing.T) {
@@ -573,7 +671,7 @@ func TestWrapTextKeepsEveryRune(t *testing.T) {
 	}
 }
 
-func TestTranscriptOpenedFinishedTurnStartsAtTop(t *testing.T) {
+func TestTranscriptOpenedFinishedTurnStartsAtTheBottom(t *testing.T) {
 	a := transcriptApp(80, 24)
 	var items []wire.TranscriptItem
 	for i := 0; i < 3; i++ {
@@ -587,8 +685,8 @@ func TestTranscriptOpenedFinishedTurnStartsAtTop(t *testing.T) {
 		}
 		a.Update(contentMsg{ref: fmt.Sprintf("msg:m%d", i), data: strings.Join(lines, "\n")})
 	}
-	if v := a.View(); !strings.Contains(v, "item0-line00") {
-		t.Fatalf("bodies arriving moved the view off the top:\n%s", v)
+	if v := a.View(); !strings.Contains(v, "item2-line29") {
+		t.Fatalf("bodies arriving moved the view off the bottom:\n%s", v)
 	}
 }
 

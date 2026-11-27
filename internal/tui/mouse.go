@@ -143,6 +143,7 @@ func (a *App) setTab(t tab) tea.Cmd {
 	a.panel = nil
 	a.tab = t
 	a.chatFollow.End()
+	a.tFollow.End()
 	if a.tab != tabChat {
 		a.reviewsDrawer.ForceClose()
 		a.syncDrawerWant()

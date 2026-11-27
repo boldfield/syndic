@@ -91,10 +91,8 @@ type App struct {
 	tReload     bool // a trigger arrived while it was
 	tStale      bool // tLines no longer matches what is known
 	tLines      []string
-	tRow        int  // first visible line
-	tFollow     bool // the view stays at the bottom as lines arrive, until the user scrolls away
-	tHad        bool // the lines last drawn had items, every body loaded and no reload pending
-	tHome       bool // the user pressed Home, so the view stays at the top
+	tRows       []FollowRow // the item and characters each line of tLines shows
+	tFollow     *Follow     // where the transcript stands: at the bottom, or holding a place by content
 	quarantined map[string]bool
 	blockDetail map[string]wire.OpenBlock // evidence and remedy of each block seen in a turn reply
 	pSelected   int                       // index of the selected row of the participants tab, in id order
@@ -191,6 +189,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		socket:                 socketPath,
 		input:                  newInput(),
 		chatFollow:             NewFollow(),
+		tFollow:                NewFollow(),
 		width:                  80,
 		height:                 24,
 		state:                  NewState(),
@@ -405,8 +404,9 @@ func (a *App) syncTranscript() tea.Cmd {
 		return nil
 	}
 	a.tTurn, a.tItems = t, nil
-	a.tRow, a.tFollow, a.tHome, a.tStale = 0, false, false, true
-	a.tLines, a.tHad = nil, false
+	a.tFollow.End()
+	a.tStale = true
+	a.tLines, a.tRows = nil, nil
 	return a.reloadTranscript()
 }
 
@@ -461,46 +461,34 @@ func (a *App) refreshTranscript() {
 		return
 	}
 	a.tStale = false
-	// Already at the bottom of what was shown: follow from here on, through
-	// the frames that wait on the new bodies, until the user scrolls away.
-	if !a.tHome && a.tHad && a.tRow >= a.maxTranscriptRow() {
-		a.tFollow = true
-	}
-	a.tLines = transcriptLines(a.state, a.tTurn, a.transcriptIn(), a.width)
-	a.tRow = a.clampTranscriptRow(a.tRow)
-	// A frame still waiting on bodies, or on a newer snapshot of the items, is
-	// not a bottom the user chose, so following never starts from one.
-	a.tHad = len(a.tItems) > 0 && !a.tLoading && !a.tReload && !transcriptPending(a.tItems, a.content)
-	if a.tFollow {
-		a.tRow = a.maxTranscriptRow()
-	}
+	a.tLines, a.tRows = transcriptRows(a.state, a.tTurn, a.transcriptIn(), a.width)
 }
 
-func (a *App) maxTranscriptRow() int { return max(len(a.tLines)-a.bodyHeight(), 0) }
+// layoutTranscript places the view on the lines as they are now: the first line to show,
+// whether it is at the bottom and how many lines are new.
+func (a *App) layoutTranscript() (first int, bottom bool, count int) {
+	return a.tFollow.Layout(a.tRows, a.bodyHeight())
+}
 
-func (a *App) clampTranscriptRow(row int) int { return min(max(row, 0), a.maxTranscriptRow()) }
-
-// scrollTranscript handles a scroll key; the view follows new lines only when
-// it ends at the bottom.
+// scrollTranscript handles a scroll key; the view follows new lines only when it is at the
+// bottom.
 func (a *App) scrollTranscript(key string) {
 	page := max(a.bodyHeight()-1, 1)
+	a.layoutTranscript()
 	switch key {
 	case "up":
-		a.tRow--
+		a.tFollow.Scroll(-1)
 	case "down":
-		a.tRow++
+		a.tFollow.Scroll(1)
 	case "pgup":
-		a.tRow -= page
+		a.tFollow.Scroll(-page)
 	case "pgdown":
-		a.tRow += page
+		a.tFollow.Scroll(page)
 	case "home":
-		a.tRow = 0
+		a.tFollow.Home()
 	case "end":
-		a.tRow = a.maxTranscriptRow()
+		a.tFollow.End()
 	}
-	a.tRow = a.clampTranscriptRow(a.tRow)
-	a.tHome = key == "home" || (a.tHome && a.tRow == 0)
-	a.tFollow = !a.tHome && a.tRow >= a.maxTranscriptRow()
 }
 
 // Init starts the first connection, from the beginning of the journal.
@@ -1565,13 +1553,19 @@ func (a *App) View() string {
 
 	var tabView string
 	var chat chatLayout
+	var tInfo string
 	switch a.tab {
 	case tabChat:
 		chat = a.layoutChat()
 		tabView = strings.Join(chat.lines, "\n")
 
 	case tabTranscript:
-		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
+		first, bottom, count := a.layoutTranscript()
+		tabView = strings.Join(a.tLines[min(first, len(a.tLines)):], "\n")
+		tInfo = fmt.Sprintf("%d%%", scrollPercent(len(a.tLines), bodyHeight, first))
+		if !bottom && count > 0 {
+			tInfo = fmt.Sprintf("↓ %d new lines · %s", count, tInfo)
+		}
 	case tabParticipants:
 		if a.pScrolled {
 			// A refresh can shorten the content under the offset, so the
@@ -1643,7 +1637,7 @@ func (a *App) View() string {
 	tabBar := a.tabBar()
 	if a.tab == tabTranscript {
 		// The transcript shows where its view stands at the tab bar's right.
-		tabBar = withScrollInfo(tabBar, w, fmt.Sprintf("%d%%", scrollPercent(len(a.tLines), bodyHeight, a.tRow)))
+		tabBar = withScrollInfo(tabBar, w, tInfo)
 	}
 	output := []string{ansi.Truncate(tabBar, w, "")}
 	output = append(output, lines...)
