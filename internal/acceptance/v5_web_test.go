@@ -380,7 +380,7 @@ func TestDNS_NoResolutionOnRefusal(t *testing.T) {
 func TestDNS_ResolutionAfterRefereeAllow(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	}))
 	defer server.Close()
 
@@ -402,7 +402,7 @@ func TestDNS_ResolutionAfterRefereeAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if len(resolver.calls) != 1 {
 		t.Errorf("DNS queries made: %d, want 1", len(resolver.calls))
@@ -416,7 +416,7 @@ func TestDNS_ResolutionAfterRefereeAllow(t *testing.T) {
 func TestRedirect_PinnedConnection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	}))
 	defer server.Close()
 
@@ -438,7 +438,7 @@ func TestRedirect_PinnedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if len(resolver.calls) != 1 {
 		t.Errorf("DNS queries made: %d, want 1", len(resolver.calls))
@@ -506,7 +506,7 @@ func (f *testFetcher) Fetch(ctx context.Context, rawURL string) (*http.Response,
 
 	hostname := req.URL.Hostname()
 	if f.resolver != nil {
-		f.resolver.LookupNetIP(ctx, "ip", hostname)
+		_, _ = f.resolver.LookupNetIP(ctx, "ip", hostname)
 	}
 
 	parsedURL := req.URL
@@ -526,12 +526,13 @@ func TestRedirect_SameHostRecheckAndReferee(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		if callCount == 1 {
+		switch callCount {
+		case 1:
 			w.Header().Set("Location", "http://ok.test/second")
 			w.WriteHeader(http.StatusFound)
-		} else if callCount == 2 {
+		case 2:
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("final response"))
+			_, _ = w.Write([]byte("final response"))
 		}
 	}))
 	defer server.Close()
@@ -574,7 +575,7 @@ func TestRedirect_ThreeHopMax(t *testing.T) {
 			w.WriteHeader(http.StatusFound)
 		} else {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("final"))
+			_, _ = w.Write([]byte("final"))
 		}
 	}))
 	defer server.Close()
