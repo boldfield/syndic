@@ -1,7 +1,8 @@
 // Package tools holds the canonical definitions of the engine's tools: the
-// eight function tools of the v5 delta's section 6, with their descriptions
-// and JSON schemas. Every place that counts, validates against or sends a tool
-// definition reads it from here, so every model receives the same bytes.
+// eight function tools of the v5 delta's section 6 and the bash tool of the v7
+// delta's section 2, with their descriptions and JSON schemas. Every place
+// that counts, validates against or sends a tool definition reads it from
+// here, so every model receives the same bytes.
 //
 // This file defines nothing but the definitions. It executes no tool,
 // validates no call and sends no request.
@@ -23,6 +24,7 @@ const (
 	GroupRead  = "read"
 	GroupWeb   = "web"
 	GroupWrite = "write"
+	GroupExec  = "exec"
 )
 
 // The tool names, in the fixed order of the definitions.
@@ -35,6 +37,7 @@ const (
 	NameWriteFile   = "write_file"
 	NameEditFile    = "edit_file"
 	NameUnstage     = "unstage"
+	NameBash        = "bash"
 )
 
 // definition pairs a tool with the group that enables it.
@@ -83,7 +86,7 @@ func function(group, name, description string, parameters map[string]interface{}
 	}
 }
 
-// canonical is the eight definitions in the fixed order. It is never handed
+// canonical is the nine definitions in the fixed order. It is never handed
 // out: every accessor returns a deep copy.
 var canonical = []definition{
 	function(GroupRead, NameReadFile,
@@ -140,9 +143,16 @@ var canonical = []definition{
 			"path": property("string", "Path whose staged change to withdraw, relative to the workspace root."),
 		}, "path"),
 	),
+	function(GroupExec, NameBash,
+		"Run a shell command and return its output. The command runs with `bash -c` in a private copy of the workspace that includes the changes you have staged in this turn. Standard input is empty and there is no terminal, so the command must not wait for input. Standard output and standard error are returned together, in the order written. Anything the command writes to files is discarded when it ends and does not change the workspace or your staged changes: to propose a change, use `write_file` or `edit_file`. Each command starts from a fresh copy, so nothing carries over from one command to the next; do related steps in one command. The command is checked before it runs and may be refused; a refusal is returned as an error that gives the reason. A command that exits with a non-zero status is returned as a result with its exit code, not as an error. Output beyond the size limit is cut off and the result says so. There is no network access unless the operator has allowed specific hosts.",
+		schema(map[string]interface{}{
+			"command":   property("string", "The command line to run with bash -c."),
+			"timeout_s": property("integer", "Seconds to allow before the command is stopped. Default 120. A value above the maximum is reduced to the maximum.", map[string]interface{}{"minimum": 1}),
+		}, "command"),
+	),
 }
 
-// All returns copies of all eight definitions in the fixed order, whatever a
+// All returns copies of all nine definitions in the fixed order, whatever a
 // preset enables.
 func All() []transport.Tool {
 	out := make([]transport.Tool, 0, len(canonical))
@@ -153,15 +163,15 @@ func All() []transport.Tool {
 }
 
 // ForGroups returns copies of the definitions a role holding the given groups
-// receives, in the fixed order. The groups are a subset of GroupRead, GroupWeb
-// and GroupWrite; their order and any repetition are ignored. web_search is
-// included only when a search provider is configured. An unknown group is an
-// error, and an empty set returns no definitions.
+// receives, in the fixed order. The groups are a subset of GroupRead,
+// GroupWeb, GroupWrite and GroupExec; their order and any repetition are
+// ignored. web_search is included only when a search provider is configured.
+// An unknown group is an error, and an empty set returns no definitions.
 func ForGroups(groups []string, searchProvider bool) ([]transport.Tool, error) {
 	enabled := make(map[string]bool, len(groups))
 	for _, g := range groups {
 		switch g {
-		case GroupRead, GroupWeb, GroupWrite:
+		case GroupRead, GroupWeb, GroupWrite, GroupExec:
 			enabled[g] = true
 		default:
 			return nil, fmt.Errorf("unknown tool group %q", g)
@@ -191,7 +201,7 @@ func Lookup(name string) (tool transport.Tool, group string, ok bool) {
 	return transport.Tool{}, "", false
 }
 
-// CanonicalJSON returns the canonical JSON encoding of all eight definitions
+// CanonicalJSON returns the canonical JSON encoding of all nine definitions
 // in the fixed order: the exact bytes DefinitionsHash is computed over, and
 // the content of testdata/definitions.json.
 //
@@ -207,7 +217,7 @@ func CanonicalJSON() []byte {
 }
 
 // DefinitionsHash returns the definitions hash: the lowercase hex SHA-256 of
-// CanonicalJSON. It covers all eight definitions whatever a preset enables, so
+// CanonicalJSON. It covers all nine definitions whatever a preset enables, so
 // a change to any definition changes it.
 func DefinitionsHash() string {
 	initCanonical()
