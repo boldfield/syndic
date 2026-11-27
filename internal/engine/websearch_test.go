@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +208,87 @@ func TestWebSearchPrivateAddressRefusedCredentialNeverJournaled(t *testing.T) {
 	for _, c := range calls {
 		if blob, _ := h.Store.Content(c.Result.ResultSHA256); bytes.Contains(blob, []byte(searchSecretValue)) {
 			t.Fatal("credential in a journaled result")
+		}
+	}
+}
+
+// Bytes a file read exposed cannot leave in a query: the canary refuses it
+// before the referee, the lookup or the credential.
+func TestWebSearchQueryCarryingReadBytesRefused(t *testing.T) {
+	const secretText = "hello from a very long file line"
+	dir := workspaceDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(secretText+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		toolStepWith(call("r1", tools.NameReadFile, `{"path":"a.txt"}`)),
+		toolStepWith(call("s1", tools.NameWebSearch, `{"query":"`+secretText+`"}`)),
+		allowReply(),
+		enginetest.Reply("final answer"),
+	}
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, refereeRoster(searchTOML), map[string][]fake.Step{"author": script}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "web", dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
+	calls := toolCalls(t, h, reply.TurnID)
+	if len(calls) != 2 || calls[1].Name != tools.NameWebSearch || calls[1].Status != journal.ToolCallError || calls[1].Result.ErrorCode != tools.ErrCodeRefused {
+		t.Fatalf("calls %+v, want the search refused", calls)
+	}
+	if n := len(refereeAttempts(t, h, reply.TurnID)); n != 0 || res.lookups() != 0 || secrets.reads() != 0 {
+		t.Fatalf("%d referee attempts, %d lookups, %d secret reads; want none", n, res.lookups(), secrets.reads())
+	}
+}
+
+// A turn ended during the referee's decision or the network wait leaves the
+// call abandoned: nothing is journaled as its result.
+func TestWebSearchAbandonedWhenStepEndsDuringWaits(t *testing.T) {
+	for _, afterNetwork := range []bool{false, true} {
+		var (
+			mu   sync.Mutex
+			turn string
+			h    *enginetest.Harness
+		)
+		hook := func(turnID, _, _ string) { mu.Lock(); turn = turnID; mu.Unlock() }
+		opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, &recordingResolver{}, &recordingSecrets{}), enginetest.WithBeforeToolEffect(hook))
+		h = enginetest.New(t, refereeRoster(searchTOML), map[string][]fake.Step{"author": searchScript("cats", allowReply())}, opts...)
+		sent := false
+		h.Engine.SetSearchClient(func(_ *tools.URLScreener, ref tools.Referee) (tools.SearchClient, error) {
+			return clientFunc(func(ctx context.Context, q string) (*http.Response, error) {
+				mu.Lock()
+				id := turn
+				mu.Unlock()
+				if !afterNetwork {
+					if err := h.Engine.Cancel(id); err != nil {
+						t.Error(err)
+					}
+					ok, _, err := ref.Allow(ctx, q)
+					if ok || err == nil {
+						t.Errorf("referee allowed a stale call: %v %v", ok, err)
+					}
+					return nil, err
+				}
+				if ok, _, err := ref.Allow(ctx, q); err != nil || !ok {
+					t.Errorf("referee: %v %v", ok, err)
+				}
+				if err := h.Engine.Cancel(id); err != nil {
+					t.Error(err)
+				}
+				sent = true
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("late results"))}, nil
+			}), nil
+		})
+		reply := submitWeb(t, h)
+		wantEnd(t, h, reply, engine.StateCancelled, "cancelled")
+		calls := toolCalls(t, h, reply)
+		if len(calls) != 1 || calls[0].Status != journal.ToolCallAbandoned {
+			t.Fatalf("afterNetwork=%v: calls %+v, want one abandoned", afterNetwork, calls)
+		}
+		if afterNetwork && !sent {
+			t.Fatal("the network round trip did not run")
 		}
 	}
 }

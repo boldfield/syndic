@@ -483,10 +483,9 @@ func (e *Engine) toolStepRefusal(t *openTurn, req transport.CompleteRequest) str
 // tools journal their own results against the accepted call. Each effect
 // re-checks the step after the hook, which stands in for a wait inside it.
 func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
-	turnID := t.id
 	effects := map[string]toolEffect{}
 	if fs != nil {
-		e.fileEffects(effects, fs, turnID, attemptID, hook)
+		e.fileEffects(effects, fs, t, attemptID, hook)
 	}
 	if e.searchOffered() {
 		effects[tools.NameWebSearch] = e.webSearchEffect(t, attemptID, hook)
@@ -496,10 +495,11 @@ func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID stri
 
 // fileEffects adds the read and write tools' effects over the confined
 // workspace.
-func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confined, turnID, attemptID string, hook func(turnID, attemptID, name string)) {
+func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confined, t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) {
+	turnID := t.id
 	read := tools.NewReadTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
 	write := tools.NewWriteTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
-	wrap := func(run func(callID string, args json.RawMessage) (tools.Result, error)) toolEffect {
+	wrap := func(route tools.Route, run func(callID string, args json.RawMessage) (tools.Result, error)) toolEffect {
 		return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
 			if hook != nil {
 				hook(turnID, attemptID, call.Name)
@@ -507,15 +507,22 @@ func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confin
 					return tools.Result{}, err
 				}
 			}
-			return run(call.ID, args)
+			// What the call exposes or stages is canary material for the
+			// turn's searches, whatever the call's outcome.
+			e.exposeToSearch(t, route, args)
+			res, err := run(call.ID, args)
+			if err == nil {
+				e.exposeToSearch(t, route, res.Content)
+			}
+			return res, err
 		}
 	}
-	effects[tools.NameReadFile] = wrap(read.ReadFile)
-	effects[tools.NameListDir] = wrap(read.ListDir)
-	effects[tools.NameSearchFiles] = wrap(read.SearchFiles)
-	effects[tools.NameWriteFile] = wrap(write.WriteFile)
-	effects[tools.NameEditFile] = wrap(write.EditFile)
-	effects[tools.NameUnstage] = wrap(write.Unstage)
+	effects[tools.NameReadFile] = wrap(tools.RouteSnapshotRead, read.ReadFile)
+	effects[tools.NameListDir] = wrap(tools.RouteSnapshotRead, read.ListDir)
+	effects[tools.NameSearchFiles] = wrap(tools.RouteSnapshotRead, read.SearchFiles)
+	effects[tools.NameWriteFile] = wrap(tools.RouteStagedWrite, write.WriteFile)
+	effects[tools.NameEditFile] = wrap(tools.RouteStagedWrite, write.EditFile)
+	effects[tools.NameUnstage] = wrap(tools.RouteStagedWrite, write.Unstage)
 }
 
 // toolStepMessages renders the next author attempt's messages from the

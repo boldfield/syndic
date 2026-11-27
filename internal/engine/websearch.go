@@ -24,7 +24,9 @@ type searchReferee struct {
 	turnID string
 	caller string
 	callID string
-	err    error
+	// recheck re-checks the step after the referee's decision.
+	recheck func() error
+	err     error
 }
 
 func (r *searchReferee) Allow(_ context.Context, query string) (bool, string, error) {
@@ -33,7 +35,22 @@ func (r *searchReferee) Allow(_ context.Context, query string) (bool, string, er
 		r.err = err
 		return false, "", err
 	}
+	if r.recheck != nil {
+		if err := r.recheck(); err != nil {
+			r.err = err
+			return false, "", err
+		}
+	}
 	return out.allow, out.reason, nil
+}
+
+// exposeToSearch records the bytes a file tool returned as exposed to the
+// turn's participants, so a query carrying them is refused (the canary).
+func (e *Engine) exposeToSearch(t *openTurn, route tools.Route, b []byte) {
+	if len(b) == 0 || !e.searchOffered() {
+		return
+	}
+	e.searchScreenerOf(t).AddBytes(route, b)
 }
 
 // searchScreenerOf is the turn's screener for queries, with the roster's
@@ -42,7 +59,11 @@ func (e *Engine) searchScreenerOf(t *openTurn) *tools.URLScreener {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if t.searchScreener == nil {
-		s := tools.NewURLScreener(0)
+		max := 0
+		if e.roster != nil && e.roster.Tools != nil && e.roster.Tools.MaxFetchesPerTurn != nil {
+			max = *e.roster.Tools.MaxFetchesPerTurn
+		}
+		s := tools.NewURLScreener(max)
 		if e.roster != nil && e.roster.Tools != nil {
 			// A bad allowlist already leaves search unoffered.
 			policy, _ := tools.HostPolicyFromConfig(e.roster.Tools.Web)
@@ -107,9 +128,9 @@ func (e *Engine) webSearchEffect(t *openTurn, attemptID string, hook func(turnID
 		}
 		ctx, cancel := context.WithDeadline(context.Background(), t.turnDeadline)
 		defer cancel()
-		ref := &searchReferee{e: e, turnID: t.id, caller: t.author, callID: call.ID}
+		ref := &searchReferee{e: e, turnID: t.id, caller: t.author, callID: call.ID, recheck: recheck}
 		client := &abandoningClient{inner: e.searchClient(scr, ref), ref: ref, cancel: cancel}
-		res, err := tools.NewWebSearchTools(client, e.store, t.id, attemptID, e.maxResultBytes()).WebSearch(ctx, call.ID, args)
+		res, err := tools.NewWebSearchTools(client, e.store, t.id, attemptID, e.maxResultBytes()).WithRecheck(recheck).WebSearch(ctx, call.ID, args)
 		if err != nil && ref.err != nil && errors.Is(ref.err, errToolAbandoned) {
 			return tools.Result{}, ref.err
 		}

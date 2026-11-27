@@ -181,6 +181,15 @@ type WebSearchTools struct {
 	turnID         string
 	attemptID      string
 	maxResultBytes int
+	recheck        func() error
+}
+
+// WithRecheck sets a check run after the search's network wait and before its
+// result is journaled. When it fails, its error is returned, nothing is
+// journaled, and the caller abandons the call.
+func (t *WebSearchTools) WithRecheck(f func() error) *WebSearchTools {
+	t.recheck = f
+	return t
 }
 
 // NewWebSearchTools returns the search tool. maxResultBytes <= 0 selects
@@ -206,6 +215,11 @@ func (t *WebSearchTools) WebSearch(ctx context.Context, callID string, raw json.
 	res, status, err := outcome(content, err)
 	if err != nil {
 		return Result{}, err
+	}
+	if t.recheck != nil {
+		if err := t.recheck(); err != nil {
+			return Result{}, err
+		}
 	}
 	if jerr := t.j.Tx(func(tx *journal.Tx) error {
 		_, e := tx.RecordToolResult(callID, status, res.Content, res.ErrorCode)
