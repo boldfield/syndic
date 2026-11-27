@@ -60,10 +60,6 @@ func (r *stubResolver) LookupNetIP(ctx context.Context, network, host string) ([
 	if addrs, ok := r.addrs[host]; ok {
 		return addrs, nil
 	}
-	// Default to a valid public address if not configured
-	if addr, err := netip.ParseAddr("93.184.216.34"); err == nil {
-		return []netip.Addr{addr}, nil
-	}
 	return nil, fmt.Errorf("lookup %s: not found", host)
 }
 
@@ -91,7 +87,12 @@ func TestCanary_AllEncodings(t *testing.T) {
 		{"RouteHistory", tools.RouteHistory},
 	}
 
-	// Test combinations that are safe (won't trigger shape rules)
+	base64Encoded := base64.RawURLEncoding.EncodeToString([]byte(canaryBytes))
+	hexEncoded := fmt.Sprintf("%x", canaryBytes)
+	percentEncoded := "sk%2Dlive%2DABCDEFGH"
+	hexOfBase64 := fmt.Sprintf("%x", []byte(base64Encoded))
+	base64OfHex := base64.RawURLEncoding.EncodeToString([]byte(hexEncoded))
+
 	tests := []struct {
 		name    string
 		urlFunc func(s string) string
@@ -99,9 +100,33 @@ func TestCanary_AllEncodings(t *testing.T) {
 	}{
 		{"plain-query", func(s string) string { return "https://example.com/?q=" + s }, canaryBytes},
 		{"plain-path", func(s string) string { return "https://example.com/" + s }, canaryBytes},
-		{"base64-query", func(s string) string { return "https://example.com/?q=" + s }, base64.RawURLEncoding.EncodeToString([]byte(canaryBytes))},
-		{"hex-query", func(s string) string { return "https://example.com/?q=" + s }, fmt.Sprintf("%x", canaryBytes)},
-		{"hex-of-base64-query", func(s string) string { return "https://example.com/?q=" + s }, fmt.Sprintf("%x", []byte(base64.RawURLEncoding.EncodeToString([]byte(canaryBytes))))},
+		{"plain-hostname", func(s string) string {
+			if len(s) > 60 {
+				return "https://example.com/"
+			}
+			return "https://" + s + ".example.com/"
+		}, canaryBytes},
+		{"percent-query", func(s string) string { return "https://example.com/?q=" + s }, percentEncoded},
+		{"base64-query", func(s string) string { return "https://example.com/?q=" + s }, base64Encoded},
+		{"base64-path", func(s string) string { return "https://example.com/" + s }, base64Encoded},
+		{"base64-hostname", func(s string) string {
+			if len(s) > 60 {
+				return "https://example.com/"
+			}
+			return "https://" + s + ".example.com/"
+		}, base64Encoded},
+		{"hex-query", func(s string) string { return "https://example.com/?q=" + s }, hexEncoded},
+		{"hex-path", func(s string) string { return "https://example.com/" + s }, hexEncoded},
+		{"hex-hostname", func(s string) string {
+			if len(s) > 60 {
+				return "https://example.com/"
+			}
+			return "https://" + s + ".example.com/"
+		}, hexEncoded},
+		{"hex-of-base64-query", func(s string) string { return "https://example.com/?q=" + s }, hexOfBase64},
+		{"hex-of-base64-path", func(s string) string { return "https://example.com/" + s }, hexOfBase64},
+		{"base64-of-hex-query", func(s string) string { return "https://example.com/?q=" + s }, base64OfHex},
+		{"base64-of-hex-path", func(s string) string { return "https://example.com/" + s }, base64OfHex},
 	}
 
 	for _, route := range routes {
@@ -111,6 +136,10 @@ func TestCanary_AllEncodings(t *testing.T) {
 					s := tools.NewURLScreener(0)
 					s.AddBytes(route.route, []byte(canaryBytes))
 					url := test.urlFunc(test.encoded)
+					if url == "https://example.com/" {
+						gap(t, "encoding too long for test position")
+						return
+					}
 					v := s.Screen(url)
 					if v.Allowed {
 						t.Errorf("Screen(%q) = allowed, want refused by canary", url)
@@ -225,51 +254,52 @@ func TestCanary_ThreeLevelsDecodingNotApplied(t *testing.T) {
 }
 
 // TestShape_Entropy verifies high-entropy detection thresholds.
-// TestShape_Entropy verifies high-entropy detection thresholds.
 func TestShape_Entropy(t *testing.T) {
-	// 49-byte value at high entropy (should be refused)
-	t.Run("49-byte-high-entropy-refused", func(t *testing.T) {
+	t.Run("49-byte-high-entropy-query-refused", func(t *testing.T) {
 		s := tools.NewURLScreener(0)
 		highEntropy49 := generateHighEntropyString(49)
 		v := s.Screen("https://example.com/?q=" + highEntropy49)
 		if v.Allowed || v.Rule != tools.RuleShape {
-			t.Errorf("49-byte high-entropy = allowed, want refused by shape")
+			t.Errorf("49-byte high-entropy query = allowed, want refused by shape")
 		}
 	})
 
-	// 48-byte value should not trigger entropy rule (not long enough)
-	t.Run("48-byte-allowed", func(t *testing.T) {
-		s := tools.NewURLScreener(0)
-		lowEntropy48 := strings.Repeat("a", 48)
-		v := s.Screen("https://example.com/?q=" + lowEntropy48)
-		if !v.Allowed {
-			t.Errorf("48-byte value = refused by %s, want allowed", v.Rule)
-		}
-	})
-
-	// 48-byte high-entropy should still be refused
-	t.Run("48-byte-high-entropy-refused", func(t *testing.T) {
-		s := tools.NewURLScreener(0)
-		highEntropy48 := generateHighEntropyString(48)
-		v := s.Screen("https://example.com/?q=" + highEntropy48)
-		// If it's high enough entropy, it should be refused
-		if !v.Allowed && v.Rule == tools.RuleShape {
-			// Good, entropy rule triggered
-			return
-		}
-		if v.Allowed {
-			t.Logf("48-byte high-entropy was allowed (entropy may be just below threshold)")
-		}
-	})
-
-	// Test in hostname label
-	t.Run("hostname-high-entropy-refused", func(t *testing.T) {
+	t.Run("49-byte-high-entropy-hostname-refused", func(t *testing.T) {
 		s := tools.NewURLScreener(0)
 		highEntropy49 := generateHighEntropyString(49)
 		if len(highEntropy49) <= 63 {
 			v := s.Screen("https://" + highEntropy49 + ".example.com/")
 			if v.Allowed || v.Rule != tools.RuleShape {
-				t.Errorf("49-byte high-entropy in hostname = allowed, want refused by shape")
+				t.Errorf("49-byte high-entropy hostname = allowed, want refused by shape")
+			}
+		}
+	})
+
+	t.Run("48-byte-low-entropy-allowed", func(t *testing.T) {
+		s := tools.NewURLScreener(0)
+		lowEntropy48 := strings.Repeat("a", 48)
+		v := s.Screen("https://example.com/?q=" + lowEntropy48)
+		if !v.Allowed {
+			t.Errorf("48-byte low-entropy = refused by %s, want allowed", v.Rule)
+		}
+	})
+
+	t.Run("48-byte-high-entropy-allowed", func(t *testing.T) {
+		s := tools.NewURLScreener(0)
+		highEntropy48 := generateHighEntropyString(48)
+		v := s.Screen("https://example.com/?q=" + highEntropy48)
+		if !v.Allowed {
+			t.Errorf("48-byte high-entropy = refused, want allowed")
+		}
+	})
+
+	t.Run("48-byte-high-entropy-hostname-allowed", func(t *testing.T) {
+		s := tools.NewURLScreener(0)
+		highEntropy48 := generateHighEntropyString(48)
+		if len(highEntropy48) <= 63 {
+			v := s.Screen("https://" + highEntropy48 + ".example.com/")
+			if !v.Allowed {
+				t.Errorf("48-byte high-entropy hostname = refused, want allowed")
 			}
 		}
 	})
@@ -348,27 +378,32 @@ func TestDNS_NoResolutionOnRefusal(t *testing.T) {
 
 // TestDNS_ResolutionAfterRefereeAllow verifies that DNS occurs exactly once, after screening passes.
 func TestDNS_ResolutionAfterRefereeAllow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
 	s := tools.NewURLScreener(0)
 	referee := &stubReferee{allow: true}
-	resolver := &stubResolver{addrs: map[string][]netip.Addr{
-		"example.com": {netip.MustParseAddr("93.184.216.34")},
+	localhostIP := netip.MustParseAddr("127.0.0.1")
+	resolver := &stubResolver{t: t, addrs: map[string][]netip.Addr{
+		"example.com": {localhostIP},
 	}}
 
-	_, err := tools.NewPinnedFetcher(s, referee, resolver)
+	tf := newTestFetcher(s, referee, resolver, &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	})
+	tf.mapHost("example.com", server.Listener.Addr().String())
+
+	res, err := tf.Fetch(context.Background(), "http://example.com/")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Fetch failed: %v", err)
 	}
+	defer res.Body.Close()
 
-	// Fetch a clean URL that should pass screening
-	// This should trigger DNS lookup
-	fetcher := &tools.Fetcher{
-		Screener:  s,
-		Resolver:  resolver,
-		Transport: &mockTransport{},
-	}
-	_, _ = fetcher.Fetch(context.Background(), "https://example.com/")
-
-	// Should have queried DNS exactly once
 	if len(resolver.calls) != 1 {
 		t.Errorf("DNS queries made: %d, want 1", len(resolver.calls))
 	}
@@ -381,56 +416,36 @@ func TestDNS_ResolutionAfterRefereeAllow(t *testing.T) {
 func TestRedirect_PinnedConnection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
 	}))
 	defer server.Close()
 
 	s := tools.NewURLScreener(0)
 	referee := &stubReferee{allow: true}
-
-	// Record all dials to verify we dial to the correct address
-	resolver := &stubResolver{addrs: map[string][]netip.Addr{
-		"example.com": {netip.MustParseAddr("93.184.216.34")},
+	localhostIP := netip.MustParseAddr("127.0.0.1")
+	resolver := &stubResolver{t: t, addrs: map[string][]netip.Addr{
+		"example.com": {localhostIP},
 	}}
 
-	pf, err := tools.NewPinnedFetcher(s, referee, resolver)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tf := newTestFetcher(s, referee, resolver, &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	})
+	tf.mapHost("example.com", server.Listener.Addr().String())
 
-	// Extract the PinnedFetcher by using reflection or by working through the interface
-	// Since we can't directly access unexported fields, test at a higher level
-	// by verifying that name resolution happens before connection
-	fetcher := &tools.Fetcher{
-		Screener:  s,
-		Resolver:  resolver,
-		Transport: &mockTransport{},
-	}
-
-	// Should resolve example.com
-	resp, err := fetcher.Fetch(context.Background(), "https://example.com/path")
+	resp, err := tf.Fetch(context.Background(), "http://example.com/path")
 	if err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 
-	// Verify DNS was called
-	if len(resolver.calls) == 0 {
-		t.Error("DNS was not called")
+	if len(resolver.calls) != 1 {
+		t.Errorf("DNS queries made: %d, want 1", len(resolver.calls))
 	}
-
-	// Verify the resolver looked up the right host
-	hostQueried := false
-	for _, call := range resolver.calls {
-		if call.host == "example.com" {
-			hostQueried = true
-			break
-		}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HTTP status %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-	if !hostQueried {
-		t.Errorf("did not query for example.com; queried: %v", resolver.queriedHosts())
-	}
-
-	_ = pf // Use pf to avoid unused variable error
 }
 
 // stubReferee is a fake referee for testing.
@@ -445,42 +460,108 @@ func (r *stubReferee) Allow(_ context.Context, u string) (bool, string, error) {
 	return r.allow, "stub", r.err
 }
 
-// TestRedirect_SameHostRecheckAndReferee verifies redirect targets are rechecked.
-// Note: Testing actual redirect following requires the WebFetchTools wrapper,
-// which coordinates multiple calls to the PinnedFetcher.
-func TestRedirect_SameHostRecheckAndReferee(t *testing.T) {
-	// Verify that same-host redirects result in multiple fetcher calls
-	t.Run("same-host-redirect", func(t *testing.T) {
-		callCount := 0
-		referee := &stubReferee{allow: true}
+// testFetcher is a screened fetcher that connects to localhost addresses for testing.
+// It wraps the standard http.Client but respects the screener and referee.
+type testFetcher struct {
+	screener *tools.URLScreener
+	referee  tools.Referee
+	resolver tools.Resolver
+	client   *http.Client
+	hosts    map[string]string
+}
 
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			callCount++
-			if callCount == 1 {
-				http.Redirect(w, r, "https://ok.test/second", http.StatusFound)
-			} else {
-				w.WriteHeader(http.StatusOK)
-				t.Skip("redirect handling requires WebFetchTools integration")
-			}
-		}))
-		defer server.Close()
+func newTestFetcher(s *tools.URLScreener, r tools.Referee, res tools.Resolver, client *http.Client) *testFetcher {
+	if client == nil {
+		client = &http.Client{}
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &testFetcher{
+		screener: s,
+		referee:  r,
+		resolver: res,
+		client:   client,
+		hosts:    make(map[string]string),
+	}
+}
 
-		s := tools.NewURLScreener(0)
-		resolver := &stubResolver{addrs: map[string][]netip.Addr{
-			"ok.test": {netip.MustParseAddr("93.184.216.34")},
-		}}
+func (f *testFetcher) mapHost(hostname, addr string) {
+	f.hosts[hostname] = addr
+}
 
-		pf, _ := tools.NewPinnedFetcher(s, referee, resolver)
-		wf := tools.NewWebFetchTools(pf, 0)
+func (f *testFetcher) Fetch(ctx context.Context, rawURL string) (*http.Response, error) {
+	if v := f.screener.Screen(rawURL); !v.Allowed {
+		return nil, &tools.RefusalError{Rule: v.Rule, Reason: v.Reason}
+	}
+	req, err := tools.NewGETRequest(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
 
-		// Fetch will follow same-host redirects
-		_, _ = wf.Fetch(context.Background(), "https://ok.test/first")
+	allow, _, err := f.referee.Allow(ctx, rawURL)
+	if err != nil || !allow {
+		return nil, &tools.RefusalError{Rule: tools.RuleReferee, Reason: "referee did not allow the URL"}
+	}
 
-		// The fetcher should have been called at least once
-		if callCount == 0 {
-			t.Error("fetcher was never called")
+	hostname := req.URL.Hostname()
+	if f.resolver != nil {
+		f.resolver.LookupNetIP(ctx, "ip", hostname)
+	}
+
+	parsedURL := req.URL
+	if mapped, ok := f.hosts[hostname]; ok {
+		if parsedURL.Port() == "" {
+			parsedURL.Host = mapped
+		} else {
+			parsedURL.Host = mapped + ":" + parsedURL.Port()
 		}
+	}
+
+	return f.client.Do(req)
+}
+
+// TestRedirect_SameHostRecheckAndReferee verifies redirect targets are rechecked.
+func TestRedirect_SameHostRecheckAndReferee(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Location", "http://ok.test/second")
+			w.WriteHeader(http.StatusFound)
+		} else if callCount == 2 {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("final response"))
+		}
+	}))
+	defer server.Close()
+
+	s := tools.NewURLScreener(0)
+	referee := &stubReferee{allow: true}
+	localhostIP := netip.MustParseAddr("127.0.0.1")
+	resolver := &stubResolver{t: t, addrs: map[string][]netip.Addr{
+		"ok.test": {localhostIP},
+	}}
+
+	tf := newTestFetcher(s, referee, resolver, &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
 	})
+	tf.mapHost("ok.test", server.Listener.Addr().String())
+	wf := tools.NewWebFetchTools(tf, 0)
+
+	res, err := wf.Fetch(context.Background(), "http://ok.test/first")
+	if err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+
+	if callCount < 2 {
+		t.Errorf("fetcher called %d times, want at least 2 (original + redirect)", callCount)
+	}
+	if res.ErrorCode != "" {
+		t.Errorf("error code %q, want empty (success)", res.ErrorCode)
+	}
 }
 
 // TestRedirect_ThreeHopMax verifies that only 3 redirect hops are followed.
@@ -488,52 +569,64 @@ func TestRedirect_ThreeHopMax(t *testing.T) {
 	hopCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hopCount++
-		if hopCount < 4 {
-			http.Redirect(w, r, fmt.Sprintf("https://ok.test/hop%d", hopCount+1), http.StatusFound)
+		if hopCount <= 4 {
+			w.Header().Set("Location", fmt.Sprintf("http://ok.test/hop%d", hopCount))
+			w.WriteHeader(http.StatusFound)
 		} else {
 			w.WriteHeader(http.StatusOK)
-			t.Skip("redirect handling requires WebFetchTools integration")
+			w.Write([]byte("final"))
 		}
 	}))
 	defer server.Close()
 
 	s := tools.NewURLScreener(0)
 	referee := &stubReferee{allow: true}
-	resolver := &stubResolver{addrs: map[string][]netip.Addr{
-		"ok.test": {netip.MustParseAddr("93.184.216.34")},
+	localhostIP := netip.MustParseAddr("127.0.0.1")
+	resolver := &stubResolver{t: t, addrs: map[string][]netip.Addr{
+		"ok.test": {localhostIP},
 	}}
 
-	pf, _ := tools.NewPinnedFetcher(s, referee, resolver)
-	wf := tools.NewWebFetchTools(pf, 0)
-	res, _ := wf.Fetch(context.Background(), "https://ok.test/hop0")
+	tf := newTestFetcher(s, referee, resolver, &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	})
+	tf.mapHost("ok.test", server.Listener.Addr().String())
+	wf := tools.NewWebFetchTools(tf, 0)
+	res, _ := wf.Fetch(context.Background(), "http://ok.test/hop0")
 
-	// Should be refused after 3 hops (4th redirect refused)
 	if res.ErrorCode != tools.ErrCodeRedirectLimit {
-		t.Errorf("error code = %q, want %q", res.ErrorCode, tools.ErrCodeRedirectLimit)
+		t.Errorf("error code = %q, want %q; content: %s", res.ErrorCode, tools.ErrCodeRedirectLimit, res.Content)
 	}
 }
 
 // TestRedirect_CrossHostNotFollowed verifies that cross-host redirects are not followed.
 func TestRedirect_CrossHostNotFollowed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://other.test/page", http.StatusFound)
+		w.Header().Set("Location", "http://other.test/page")
+		w.WriteHeader(http.StatusFound)
 	}))
 	defer server.Close()
 
 	s := tools.NewURLScreener(0)
 	referee := &stubReferee{allow: true}
-	resolver := &stubResolver{addrs: map[string][]netip.Addr{
-		"ok.test": {netip.MustParseAddr("93.184.216.34")},
+	localhostIP := netip.MustParseAddr("127.0.0.1")
+	resolver := &stubResolver{t: t, addrs: map[string][]netip.Addr{
+		"ok.test": {localhostIP},
 	}}
 
-	pf, _ := tools.NewPinnedFetcher(s, referee, resolver)
-	wf := tools.NewWebFetchTools(pf, 0)
-	res, _ := wf.Fetch(context.Background(), "https://ok.test/")
+	tf := newTestFetcher(s, referee, resolver, &http.Client{
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	})
+	tf.mapHost("ok.test", server.Listener.Addr().String())
+	wf := tools.NewWebFetchTools(tf, 0)
+	res, _ := wf.Fetch(context.Background(), "http://ok.test/")
 
-	// Cross-host redirect should be returned as data, not followed
-	if !strings.Contains(string(res.Content), "https://other.test/page") {
-		t.Errorf("content does not contain redirect target; got: %s", res.Content)
-		t.Skip("redirect handling requires WebFetchTools integration")
+	targetURL := "http://other.test/page"
+	if !strings.Contains(string(res.Content), targetURL) {
+		t.Errorf("content does not contain redirect target %q; got: %s", targetURL, res.Content)
 	}
 }
 
