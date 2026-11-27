@@ -73,18 +73,18 @@ func TestModeAppliesToOneSubmit(t *testing.T) {
 
 	r.typeLine("/mode nope")
 	v := untilView(t, r, `unknown preset "nope"`, "presets: review, solo")
-	if strings.Contains(v, "[next:") {
+	if strings.Contains(v, "next:") {
 		t.Fatalf("a refused preset is pending:\n%s", v)
 	}
 
 	r.typeLine("/mode solo")
-	untilView(t, r, "[review] [next: solo]")
+	untilView(t, r, "review · next: solo")
 	r.typeLine("first")
 	solo := turnIn(t, r, "solo_complete")
 	if got := presetOf(t, r, solo); got != "solo" {
 		t.Fatalf("first submit ran preset %q", got)
 	}
-	if v := view(t, r); strings.Contains(v, "[next:") {
+	if v := view(t, r); strings.Contains(v, "next:") {
 		t.Fatalf("the preset is still pending after the submit:\n%s", v)
 	}
 
