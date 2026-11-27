@@ -200,7 +200,11 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 	_, turn := toolLoopsSubmit(t, s, c, "s1")
 
 	if turn.State != engine.StateApproved {
-		t.Fatalf("expected approved, got state=%s", turn.State)
+		reason := ""
+		if turn.TerminalReason != nil {
+			reason = *turn.TerminalReason
+		}
+		t.Fatalf("expected approved, got state=%s reason=%s", turn.State, reason)
 	}
 }
 
