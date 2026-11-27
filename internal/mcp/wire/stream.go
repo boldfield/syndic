@@ -39,7 +39,11 @@ func (s *Stream) close() {
 // Next returns the next message. Passing a size or depth bound closes the
 // connection and returns that bound's error.
 func (s *Stream) Next() ([]byte, error) {
-	b, err := s.Messages.Next()
+	return s.checked(s.Messages.Next())
+}
+
+// checked closes the connection when a read passed a bound.
+func (s *Stream) checked(b []byte, err error) ([]byte, error) {
 	if errors.Is(err, ErrBound) {
 		s.close()
 	}
@@ -62,10 +66,14 @@ func (s *Stream) Next() ([]byte, error) {
 // A message that does not decode returns an error wrapping ErrMalformed;
 // the connection is left to the caller.
 func (s *Stream) Await(id int64) (Response, error) {
+	return s.await(id, s.Next)
+}
+
+func (s *Stream) await(id int64, next func() ([]byte, error)) (Response, error) {
 	lim := s.Limits.orDefault()
 	discarded := 0
 	for {
-		b, err := s.Next()
+		b, err := next()
 		if err != nil {
 			return Response{}, err
 		}
