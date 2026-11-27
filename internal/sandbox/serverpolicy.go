@@ -41,8 +41,8 @@ type ServerPolicy struct {
 	Capabilities CapSet
 	// NetworkAllow is mcp.<server>.network_allow, in configured order.
 	NetworkAllow []string
-	// EnvNames are the names of the server's environment: v7's fixed names
-	// and the listed ones, sorted.
+	// EnvNames are the names of the server's environment: v7's fixed names,
+	// TMPDIR, the proxy variables under N2, and the listed ones, sorted.
 	EnvNames []string
 
 	stateDir, tmpDir, workspaceDir string
@@ -51,9 +51,12 @@ type ServerPolicy struct {
 // NewServerPolicy builds the server policy. A listed environment name that
 // ReservedName reserves is refused.
 func NewServerPolicy(c ServerConfig) (ServerPolicy, error) {
-	names := append([]string{}, FixedNames...)
+	names := append([]string{"TMPDIR"}, FixedNames...)
+	if len(c.NetworkAllow) > 0 {
+		names = append(names, ProxyVars...)
+	}
 	for _, n := range c.EnvNames {
-		if ReservedName(n) {
+		if ReservedName(n) || n == "TMPDIR" {
 			return ServerPolicy{}, fmt.Errorf("sandbox: environment name %q is reserved", n)
 		}
 		names = append(names, n)
@@ -91,7 +94,7 @@ func (p ServerPolicy) Env(path, proxyURL string, source map[string]string) []str
 	}
 	vars["TMPDIR"] = p.tmpDir
 	for _, n := range p.EnvNames {
-		if v, ok := source[n]; ok && !ReservedName(n) {
+		if v, ok := source[n]; ok && !ReservedName(n) && n != "TMPDIR" {
 			vars[n] = v
 		}
 	}

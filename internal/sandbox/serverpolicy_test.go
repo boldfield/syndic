@@ -70,8 +70,23 @@ func TestServerPolicyEnv(t *testing.T) {
 	}
 }
 
+func TestServerPolicyEnvNames(t *testing.T) {
+	c := serverCfg("/s", "/t", "")
+	got := mustServer(t, c).EnvNames
+	want := []string{"API_KEY", "HOME", "LANG", "PATH", "TERM", "TMPDIR"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("env names %v, want %v", got, want)
+	}
+	c.NetworkAllow = []string{"example.com"}
+	got = mustServer(t, c).EnvNames
+	want = []string{"API_KEY", "HOME", "HTTPS_PROXY", "HTTP_PROXY", "LANG", "PATH", "TERM", "TMPDIR", "http_proxy", "https_proxy"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("env names %v, want %v", got, want)
+	}
+}
+
 func TestServerPolicyRefusesReservedName(t *testing.T) {
-	for _, n := range []string{"HOME", "PATH", "HTTP_PROXY", "BASH_ENV"} {
+	for _, n := range []string{"HOME", "PATH", "HTTP_PROXY", "BASH_ENV", "TMPDIR"} {
 		c := serverCfg("/s", "/t", "")
 		c.EnvNames = []string{"OK", n}
 		if _, err := NewServerPolicy(c); err == nil || !strings.Contains(err.Error(), n) {
@@ -102,7 +117,7 @@ func TestServerPolicyHash(t *testing.T) {
 	}
 	p := mustServer(t, serverCfg("/s1", "/t1", "/w1"))
 	b, _ := p.CanonicalJSON()
-	if strings.Contains(string(b), "/s1") || strings.Contains(string(b), "/w1") {
+	if strings.Contains(string(b), "/s1") || strings.Contains(string(b), "/w1") || strings.Contains(string(b), "/t1") {
 		t.Errorf("instance path in %s", b)
 	}
 	if !strings.Contains(string(b), `"roles":["state","tmp","workspace"]`) {
