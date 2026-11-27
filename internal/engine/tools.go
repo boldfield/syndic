@@ -389,31 +389,51 @@ const toolResultNote = "The result of your tool call is given below between deli
 // has reached its call bound.
 const toolLimitStatement = "No further tool calls are available in this turn: the bound on tool calls has been reached. Answer from what you have."
 
-// executableGroups are the tool groups the engine can execute. The web group
-// has no fetch or search implementation yet and so is never offered: a call
-// naming one of its tools is answered not_offered.
+// executableGroups are the tool groups the engine can execute with no further
+// condition. The web group is not among them: it has no fetch implementation
+// yet, and its web_search is offered only when a supported provider is
+// injected (see authorToolDefs). A call naming web_fetch is answered
+// not_offered.
 var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
 // offers: the tools of the preset's executable groups, which for the file
-// groups need the conversation to have a workspace. None are offered once
-// the author has no calls remaining under its bound; limited reports that
-// case, and the caller then sends the statement in their place. e.mu is held.
+// groups need the conversation to have a workspace, and web_search when the
+// preset has the web group, a supported provider is injected and the caller
+// has a usable referee. None are offered once the author has no calls
+// remaining under its bound; limited reports that case, and the caller then
+// sends the statement in their place. e.mu is held.
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
 	var groups []string
+	search := false
 	for _, g := range t.eff.Preset.Tools {
-		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author) {
+		switch {
+		case g == tools.GroupWeb:
+			search = e.searchProvider() && e.groupOffered(g, t.author)
+		case executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author):
 			groups = append(groups, g)
 		}
 	}
-	if len(groups) == 0 {
+	if len(groups) == 0 && !search {
 		return nil, false, nil
 	}
 	if e.authorCallsRemaining(t) <= 0 {
 		return nil, true, nil
 	}
-	defs, err = tools.ForGroups(groups, e.searchProvider())
-	return defs, false, err
+	if search {
+		groups = append(groups, tools.GroupWeb)
+	}
+	all, err := tools.ForGroups(groups, search)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, d := range all {
+		// web_fetch has no effect, so it is never offered.
+		if d.Function.Name != tools.NameWebFetch {
+			defs = append(defs, d)
+		}
+	}
+	return defs, false, nil
 }
 
 // groupOffered reports whether the caller may be offered the group's tools:
@@ -462,7 +482,21 @@ func (e *Engine) toolStepRefusal(t *openTurn, req transport.CompleteRequest) str
 // over the confined workspace, for the attempt whose step is executing. The
 // tools journal their own results against the accepted call. Each effect
 // re-checks the step after the hook, which stands in for a wait inside it.
-func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
+func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
+	turnID := t.id
+	effects := map[string]toolEffect{}
+	if fs != nil {
+		e.fileEffects(effects, fs, turnID, attemptID, hook)
+	}
+	if e.searchOffered() {
+		effects[tools.NameWebSearch] = e.webSearchEffect(t, attemptID, hook)
+	}
+	return effects
+}
+
+// fileEffects adds the read and write tools' effects over the confined
+// workspace.
+func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confined, turnID, attemptID string, hook func(turnID, attemptID, name string)) {
 	read := tools.NewReadTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
 	write := tools.NewWriteTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
 	wrap := func(run func(callID string, args json.RawMessage) (tools.Result, error)) toolEffect {
@@ -476,14 +510,12 @@ func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, h
 			return run(call.ID, args)
 		}
 	}
-	return map[string]toolEffect{
-		tools.NameReadFile:    wrap(read.ReadFile),
-		tools.NameListDir:     wrap(read.ListDir),
-		tools.NameSearchFiles: wrap(read.SearchFiles),
-		tools.NameWriteFile:   wrap(write.WriteFile),
-		tools.NameEditFile:    wrap(write.EditFile),
-		tools.NameUnstage:     wrap(write.Unstage),
-	}
+	effects[tools.NameReadFile] = wrap(read.ReadFile)
+	effects[tools.NameListDir] = wrap(read.ListDir)
+	effects[tools.NameSearchFiles] = wrap(read.SearchFiles)
+	effects[tools.NameWriteFile] = wrap(write.WriteFile)
+	effects[tools.NameEditFile] = wrap(write.EditFile)
+	effects[tools.NameUnstage] = wrap(write.Unstage)
 }
 
 // toolStepMessages renders the next author attempt's messages from the

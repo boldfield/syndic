@@ -5,6 +5,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 	"os"
@@ -153,4 +154,10 @@ func (e *Engine) RefereeAdapterCount() int {
 func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) (RefereeOutcome, error) {
 	out, err := e.dispatchCommandReferee(commandCall{turnID: turnID, caller: caller, callID: callID, command: command})
 	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
+}
+
+// SetSearchClient replaces the client a search call is built with, so a test
+// can answer queries without a network. Call it before the first request.
+func (e *Engine) SetSearchClient(f func(scr *tools.URLScreener, ref tools.Referee) (tools.SearchClient, error)) {
+	e.searchClientFn = f
 }

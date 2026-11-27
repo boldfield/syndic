@@ -117,15 +117,16 @@ func (e *Engine) executeToolStep(t *openTurn, req transport.CompleteRequest, att
 // performToolStep executes the step over the conversation's confined
 // workspace, opened for this step and closed after it. e.mu is not held.
 func (e *Engine) performToolStep(t *openTurn, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, remaining int, patterns []string, hook func(turnID, attemptID, name string)) (toolStepOutcome, error) {
-	var effects map[string]toolEffect
+	var fs *workspace.Confined
 	if t.workspace != "" {
-		fs, err := workspace.OpenConfined(t.workspace, patterns)
+		var err error
+		fs, err = workspace.OpenConfined(t.workspace, patterns)
 		if err != nil {
 			return toolStepOutcome{}, err
 		}
 		defer func() { _ = fs.Close() }()
-		effects = e.toolEffects(fs, t.id, attemptID, hook)
 	}
+	effects := e.toolEffects(fs, t, attemptID, hook)
 	return runToolStep(e.store, toolStep{
 		attemptID: attemptID,
 		calls:     res.ToolCalls,

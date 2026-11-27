@@ -18,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -155,6 +156,18 @@ type Options struct {
 	// are none). It exists for tests of unchanged-revision detection; the
 	// daemon never sets it.
 	AuthorChangeLines func(transport.CompleteResult) []string
+	// SearchProvider is the injection seam for the web search vendor (v5
+	// delta section 6). The daemon supplies none: no vendor is chosen, and
+	// with none injected web_search is not offered. A provider is used only
+	// when it is the one [tools.web.search].provider names and its host
+	// passes the shape rules and the allowlist.
+	SearchProvider tools.SearchProvider
+	// SearchResolver resolves the provider's host for a query the referee
+	// allowed; nil means the system resolver.
+	SearchResolver tools.Resolver
+	// SearchSecrets resolves the provider's credential reference; nil means
+	// the environment and the file-secret directory (SecretsDir).
+	SearchSecrets config.SecretResolver
 	// BeforeToolEffect, when set, is called inside each author tool call's
 	// effect, before the tool runs and after the step's pre-effect re-check,
 	// and the step is re-checked again once it returns, as it is after any
@@ -182,6 +195,12 @@ type Engine struct {
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
 	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	searchProv      tools.SearchProvider
+	searchResolver  tools.Resolver
+	searchSecrets   config.SecretResolver
+	// searchClientFn builds the client of one search call. Tests replace it;
+	// nil builds the pinned searcher.
+	searchClientFn func(scr *tools.URLScreener, ref tools.Referee) (tools.SearchClient, error)
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -270,6 +289,9 @@ func New(o Options) (*Engine, error) {
 		newAdapter:      o.NewAdapter,
 		changeLines:     o.AuthorChangeLines,
 		beforeEffect:    o.BeforeToolEffect,
+		searchProv:      o.SearchProvider,
+		searchResolver:  o.SearchResolver,
+		searchSecrets:   o.SearchSecrets,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),

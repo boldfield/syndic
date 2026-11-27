@@ -12,6 +12,7 @@ import (
 	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -70,6 +71,9 @@ type openTurn struct {
 	workspace     string
 	toolCallsUsed int
 	toolLimited   bool
+	// searchScreener is the turn's URL screener for web_search queries,
+	// created at the first query so its counters span the turn.
+	searchScreener *tools.URLScreener
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.

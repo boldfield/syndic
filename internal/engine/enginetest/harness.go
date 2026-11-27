@@ -16,6 +16,7 @@ import (
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
@@ -121,10 +122,19 @@ type options struct {
 	clockStart     time.Time
 	changeLines    func(transport.CompleteResult) []string
 	beforeEffect   func(turnID, attemptID, name string)
+	searchProvider tools.SearchProvider
+	searchResolver tools.Resolver
+	searchSecrets  config.SecretResolver
 }
 
 // Option adjusts how New seeds and starts the harness.
 type Option func(*options)
+
+// WithSearch injects the web search provider, the resolver of its host and
+// the resolver of its credential.
+func WithSearch(p tools.SearchProvider, res tools.Resolver, secrets config.SecretResolver) Option {
+	return func(o *options) { o.searchProvider, o.searchResolver, o.searchSecrets = p, res, secrets }
+}
 
 // SkipProbe leaves the participant without a probe record.
 func SkipProbe(id string) Option {
@@ -314,6 +324,9 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		NoStartupProbes:   true,
 		AuthorChangeLines: o.changeLines,
 		BeforeToolEffect:  o.beforeEffect,
+		SearchProvider:    o.searchProvider,
+		SearchResolver:    o.searchResolver,
+		SearchSecrets:     o.searchSecrets,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {
