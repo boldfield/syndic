@@ -21,6 +21,20 @@ func unsupported(status int, supported ...string) *mcptest.Reply {
 	}}
 }
 
+// discovery is a discovery result listing versions, whole in shape.
+func discovery(versions ...string) map[string]any {
+	if versions == nil {
+		versions = []string{}
+	}
+	return map[string]any{
+		"supportedVersions": versions,
+		"capabilities":      map[string]any{},
+		"resultType":        "complete",
+		"ttlMs":             0,
+		"cacheScope":        "none",
+	}
+}
+
 func httpDetect(t *testing.T, cfg mcptest.Config, protocol string) (mcp.Decision, *mcptest.Server) {
 	t.Helper()
 	srv := mcptest.New(cfg)
@@ -165,7 +179,7 @@ func TestDetectDiscoveryListings(t *testing.T) {
 		{[]string{}, mcp.OutcomeUnoffered},
 	}
 	for _, c := range cases {
-		rep := &mcptest.Reply{Result: map[string]any{"supportedVersions": c.list}}
+		rep := &mcptest.Reply{Result: discovery(c.list...)}
 		if d, _ := httpDetect(t, mcptest.Config{Discover: rep}, mcp.ProtocolAuto); d.Outcome != c.want {
 			t.Errorf("%v http: %+v", c.list, d)
 		}
@@ -229,7 +243,7 @@ func TestNamedRevisionDetectsNothing(t *testing.T) {
 func TestDetectHTTPDiscoveryResultOnFailingStatus(t *testing.T) {
 	for _, st := range []int{400, 404, 405} {
 		for list, want := range map[string]mcp.Outcome{mcptest.Current: mcp.OutcomeCurrent, mcptest.Legacy: mcp.OutcomeLegacy, "2024-11-05": mcp.OutcomeUnoffered} {
-			rep := &mcptest.Reply{Status: st, Result: map[string]any{"supportedVersions": []string{list}}}
+			rep := &mcptest.Reply{Status: st, Result: discovery(list)}
 			d, srv := httpDetect(t, mcptest.Config{Discover: rep}, mcp.ProtocolAuto)
 			if d.Outcome != want {
 				t.Errorf("%d %s: %+v", st, list, d)
@@ -251,7 +265,18 @@ func TestDiscoverStdioSilentThenInitialize(t *testing.T) {
 	if _, err := client.OpenLegacyStdio(c.W, s, info); err != nil {
 		t.Fatal(err)
 	}
-	if m := srv.Methods(); len(m) != 3 || m[0] != "server/discover" || m[1] != "initialize" || m[2] != "notifications/initialized" {
+	// initialize was answered, so the server has recorded it and discovery;
+	// the one-way initialized may still be in flight.
+	if m := srv.Methods(); len(m) < 2 || m[0] != "server/discover" || m[1] != "initialize" {
+		t.Errorf("sent %v", m)
+	}
+	for deadline := time.Now().Add(5 * time.Second); srv.Count("notifications/initialized") == 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("initialized not sent: %v", srv.Methods())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if m := srv.Methods(); len(m) != 3 {
 		t.Errorf("sent %v", m)
 	}
 }
@@ -351,7 +376,7 @@ func TestDetectHTTPCurrentAnswerOnOtherStatus(t *testing.T) {
 			t.Errorf("%d error: %+v", st, d)
 		}
 		onlyDiscover(t, srv)
-		rep := &mcptest.Reply{Status: st, Result: map[string]any{"supportedVersions": []string{mcptest.Current}}}
+		rep := &mcptest.Reply{Status: st, Result: discovery(mcptest.Current)}
 		d, srv = httpDetect(t, mcptest.Config{Discover: rep}, mcp.ProtocolAuto)
 		if d.Outcome != mcp.OutcomeCurrent {
 			t.Errorf("%d result: %+v", st, d)
@@ -375,5 +400,49 @@ func TestDetectHTTPNothingToJudgeIsNotEvidence(t *testing.T) {
 			t.Errorf("%s: %+v", name, d)
 		}
 		onlyDiscover(t, srv)
+	}
+}
+
+// A success that is not a discovery result in its whole shape, or whose
+// result is not complete, is a malformed success: unoffered, no initialize.
+func TestDetectMalformedDiscoverySuccess(t *testing.T) {
+	without := func(k string) map[string]any {
+		r := discovery(mcptest.Current)
+		delete(r, k)
+		return r
+	}
+	with := func(k string, v any) map[string]any {
+		r := discovery(mcptest.Current)
+		r[k] = v
+		return r
+	}
+	cases := map[string]map[string]any{
+		"no capabilities":     without("capabilities"),
+		"no resultType":       without("resultType"),
+		"no ttlMs":            without("ttlMs"),
+		"no cacheScope":       without("cacheScope"),
+		"capabilities list":   with("capabilities", []any{}),
+		"input_required":      with("resultType", "input_required"),
+		"task":                with("resultType", "task"),
+		"ttlMs text":          with("ttlMs", "0"),
+		"negative ttlMs":      with("ttlMs", -1),
+		"cacheScope number":   with("cacheScope", 1),
+		"versions not string": with("supportedVersions", []any{1}),
+	}
+	for name, body := range cases {
+		d, srv := httpDetect(t, mcptest.Config{Discover: &mcptest.Reply{Result: body}}, mcp.ProtocolAuto)
+		if d.Outcome != mcp.OutcomeUnoffered || d.Err == nil {
+			t.Errorf("%s http: %+v", name, d)
+		}
+		onlyDiscover(t, srv)
+		if d, _ := stdioDetect(t, mcptest.Config{Discover: &mcptest.Reply{Result: body}}, time.Second); d.Outcome != mcp.OutcomeUnoffered || d.Err == nil {
+			t.Errorf("%s stdio: %+v", name, d)
+		}
+		// On a legacy status the same body is not a discovery result, and
+		// the status decides.
+		d, _ = httpDetect(t, mcptest.Config{Discover: &mcptest.Reply{Status: 400, Result: body}}, mcp.ProtocolAuto)
+		if d.Outcome != mcp.OutcomeLegacy {
+			t.Errorf("%s 400: %+v", name, d)
+		}
 	}
 }

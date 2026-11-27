@@ -210,16 +210,39 @@ func fromAnswer(a Answer, success bool) (Decision, bool) {
 	if a.Result == nil {
 		return Decision{}, false
 	}
-	var res struct {
-		Supported []string `json:"supportedVersions"`
-	}
-	if err := json.Unmarshal(a.Result, &res); err != nil || res.Supported == nil {
+	versions, ok := discoveryResult(a.Result)
+	if !ok {
 		if !success {
 			return Decision{}, false
 		}
 		return failed(errors.New("mcp: malformed server/discover result")), true
 	}
-	return fromVersions(res.Supported), true
+	return fromVersions(versions), true
+}
+
+// discoveryResult returns the versions a discovery result lists. ok is false
+// unless the result has the whole shape the current revision gives it: a
+// supportedVersions array of strings, a capabilities object, a resultType of
+// "complete", a ttlMs number and a cacheScope string.
+func discoveryResult(raw json.RawMessage) (versions []string, ok bool) {
+	var res struct {
+		Supported    []string        `json:"supportedVersions"`
+		Capabilities json.RawMessage `json:"capabilities"`
+		ResultType   *string         `json:"resultType"`
+		TTLMs        *float64        `json:"ttlMs"`
+		CacheScope   *string         `json:"cacheScope"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, false
+	}
+	var caps map[string]json.RawMessage
+	if res.Supported == nil || json.Unmarshal(res.Capabilities, &caps) != nil || caps == nil {
+		return nil, false
+	}
+	if res.ResultType == nil || *res.ResultType != "complete" || res.TTLMs == nil || *res.TTLMs < 0 || res.CacheScope == nil {
+		return nil, false
+	}
+	return res.Supported, true
 }
 
 // legacyStatus reports whether a status alone shows a legacy server when the
