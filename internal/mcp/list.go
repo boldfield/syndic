@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/boldfield/syndic/internal/mcp/jcs"
 )
 
 // Bounds on a listing when the roster does not set them.
@@ -50,14 +52,15 @@ type ListedTool struct {
 	Definition *Definition
 	// NotOffered is set when it cannot; Definition is then nil.
 	NotOffered *NotOfferedError
+
+	// annotations is kept whether or not the tool can be offered.
+	annotations json.RawMessage
 }
 
-// Annotations is the canonical JSON of the tool's annotations, or nil.
+// Annotations is the canonical JSON of the tool's annotations, or nil. It is
+// kept for a tool that cannot be offered too, when the tool could be read.
 func (t ListedTool) Annotations() json.RawMessage {
-	if t.Definition == nil {
-		return nil
-	}
-	return t.Definition.Annotations
+	return t.annotations
 }
 
 // Listing is a server's complete listing, tools in the order reported.
@@ -105,8 +108,8 @@ func ListTools(fetch Fetch, opts ListOptions) (*Listing, error) {
 			if len(l.Tools) == opts.MaxTools {
 				return nil, listFailure("more than %d tools", opts.MaxTools)
 			}
-			t := listTool(rt, opts.MaxDefinitionBytes)
-			if t.Name != "" {
+			t, named := listTool(rt, opts.MaxDefinitionBytes)
+			if named {
 				if seen[t.Name] {
 					return nil, listFailure("tool %q is named twice", t.Name)
 				}
@@ -137,13 +140,23 @@ func nextCursor(raw json.RawMessage) (string, error) {
 }
 
 // listTool derives one tool. A tool that is not a JSON object with a string
-// name has no name here; it fails in BuildDefinition.
-func listTool(raw json.RawMessage, maxBytes int) ListedTool {
-	var named struct {
-		Name string `json:"name"`
+// name has no name here, and named is false; it fails in BuildDefinition. An
+// empty string is a name.
+func listTool(raw json.RawMessage, maxBytes int) (t ListedTool, named bool) {
+	var n struct {
+		Name *string `json:"name"`
 	}
-	_ = json.Unmarshal(raw, &named)
-	t := ListedTool{Name: named.Name}
+	_ = json.Unmarshal(raw, &n)
+	if n.Name != nil {
+		t.Name = *n.Name
+		named = true
+	}
+	if canon, err := jcs.Canonicalize(raw); err == nil {
+		var members map[string]json.RawMessage
+		if json.Unmarshal(canon, &members) == nil {
+			t.annotations = members["annotations"]
+		}
+	}
 	def, err := BuildDefinition(raw, maxBytes)
 	if err != nil {
 		var ne *NotOfferedError
@@ -151,9 +164,9 @@ func listTool(raw json.RawMessage, maxBytes int) ListedTool {
 			ne = &NotOfferedError{Reason: ReasonMalformed, Detail: err.Error()}
 		}
 		t.NotOffered = ne
-		return t
+		return t, named
 	}
 	t.Definition = def
 	t.Name = def.Name
-	return t
+	return t, true
 }
