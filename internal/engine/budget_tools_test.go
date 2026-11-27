@@ -175,14 +175,17 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	waitDeliveries(t, h, reply.TurnID, 2)
 
 	phases := map[string]int{}
+	authorDefs := len(definitions(t, tools.GroupRead))
+	reviewerDefs := len(definitions(t, tools.GroupRead))
 	for _, id := range []string{"author", "reviewer"} {
 		for _, call := range h.Adapters[id].Calls() {
 			wantDefs := 0
 			if call.Request.Envelope.Phase == "author" {
-				wantDefs = len(definitions(t, tools.GroupRead))
+				wantDefs = authorDefs
 			}
 			if call.Request.Envelope.Phase == "review" {
-				wantDefs = len(definitions(t, tools.GroupRead))
+				// Reviewer requests carry reviewer_tools definitions
+				wantDefs = reviewerDefs
 			}
 			if len(call.Request.Tools) != wantDefs {
 				t.Errorf("%s %s request carries %d definitions, want %d", id, call.Request.Envelope.Phase, len(call.Request.Tools), wantDefs)
