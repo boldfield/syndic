@@ -1492,3 +1492,41 @@ func (tx *Tx) EmitAttemptEvent(turnID, attemptID, eventType string, data []byte)
 	_, err = tx.Emit(turnID, eventType, data)
 	return err
 }
+
+// RecordObservationMode records, beside the turn's snapshot, whether the file
+// at path was executable for its owner when its content was observed. Call it
+// in the transaction that recorded the observation, which must be a file. The
+// bit is written once.
+func (tx *Tx) RecordObservationMode(turnID, path string, ownerExec bool) error {
+	var kind string
+	err := tx.tx.QueryRow(`SELECT kind FROM observations WHERE turn_id = ? AND path = ?`, turnID, []byte(path)).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("path %q in turn %q: %w", path, turnID, ErrNotObserved)
+	}
+	if err != nil {
+		return fmt.Errorf("query observation: %w", err)
+	}
+	if kind != ObservationFile {
+		return fmt.Errorf("path %q in turn %q is not an observed file", path, turnID)
+	}
+	if _, err := tx.tx.Exec(`INSERT INTO observation_modes (turn_id, path, owner_exec) VALUES (?, ?, ?)`,
+		turnID, []byte(path), ownerExec); err != nil {
+		return fmt.Errorf("insert observation mode: %w", err)
+	}
+	return nil
+}
+
+// ObservationOwnerExec returns the recorded owner-execute bit for path. A path
+// with no mode record, including one observed before modes were recorded,
+// reads as not executable.
+func (tx *Tx) ObservationOwnerExec(turnID, path string) (bool, error) {
+	var exec bool
+	err := tx.tx.QueryRow(`SELECT owner_exec FROM observation_modes WHERE turn_id = ? AND path = ?`, turnID, []byte(path)).Scan(&exec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query observation mode: %w", err)
+	}
+	return exec, nil
+}
