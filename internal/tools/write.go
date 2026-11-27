@@ -62,7 +62,7 @@ func (t *WriteTools) target(p string) (string, error) {
 
 // observe records path in the turn's snapshot, once.
 func (t *WriteTools) observe(path string) (journal.Observation, error) {
-	o, err := t.r.obs.Observe(t.r.turnID, t.r.attemptID, path, t.r.liveReader(path))
+	o, err := t.r.obs.ObserveWithMode(t.r.turnID, t.r.attemptID, path, t.r.liveReader(path))
 	if err != nil {
 		return journal.Observation{}, classify(path, err)
 	}

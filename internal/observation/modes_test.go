@@ -2,6 +2,7 @@ package observation
 
 import (
 	"io/fs"
+	"path/filepath"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -65,18 +66,44 @@ func TestModeRecordedOnceWithContent(t *testing.T) {
 func TestUnrecordedPathsAreNotExecutable(t *testing.T) {
 	f := newFixture(t)
 	s := NewStore(f.j)
-	var n int
-	// Observe, which carries no mode, and a path never observed.
-	if _, err := s.Observe(f.turn, f.author, "old.sh", func() (string, []byte, error) {
-		n++
-		return journal.ObservationFile, []byte("x"), nil
+	// An observation with no mode row, as one recorded before the mode record
+	// existed; written directly, since every current observation has a row.
+	db, err := journal.Open(filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	lf := fixture{j: journal.NewStore(db)}
+	if err := lf.j.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun([]byte(`{}`))
+		if err != nil {
+			return err
+		}
+		if lf.turn, err = tx.CreateTurn(run, "review", nil); err != nil {
+			return err
+		}
+		lf.author, err = tx.BeginAttempt(lf.turn, "author", "author", 1, nil, "")
+		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"old.sh", "never.sh"} {
-		if got, err := s.OwnerExec(f.turn, p); err != nil || got {
-			t.Errorf("OwnerExec(%q) = %v, %v; want false, nil", p, got, err)
-		}
+	const sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if _, err := db.Conn().Exec(`INSERT INTO tool_content (sha256, byte_len, body) VALUES (?, 0, X'')`, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Conn().Exec(`INSERT INTO observations (id, turn_id, attempt_id, snapshot_version, path, kind, content_sha256, journal_seq, recorded_at)
+		VALUES ('legacy', ?, ?, 1, X'6F6C642E7368', 'f', ?, 1, 'now')`, lf.turn, lf.author, sha); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.Conn().QueryRow(`SELECT COUNT(*) FROM observation_modes WHERE turn_id = ?`, lf.turn).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("mode rows = %d, %v; want none", n, err)
+	}
+	if got, err := NewStore(lf.j).OwnerExec(lf.turn, "old.sh"); err != nil || got {
+		t.Errorf("OwnerExec(old.sh) = %v, %v; want false, nil", got, err)
+	}
+	if got, err := s.OwnerExec(f.turn, "never.sh"); err != nil || got {
+		t.Errorf("OwnerExec(never.sh) = %v, %v; want false, nil", got, err)
 	}
 }
 
