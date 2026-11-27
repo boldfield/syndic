@@ -249,3 +249,28 @@ func TestSSEMultiLineDataBound(t *testing.T) {
 		t.Fatalf("over bound: %v", err)
 	}
 }
+
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+func TestSSEMultiLineBoundStopsReadingEarly(t *testing.T) {
+	const bound = 1000
+	in := "data: " + strings.Repeat("a", 990) + "\ndata: " + strings.Repeat("b", 3000) + "\n\n"
+	cr := &countingReader{r: strings.NewReader(in)}
+	r := &eventReader{br: bufio.NewReaderSize(cr, 16), lim: Limits{MaxMessageBytes: bound}.norm()}
+	if _, err := r.Next(); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+	// first line (996+1) plus what the second may add: room, framing, one buffer.
+	if limit := 997 + 10 + eventSlack + 6 + 16; cr.n > limit {
+		t.Fatalf("consumed %d bytes, want at most %d", cr.n, limit)
+	}
+}

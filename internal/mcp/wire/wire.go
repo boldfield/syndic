@@ -282,13 +282,23 @@ type eventReader struct {
 	lim Limits
 }
 
+// eventSlack is the room a raw event line gets beyond the bound it is read
+// against: the "data: " prefix, a CR, and short ignored fields such as "id:".
+const eventSlack = 32
+
 func (e *eventReader) Next() ([]byte, error) {
 	for {
 		dt := &depthTracker{max: e.lim.MaxDepth}
 		var data []byte
 		have := false
 		for {
-			line, err := readLine(e.br, e.lim.MaxMessageBytes, len("data: ")+1, nil)
+			// Read against what the event has left of the bound, so a later
+			// line never grows past it while the earlier data is held.
+			room := e.lim.MaxMessageBytes - len(data)
+			if have {
+				room--
+			}
+			line, err := readLine(e.br, max(room, 0), eventSlack, nil)
 			if err != nil {
 				if errors.Is(err, io.EOF) && have {
 					return data, nil
