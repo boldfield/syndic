@@ -6,7 +6,6 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -17,35 +16,16 @@ import (
 	"github.com/boldfield/syndic/internal/sandbox"
 )
 
-// pipeProc is a fake process with the three protocol pipes.
-type pipeProc struct {
-	sandbox.Process
-	inR      *io.PipeReader
-	inW      *io.PipeWriter
-	outR     *io.PipeReader
-	outW     *io.PipeWriter
-	errR     *io.PipeReader
-	errW     *io.PipeWriter
-	termOnce sync.Once
-}
+// bareProcess hides the pipes of a server process, as a backend that does
+// not honor Spec.ServerPipes returns one.
+type bareProcess struct{ sandbox.Process }
 
-func (p *pipeProc) Stdin() io.WriteCloser { return p.inW }
-func (p *pipeProc) Stdout() io.ReadCloser { return p.outR }
-func (p *pipeProc) Stderr() io.ReadCloser { return p.errR }
-
-func (p *pipeProc) Terminate(sig syscall.Signal) error {
-	err := p.Process.Terminate(sig)
-	p.termOnce.Do(func() { _ = p.outW.Close(); _ = p.errW.Close() })
-	return err
-}
-
-// pipeBackend wraps the fake backend, whose processes have no server pipes.
+// pipeBackend wraps the fake backend to rename it and, with bare, to return
+// processes without server pipes.
 type pipeBackend struct {
 	*sandbox.Fake
-	name  string
-	mu    sync.Mutex
-	procs []*pipeProc
-	bare  bool // return the fake's own process, which has no pipes
+	name string
+	bare bool
 }
 
 func (b *pipeBackend) Name() string {
@@ -57,23 +37,10 @@ func (b *pipeBackend) Name() string {
 
 func (b *pipeBackend) Start(ctx context.Context, spec sandbox.Spec) (sandbox.Process, error) {
 	p, err := b.Fake.Start(ctx, spec)
-	if err != nil || b.bare {
+	if err != nil || !b.bare {
 		return p, err
 	}
-	pp := &pipeProc{Process: p}
-	pp.inR, pp.inW = io.Pipe()
-	pp.outR, pp.outW = io.Pipe()
-	pp.errR, pp.errW = io.Pipe()
-	b.mu.Lock()
-	b.procs = append(b.procs, pp)
-	b.mu.Unlock()
-	return pp, nil
-}
-
-func (b *pipeBackend) proc(i int) *pipeProc {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.procs[i]
+	return bareProcess{p}, nil
 }
 
 var longRunning = sandbox.FakeScript{Runtime: time.Hour}
@@ -230,10 +197,10 @@ func TestInstancePipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := b.proc(0)
+	p := b.Server(0)
 	go func() {
-		_, _ = p.outW.Write([]byte("{\"jsonrpc\":\"2.0\"}\n"))
-		_, _ = p.errW.Write([]byte("log line\n"))
+		_, _ = p.ServerOut().Write([]byte("{\"jsonrpc\":\"2.0\"}\n"))
+		_, _ = p.ServerErr().Write([]byte("log line\n"))
 	}()
 	msg, err := wire.NewLineReader(inst.Stdout(), wire.Limits{}).Next()
 	if err != nil || string(msg) != `{"jsonrpc":"2.0"}` {
@@ -250,7 +217,7 @@ func TestInstancePipes(t *testing.T) {
 	got := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 5)
-		_, _ = io.ReadFull(p.inR, buf)
+		_, _ = io.ReadFull(p.ServerIn(), buf)
 		got <- string(buf)
 	}()
 	if _, err := inst.Stdin().Write([]byte("hello")); err != nil {
@@ -389,5 +356,66 @@ func TestUnconfinedNoticeNamesServer(t *testing.T) {
 	if len(lines) != 1 || lines[0] != mcp.UnconfinedLine("srv", sandbox.NoneNotice) ||
 		!strings.Contains(lines[0], `"srv"`) || !strings.Contains(lines[0], sandbox.NoneNotice) {
 		t.Fatalf("lines = %q", lines)
+	}
+}
+
+func TestBackendWithoutPipesUnconfirmedStaysUnresolved(t *testing.T) {
+	m, b, store, _ := newInstances(t, sandbox.FakeScript{Runtime: time.Hour, NeverConfirm: true})
+	b.bare = true
+	_, err := m.Open(t.Context(), request(mcp.TurnInstance, "alice"))
+	if !errors.Is(err, ErrNoServerPipes) || !errors.Is(err, mcp.ErrContainmentUnverified) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(unresolved(t, store)) != 1 {
+		t.Fatalf("unresolved = %v", unresolved(t, store))
+	}
+	for _, k := range eventKinds(t, store) {
+		if k == "mcp_instance_ended" {
+			t.Fatal("end journaled without confirmation")
+		}
+	}
+}
+
+func TestOfferOnRunInstanceSharesItAndLeavesItRunning(t *testing.T) {
+	m, b, store, _ := newInstances(t, longRunning, longRunning)
+	run, err := m.Open(t.Context(), request(mcp.RunInstance, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *mcp.Instance
+	_, err = mcp.Offer(t.Context(), m, request(mcp.RunInstance, ""), time.Second,
+		func(_ context.Context, inst *mcp.Instance) (int, error) { got = inst; return 1, nil })
+	if err != nil || got != run || run.Ended() || len(b.Starts()) != 1 {
+		t.Fatalf("err %v shared %v ended %v starts %d", err, got == run, run.Ended(), len(b.Starts()))
+	}
+	// A run server that does not answer is not offered and is ended.
+	_, err = mcp.Offer(t.Context(), m, request(mcp.RunInstance, ""), 30*time.Millisecond,
+		func(ctx context.Context, _ *mcp.Instance) (int, error) { <-ctx.Done(); return 0, ctx.Err() })
+	if !errors.Is(err, mcp.ErrNotOffered) || !run.Ended() || len(unresolved(t, store)) != 0 {
+		t.Fatalf("err %v ended %v", err, run.Ended())
+	}
+}
+
+func TestEndRunWaitsForRunInstanceStart(t *testing.T) {
+	m, b, store, _ := newInstances(t, longRunning)
+	opened := make(chan *mcp.Instance, 1)
+	go func() {
+		inst, _ := m.Open(t.Context(), request(mcp.RunInstance, ""))
+		opened <- inst
+	}()
+	for len(b.Starts()) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if err := m.EndRun(); err != nil {
+		t.Fatal(err)
+	}
+	if inst := <-opened; inst != nil && !inst.Ended() {
+		t.Fatal("run instance left running after EndRun")
+	}
+	if len(unresolved(t, store)) != 0 {
+		t.Fatal("instance unresolved")
+	}
+	if _, err := m.Open(t.Context(), request(mcp.RunInstance, "")); !errors.Is(err, mcp.ErrInstanceEnded) {
+		t.Fatalf("open after EndRun: %v", err)
 	}
 }

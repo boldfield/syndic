@@ -101,7 +101,9 @@ type Instances struct {
 	Gate Gate
 	// Start starts the process of one instance, under the server policy,
 	// with standard input, output and error as three pipes. It is called
-	// after the instance's start is journaled and the gate entered.
+	// after the instance's start is journaled and the gate entered. When it
+	// fails after a process exists it returns that process with the error,
+	// and the process is ended like any instance, its pipes unused.
 	Start func(ctx context.Context, req InstanceRequest) (ServerProcess, error)
 	// Terminate runs v7's one sequence on p (SIGTERM, the grace period,
 	// SIGKILL, the cleanup deadline) and reports whether the backend
@@ -120,6 +122,7 @@ type Instances struct {
 
 	mu      sync.Mutex
 	run     map[string]*runSlot
+	stopped bool // EndRun has run: no run instance starts after it
 	noticed map[string]bool
 }
 
@@ -159,6 +162,10 @@ func (m *Instances) Open(ctx context.Context, req InstanceRequest) (*Instance, e
 		return m.open(ctx, req)
 	}
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return nil, ErrInstanceEnded
+	}
 	if m.run == nil {
 		m.run = map[string]*runSlot{}
 	}
@@ -170,6 +177,14 @@ func (m *Instances) Open(ctx context.Context, req InstanceRequest) (*Instance, e
 	m.mu.Unlock()
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
+	// EndRun takes slot.mu after setting stopped, so either it waits for this
+	// start and ends the instance, or this sees stopped and starts nothing.
+	m.mu.Lock()
+	stopped := m.stopped
+	m.mu.Unlock()
+	if stopped {
+		return nil, ErrInstanceEnded
+	}
 	if slot.inst != nil && !slot.inst.Ended() {
 		return slot.inst, nil
 	}
@@ -201,9 +216,16 @@ func (m *Instances) open(ctx context.Context, req InstanceRequest) (*Instance, e
 	}
 	proc, err := m.Start(ctx, req)
 	if err != nil {
+		err = fmt.Errorf("mcp: start server %q: %w", req.Server, err)
+		if proc != nil {
+			// A process exists: the end is journaled only once the backend
+			// confirms that nothing remains.
+			inst.proc = proc
+			return nil, errors.Join(err, inst.End())
+		}
 		// Nothing started, so nothing remains.
 		_ = inst.finish()
-		return nil, fmt.Errorf("mcp: start server %q: %w", req.Server, err)
+		return nil, err
 	}
 	inst.proc = proc
 	inst.stdin, inst.stdout = proc.Stdin(), proc.Stdout()
@@ -230,15 +252,20 @@ func (m *Instances) open(ctx context.Context, req InstanceRequest) (*Instance, e
 	return inst, nil
 }
 
-// Offer opens a listing instance for the server, runs list on it, and ends
-// it. A server that fails to start, or does not finish list within timeout
+// Offer lists a server: it opens a listing instance for it, runs list on it,
+// and ends it. For a request of kind RunInstance the list runs on the shared
+// run instance, which is left running unless the server is not offered.
+// A server that fails to start, or does not finish list within timeout
 // (zero waits without bound), is not offered: the error wraps ErrNotOffered.
 // At the timeout the instance is ended, which ends any read still waiting.
 func Offer[T any](ctx context.Context, m *Instances, req InstanceRequest, timeout time.Duration, list func(ctx context.Context, inst *Instance) (T, error)) (T, error) {
 	var zero T
-	req.Kind = ListingInstance
-	if req.Owner == "" {
-		req.Owner = "listing"
+	run := req.Kind == RunInstance
+	if !run {
+		req.Kind = ListingInstance
+		if req.Owner == "" {
+			req.Owner = "listing"
+		}
 	}
 	inst, err := m.Open(ctx, req)
 	if err != nil {
@@ -269,9 +296,14 @@ func Offer[T any](ctx context.Context, m *Instances, req InstanceRequest, timeou
 			res.err = lctx.Err()
 		}
 	}
-	endErr := inst.End()
+	var endErr error
+	if !run || res.err != nil {
+		// A run server that did not answer is in an unknown state: it ends
+		// and the next use starts a new one.
+		endErr = inst.End()
+	}
 	if res.err != nil {
-		return zero, fmt.Errorf("%w: %s: %w", ErrNotOffered, req.Server, res.err)
+		return zero, errors.Join(fmt.Errorf("%w: %s: %w", ErrNotOffered, req.Server, res.err), endErr)
 	}
 	if endErr != nil {
 		return zero, endErr
@@ -282,13 +314,20 @@ func Offer[T any](ctx context.Context, m *Instances, req InstanceRequest, timeou
 // EndRun ends every run instance, at engine stop.
 func (m *Instances) EndRun() error {
 	m.mu.Lock()
-	var all []*Instance
+	m.stopped = true
+	slots := make([]*runSlot, 0, len(m.run))
 	for _, s := range m.run {
+		slots = append(slots, s)
+	}
+	m.mu.Unlock()
+	var all []*Instance
+	for _, s := range slots {
+		s.mu.Lock() // waits for a start in progress
 		if s.inst != nil {
 			all = append(all, s.inst)
 		}
+		s.mu.Unlock()
 	}
-	m.mu.Unlock()
 	var errs []error
 	for _, i := range all {
 		errs = append(errs, i.End())

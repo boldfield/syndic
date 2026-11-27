@@ -63,8 +63,9 @@ func New(c Config) *mcp.Instances {
 			}
 			sp, ok := p.(Process)
 			if !ok {
-				c.Sequence.Run(p, false, nil)
-				return nil, ErrNoServerPipes
+				// The process started, so it is ended by the same
+				// containment-checked sequence as any instance.
+				return unpiped{p}, ErrNoServerPipes
 			}
 			return sp, nil
 		},
@@ -79,6 +80,13 @@ func New(c Config) *mcp.Instances {
 	}
 	return m
 }
+
+// unpiped is a started process with no server pipes: it is only ended.
+type unpiped struct{ sandbox.Process }
+
+func (unpiped) Stdin() io.WriteCloser { return nil }
+func (unpiped) Stdout() io.ReadCloser { return nil }
+func (unpiped) Stderr() io.ReadCloser { return nil }
 
 type journalAdapter struct{ s *journal.Store }
 
