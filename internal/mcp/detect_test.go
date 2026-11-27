@@ -264,3 +264,19 @@ func TestDiscoverStdioSilentThenInitialize(t *testing.T) {
 		t.Errorf("sent %v", m)
 	}
 }
+
+func TestDetectHTTPCurrentAnswerOnOtherStatus(t *testing.T) {
+	for _, st := range []int{409, 418, 429} {
+		d, srv := httpDetect(t, mcptest.Config{Discover: unsupported(st, mcptest.Legacy)}, mcp.ProtocolAuto)
+		if d.Outcome != mcp.OutcomeLegacy {
+			t.Errorf("%d error: %+v", st, d)
+		}
+		onlyDiscover(t, srv)
+		rep := &mcptest.Reply{Status: st, Result: map[string]any{"supportedVersions": []string{mcptest.Current}}}
+		d, srv = httpDetect(t, mcptest.Config{Discover: rep}, mcp.ProtocolAuto)
+		if d.Outcome != mcp.OutcomeCurrent {
+			t.Errorf("%d result: %+v", st, d)
+		}
+		onlyDiscover(t, srv)
+	}
+}

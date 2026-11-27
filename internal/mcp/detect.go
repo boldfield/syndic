@@ -239,10 +239,10 @@ func DetectHTTP(ctx context.Context, protocol string, send func(context.Context)
 	if err != nil {
 		return failed(err)
 	}
-	ok2xx := a.Status >= 200 && a.Status < 300
-	// A 401, a 403, a 5xx and anything else but a success or a 400, 404 or
-	// 405 is no evidence of era, whatever its body says.
-	if !ok2xx && !legacyStatus(a.Status) {
+	// A 401, a 403 and a 5xx are no evidence of era, whatever their body
+	// says. Any other status carries an answer the current revision defines
+	// as well as a 2xx does.
+	if a.Status == 401 || a.Status == 403 || a.Status >= 500 {
 		return failed(&StatusFailure{Status: a.Status, Err: statusCause(a)})
 	}
 	if d, ok := fromAnswer(a); ok {
