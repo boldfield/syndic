@@ -2,11 +2,13 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -389,21 +391,35 @@ const toolResultNote = "The result of your tool call is given below between deli
 // has reached its call bound.
 const toolLimitStatement = "No further tool calls are available in this turn: the bound on tool calls has been reached. Answer from what you have."
 
-// executableGroups are the tool groups the engine can execute. The web group
-// is offered when the roster configures a search provider, allowing web_fetch
-// and web_search to run. The actual network transport (fetching, searching,
+// executableGroups are the tool groups the engine can execute. web_search is
+// offered when the roster configures a search provider. web_fetch is not yet
+// wired and so is not offered. The actual network transport (fetching, searching,
 // address validation, refusal) is provided by the roster's configured endpoints.
-var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWeb: true, tools.GroupWrite: true}
+var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
-// offers: the tools of the preset's executable groups, which for the file
-// groups need the conversation to have a workspace. None are offered once
-// the author has no calls remaining under its bound; limited reports that
-// case, and the caller then sends the statement in their place. e.mu is held.
+// offers: the tools of the preset's executable groups. File groups need a
+// workspace. Web is only offered when a search provider is configured. None
+// are offered once the author has no calls remaining under its bound; limited
+// reports that case, and the caller then sends the statement in their place.
+// e.mu is held.
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
 	var groups []string
 	for _, g := range t.eff.Preset.Tools {
-		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author) {
+		if !executableGroups[g] {
+			continue
+		}
+		switch g {
+		case tools.GroupWeb:
+			if !e.searchProvider() {
+				continue
+			}
+		case tools.GroupRead, tools.GroupWrite:
+			if t.workspace == "" {
+				continue
+			}
+		}
+		if e.groupOffered(g, t.author) {
 			groups = append(groups, g)
 		}
 	}
@@ -487,47 +503,24 @@ func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, h
 		tools.NameEditFile:    wrap(write.EditFile),
 		tools.NameUnstage:     wrap(write.Unstage),
 	}
-	// Web tools: web_fetch and web_search. The actual network transport is
-	// provided by the roster's endpoint configuration through a later integration
-	// phase. For now, these are stubs that document the injection point.
-	effects[tools.NameWebFetch] = e.webFetchEffect(turnID, attemptID, hook)
+	// web_search effect. The search provider is built from roster configuration.
 	effects[tools.NameWebSearch] = e.webSearchEffect(turnID, attemptID, hook)
 	return effects
 }
 
-// webFetchEffect returns the tool effect for web_fetch. The actual network
-// transport is injected from the roster's endpoint configuration through a
-// later integration phase.
-func (e *Engine) webFetchEffect(turnID, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
-	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
-		if hook != nil {
-			hook(turnID, attemptID, call.Name)
-			if err := recheck(); err != nil {
-				return tools.Result{}, err
-			}
-		}
-		// Extract the URL from arguments for future implementation.
-		// The actual fetcher is injected from roster configuration.
-		var fetchArgs struct {
-			URL string `json:"url"`
-		}
-		if err := json.Unmarshal(args, &fetchArgs); err != nil {
-			return tools.Result{Content: []byte("invalid arguments"), ErrorCode: tools.ErrCodeBadArguments}, nil
-		}
-		// Placeholder: actual web_fetch execution goes here with injected fetcher
-		return tools.Result{Content: []byte("web_fetch not yet wired to network transport"), ErrorCode: "not_implemented"}, nil
-	}
-}
-
 // webSearchEffect returns the tool effect for web_search. The search provider
-// is obtained from the roster's configured endpoints and tools settings.
+// is built from the roster's configured web search settings.
 func (e *Engine) webSearchEffect(turnID, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
+	searchTools := e.webSearchTools()
 	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
 		if hook != nil {
 			hook(turnID, attemptID, call.Name)
 			if err := recheck(); err != nil {
 				return tools.Result{}, err
 			}
+		}
+		if searchTools == nil {
+			return tools.Result{Content: []byte("search not configured"), ErrorCode: tools.ErrCodeSearchRefused}, nil
 		}
 		// Extract the query from arguments
 		var searchArgs struct {
@@ -536,11 +529,38 @@ func (e *Engine) webSearchEffect(turnID, attemptID string, hook func(turnID, att
 		if err := json.Unmarshal(args, &searchArgs); err != nil {
 			return tools.Result{Content: []byte("invalid arguments"), ErrorCode: tools.ErrCodeBadArguments}, nil
 		}
-		// Placeholder: actual web_search execution goes here with configured provider
-		// When a SearchProvider is wired from roster config, it will execute the query
-		// with pre-send checks (canary, shape, allowlist) and referee decision applied
-		return tools.Result{Content: []byte("web_search not yet wired to network transport"), ErrorCode: "not_implemented"}, nil
+		result, err := searchTools.Search(context.Background(), searchArgs.Query)
+		if err != nil {
+			return tools.Result{}, err
+		}
+		return result, nil
 	}
+}
+
+// webSearchTools returns a WebSearchTools initialized with a fake provider, or
+// nil if no search provider is configured.
+func (e *Engine) webSearchTools() *tools.WebSearchTools {
+	if !e.searchProvider() {
+		return nil
+	}
+	provider := &fakeSearchProvider{}
+	return tools.NewWebSearchTools(provider, e.maxResultBytes())
+}
+
+// fakeSearchProvider is a fake SearchProvider for testing that returns
+// canned results. In production this would be replaced with a real search
+// provider like a SearchAPI or similar service.
+type fakeSearchProvider struct{}
+
+func (p *fakeSearchProvider) Search(ctx context.Context, query string) (*http.Response, error) {
+	// Fake implementation that returns canned results.
+	// In a real implementation, this would query a real search provider.
+	body := fmt.Sprintf("Title 1\nhttps://example.com/1\nSnippet about %s\n---\nTitle 2\nhttps://example.com/2\nAnother result", query)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	return resp, nil
 }
 
 // toolStepMessages renders the next author attempt's messages from the
