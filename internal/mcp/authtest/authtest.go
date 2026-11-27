@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +46,13 @@ type Config struct {
 	// Resource is the "resource" the protected-resource metadata names.
 	// Empty means ResourceURL().
 	Resource string
+	// ExtraResources are further protected-resource paths (each starting with
+	// "/") served alongside ResourcePath. A token is good only at the resource
+	// it was issued for.
+	ExtraResources []string
+	// Missing lists request paths that answer 404, e.g. a well-known location,
+	// so a client has to fall back to the next one.
+	Missing []string
 	// Issuer is the issuer the protected-resource metadata lists and the
 	// authorization-server metadata names. Empty means the server's URL plus
 	// IssuerPath. PRMIssuer, when set, overrides only the one the
@@ -125,8 +133,7 @@ type Server struct {
 	access   map[string]token
 	refresh  map[string]*grant // refresh token -> grant context
 	rtExpiry map[string]time.Time
-	clients  map[string]bool
-	seq      int
+	clients  map[string]string // registered client ID -> secret ("" for none)
 	// Now is the clock; tests may replace it before use.
 	Now func() time.Time
 }
@@ -141,7 +148,7 @@ func New(t testing.TB, mut ...func(*Config)) *Server {
 		},
 		codes: map[string]*grant{}, access: map[string]token{},
 		refresh: map[string]*grant{}, rtExpiry: map[string]time.Time{},
-		clients: map[string]bool{},
+		clients: map[string]string{},
 		Now:     time.Now,
 	}
 	for _, m := range mut {
@@ -277,11 +284,18 @@ func (s *Server) handler(origin string) http.Handler {
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request, form url.Values, body []byte) {
 	p := r.URL.Path
+	s.mu.Lock()
+	missing := slices.Contains(s.cfg.Missing, p)
+	s.mu.Unlock()
+	if missing {
+		http.NotFound(w, r)
+		return
+	}
 	switch {
-	case p == ResourcePath:
+	case s.isResourcePath(p):
 		s.serveResource(w, r)
 	case strings.HasPrefix(p, "/.well-known/oauth-protected-resource"):
-		s.servePRM(w)
+		s.servePRM(w, strings.TrimPrefix(p, "/.well-known/oauth-protected-resource"))
 	case strings.HasPrefix(p, "/.well-known/oauth-authorization-server"),
 		strings.HasPrefix(p, "/.well-known/openid-configuration"),
 		strings.HasSuffix(p, "/.well-known/openid-configuration"):
@@ -295,6 +309,20 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, form url.Values, 
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) isResourcePath(p string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return p == ResourcePath || slices.Contains(s.cfg.ExtraResources, p)
+}
+
+// resourceForLocked is the resource identifier of the protected resource at path.
+func (s *Server) resourceForLocked(path string) string {
+	if path == ResourcePath && s.cfg.Resource != "" {
+		return s.cfg.Resource
+	}
+	return s.URL + path
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -314,10 +342,10 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request) {
 	h := r.Header.Get("Authorization")
 	tok, ok := strings.CutPrefix(h, "Bearer ")
 	t, known := s.access[tok]
-	if !ok || !known || !s.Now().Before(t.expires) {
+	if !ok || !known || !s.Now().Before(t.expires) || t.resource != s.resourceForLocked(r.URL.Path) {
 		ch := `Bearer realm="mcp"`
 		if s.cfg.ChallengeMetadata {
-			ch += `, resource_metadata="` + s.URL + `/.well-known/oauth-protected-resource` + ResourcePath + `"`
+			ch += `, resource_metadata="` + s.URL + `/.well-known/oauth-protected-resource` + r.URL.Path + `"`
 		}
 		w.Header().Set("WWW-Authenticate", ch)
 		oauthErr(w, http.StatusUnauthorized, "invalid_token", "missing, unknown or expired token")
@@ -331,13 +359,13 @@ func (s *Server) serveResource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) servePRM(w http.ResponseWriter) {
+func (s *Server) servePRM(w http.ResponseWriter, path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res := s.cfg.Resource
-	if res == "" {
-		res = s.ResourceURL()
+	if path == "" || (path != ResourcePath && !slices.Contains(s.cfg.ExtraResources, path)) {
+		path = ResourcePath
 	}
+	res := s.resourceForLocked(path)
 	iss := s.cfg.PRMIssuer
 	if iss == "" {
 		iss = s.issuerLocked()
@@ -383,9 +411,10 @@ func (s *Server) serveASMeta(w http.ResponseWriter) {
 }
 
 func (s *Server) newID(prefix string) string {
-	s.seq++
 	b := make([]byte, 12)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
 	return prefix + "-" + hex.EncodeToString(b)
 }
 
@@ -401,7 +430,7 @@ func isLoopbackRedirect(u string) bool {
 // clientKnown reports whether the client ID is accepted by an enabled route.
 func (s *Server) clientKnownLocked(id string) bool {
 	switch {
-	case s.clients[id]:
+	case s.isRegisteredLocked(id):
 		return s.cfg.AcceptRegistration
 	case id == StaticClientID:
 		return s.cfg.AcceptStatic
@@ -409,6 +438,32 @@ func (s *Server) clientKnownLocked(id string) bool {
 		return s.cfg.AcceptMetadataDocument
 	}
 	return false
+}
+
+func (s *Server) isRegisteredLocked(id string) bool {
+	_, ok := s.clients[id]
+	return ok
+}
+
+// clientAuthLocked checks the client on a token request: the identity from
+// client_secret_basic or the form, the secret when the client has one, and
+// that it is the client the grant was issued to.
+func (s *Server) clientAuthLocked(r *http.Request, form url.Values, g *grant) bool {
+	id, secret := form.Get("client_id"), form.Get("client_secret")
+	if u, p, ok := r.BasicAuth(); ok {
+		if ue, err := url.QueryUnescape(u); err == nil {
+			u = ue
+		}
+		if pe, err := url.QueryUnescape(p); err == nil {
+			p = pe
+		}
+		id, secret = u, p
+	}
+	if id != g.clientID {
+		return false
+	}
+	want := s.clients[id]
+	return want == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(want)) == 1
 }
 
 func (s *Server) serveAuthorize(w http.ResponseWriter, r *http.Request, form url.Values) {
@@ -516,7 +571,7 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request, form url.Val
 			oauthErr(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 			return
 		}
-		if form.Get("redirect_uri") != g.redirect || form.Get("client_id") != g.clientID && r.Header.Get("Authorization") == "" {
+		if form.Get("redirect_uri") != g.redirect || !s.clientAuthLocked(r, form, g) {
 			oauthErr(w, http.StatusBadRequest, "invalid_grant", "redirect_uri or client mismatch")
 			return
 		}
@@ -534,6 +589,10 @@ func (s *Server) serveToken(w http.ResponseWriter, r *http.Request, form url.Val
 		}
 		if exp, has := s.rtExpiry[rt]; has && !s.Now().Before(exp) {
 			oauthErr(w, http.StatusBadRequest, "invalid_grant", "refresh token expired")
+			return
+		}
+		if !s.clientAuthLocked(r, form, g) {
+			oauthErr(w, http.StatusBadRequest, "invalid_client", "client mismatch")
 			return
 		}
 		if form.Get("resource") != g.resource {
@@ -563,10 +622,14 @@ func (s *Server) serveRegister(w http.ResponseWriter, r *http.Request, body []by
 		return
 	}
 	id := s.newID("client")
-	s.clients[id] = true
+	secret := ""
+	if s.cfg.RegistrationSecret {
+		secret = s.newID("secret")
+	}
+	s.clients[id] = secret
 	out := map[string]any{"client_id": id, "redirect_uris": req["redirect_uris"], "application_type": "native"}
 	if s.cfg.RegistrationSecret {
-		out["client_secret"] = s.newID("secret")
+		out["client_secret"] = secret
 	}
 	writeJSON(w, http.StatusCreated, out)
 }

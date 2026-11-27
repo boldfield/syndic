@@ -85,13 +85,13 @@ func TestFlowAndRotation(t *testing.T) {
 		t.Fatalf("resource %d", resp.StatusCode)
 	}
 	code, tok2 := post(t, s.URL+TokenPath, url.Values{
-		"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "resource": {s.ResourceURL()},
+		"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "client_id": {StaticClientID}, "resource": {s.ResourceURL()},
 	})
 	if code != 200 || tok2["refresh_token"] == tok["refresh_token"] {
 		t.Fatalf("no rotation: %d %v", code, tok2)
 	}
 	if code, _ := post(t, s.URL+TokenPath, url.Values{
-		"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "resource": {s.ResourceURL()},
+		"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "client_id": {StaticClientID}, "resource": {s.ResourceURL()},
 	}); code != 400 {
 		t.Fatalf("old refresh token still works: %d", code)
 	}
@@ -180,4 +180,250 @@ func login2(t *testing.T, s *Server, tokenBase string) string {
 		"redirect_uri": {"http://127.0.0.1:9/cb"}, "resource": {s.ResourceURL()},
 	})
 	return tok["access_token"].(string)
+}
+
+const cb = "http://127.0.0.1:9/cb"
+
+// authorize runs the authorization request and returns the redirect target.
+func authorize(t *testing.T, s *Server, clientID, resource string) (*url.URL, int) {
+	t.Helper()
+	sum := sha256.Sum256([]byte(verifier))
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {clientID}, "state": {"st"}, "redirect_uri": {cb},
+		"code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"},
+		"resource": {resource},
+	}
+	loc, status, err := s.Approve(s.URL + AuthorizePath + "?" + q.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(loc)
+	return u, status
+}
+
+// exchange logs in and returns the token endpoint status and body. basic, when
+// non-empty, is sent as the Basic credentials "id:secret".
+func exchange(t *testing.T, s *Server, clientID, resource string, extra url.Values, basic [2]string) (int, map[string]any) {
+	t.Helper()
+	u, st := authorize(t, s, clientID, resource)
+	if st != http.StatusFound {
+		t.Fatalf("authorize %d", st)
+	}
+	f := url.Values{
+		"grant_type": {"authorization_code"}, "code": {u.Query().Get("code")}, "code_verifier": {verifier},
+		"redirect_uri": {cb}, "resource": {resource},
+	}
+	if basic[0] == "" {
+		f.Set("client_id", clientID)
+	}
+	for k, v := range extra {
+		f[k] = v
+	}
+	return tokenPost(t, s, f, basic)
+}
+
+func tokenPost(t *testing.T, s *Server, f url.Values, basic [2]string) (int, map[string]any) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", s.URL+TokenPath, strings.NewReader(f.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if basic[0] != "" {
+		req.SetBasicAuth(basic[0], basic[1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var m map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&m)
+	return resp.StatusCode, m
+}
+
+func register(t *testing.T, s *Server) map[string]any {
+	t.Helper()
+	resp, err := http.Post(s.URL+RegistrationPath, "application/json", strings.NewReader(`{"application_type":"native","redirect_uris":["`+cb+`"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var m map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&m)
+	if resp.StatusCode != 201 {
+		t.Fatalf("register %d %v", resp.StatusCode, m)
+	}
+	return m
+}
+
+func bearer(t *testing.T, s *Server, tok, path string) int {
+	t.Helper()
+	resp, _ := get(t, s.URL+path, map[string]string{"Authorization": "Bearer " + tok})
+	return resp.StatusCode
+}
+
+func TestTokenIsPerResource(t *testing.T) {
+	s := New(t, func(c *Config) { c.ExtraResources = []string{"/other"} })
+	_, a := exchange(t, s, StaticClientID, s.URL+"/mcp", nil, [2]string{})
+	_, b := exchange(t, s, StaticClientID, s.URL+"/other", nil, [2]string{})
+	ta, tb := a["access_token"].(string), b["access_token"].(string)
+	if bearer(t, s, ta, "/mcp") != 200 || bearer(t, s, tb, "/other") != 200 {
+		t.Fatal("token refused at its own resource")
+	}
+	if bearer(t, s, ta, "/other") != 401 || bearer(t, s, tb, "/mcp") != 401 {
+		t.Fatal("token accepted at another resource")
+	}
+	_, prm := get(t, s.URL+"/.well-known/oauth-protected-resource/other", nil)
+	if prm["resource"] != s.URL+"/other" {
+		t.Fatalf("%v", prm)
+	}
+}
+
+func TestClientSecretChecked(t *testing.T) {
+	s := New(t, func(c *Config) { c.RegistrationSecret = true })
+	reg := register(t, s)
+	id, secret := reg["client_id"].(string), reg["client_secret"].(string)
+	res := s.ResourceURL()
+	if code, _ := exchange(t, s, id, res, url.Values{"client_id": {id}}, [2]string{}); code != 400 {
+		t.Fatalf("no secret accepted: %d", code)
+	}
+	if code, _ := exchange(t, s, id, res, nil, [2]string{id, "wrong"}); code != 400 {
+		t.Fatalf("wrong secret accepted: %d", code)
+	}
+	if code, _ := exchange(t, s, id, res, nil, [2]string{StaticClientID, secret}); code != 400 {
+		t.Fatalf("other client accepted: %d", code)
+	}
+	if code, _ := exchange(t, s, id, res, url.Values{"client_id": {id}, "client_secret": {"nope"}}, [2]string{}); code != 400 {
+		t.Fatalf("wrong post secret accepted: %d", code)
+	}
+	code, tok := exchange(t, s, id, res, url.Values{"client_id": {id}, "client_secret": {secret}}, [2]string{})
+	if code != 200 {
+		t.Fatalf("client_secret_post refused: %d", code)
+	}
+	if code, _ := exchange(t, s, id, res, nil, [2]string{id, secret}); code != 200 {
+		t.Fatalf("client_secret_basic refused: %d", code)
+	}
+	// Refresh is bound to the client.
+	rf := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "resource": {res}}
+	if code, _ := tokenPost(t, s, rf, [2]string{id, "wrong"}); code != 400 {
+		t.Fatalf("refresh with wrong secret: %d", code)
+	}
+	if code, _ := tokenPost(t, s, rf, [2]string{StaticClientID, ""}); code != 400 {
+		t.Fatalf("refresh by another client: %d", code)
+	}
+	if code, _ := tokenPost(t, s, rf, [2]string{id, secret}); code != 200 {
+		t.Fatalf("refresh refused: %d", code)
+	}
+	// A second server (issuer) does not know this registration.
+	s2 := New(t)
+	if _, st := authorize(t, s2, id, s2.ResourceURL()); st != 400 {
+		t.Fatalf("registration used at a second issuer: %d", st)
+	}
+}
+
+func TestIdentityRoutes(t *testing.T) {
+	const doc = "https://client.example/metadata.json"
+	s := New(t)
+	reg := register(t, s)["client_id"].(string)
+	ids := map[string]string{"static": StaticClientID, "registered": reg, "document": doc}
+	for only := range ids {
+		s.Set(func(c *Config) {
+			c.AcceptStatic = only == "static"
+			c.AcceptRegistration = only == "registered"
+			c.AcceptMetadataDocument = only == "document"
+		})
+		for name, id := range ids {
+			_, st := authorize(t, s, id, s.ResourceURL())
+			if want := name == only; (st == http.StatusFound) != want {
+				t.Fatalf("only %s: %s (%s) got %d", only, name, id, st)
+			}
+		}
+	}
+	// A full login with a dynamically registered client and a metadata-document one.
+	s.Set(func(c *Config) { c.AcceptStatic, c.AcceptRegistration, c.AcceptMetadataDocument = true, true, true })
+	for _, id := range []string{reg, doc} {
+		if code, _ := exchange(t, s, id, s.ResourceURL(), url.Values{"client_id": {id}}, [2]string{}); code != 200 {
+			t.Fatalf("login as %s: %d", id, code)
+		}
+	}
+	_, as := get(t, s.URL+"/.well-known/oauth-authorization-server", nil)
+	if as["registration_endpoint"] == nil || as["client_id_metadata_document_supported"] != true {
+		t.Fatalf("%v", as)
+	}
+	s.Set(func(c *Config) { c.AcceptRegistration, c.AcceptMetadataDocument = false, false })
+	_, as = get(t, s.URL+"/.well-known/oauth-authorization-server", nil)
+	if as["registration_endpoint"] != nil || as["client_id_metadata_document_supported"] != nil {
+		t.Fatalf("%v", as)
+	}
+}
+
+func TestRefreshBehaviours(t *testing.T) {
+	s := New(t)
+	res := s.ResourceURL()
+	refresh := func(rt string) (int, map[string]any) {
+		return tokenPost(t, s, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rt}, "client_id": {StaticClientID}, "resource": {res}}, [2]string{})
+	}
+	_, tok := exchange(t, s, StaticClientID, res, url.Values{"client_id": {StaticClientID}}, [2]string{})
+	rt := tok["refresh_token"].(string)
+
+	s.Set(func(c *Config) { c.RejectRefresh = true })
+	if code, _ := refresh(rt); code != 400 {
+		t.Fatalf("refresh not rejected: %d", code)
+	}
+	s.Set(func(c *Config) { c.RejectRefresh = false; c.NoRotate = true })
+	code, t2 := refresh(rt)
+	if code != 200 || t2["refresh_token"] != rt {
+		t.Fatalf("NoRotate: %d %v", code, t2)
+	}
+
+	now := time.Now()
+	s.Now = func() time.Time { return now }
+	s.Set(func(c *Config) { c.NoRotate = false; c.RefreshTTL = time.Minute; c.AccessTTL = 30 * time.Second })
+	_, t3 := exchange(t, s, StaticClientID, res, url.Values{"client_id": {StaticClientID}}, [2]string{})
+	if t3["expires_in"] != float64(30) {
+		t.Fatalf("expires_in %v", t3["expires_in"])
+	}
+	at := t3["access_token"].(string)
+	if bearer(t, s, at, "/mcp") != 200 {
+		t.Fatal("fresh token refused")
+	}
+	now = now.Add(45 * time.Second)
+	if bearer(t, s, at, "/mcp") != 401 {
+		t.Fatal("token past AccessTTL accepted")
+	}
+	now = now.Add(time.Minute)
+	if code, _ := refresh(t3["refresh_token"].(string)); code != 400 {
+		t.Fatalf("expired refresh token accepted: %d", code)
+	}
+}
+
+func TestChallengeAndISSAndDiscovery(t *testing.T) {
+	s := New(t, func(c *Config) { c.ChallengeMetadata = true; c.ISS = "https://bogus.example"; c.IssuerPath = "/t" })
+	resp, _ := get(t, s.ResourceURL(), nil)
+	if h := resp.Header.Get("WWW-Authenticate"); !strings.Contains(h, `resource_metadata="`+s.URL+`/.well-known/oauth-protected-resource/mcp"`) {
+		t.Fatalf("challenge %q", h)
+	}
+	s.Set(func(c *Config) { c.ChallengeMetadata = false })
+	resp, _ = get(t, s.ResourceURL(), nil)
+	if strings.Contains(resp.Header.Get("WWW-Authenticate"), "resource_metadata") {
+		t.Fatal("resource_metadata present")
+	}
+	u, _ := authorize(t, s, StaticClientID, s.ResourceURL())
+	if u.Query().Get("iss") != "https://bogus.example" {
+		t.Fatalf("iss %v", u)
+	}
+	// Missing locations answer 404 so a client must fall back.
+	s.Set(func(c *Config) {
+		c.Missing = []string{"/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server/t"}
+	})
+	if r, _ := get(t, s.URL+"/.well-known/oauth-protected-resource/mcp", nil); r.StatusCode != 404 {
+		t.Fatalf("%d", r.StatusCode)
+	}
+	if r, _ := get(t, s.URL+"/.well-known/oauth-protected-resource", nil); r.StatusCode != 200 {
+		t.Fatalf("%d", r.StatusCode)
+	}
+	if r, _ := get(t, s.URL+"/.well-known/oauth-authorization-server/t", nil); r.StatusCode != 404 {
+		t.Fatalf("%d", r.StatusCode)
+	}
+	if r, m := get(t, s.URL+"/.well-known/openid-configuration/t", nil); r.StatusCode != 200 || m["issuer"] != s.URL+"/t" {
+		t.Fatalf("%d %v", r.StatusCode, m)
+	}
 }
