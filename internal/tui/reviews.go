@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/harmonica"
@@ -18,12 +19,14 @@ type ReviewsDrawer struct {
 	selectedRound int      // index in rounds list
 	turns         []string // turn IDs to display, oldest first
 	reviewsByTurn map[string]*drawerReviews
-	scrollOffset  int      // scroll position within the drawer content
+	follow        Follow   // where the drawer stands: at the bottom, or holding a place by content
 	roster        []string // participant IDs in roster order
 	drawerHeight  int      // allocated height for rendering
 	animating     bool     // a spring is still moving animPos toward its target
 	animPos       float64  // how much of the drawer shows while animating, 0 to 1
 	animVel       float64  // the spring's velocity
+
+	rowsFn func() ([]string, []FollowRow) // tests only: stands in for the content's rows
 }
 
 // drawerSpring moves the drawer open and shut in a few tenths of a second
@@ -52,8 +55,8 @@ func NewReviewsDrawer() *ReviewsDrawer {
 }
 
 // SetTurns updates the drawer's turn list.
-// The selected turn stays selected when it is still listed, and the scroll
-// position is kept then; otherwise the selection is clamped and scroll resets.
+// The selected turn stays selected when it is still listed, and the view keeps
+// its place then; otherwise the selection is clamped and the view goes to the bottom.
 func (d *ReviewsDrawer) SetTurns(turns []string) {
 	prev := d.selectedTurnID()
 	d.turns = turns
@@ -69,7 +72,7 @@ func (d *ReviewsDrawer) SetTurns(turns []string) {
 	if d.selectedTurn >= len(d.turns) {
 		d.selectedTurn = max(0, len(d.turns)-1)
 	}
-	d.scrollOffset = 0
+	d.follow.End()
 }
 
 // SetRoster sets the participant ordering for the drawer from a list in roster order.
@@ -82,8 +85,8 @@ func (d *ReviewsDrawer) SetDrawerHeight(height int) {
 	d.drawerHeight = height
 }
 
-// Open opens the drawer on the given turn index. It slides in unless plainMode
-// is set, when it is whole at once.
+// Open opens the drawer on the given turn index, at the bottom of its content. It
+// slides in unless plainMode is set, when it is whole at once.
 func (d *ReviewsDrawer) Open(turnIdx int, plainMode bool) {
 	if turnIdx < 0 || turnIdx >= len(d.turns) {
 		return
@@ -92,7 +95,7 @@ func (d *ReviewsDrawer) Open(turnIdx int, plainMode bool) {
 	d.open = true
 	d.selectedTurn = turnIdx
 	d.selectedRound = 0
-	d.scrollOffset = 0
+	d.follow.End()
 	d.animPos, d.animVel = from, d.animVel*boolFloat(d.animating)
 	d.animating = !plainMode && from < 1
 }
@@ -102,7 +105,7 @@ func (d *ReviewsDrawer) Open(turnIdx int, plainMode bool) {
 func (d *ReviewsDrawer) Close(plainMode bool) {
 	from := d.progress()
 	d.open = false
-	d.scrollOffset = 0
+	d.follow.End()
 	d.animPos, d.animVel = from, d.animVel*boolFloat(d.animating)
 	d.animating = !plainMode && from > 0
 }
@@ -213,7 +216,7 @@ func (d *ReviewsDrawer) SelectUp() {
 	if d.selectedTurn > 0 {
 		d.selectedTurn--
 		d.selectedRound = 0
-		d.scrollOffset = 0
+		d.follow.End()
 	}
 }
 
@@ -222,7 +225,7 @@ func (d *ReviewsDrawer) SelectDown() {
 	if d.selectedTurn < len(d.turns)-1 {
 		d.selectedTurn++
 		d.selectedRound = 0
-		d.scrollOffset = 0
+		d.follow.End()
 	}
 }
 
@@ -234,7 +237,7 @@ func (d *ReviewsDrawer) SelectRoundLeft() {
 	}
 	if d.selectedRound > 0 {
 		d.selectedRound--
-		d.scrollOffset = 0
+		d.follow.End()
 	}
 }
 
@@ -246,7 +249,7 @@ func (d *ReviewsDrawer) SelectRoundRight() {
 	}
 	if d.selectedRound < len(rounds)-1 {
 		d.selectedRound++
-		d.scrollOffset = 0
+		d.follow.End()
 	}
 }
 
@@ -283,10 +286,10 @@ func (d *ReviewsDrawer) headerPrefix() string {
 
 // RoundAt returns the index of the round whose number is under cell x of the
 // drawer's header line, if the header lists several rounds and a number is
-// there. The header scrolls with the content, so it is only there at the top.
+// there.
 func (d *ReviewsDrawer) RoundAt(x, w int) (int, bool) {
 	rounds := d.getRounds()
-	if len(rounds) <= 1 || d.scrollOffset != 0 || x < 0 || x >= w {
+	if len(rounds) <= 1 || x < 0 || x >= w {
 		return 0, false
 	}
 	_, spans := roundsHeader(rounds, d.selectedRound)
@@ -303,23 +306,43 @@ func (d *ReviewsDrawer) RoundAt(x, w int) (int, bool) {
 func (d *ReviewsDrawer) SelectRound(i int) {
 	if i >= 0 && i < len(d.getRounds()) {
 		d.selectedRound = i
-		d.scrollOffset = 0
+		d.follow.End()
 	}
 }
 
-// ScrollUp scrolls the drawer content up by one line.
-func (d *ReviewsDrawer) ScrollUp(lines int) {
-	d.scrollOffset = max(d.scrollOffset-lines, 0)
+// Scroll moves the drawer n rows down, or up when n is negative, through the follow
+// model at width w.
+func (d *ReviewsDrawer) Scroll(n, w int, cc *ContentCache) {
+	d.layout(w, cc)
+	d.follow.Scroll(n)
 }
 
-// ScrollDown scrolls the drawer content down by a page.
-func (d *ReviewsDrawer) ScrollDown(lines int, maxContent int) {
-	viewport := d.drawerHeight
-	if viewport <= 0 {
-		viewport = lines
+// Home moves the drawer to its first row.
+func (d *ReviewsDrawer) Home(w int, cc *ContentCache) {
+	d.layout(w, cc)
+	d.follow.Home()
+}
+
+// End puts the drawer at the bottom.
+func (d *ReviewsDrawer) End() { d.follow.End() }
+
+// AtBottom reports whether the drawer showed its last row at its last layout.
+func (d *ReviewsDrawer) AtBottom() bool { return d.follow.AtBottom() }
+
+// viewRows is how many rows of content the drawer shows: its height less the header line.
+func (d *ReviewsDrawer) viewRows() int { return max(d.drawerHeight-1, 1) }
+
+// layout places the view on the content as it is now at width w: the header line, the
+// content rows, the first row shown, whether the view is at the bottom, and the count of
+// new rows.
+func (d *ReviewsDrawer) layout(w int, cc *ContentCache) (header string, body []string, first int, bottom bool, count int) {
+	header, body, rows := d.content(w, cc)
+	height := d.viewRows()
+	if d.drawerHeight <= 0 {
+		height = max(len(rows), 1) // no height allotted: every row shows
 	}
-	maxScroll := max(0, maxContent-viewport)
-	d.scrollOffset = min(d.scrollOffset+lines, maxScroll)
+	first, bottom, count = d.follow.Layout(rows, height)
+	return header, body, first, bottom, count
 }
 
 // ContentLines returns the number of lines the drawer's content takes at width w.
@@ -332,20 +355,28 @@ func (d *ReviewsDrawer) SelectedTurnIndex() int {
 	return d.selectedTurn
 }
 
-// render renders the drawer at width w from its scroll position, using
-// content from the cache. While it slides, only the top part of the lines
-// shows; plainMode never slides.
+// render renders the drawer at width w, using content from the cache: the header line,
+// with at its right the count of new rows and where the view stands, then the rows from
+// the first one shown. While it slides, only the top part of the lines shows; plainMode
+// never slides.
 func (d *ReviewsDrawer) render(w int, cc *ContentCache, plainMode bool) string {
 	if !d.Visible() {
 		return ""
 	}
 
-	lines := d.lines(w, cc)
-	if d.scrollOffset < len(lines) {
-		lines = lines[d.scrollOffset:]
-	} else {
-		lines = nil
+	header, body, first, bottom, count := d.layout(w, cc)
+	if d.selectedTurnID() != "" {
+		info := fmt.Sprintf("%d%%", scrollPercent(len(body), d.viewRows(), first))
+		if !bottom && count > 0 {
+			info = fmt.Sprintf("↓ %d new lines · %s", count, info)
+		}
+		header = withScrollInfo(header, w, info)
 	}
+	body = body[min(first, len(body)):]
+	if d.drawerHeight > 0 {
+		body = body[:min(len(body), d.viewRows())]
+	}
+	lines := append([]string{header}, body...)
 
 	if !plainMode && d.animating && d.drawerHeight > 0 {
 		visible := int(d.animPos*float64(d.drawerHeight) + 0.5)
@@ -357,23 +388,56 @@ func (d *ReviewsDrawer) render(w int, cc *ContentCache, plainMode bool) string {
 	return strings.Join(lines, "\n")
 }
 
-// lines is the drawer's whole content at width w: a header naming the turn
-// and its rounds, then each reviewer of the selected round in roster order.
+// lines is the drawer's whole content at width w: the header line, then the rows.
 func (d *ReviewsDrawer) lines(w int, cc *ContentCache) []string {
+	header, body, _ := d.content(w, cc)
+	return append([]string{header}, body...)
+}
+
+// content is the drawer's content at width w: a header naming the turn and its rounds,
+// then the rows, which are each reviewer of the selected round in roster order. For every
+// row it also gives the item it belongs to, a reviewer or a note, and the characters of
+// that item it shows. A row's characters are its runes, and an empty row counts as one.
+func (d *ReviewsDrawer) content(w int, cc *ContentCache) (string, []string, []FollowRow) {
+	if d.rowsFn != nil {
+		lines, rows := d.rowsFn()
+		return "Reviews · Turn 1", lines, rows
+	}
+	var lines []string
+	var rows []FollowRow
+	chars := map[string]int{}
+	// addText adds a row whose characters are those after the first skip bytes of it: the
+	// indentation a wrapped row repeats is not content, so it does not count.
+	addText := func(item, line string, skip int) {
+		line = ansi.Truncate(line, w, "")
+		lines = append(lines, line)
+		text := ansi.Strip(line)
+		if len(text) >= skip {
+			text = text[skip:]
+		}
+		n := max(utf8.RuneCountInString(text), 1)
+		c := chars[item]
+		rows = append(rows, FollowRow{Item: item, Char: c, End: c + n})
+		chars[item] = c + n
+	}
+	add := func(item, line string) { addText(item, line, 0) }
 	turnID := d.selectedTurnID()
 	if turnID == "" {
-		return []string{strings.Repeat("─", w)}
+		return strings.Repeat("─", w), nil, nil
 	}
 	header := fmt.Sprintf("Reviews · Turn %d", d.selectedTurn+1)
 	rev, fetched := d.reviewsByTurn[turnID]
 	rounds := d.getRounds()
 	switch {
 	case !fetched:
-		return []string{ansi.Truncate(header, w, ""), "  loading…"}
+		add("note", "  loading…")
+		return ansi.Truncate(header, w, ""), lines, rows
 	case rev != nil && rev.err != "":
-		return []string{ansi.Truncate(header, w, ""), ansi.Truncate("  reviews unavailable: "+safeLine(rev.err), w, "")}
+		add("note", "  reviews unavailable: "+safeLine(rev.err))
+		return ansi.Truncate(header, w, ""), lines, rows
 	case len(rounds) == 0:
-		return []string{ansi.Truncate(header, w, ""), "  no reviews"}
+		add("note", "  no reviews")
+		return ansi.Truncate(header, w, ""), lines, rows
 	}
 	if d.selectedRound >= len(rounds) {
 		d.selectedRound = 0
@@ -387,8 +451,7 @@ func (d *ReviewsDrawer) lines(w int, cc *ContentCache) []string {
 		list, _ := roundsHeader(rounds, d.selectedRound)
 		header = d.headerPrefix() + list
 	}
-
-	lines := []string{ansi.Truncate(header, w, "")}
+	header = ansi.Truncate(header, w, "")
 
 	// Get items for this round
 	itemsByParticipant := make(map[string]*wire.ReviewItem)
@@ -416,34 +479,35 @@ func (d *ReviewsDrawer) lines(w int, cc *ContentCache) []string {
 	slices.Sort(missing)
 	sortedParticipants = append(sortedParticipants, missing...)
 
-	// content appends a labelled content reference once it is fetched.
-	content := func(label string, ref *wire.ContentReference, indent int) {
-		if ref == nil {
-			return
-		}
-		ci := cc.Get(ref.Ref)
-		if !ci.Ready || ci.Err != nil {
-			return
-		}
-		lines = append(lines, ansi.Truncate(strings.Repeat(" ", indent)+label+":", w, ""))
-		for _, line := range SafeTextWithPrefix(ci.Data, w-indent-2) {
-			lines = append(lines, ansi.Truncate(line, w, ""))
-		}
-	}
-
 	// Render each participant's verdict. Oversized items were already
 	// replaced by their verified records when they were fetched.
 	for _, participant := range sortedParticipants {
 		item := itemsByParticipant[participant]
-		itemLine := fmt.Sprintf("  %s (%s)", safeLine(participant), safeLine(item.Kind))
-		lines = append(lines, ansi.Truncate(itemLine, w, ""))
-		for _, block := range item.Blocks {
-			blockLine := fmt.Sprintf("    • %s: %s", safeLine(block.BlockID), safeLine(block.State))
-			lines = append(lines, ansi.Truncate(blockLine, w, ""))
-			content("evidence", block.Evidence, 6)
-			content("remedy", block.Remedy, 6)
+		id := "reviewer:" + participant
+		// content appends a labelled content reference once it is fetched. Each body is an
+		// item of its own, so one that loads or changes above the view does not move a place
+		// held in another.
+		content := func(item, label string, ref *wire.ContentReference, indent int) {
+			if ref == nil {
+				return
+			}
+			ci := cc.Get(ref.Ref)
+			if !ci.Ready || ci.Err != nil {
+				return
+			}
+			add(item, strings.Repeat(" ", indent)+label+":")
+			for _, line := range SafeTextWithPrefix(ci.Data, w-indent-2) {
+				addText(item, line, len(contentPrefix))
+			}
 		}
-		content("commentary", item.Commentary, 4)
+		add(id, fmt.Sprintf("  %s (%s)", safeLine(participant), safeLine(item.Kind)))
+		for i, block := range item.Blocks {
+			bid := fmt.Sprintf("%s/block:%d:%s", id, i, block.BlockID)
+			add(bid, fmt.Sprintf("    • %s: %s", safeLine(block.BlockID), safeLine(block.State)))
+			content(bid+"/evidence", "evidence", block.Evidence, 6)
+			content(bid+"/remedy", "remedy", block.Remedy, 6)
+		}
+		content(id+"/commentary", "commentary", item.Commentary, 4)
 	}
-	return lines
+	return header, lines, rows
 }

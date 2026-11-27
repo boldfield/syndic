@@ -1,0 +1,217 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/boldfield/syndic/internal/tui/followtest"
+	"github.com/boldfield/syndic/internal/wire"
+	"github.com/charmbracelet/x/ansi"
+)
+
+// drawerView adapts the reviews drawer to the shared case table.
+type drawerView struct {
+	d    *ReviewsDrawer
+	rows []FollowRow
+	cc   *ContentCache
+}
+
+func newDrawerView() *drawerView {
+	v := &drawerView{d: reviewsDrawerOf(1, 8), cc: NewContentCache()}
+	v.d.rowsFn = func() ([]string, []FollowRow) {
+		lines := make([]string, len(v.rows))
+		for i, r := range v.rows {
+			lines[i] = fmt.Sprintf("%s %d", r.Item, r.Char)
+		}
+		return lines, v.rows
+	}
+	return v
+}
+
+func (v *drawerView) SetRows(rows []followtest.Row) {
+	v.rows = v.rows[:0:0]
+	for _, r := range rows {
+		v.rows = append(v.rows, FollowRow{r.Item, r.Char, r.End})
+	}
+	v.d.layout(80, v.cc)
+}
+
+// SetHeight gives the drawer h rows of content under its header line.
+func (v *drawerView) SetHeight(h int) { v.d.SetDrawerHeight(h + 1); v.d.layout(80, v.cc) }
+
+func (v *drawerView) Press(k followtest.Key) {
+	page := max(v.d.viewRows()-1, 1)
+	switch k {
+	case followtest.Up:
+		v.d.Scroll(-1, 80, v.cc)
+	case followtest.Down:
+		v.d.Scroll(1, 80, v.cc)
+	case followtest.PageUp:
+		v.d.Scroll(-page, 80, v.cc)
+	case followtest.PageDown:
+		v.d.Scroll(page, 80, v.cc)
+	case followtest.Home:
+		v.d.Home(80, v.cc)
+	case followtest.End:
+		v.d.End()
+	}
+}
+
+func (v *drawerView) First() int     { _, _, first, _, _ := v.d.layout(80, v.cc); return first }
+func (v *drawerView) AtBottom() bool { _, _, _, bottom, _ := v.d.layout(80, v.cc); return bottom }
+func (v *drawerView) Count() int     { _, _, _, _, count := v.d.layout(80, v.cc); return count }
+
+func TestDrawerFollowCases(t *testing.T) {
+	followtest.Run(t, func() followtest.View { return newDrawerView() })
+}
+
+// TestEveryScrollingViewPassesTheSharedCases runs the one case table against the chat, the
+// transcript and the drawer, and fails if any of them is missing.
+func TestEveryScrollingViewPassesTheSharedCases(t *testing.T) {
+	views := map[string]func() followtest.View{
+		"chat": func() followtest.View {
+			v := &chatAdaptor{a: chatApp(t)}
+			v.a.chatRowsFn = func() ([]string, []FollowRow, []int) {
+				lines := make([]string, len(v.rows))
+				for i, r := range v.rows {
+					lines[i] = fmt.Sprintf("%s %d", r.Item, r.Char)
+				}
+				return lines, v.rows, nil
+			}
+			return v
+		},
+		"transcript": func() followtest.View { return &transcriptView{a: transcriptApp(80, 24)} },
+		"drawer":     func() followtest.View { return newDrawerView() },
+	}
+	for _, name := range []string{"chat", "transcript", "drawer"} {
+		newView, ok := views[name]
+		if !ok {
+			t.Fatalf("the %s is missing from the shared cases", name)
+		}
+		t.Run(name, func(t *testing.T) { followtest.Run(t, newView) })
+	}
+	if len(views) != 3 {
+		t.Fatalf("%d views in the table, want the chat, the transcript and the drawer", len(views))
+	}
+}
+
+func TestDrawerOpensShowingItsLastRow(t *testing.T) {
+	d := reviewsDrawerOf(30, 7)
+	out := strings.Split(ansi.Strip(d.render(80, NewContentCache(), true)), "\n")
+	if len(out) != 7 || !strings.Contains(out[len(out)-1], "p29") {
+		t.Fatalf("the drawer does not end on its last row:\n%s", strings.Join(out, "\n"))
+	}
+	d.Scroll(-10, 80, NewContentCache())
+	d.Close(true)
+	d.Open(0, true)
+	if !d.AtBottom() {
+		t.Fatal("reopened away from the bottom")
+	}
+	out = strings.Split(ansi.Strip(d.render(80, NewContentCache(), true)), "\n")
+	if !strings.Contains(out[len(out)-1], "p29") {
+		t.Fatalf("reopened, the drawer does not end on its last row:\n%s", strings.Join(out, "\n"))
+	}
+}
+
+func TestDrawerCountIsOnItsHeaderLine(t *testing.T) {
+	cc := NewContentCache()
+	d := reviewsDrawerOf(30, 7)
+	d.Scroll(-10, 80, cc)
+	d.UpdateReviews("turn1", reviewsDrawerOf(35, 7).reviewsByTurn["turn1"].items)
+	head := strings.Split(ansi.Strip(d.render(80, cc, true)), "\n")[0]
+	if !strings.Contains(head, "↓ 5 new lines · ") || !strings.HasSuffix(strings.TrimRight(head, " "), "%") {
+		t.Fatalf("header line %q", head)
+	}
+	d.End()
+	if head := strings.Split(ansi.Strip(d.render(80, cc, true)), "\n")[0]; strings.Contains(head, "new lines") || !strings.HasSuffix(head, "100%") {
+		t.Fatalf("header line at the bottom %q", head)
+	}
+}
+
+// A held place in a long review comment stays on the same words when the drawer is
+// rewrapped: the indentation every wrapped row repeats is not content.
+func TestDrawerHoldsItsPlaceInLongCommentaryOnResize(t *testing.T) {
+	var words []string
+	for i := range 500 {
+		words = append(words, fmt.Sprintf("w%04d", i))
+	}
+	text := strings.Join(words, " ")
+	cc := NewContentCache()
+	cc.Store("ref:long", text, nil)
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0, true)
+	d.SetDrawerHeight(8)
+	d.UpdateReviews("turn1", []wire.ReviewItem{{
+		Round: 0, Participant: "reviewer1", Kind: "approve",
+		Commentary: &wire.ContentReference{Ref: "ref:long", SHA256: "x", ByteLen: int64(len(text))},
+	}})
+	lines := func(w int) []string {
+		return strings.Split(ansi.Strip(d.render(w, cc, true)), "\n")
+	}
+	lines(80)
+	d.Scroll(-20, 80, cc)
+	before := lines(80)
+	token := strings.Fields(before[1])[0]
+	if !strings.HasPrefix(token, "w") {
+		t.Fatalf("first row is not commentary text: %q", before[1])
+	}
+	after := lines(40)
+	if !strings.Contains(after[1], token) {
+		t.Fatalf("after narrowing, the first row %q lost %s", after[1], token)
+	}
+	if got := lines(80); !strings.Contains(got[1], token) {
+		t.Fatalf("after widening, the first row %q lost %s", got[1], token)
+	}
+}
+
+// A held place in a reviewer's commentary stays on the same words when a block's evidence
+// and remedy above it load: each body is an item of its own.
+func TestDrawerHoldsItsPlaceWhenABodyAboveLoads(t *testing.T) {
+	numbered := func(word string, n int) string {
+		var ws []string
+		for i := range n {
+			ws = append(ws, fmt.Sprintf("%s%03d", word, i))
+		}
+		return strings.Join(ws, " ")
+	}
+	commentary, evidence, remedy := numbered("comment", 200), numbered("evidence", 100), numbered("remedy", 100)
+	ref := func(r, text string) *wire.ContentReference {
+		return &wire.ContentReference{Ref: r, SHA256: "x", ByteLen: int64(len(text))}
+	}
+	cc := NewContentCache()
+	cc.Store("ref:commentary", commentary, nil)
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(8)
+	d.Open(0, true)
+	d.UpdateReviews("turn1", []wire.ReviewItem{{
+		Round: 0, Participant: "reviewer1", Kind: "block",
+		Blocks: []wire.ReviewBlock{{
+			BlockID: "b1", State: "opened",
+			Evidence: ref("ref:evidence", evidence), Remedy: ref("ref:remedy", remedy),
+		}},
+		Commentary: ref("ref:commentary", commentary),
+	}})
+	firstRow := func() string {
+		return strings.Split(ansi.Strip(d.render(40, cc, true)), "\n")[1]
+	}
+	firstRow()
+	d.Scroll(-30, 40, cc)
+	held := firstRow()
+	if !strings.Contains(held, "comment") {
+		t.Fatalf("the held row is not in the commentary: %q", held)
+	}
+	cc.Store("ref:evidence", evidence, nil)
+	if got := firstRow(); got != held {
+		t.Fatalf("after the evidence loaded, the first row is %q, want %q", got, held)
+	}
+	cc.Store("ref:remedy", remedy, nil)
+	if got := firstRow(); got != held {
+		t.Fatalf("after the remedy loaded, the first row is %q, want %q", got, held)
+	}
+	if d.AtBottom() {
+		t.Fatal("loading a body above the view put it at the bottom")
+	}
+}

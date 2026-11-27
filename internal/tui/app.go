@@ -663,6 +663,7 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Drawer focus takes priority: it blocks input changes and navigation keys.
 	if a.reviewsDrawer.IsOpen() && a.tab == tabChat {
 		drawerHeight := a.layout().Drawer
+		a.reviewsDrawer.SetDrawerHeight(drawerHeight)
 		// Turns that arrived while the drawer is open become selectable.
 		a.updateDrawerTurns()
 		switch msg.String() {
@@ -692,10 +693,16 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.reviewsDrawer.SelectRoundRight()
 			return a, nil
 		case "pgup":
-			a.reviewsDrawer.ScrollUp(drawerHeight)
+			a.reviewsDrawer.Scroll(-max(drawerHeight-2, 1), a.width, a.content)
 			return a, nil
 		case "pgdown":
-			a.reviewsDrawer.ScrollDown(drawerHeight, a.reviewsDrawer.ContentLines(a.width, a.content))
+			a.reviewsDrawer.Scroll(max(drawerHeight-2, 1), a.width, a.content)
+			return a, nil
+		case "home":
+			a.reviewsDrawer.Home(a.width, a.content)
+			return a, nil
+		case "end":
+			a.reviewsDrawer.End()
 			return a, nil
 		case "esc", "ctrl+o":
 			return a, a.closeDrawer()
