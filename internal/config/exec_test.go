@@ -82,6 +82,9 @@ func TestExecRules(t *testing.T) {
 		{"read_only_paths inside syndic state", func(r *Roster) {
 			ensureExec(r).ReadOnlyPaths = []string{filepath.Join(homeForTest(), ".local", "state", "syndic", "journal")}
 		}, "read_only_paths"},
+		{"read_only_paths inside the temporary area", func(r *Roster) {
+			ensureExec(r).ReadOnlyPaths = []string{filepath.Join(os.TempDir(), "syndic-sbx-x")}
+		}, "read_only_paths"},
 		{"read_only_paths containing the temporary area", func(r *Roster) { ensureExec(r).ReadOnlyPaths = []string{filepath.Dir(os.TempDir())} }, "read_only_paths"},
 		{"read_only_paths matching a protected pattern", func(r *Roster) {
 			r.Tools = &ToolsConfig{ProtectedPaths: []string{"**/secrets/"}}
@@ -251,5 +254,38 @@ func TestCheckExecWorkspaceRoot(t *testing.T) {
 		if err := r.CheckExecWorkspaceRoot(root); err != nil {
 			t.Errorf("root %q refused: %v", root, err)
 		}
+	}
+}
+
+func TestExecSyndicAreasOutsideHome(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	t.Setenv("TMPDIR", filepath.Join(base, "tmp"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "state"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
+	for _, area := range []string{"config", "state", "data", "run"} {
+		refused := filepath.Join(base, area, "syndic", "x")
+		neighbour := filepath.Join(base, area, "other")
+		err := execRoster(func(r *Roster) { ensureExec(r).ReadOnlyPaths = []string{refused} }).Validate()
+		if err == nil || !strings.Contains(err.Error(), "read_only_paths") {
+			t.Errorf("%s area: %q accepted, want refusal (%v)", area, refused, err)
+		}
+		if err := execRoster(func(r *Roster) { ensureExec(r).ReadOnlyPaths = []string{neighbour} }).Validate(); err != nil {
+			t.Errorf("%s area: neighbour %q refused: %v", area, neighbour, err)
+		}
+	}
+}
+
+func TestExecLocationChecksNeedExec(t *testing.T) {
+	t.Setenv("HOME", "/")
+	r := makeBaseRoster()
+	r.ApplyDefaults()
+	if err := r.Validate(); err != nil {
+		t.Fatalf("roster without exec refused under HOME=/: %v", err)
+	}
+	if err := execRoster(nil).Validate(); err == nil {
+		t.Fatal("roster granting exec accepted under HOME=/, want refusal")
 	}
 }

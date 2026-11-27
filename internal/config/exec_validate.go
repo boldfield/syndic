@@ -17,10 +17,13 @@ var execReservedEnv = []string{
 	"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
 }
 
+const (
+	defaultExecMaxOutputBytes = 61440
+	defaultExecPath           = "/usr/local/bin:/usr/bin:/bin"
+)
+
 // execResultFramingBytes is what the rendering of an exec result adds to its
 // output, at most (v7 section 2, "Output").
-const defaultExecMaxOutputBytes = 61440
-
 const execResultFramingBytes = 1024
 
 // validateExec applies every rule v7 checks at roster load for the exec tool
@@ -64,12 +67,13 @@ func (r *Roster) validateExec() []error {
 	}
 	// The default output bound is checked only where exec is in use or the
 	// bound is changed, so a roster with no exec anywhere loads as it always did.
-	execInUse := ex.MaxOutputBytes != defaultExecMaxOutputBytes
+	granted := false
 	for _, p := range r.Presets {
 		if slices.Contains(p.Tools, "exec") || slices.Contains(p.ReviewerTools, "exec") {
-			execInUse = true
+			granted = true
 		}
 	}
+	execInUse := granted || ex.MaxOutputBytes != defaultExecMaxOutputBytes
 	if execInUse && ex.MaxOutputBytes > maxResult-execResultFramingBytes {
 		errs = append(errs, fmt.Errorf("tools.exec.max_output_bytes (%d) must be at most tools.max_result_bytes less %d (%d)", ex.MaxOutputBytes, execResultFramingBytes, maxResult-execResultFramingBytes))
 	}
@@ -81,21 +85,20 @@ func (r *Roster) validateExec() []error {
 			protected = append(protected, re)
 		}
 	}
-	areas := execForbiddenAreas()
-	var pathDirs []string
-	for _, d := range filepath.SplitList(ex.Path) {
-		if d != "" {
-			pathDirs = append(pathDirs, d)
+	// The location checks run where exec is granted or the lists are set, so a
+	// roster with no exec anywhere loads as it always did, wherever HOME is.
+	// ApplyDefaults fills the raw fields, so "set" means "differs from the default".
+	if granted || ex.Path != defaultExecPath || !slices.Equal(ex.ReadOnlyPaths, DefaultExecReadOnlyPaths()) {
+		areas := execForbiddenAreas()
+		for _, d := range filepath.SplitList(ex.Path) {
+			if why := execPathProblem(d, areas, protected); why != "" {
+				errs = append(errs, fmt.Errorf("tools.exec.path: directory %q %s", d, why))
+			}
 		}
-	}
-	for _, d := range pathDirs {
-		if why := execPathProblem(d, areas, protected); why != "" {
-			errs = append(errs, fmt.Errorf("tools.exec.path: directory %q %s", d, why))
-		}
-	}
-	for _, p := range ex.ReadOnlyPaths {
-		if why := execPathProblem(p, areas, protected); why != "" {
-			errs = append(errs, fmt.Errorf("tools.exec.read_only_paths: %q %s", p, why))
+		for _, p := range ex.ReadOnlyPaths {
+			if why := execPathProblem(p, areas, protected); why != "" {
+				errs = append(errs, fmt.Errorf("tools.exec.read_only_paths: %q %s", p, why))
+			}
 		}
 	}
 
@@ -208,8 +211,6 @@ func validateNetworkAllowPattern(pattern string) error {
 
 type execArea struct {
 	path string
-	// outsideOnly areas are refused only when the path is, or contains, them.
-	outsideOnly bool
 }
 
 // execForbiddenAreas lists the home directory and the syndic configuration,
@@ -217,26 +218,30 @@ type execArea struct {
 func execForbiddenAreas() []execArea {
 	var areas []execArea
 	home, _ := os.UserHomeDir()
-	add := func(p string, outsideOnly bool) {
+	add := func(p string) {
 		if p != "" && filepath.IsAbs(p) {
-			areas = append(areas, execArea{p, outsideOnly})
+			areas = append(areas, execArea{p})
 		}
 	}
-	add(home, false)
+	add(home)
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		add(filepath.Join(v, "syndic"), false)
+		add(filepath.Join(v, "syndic"))
 	}
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
-		add(filepath.Join(v, "syndic"), false)
+		add(filepath.Join(v, "syndic"))
+	}
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		add(filepath.Join(v, "syndic"))
 	}
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
-		add(filepath.Join(v, "syndic"), false)
+		add(filepath.Join(v, "syndic"))
 	}
 	if home != "" {
-		add(filepath.Join(home, ".config", "syndic"), false)
-		add(filepath.Join(home, ".local", "state", "syndic"), false)
+		add(filepath.Join(home, ".config", "syndic"))
+		add(filepath.Join(home, ".local", "state", "syndic"))
+		add(filepath.Join(home, ".local", "share", "syndic"))
 	}
-	add(os.TempDir(), true)
+	add(os.TempDir())
 	return areas
 }
 
@@ -245,7 +250,7 @@ func execPathProblem(p string, areas []execArea, protected []*regexp.Regexp) str
 		return ""
 	}
 	for _, a := range areas {
-		if execPathsOverlapArea(p, a) {
+		if execPathsOverlap(p, a.path) {
 			return fmt.Sprintf("is, contains or lies inside %q, which a command may not read", a.path)
 		}
 	}
@@ -256,13 +261,6 @@ func execPathProblem(p string, areas []execArea, protected []*regexp.Regexp) str
 		}
 	}
 	return ""
-}
-
-func execPathsOverlapArea(p string, a execArea) bool {
-	if a.outsideOnly {
-		return pathWithin(p, resolveExecPath(a.path))
-	}
-	return execPathsOverlap(p, a.path)
 }
 
 // execPathsOverlap reports whether a is, contains, or is contained in b.

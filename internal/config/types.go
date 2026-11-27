@@ -394,7 +394,7 @@ func (e *ExecConfig) applyDefaults() {
 	setInt(&e.MaxCalls, 20)
 	setInt(&e.MaxReviewerCalls, 10)
 	if e.Path == "" {
-		e.Path = "/usr/local/bin:/usr/bin:/bin"
+		e.Path = defaultExecPath
 	}
 	if e.ReadOnlyPaths == nil {
 		e.ReadOnlyPaths = DefaultExecReadOnlyPaths()
