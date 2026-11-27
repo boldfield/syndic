@@ -21,7 +21,7 @@ func TestMigration007FreshVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if v != 21 {
-		t.Errorf("version = %d, want 21", v)
+		t.Errorf("version = %d, want 22", v)
 	}
 }
 
