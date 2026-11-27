@@ -75,8 +75,8 @@ func TestMigration017UpgradeRetainsToolCalls(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	c := db.Conn()
 	var version int
-	if err := c.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 17 {
-		t.Fatalf("version = %d, %v; want 17", version, err)
+	if err := c.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 18 {
+		t.Fatalf("version = %d, %v; want 18", version, err)
 	}
 	rows, err := c.Query(`PRAGMA foreign_key_check`)
 	if err != nil {
