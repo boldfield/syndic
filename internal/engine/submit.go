@@ -70,6 +70,9 @@ type openTurn struct {
 	workspace     string
 	toolCallsUsed int
 	toolLimited   bool
+	// reviewerCalls counts each reviewer's calls in the current round against
+	// tools.max_reviewer_calls.
+	reviewerCalls map[string]int
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.

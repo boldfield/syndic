@@ -157,9 +157,9 @@ func TestBudgetReserveChargesDefinitions(t *testing.T) {
 }
 
 // Each dispatch is reserved at the estimate of exactly the request it sends:
-// the author's request carries the read definitions its preset gives it over
-// the conversation's workspace, and the review, the repair and the deliveries
-// carry none, no reviewer dispatch offering definitions yet.
+// the author's and a reviewer's first request carry the read definitions their
+// preset gives them over the conversation's workspace, and the repair and the
+// deliveries carry none.
 func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
 	roster := withPresetTools(t, enginetest.RosterTOML, "review", []string{tools.GroupRead}, []string{tools.GroupRead})
@@ -178,7 +178,8 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	for _, id := range []string{"author", "reviewer"} {
 		for _, call := range h.Adapters[id].Calls() {
 			wantDefs := 0
-			if call.Request.Envelope.Phase == "author" {
+			row := getAttempt(t, h, call.Request.Envelope.AttemptID)
+			if call.Request.Envelope.Phase == "author" || (row.Phase == "review" && row.RepairOf == nil) {
 				wantDefs = len(definitions(t, tools.GroupRead))
 			}
 			if len(call.Request.Tools) != wantDefs {
@@ -188,7 +189,6 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 			if len(call.Request.Tools) > 0 {
 				want += definitionsEstimate(call.Request.Tools)
 			}
-			row := getAttempt(t, h, call.Request.Envelope.AttemptID)
 			if row.EstimatedPromptTokens == nil || *row.EstimatedPromptTokens != want {
 				t.Errorf("%s %s estimate = %v, want %d", id, row.Phase, row.EstimatedPromptTokens, want)
 			}
