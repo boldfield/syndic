@@ -514,6 +514,9 @@ func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confin
 			if err == nil {
 				e.exposeToSearch(t, route, res.Content)
 			}
+			if route == tools.RouteStagedWrite {
+				e.exposeStagedBases(t)
+			}
 			return res, err
 		}
 	}

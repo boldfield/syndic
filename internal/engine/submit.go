@@ -74,6 +74,9 @@ type openTurn struct {
 	// searchScreener is the turn's URL screener for web_search queries,
 	// created at the first query so its counters span the turn.
 	searchScreener *tools.URLScreener
+	// searchBases are the staged bases already given to searchScreener, by
+	// content hash.
+	searchBases map[string]bool
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.

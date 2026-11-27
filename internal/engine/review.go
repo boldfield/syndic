@@ -11,6 +11,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
@@ -392,6 +393,9 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 	if err != nil {
 		return reviewerDispatch{}, err
 	}
+	// The diffs the reviewer is given are canary material for the turn's
+	// later searches.
+	e.exposeToSearchLocked(t, tools.RouteDiff, []byte(t.pkt.diffs))
 	e.markRunning(id)
 	e.armAttempt(t, d.attemptID, d.req.Deadline)
 	return d, nil

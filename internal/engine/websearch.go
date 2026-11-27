@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 
@@ -44,8 +45,8 @@ func (r *searchReferee) Allow(_ context.Context, query string) (bool, string, er
 	return out.allow, out.reason, nil
 }
 
-// exposeToSearch records the bytes a file tool returned as exposed to the
-// turn's participants, so a query carrying them is refused (the canary).
+// exposeToSearch records file-derived bytes a participant of the turn has
+// been exposed to, so a query carrying them is refused (the canary).
 func (e *Engine) exposeToSearch(t *openTurn, route tools.Route, b []byte) {
 	if len(b) == 0 || !e.searchOffered() {
 		return
@@ -53,11 +54,64 @@ func (e *Engine) exposeToSearch(t *openTurn, route tools.Route, b []byte) {
 	e.searchScreenerOf(t).AddBytes(route, b)
 }
 
+// exposeToSearchLocked is exposeToSearch with e.mu held.
+func (e *Engine) exposeToSearchLocked(t *openTurn, route tools.Route, b []byte) {
+	if len(b) == 0 || !e.searchOffered() {
+		return
+	}
+	e.searchScreenerLocked(t).AddBytes(route, b)
+}
+
+// exposeStagedBases records the base content of every path the turn has
+// staged, read from the journal, as exposed. Each base is added once.
+func (e *Engine) exposeStagedBases(t *openTurn) {
+	if !e.searchOffered() {
+		return
+	}
+	entries, err := e.store.Staging(t.id)
+	if err != nil {
+		log.Printf("engine: turn %s: staged bases unreadable for the search canary: %v", t.id, err)
+		return
+	}
+	for _, s := range entries {
+		if s.BaseSHA256 == "" {
+			continue
+		}
+		e.mu.Lock()
+		seen := t.searchBases[s.BaseSHA256]
+		if t.searchBases == nil {
+			t.searchBases = map[string]bool{}
+		}
+		t.searchBases[s.BaseSHA256] = true
+		e.mu.Unlock()
+		if seen {
+			continue
+		}
+		base, err := e.store.Content(s.BaseSHA256)
+		if err != nil {
+			log.Printf("engine: turn %s: staged base unreadable for the search canary: %v", t.id, err)
+			e.mu.Lock()
+			delete(t.searchBases, s.BaseSHA256)
+			e.mu.Unlock()
+			continue
+		}
+		e.exposeToSearch(t, tools.RouteBase, base)
+	}
+}
+
 // searchScreenerOf is the turn's screener for queries, with the roster's
 // allowlist set.
 func (e *Engine) searchScreenerOf(t *openTurn) *tools.URLScreener {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.searchScreenerLocked(t)
+}
+
+// searchScreenerLocked is searchScreenerOf with e.mu held. The screener is
+// created seeded with the answer and change fields of the turn's history
+// document, which is frozen at submit; its input fields are the user's own
+// words and are not canary material.
+func (e *Engine) searchScreenerLocked(t *openTurn) *tools.URLScreener {
 	if t.searchScreener == nil {
 		max := 0
 		if e.roster != nil && e.roster.Tools != nil && e.roster.Tools.MaxFetchesPerTurn != nil {
@@ -68,6 +122,14 @@ func (e *Engine) searchScreenerOf(t *openTurn) *tools.URLScreener {
 			// A bad allowlist already leaves search unoffered.
 			policy, _ := tools.HostPolicyFromConfig(e.roster.Tools.Web)
 			s.SetHostPolicy(policy)
+		}
+		if t.history != nil {
+			for _, h := range t.history.Included() {
+				s.AddBytes(tools.RouteHistory, h.Answer)
+				for _, c := range h.Changes {
+					s.AddBytes(tools.RouteHistory, []byte(c.Outcome+" "+c.Path))
+				}
+			}
 		}
 		t.searchScreener = s
 	}
@@ -126,7 +188,9 @@ func (e *Engine) webSearchEffect(t *openTurn, attemptID string, hook func(turnID
 				return tools.Result{}, err
 			}
 		}
-		ctx, cancel := context.WithDeadline(context.Background(), t.turnDeadline)
+		// The turn's deadline is on the engine's clock, so the time left is
+		// measured there and not against the wall clock.
+		ctx, cancel := context.WithTimeout(context.Background(), t.turnDeadline.Sub(e.clock.Now()))
 		defer cancel()
 		ref := &searchReferee{e: e, turnID: t.id, caller: t.author, callID: call.ID, recheck: recheck}
 		client := &abandoningClient{inner: e.searchClient(scr, ref), ref: ref, cancel: cancel}
