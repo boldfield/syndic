@@ -948,14 +948,17 @@ type manifestDeadlines struct {
 }
 
 type manifestBudgets struct {
-	CalibrationSafety       *float64 `json:"calibration_safety"`
-	MessageOverheadTokens   *int     `json:"message_overhead_tokens"`
-	RequestOverheadTokens   *int     `json:"request_overhead_tokens"`
-	ContextMargin           *float64 `json:"context_margin"`
-	AuthorMaxOutputTokens   *int     `json:"author_max_output_tokens"`
-	ReviewerMaxOutputTokens *int     `json:"reviewer_max_output_tokens"`
-	DeliveryMaxTokens       *int     `json:"delivery_max_tokens"`
-	TurnMaxEstimatedTokens  *int     `json:"turn_max_estimated_tokens"`
+	CalibrationSafety         *float64 `json:"calibration_safety"`
+	MessageOverheadTokens     *int     `json:"message_overhead_tokens"`
+	RequestOverheadTokens     *int     `json:"request_overhead_tokens"`
+	ContextMargin             *float64 `json:"context_margin"`
+	AuthorMaxOutputTokens     *int     `json:"author_max_output_tokens"`
+	ReviewerMaxOutputTokens   *int     `json:"reviewer_max_output_tokens"`
+	ProposerMaxOutputTokens   *int     `json:"proposer_max_output_tokens"`
+	CritiqueMaxOutputTokens   *int     `json:"critique_max_output_tokens"`
+	IntegratorMaxOutputTokens *int     `json:"integrator_max_output_tokens"`
+	DeliveryMaxTokens         *int     `json:"delivery_max_tokens"`
+	TurnMaxEstimatedTokens    *int     `json:"turn_max_estimated_tokens"`
 }
 
 type manifestPreset struct {

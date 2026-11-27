@@ -562,6 +562,15 @@ func (r *Roster) Validate() error {
 	if r.Budgets.ReviewerMaxOutputTokens != nil && *r.Budgets.ReviewerMaxOutputTokens < 1 {
 		errs = append(errs, fmt.Errorf("budgets.reviewer_max_output_tokens must be at least 1"))
 	}
+	if r.Budgets.ProposerMaxOutputTokens != nil && *r.Budgets.ProposerMaxOutputTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.proposer_max_output_tokens must be at least 1"))
+	}
+	if r.Budgets.CritiqueMaxOutputTokens != nil && *r.Budgets.CritiqueMaxOutputTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.critique_max_output_tokens must be at least 1"))
+	}
+	if r.Budgets.IntegratorMaxOutputTokens != nil && *r.Budgets.IntegratorMaxOutputTokens < 1 {
+		errs = append(errs, fmt.Errorf("budgets.integrator_max_output_tokens must be at least 1"))
+	}
 	if r.Budgets.DeliveryMaxTokens != nil && *r.Budgets.DeliveryMaxTokens < 1 {
 		errs = append(errs, fmt.Errorf("budgets.delivery_max_tokens must be at least 1"))
 	}
@@ -828,6 +837,15 @@ func (r *Roster) Validate() error {
 			if preset.Budgets.ReviewerMaxOutputTokens != nil && *preset.Budgets.ReviewerMaxOutputTokens < 1 {
 				errs = append(errs, fmt.Errorf("presets[%q].budgets.reviewer_max_output_tokens must be at least 1", name))
 			}
+			if preset.Budgets.ProposerMaxOutputTokens != nil && *preset.Budgets.ProposerMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.proposer_max_output_tokens must be at least 1", name))
+			}
+			if preset.Budgets.CritiqueMaxOutputTokens != nil && *preset.Budgets.CritiqueMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.critique_max_output_tokens must be at least 1", name))
+			}
+			if preset.Budgets.IntegratorMaxOutputTokens != nil && *preset.Budgets.IntegratorMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("presets[%q].budgets.integrator_max_output_tokens must be at least 1", name))
+			}
 			if preset.Budgets.DeliveryMaxTokens != nil && *preset.Budgets.DeliveryMaxTokens < 1 {
 				errs = append(errs, fmt.Errorf("presets[%q].budgets.delivery_max_tokens must be at least 1", name))
 			}
@@ -923,6 +941,15 @@ func (r *Roster) Validate() error {
 			}
 			if qp.Budgets.ReviewerMaxOutputTokens != nil && *qp.Budgets.ReviewerMaxOutputTokens < 1 {
 				errs = append(errs, fmt.Errorf("quick profile %q: budgets.reviewer_max_output_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.ProposerMaxOutputTokens != nil && *qp.Budgets.ProposerMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.proposer_max_output_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.CritiqueMaxOutputTokens != nil && *qp.Budgets.CritiqueMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.critique_max_output_tokens must be at least 1", profileName))
+			}
+			if qp.Budgets.IntegratorMaxOutputTokens != nil && *qp.Budgets.IntegratorMaxOutputTokens < 1 {
+				errs = append(errs, fmt.Errorf("quick profile %q: budgets.integrator_max_output_tokens must be at least 1", profileName))
 			}
 			if qp.Budgets.DeliveryMaxTokens != nil && *qp.Budgets.DeliveryMaxTokens < 1 {
 				errs = append(errs, fmt.Errorf("quick profile %q: budgets.delivery_max_tokens must be at least 1", profileName))

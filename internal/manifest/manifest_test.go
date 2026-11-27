@@ -1599,6 +1599,9 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	endpointsObj := rosterObj["endpoints"].([]interface{})
 	endpointDefault := endpointsObj[0].(map[string]interface{})
 
+	if endpointDefault["referee_command_template_hash"] != referee.CommandTemplateHash() {
+		t.Errorf("referee_command_template_hash should be frozen in manifest, got %v", endpointDefault["referee_command_template_hash"])
+	}
 	if endpointDefault["referee_template_hash"] != referee.TemplateHash() {
 		t.Errorf("referee_template_hash should be frozen in manifest, got %v", endpointDefault["referee_template_hash"])
 	}
@@ -1800,11 +1803,11 @@ func TestBuild_Referees(t *testing.T) {
 		t.Fatalf("referees %+v, want one per endpoint naming a referee model", built.Referees)
 	}
 	cloud := built.Referees["cloud"]
-	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.BytesPerToken == nil {
+	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.CommandTemplateHash != referee.CommandTemplateHash() || cloud.BytesPerToken == nil {
 		t.Fatalf("cloud referee %+v", cloud)
 	}
 	plain := built.Referees["plain"]
-	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" {
+	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" || plain.CommandTemplateHash != referee.CommandTemplateHash() {
 		t.Fatalf("plain referee %+v", plain)
 	}
 
@@ -1815,5 +1818,35 @@ func TestBuild_Referees(t *testing.T) {
 	var records map[string]json.RawMessage
 	if err := json.Unmarshal(m["referee_probe_records"], &records); err != nil || len(records) != 1 || records["cloud"] == nil {
 		t.Fatalf("referee_probe_records = %s, err %v; want the usable record by endpoint", m["referee_probe_records"], err)
+	}
+}
+
+func TestRosterToMap_QuickProfileDeliberateBounds(t *testing.T) {
+	p, c, i := 111, 222, 333
+	roster := &config.Roster{
+		Quick: map[string]config.QuickProfile{
+			"fast": {Preset: "x", Budgets: &config.Budgets{
+				ProposerMaxOutputTokens:   &p,
+				CritiqueMaxOutputTokens:   &c,
+				IntegratorMaxOutputTokens: &i,
+			}},
+		},
+	}
+	m, err := rosterToMap(roster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, ok := m["quick"].(map[string]map[string]interface{})["fast"]["budgets"].(map[string]interface{})
+	if !ok {
+		t.Fatal("quick profile budgets not serialized")
+	}
+	for k, want := range map[string]int{
+		"proposer_max_output_tokens":   111,
+		"critique_max_output_tokens":   222,
+		"integrator_max_output_tokens": 333,
+	} {
+		if b[k] != want {
+			t.Errorf("%s = %v, want %d", k, b[k], want)
+		}
 	}
 }
