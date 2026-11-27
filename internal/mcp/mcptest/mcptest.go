@@ -10,6 +10,7 @@ package mcptest
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,10 +68,15 @@ type Reply struct {
 	// Silent sends nothing (a request with no answer; over HTTP, an empty
 	// body with Status).
 	Silent bool
-	// Drop ends the connection without a reply: the HTTP connection is
-	// closed, and the stdio pair is closed.
+	// Drop ends the exchange without a reply. Scripted Notifications and
+	// ServerRequests are sent first: over HTTP they form a 200 event stream
+	// that then ends with no response for the request, and over stdio they are
+	// written before the pair is closed. With none, the HTTP connection is
+	// closed before any response header.
 	Drop bool
-	// Delay waits before replying. A cancelled request abandons the wait.
+	// Delay waits before replying. A cancelled request abandons the wait: over
+	// stdio by notifications/cancelled, over HTTP by the client closing the
+	// request (a notifications/cancelled POST is recorded but cancels nothing).
 	Delay time.Duration
 	// Notifications is the number of notifications sent before the reply;
 	// over HTTP they turn the response into an event stream.
@@ -262,6 +268,7 @@ type outcome struct {
 	silent  bool
 	drop    bool
 	aborted bool
+	stream  bool // write msgs as an event stream even if there is one
 }
 
 type envelope struct {
@@ -332,9 +339,6 @@ func (s *Server) handle(ctx context.Context, req Request) outcome {
 	case rep.Silent:
 		out.silent = true
 		return out
-	case rep.Drop:
-		out.drop = true
-		return out
 	case rep.Body != nil:
 		out.msgs = [][]byte{rep.Body}
 		return out
@@ -354,6 +358,10 @@ func (s *Server) handle(ctx context.Context, req Request) outcome {
 			JSONRPC: "2.0", ID: json.RawMessage(fmt.Sprintf(`"srv-%d"`, id)),
 			Method: "sampling/createMessage", Params: map[string]any{},
 		}))
+	}
+	if rep.Drop {
+		out.drop = true
+		return out
 	}
 	env := envelope{JSONRPC: "2.0", ID: req.ID}
 	switch {
@@ -530,6 +538,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		return
 	}
+	if out.drop && len(out.msgs) > 0 {
+		writeHTTP(w, outcome{status: out.status, header: out.header, msgs: out.msgs, stream: true})
+		return
+	}
 	if out.drop {
 		if hj, ok := w.(http.Hijacker); ok {
 			if c, _, err := hj.Hijack(); err == nil {
@@ -547,7 +559,8 @@ func (s *Server) render(rep Reply, req Request) [][]byte {
 }
 
 // headerMismatch is the -32020 reply for a current-revision request whose
-// Mcp-Method or MCP-Protocol-Version header disagrees with its body.
+// Mcp-Method, MCP-Protocol-Version or (for tools/call) Mcp-Name header is
+// missing or disagrees with its body.
 func (s *Server) headerMismatch(req Request) *Reply {
 	raw, ok := req.meta()[MetaVersion]
 	if !ok || req.Method == "" {
@@ -559,7 +572,27 @@ func (s *Server) headerMismatch(req Request) *Reply {
 		r := ErrorReply(CodeHeaderMismatch, "header mismatch")
 		return &r
 	}
+	if req.Method == "tools/call" {
+		var p struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		if decodeHeader(req.Header.Get("Mcp-Name")) != p.Name {
+			r := ErrorReply(CodeHeaderMismatch, "header mismatch")
+			return &r
+		}
+	}
 	return nil
+}
+
+// decodeHeader undoes the =?base64?<Base64>?= form of a header value.
+func decodeHeader(v string) string {
+	if strings.HasPrefix(v, "=?base64?") && strings.HasSuffix(v, "?=") {
+		if b, err := base64.StdEncoding.DecodeString(v[len("=?base64?") : len(v)-2]); err == nil {
+			return string(b)
+		}
+	}
+	return v
 }
 
 func writeHTTP(w http.ResponseWriter, out outcome) {
@@ -570,7 +603,7 @@ func writeHTTP(w http.ResponseWriter, out outcome) {
 		w.WriteHeader(out.status)
 		return
 	}
-	if len(out.msgs) == 1 {
+	if len(out.msgs) == 1 && !out.stream {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(out.status)
 		_, _ = w.Write(out.msgs[0])

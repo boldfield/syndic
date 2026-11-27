@@ -42,10 +42,22 @@ func post(t *testing.T, url string, body []byte, hdr map[string]string) (*http.R
 	return resp, b
 }
 
+// currentHeaders are the headers of a current-revision request; a tools/call
+// names tool "a".
 func currentHeaders(method string) map[string]string {
-	return map[string]string{
+	h := map[string]string{
 		"Content-Type": "application/json", "Mcp-Method": method, "MCP-Protocol-Version": Current,
 	}
+	if method == "tools/call" {
+		h["Mcp-Name"] = "a"
+	}
+	return h
+}
+
+func callHeaders(name string) map[string]string {
+	h := currentHeaders("tools/call")
+	h["Mcp-Name"] = name
+	return h
 }
 
 func TestHTTPCurrentDiscoverListCall(t *testing.T) {
@@ -195,7 +207,7 @@ func TestHTTPDropAndAbort(t *testing.T) {
 	ctx, cancel := contextTimeout(50 * time.Millisecond)
 	defer cancel()
 	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, ts.URL, bytes.NewReader(currentReq(2, "tools/call", map[string]any{"name": "slow"})))
-	for k, v := range currentHeaders("tools/call") {
+	for k, v := range callHeaders("slow") {
 		req.Header.Set(k, v)
 	}
 	if resp, err := http.DefaultClient.Do(req); err == nil {
@@ -234,7 +246,7 @@ func TestPagingAndScriptOrder(t *testing.T) {
 	if !strings.Contains(got[0], "one") || !strings.Contains(got[1], "two") || !strings.Contains(got[2], "two") {
 		t.Fatal(got)
 	}
-	_, b = post(t, ts.URL, currentReq(9, "tools/call", map[string]any{"name": "zzz"}), currentHeaders("tools/call"))
+	_, b = post(t, ts.URL, currentReq(9, "tools/call", map[string]any{"name": "zzz"}), callHeaders("zzz"))
 	if !strings.Contains(string(b), "-32602") {
 		t.Fatal(string(b))
 	}
@@ -351,6 +363,8 @@ func TestStdioMalformedOversizeAndCancel(t *testing.T) {
 	if l := c.line(t); !strings.Contains(l, `"id":4`) {
 		t.Fatal(l)
 	}
+	// The cancelled call never answers: line 4 above came first, and the id 3
+	// reply would have been written before it.
 	if s.Count("notifications/cancelled") != 1 {
 		t.Fatalf("%v", s.Methods())
 	}
@@ -364,4 +378,42 @@ func TestNestedJSON(t *testing.T) {
 
 func contextTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
+}
+
+func TestHTTPDroppedEventStream(t *testing.T) {
+	s := New(Config{
+		Tools: []json.RawMessage{NewTool("d", "")},
+		Calls: map[string][]Reply{"d": {{Drop: true, Notifications: 2}}},
+	})
+	ts := s.HTTP(t)
+	resp, b := post(t, ts.URL, currentReq(7, "tools/call", map[string]any{"name": "d"}), callHeaders("d"))
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("%d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	if n := strings.Count(string(b), "notifications/message"); n != 2 {
+		t.Fatalf("events %d: %s", n, b)
+	}
+	if strings.Contains(string(b), `"id":7`) {
+		t.Fatalf("unexpected response: %s", b)
+	}
+}
+
+func TestHTTPMcpNameChecked(t *testing.T) {
+	s := New(Config{Tools: []json.RawMessage{NewTool("a", "")}})
+	ts := s.HTTP(t)
+	body := currentReq(1, "tools/call", map[string]any{"name": "a"})
+	h := currentHeaders("tools/call")
+	delete(h, "Mcp-Name")
+	_, b := post(t, ts.URL, body, h)
+	if !strings.Contains(string(b), "-32020") {
+		t.Fatalf("missing: %s", b)
+	}
+	h["Mcp-Name"] = "b"
+	if _, b = post(t, ts.URL, body, h); !strings.Contains(string(b), "-32020") {
+		t.Fatalf("mismatch: %s", b)
+	}
+	h["Mcp-Name"] = "=?base64?YQ==?="
+	if _, b = post(t, ts.URL, body, h); strings.Contains(string(b), "-32020") {
+		t.Fatalf("base64 form rejected: %s", b)
+	}
 }
