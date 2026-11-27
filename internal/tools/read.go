@@ -158,28 +158,28 @@ type view struct {
 }
 
 // liveReader reads path from the live tree for the observation store.
-func (t *ReadTools) liveReader(path string) observation.Reader {
-	return func() (string, []byte, error) {
+func (t *ReadTools) liveReader(path string) observation.ModeReader {
+	return func() (string, []byte, bool, error) {
 		if t.fs.IsProtected(path) {
-			return "", nil, toolErrorf(ErrCodeProtected, "%q is protected", path)
+			return "", nil, false, toolErrorf(ErrCodeProtected, "%q is protected", path)
 		}
 		ex, err := t.fs.Examine(path)
 		switch {
 		case err == nil:
 		case errors.Is(err, workspace.ErrSymlinkOnPath):
 			// Checked before ENOTDIR, which it wraps: refused, not absent.
-			return "", nil, observation.ErrSymlinkOnPath
+			return "", nil, false, observation.ErrSymlinkOnPath
 		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOTDIR):
-			return journal.ObservationAbsent, nil, nil
+			return journal.ObservationAbsent, nil, false, nil
 		case errors.Is(err, workspace.ErrSymlink):
-			return observation.KindSymlink, nil, nil
+			return observation.KindSymlink, nil, false, nil
 		case errors.Is(err, workspace.ErrNotRegular):
-			return observation.KindSpecial, nil, nil
+			return observation.KindSpecial, nil, false, nil
 		default:
-			return "", nil, &liveError{err}
+			return "", nil, false, &liveError{err}
 		}
 		if !ex.IsDir {
-			return journal.ObservationFile, ex.Content, nil
+			return journal.ObservationFile, ex.Content, ex.OwnerExec, nil
 		}
 		entries := make([]observation.Entry, len(ex.Entries))
 		for i, e := range ex.Entries {
@@ -187,9 +187,9 @@ func (t *ReadTools) liveReader(path string) observation.Reader {
 		}
 		framed, err := observation.FrameEntries(entries)
 		if err != nil {
-			return "", nil, &liveError{err}
+			return "", nil, false, &liveError{err}
 		}
-		return journal.ObservationListing, framed, nil
+		return journal.ObservationListing, framed, false, nil
 	}
 }
 
@@ -216,7 +216,7 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 		body, err := t.content(sha)
 		return view{kind: journal.ObservationFile, content: body}, err
 	}
-	o, err := t.obs.Observe(t.turnID, t.attemptID, path, t.liveReader(path))
+	o, err := t.obs.ObserveWithMode(t.turnID, t.attemptID, path, t.liveReader(path))
 	if err != nil {
 		return view{}, classify(path, err)
 	}

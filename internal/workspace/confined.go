@@ -318,6 +318,9 @@ type Examination struct {
 	IsDir   bool
 	Entries []DirEntry
 	Content []byte
+	// OwnerExec is a regular file's owner-execute bit, from the same fstat
+	// as Content. Setuid, setgid and sticky are not reported.
+	OwnerExec bool
 }
 
 // ErrNotRegular is returned by Examine for a path that is neither a regular
@@ -361,7 +364,7 @@ func (c *Confined) Examine(path string) (Examination, error) {
 		if err != nil {
 			return Examination{}, fmt.Errorf("read %q: %w", path, err)
 		}
-		return Examination{Content: content}, nil
+		return Examination{Content: content, OwnerExec: stat.Mode&unix.S_IXUSR != 0}, nil
 	case unix.S_IFDIR:
 		names, err := f.Readdirnames(-1)
 		if err != nil {
