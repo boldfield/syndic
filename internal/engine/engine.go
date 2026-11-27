@@ -955,6 +955,8 @@ type manifestPreset struct {
 	Mode              string             `json:"mode"`
 	Author            string             `json:"author"`
 	RequiredReviewers []string           `json:"required_reviewers"`
+	Proposers         []string           `json:"proposers"`
+	Integrator        string             `json:"integrator"`
 	Deadlines         *manifestDeadlines `json:"deadlines"`
 	Budgets           *manifestBudgets   `json:"budgets"`
 }
@@ -991,7 +993,8 @@ func (e *Engine) manifestEffective(row *journal.TurnRow) (config.Effective, erro
 		Budgets:       config.Budgets(m.Roster.Budgets),
 	}
 	for name, p := range m.Roster.Presets {
-		cp := config.Preset{Mode: p.Mode, Author: p.Author, RequiredReviewers: p.RequiredReviewers, Budgets: budgets(p.Budgets)}
+		cp := config.Preset{Mode: p.Mode, Author: p.Author, RequiredReviewers: p.RequiredReviewers,
+			Proposers: p.Proposers, Integrator: p.Integrator, Budgets: budgets(p.Budgets)}
 		if p.Deadlines != nil {
 			d := config.Deadlines(*p.Deadlines)
 			cp.Deadlines = &d
