@@ -71,6 +71,19 @@ type ReadTools struct {
 	turnID         string
 	attemptID      string
 	maxResultBytes int
+	// recordOnly serves reads from what the record already holds: a path it
+	// does not hold reads as absent, and nothing is observed or journaled.
+	recordOnly bool
+	// frozen, when set, is the record and overlay captured when a recordOnly
+	// reader was built; later changes to either are not seen.
+	frozen *frozenView
+}
+
+// frozenView is the turn's observations by path and its staging map at one
+// moment.
+type frozenView struct {
+	obs     map[string]journal.Observation
+	staging map[string]string
 }
 
 // NewReadTools returns the read tools for attemptID of turnID over the
@@ -86,6 +99,22 @@ func NewReadTools(j *journal.Store, fs *workspace.Confined, turnID, attemptID st
 // becomes an error result carrying its text; any other error is a failure of
 // the engine itself, journals nothing and is returned.
 func (t *ReadTools) finish(callID string, content []byte, err error) (Result, error) {
+	res, status, err := outcome(content, err)
+	if err != nil {
+		return Result{}, err
+	}
+	if jerr := t.j.Tx(func(tx *journal.Tx) error {
+		_, e := tx.RecordToolResult(callID, status, res.Content, res.ErrorCode)
+		return e
+	}); jerr != nil {
+		return Result{}, fmt.Errorf("journal result of call %s: %w", callID, jerr)
+	}
+	return res, nil
+}
+
+// outcome turns what a read produced into the result the model sees and the
+// status it is journaled with. An error that is not a *toolError is returned.
+func outcome(content []byte, err error) (Result, string, error) {
 	res := Result{Content: content}
 	status := journal.ToolCallExecuted
 	var te *toolError
@@ -95,18 +124,12 @@ func (t *ReadTools) finish(callID string, content []byte, err error) (Result, er
 		res = Result{Content: []byte(te.msg), ErrorCode: te.code}
 		status = journal.ToolCallError
 	default:
-		return Result{}, err
+		return Result{}, "", err
 	}
 	if res.Content == nil {
 		res.Content = []byte{}
 	}
-	if jerr := t.j.Tx(func(tx *journal.Tx) error {
-		_, e := tx.RecordToolResult(callID, status, res.Content, res.ErrorCode)
-		return e
-	}); jerr != nil {
-		return Result{}, fmt.Errorf("journal result of call %s: %w", callID, jerr)
-	}
-	return res, nil
+	return res, status, nil
 }
 
 // cleanPath normalizes a model-supplied path to the slash-separated form the
@@ -216,7 +239,13 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 		body, err := t.content(sha)
 		return view{kind: journal.ObservationFile, content: body}, err
 	}
-	o, err := t.obs.ObserveWithMode(t.turnID, t.attemptID, path, t.liveReader(path))
+	var o journal.Observation
+	var err error
+	if t.recordOnly {
+		o, err = t.recorded(path)
+	} else {
+		o, err = t.obs.ObserveWithMode(t.turnID, t.attemptID, path, t.liveReader(path))
+	}
 	if err != nil {
 		return view{}, classify(path, err)
 	}
@@ -256,8 +285,31 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 	return view{kind: journal.ObservationListing, entries: merged}, nil
 }
 
+// recorded returns the turn's observation of path, or an absent one when the
+// record holds none. It observes nothing.
+func (t *ReadTools) recorded(path string) (o journal.Observation, err error) {
+	if t.frozen != nil {
+		if o, ok := t.frozen.obs[path]; ok {
+			return o, nil
+		}
+		return journal.Observation{Kind: journal.ObservationAbsent}, nil
+	}
+	err = t.j.Tx(func(tx *journal.Tx) error {
+		var txErr error
+		o, txErr = tx.ObservationAt(t.turnID, path)
+		return txErr
+	})
+	if errors.Is(err, journal.ErrNotObserved) {
+		return journal.Observation{Kind: journal.ObservationAbsent}, nil
+	}
+	return o, err
+}
+
 // loadStaging returns the turn's staged paths with their content hashes.
 func (t *ReadTools) loadStaging() (map[string]string, error) {
+	if t.frozen != nil {
+		return t.frozen.staging, nil
+	}
 	var entries []journal.StagingEntry
 	if err := t.j.Tx(func(tx *journal.Tx) (err error) {
 		entries, err = tx.Staging(t.turnID)

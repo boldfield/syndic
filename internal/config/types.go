@@ -257,7 +257,9 @@ type WebConfig struct {
 }
 
 type RefereeConfig struct {
-	MaxOutputTokens *int `toml:"max_output_tokens"` // default 64
+	MaxOutputTokens     *int `toml:"max_output_tokens"`      // default 64
+	ExecMaxOutputTokens *int `toml:"exec_max_output_tokens"` // default 256
+	MaxReads            *int `toml:"max_reads"`              // default 6, per command decision
 }
 
 type ToolsConfig struct {
@@ -421,6 +423,14 @@ func (r *Roster) ApplyDefaults() {
 	if r.Tools.Referee.MaxOutputTokens == nil {
 		mot := 64
 		r.Tools.Referee.MaxOutputTokens = &mot
+	}
+	if r.Tools.Referee.ExecMaxOutputTokens == nil {
+		emot := 256
+		r.Tools.Referee.ExecMaxOutputTokens = &emot
+	}
+	if r.Tools.Referee.MaxReads == nil {
+		mr := 6
+		r.Tools.Referee.MaxReads = &mr
 	}
 }
 

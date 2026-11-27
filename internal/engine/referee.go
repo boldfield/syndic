@@ -204,6 +204,10 @@ type refereeOutcome struct {
 	reason    string
 	cause     string
 	attemptID string
+	// step and calls: the result was a read step, not a decision.
+	step  bool
+	calls []transport.ToolCall
+	text  string
 }
 
 // refereeDecisionEvent is the payload of the journaled web_referee_decision of a
@@ -348,17 +352,24 @@ func webTarget(name string, args []byte) string {
 // output and the reservation uses that bound. It returns a *budgetRefusal
 // when the request does not fit. e.mu is held.
 func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, run config.EndpointProfile, prior []referee.WebCall) (transport.CompleteRequest, string, error) {
-	pb, missing := budgetConstants(t.eff, manifest.RefereeLabel(ref.RunEndpoint, ref.Model), ref.Participant, run)
-	if missing != "" {
-		return transport.CompleteRequest{}, "", fmt.Errorf("engine: referee %s lacks %s", pb.id, missing)
-	}
 	msgs := referee.PromptMessages(referee.Payload{
 		UserInput:  t.input,
 		CallName:   c.name,
 		CallURL:    c.target,
 		PriorCalls: prior,
 	})
-	maxOut := budget.ClampOutput(e.refereeMaxOutput(), ref.OutputBound)
+	return e.beginRefereeWith(t, c.caller, ref, run, msgs, nil, e.refereeMaxOutput())
+}
+
+// beginRefereeWith reserves a referee request of msgs and the tool definitions
+// defs, bounded to maxOutput tokens, and records its attempt, in one
+// transaction. e.mu is held.
+func (e *Engine) beginRefereeWith(t *openTurn, caller string, ref manifest.Referee, run config.EndpointProfile, msgs []transport.Message, defs []transport.Tool, maxOutput int) (transport.CompleteRequest, string, error) {
+	pb, missing := budgetConstants(t.eff, manifest.RefereeLabel(ref.RunEndpoint, ref.Model), ref.Participant, run)
+	if missing != "" {
+		return transport.CompleteRequest{}, "", fmt.Errorf("engine: referee %s lacks %s", pb.id, missing)
+	}
+	maxOut := budget.ClampOutput(maxOutput, ref.OutputBound)
 	deadline := e.attemptDeadline(t)
 
 	var req transport.CompleteRequest
@@ -368,13 +379,13 @@ func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, 
 		if err != nil {
 			return err
 		}
-		estimated, err := reserveWith(tx, t, pb, msgs, nil, maxOut)
+		estimated, err := reserveWith(tx, t, pb, msgs, defs, maxOut)
 		if err != nil {
 			return err
 		}
 		attemptID, err = tx.BeginAttemptWith(journal.AttemptParams{
 			TurnID:                t.id,
-			Participant:           c.caller,
+			Participant:           caller,
 			Phase:                 phaseReferee,
 			Epoch:                 turn.Epoch,
 			Deadline:              &deadline,
@@ -386,7 +397,7 @@ func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, 
 		}
 		if err := emit(t.id, wire.EventKindAttemptBegun, wire.EvAttemptBegun{
 			AttemptID:             attemptID,
-			Participant:           c.caller,
+			Participant:           caller,
 			Phase:                 phaseReferee,
 			Epoch:                 int64(turn.Epoch),
 			Deadline:              deadline.Format(time.RFC3339Nano),
@@ -397,7 +408,7 @@ func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, 
 		}
 		req = transport.CompleteRequest{
 			Envelope: transport.AttemptEnvelope{
-				Participant: c.caller,
+				Participant: caller,
 				TurnID:      t.id,
 				Phase:       phaseReferee,
 				Epoch:       turn.Epoch,
@@ -405,6 +416,7 @@ func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, 
 			},
 			Model:           ref.Model,
 			Messages:        msgs,
+			Tools:           defs,
 			MaxOutputTokens: maxOut,
 			Deadline:        deadline,
 		}
@@ -427,6 +439,17 @@ func (e *Engine) beginReferee(t *openTurn, c refereeCall, ref manifest.Referee, 
 // error or a timeout denies. A failure that leaves the work's outcome unknown
 // opens a capacity hold. e.mu is held.
 func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Referee, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, fail *failure) (refereeOutcome, error) {
+	return e.completeRefereeWith(t, c.caller, ref, req, attemptID, res, fail, func(tx *journal.Tx, emit hub.Emit, out refereeOutcome) error {
+		return e.recordRefereeDecision(tx, emit, t.id, c, out)
+	})
+}
+
+// completeRefereeWith is completeReferee for a decision recorded by record.
+// When the request offered tool definitions, an accepted, checked result that
+// finishes with the tool-call status and carries calls is a read step, not a
+// decision: it is charged and journaled like any attempt, record is not
+// called, and the outcome has step set and carries the calls. e.mu is held.
+func (e *Engine) completeRefereeWith(t *openTurn, caller string, ref manifest.Referee, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, fail *failure, record func(*journal.Tx, hub.Emit, refereeOutcome) error) (refereeOutcome, error) {
 	gate := transport.CheckResult(req, res, ref.Expected)
 	var out refereeOutcome
 	var held *hold
@@ -453,7 +476,7 @@ func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Refere
 			if exceeded, err = e.settleQuarantined(tx, emit, t.id, attemptID, res); err != nil {
 				return err
 			}
-			return e.recordRefereeDecision(tx, emit, t.id, c, out)
+			return record(tx, emit, out)
 		}
 
 		var usage *wire.ReportedUsage
@@ -487,11 +510,11 @@ func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Refere
 		if fail != nil && fail.hold {
 			uncertain = &failure{hold: true}
 		}
-		if held, err = e.failedIn(tx, emit, c.caller, attemptID, uncertain); err != nil {
+		if held, err = e.failedIn(tx, emit, caller, attemptID, uncertain); err != nil {
 			return err
 		}
-		if held != nil && e.lastInflight(c.caller) {
-			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: c.caller, State: ParticipantUnknown}); err != nil {
+		if held != nil && e.lastInflight(caller) {
+			if err := emit("", wire.EventKindParticipantState, wire.EvParticipantState{Participant: caller, State: ParticipantUnknown}); err != nil {
 				return err
 			}
 		}
@@ -503,6 +526,9 @@ func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Refere
 		switch {
 		case fail != nil:
 			out.cause = refereeFailureCause(fail)
+		case len(req.Tools) > 0 && gate == nil && transport.IsToolStep(res):
+			out.step, out.calls, out.text = true, res.ToolCalls, res.Text
+			return nil
 		case perr != nil && (res.Status != transport.StatusComplete || len(res.ToolCalls) > 0):
 			out.cause, out.reason = refereeParseCause(res), perr.Error()
 		case gate != nil:
@@ -519,7 +545,7 @@ func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Refere
 				out.cause = journal.RefereeCauseAnswer
 			}
 		}
-		return e.recordRefereeDecision(tx, emit, t.id, c, out)
+		return record(tx, emit, out)
 	})
 	delete(t.pending, attemptID)
 	if err != nil {
@@ -527,14 +553,14 @@ func (e *Engine) completeReferee(t *openTurn, c refereeCall, ref manifest.Refere
 		return refereeOutcome{attemptID: attemptID}, err
 	}
 	if exceeded {
-		e.markExceeded(c.caller)
+		e.markExceeded(caller)
 	}
 	if quarantined {
 		e.lateCommitted(attemptID, res)
 		return out, nil
 	}
 	if held != nil {
-		e.failedCommitted(c.caller, &failure{hold: true}, held)
+		e.failedCommitted(caller, &failure{hold: true}, held)
 	}
 	return out, nil
 }

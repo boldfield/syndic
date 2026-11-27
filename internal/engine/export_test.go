@@ -147,3 +147,10 @@ func (e *Engine) RefereeAdapterCount() int {
 	defer e.mu.Unlock()
 	return len(e.refereeAdapters)
 }
+
+// DispatchCommandReferee asks the referee about a bash call of the open turn,
+// as a bash effect does with the caller's slot held.
+func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) (RefereeOutcome, error) {
+	out, err := e.dispatchCommandReferee(commandCall{turnID: turnID, caller: caller, callID: callID, command: command})
+	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
+}
