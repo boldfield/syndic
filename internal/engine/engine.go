@@ -492,9 +492,11 @@ func (e *Engine) Start() error {
 	}
 
 	// Recovery: classify unfinished applies without writing to the workspace.
-	// RecoverApply is called for change sets during the apply flow.
-	// This is a placeholder for future implementation that would enumerate
-	// all change sets and call RecoverApply for any with in-progress applies.
+	// Enumerate all conversations and their turns to find any change sets with
+	// in-progress applies that need recovery classification.
+	if err := e.recoverApplies(); err != nil {
+		return fmt.Errorf("engine: recovery applies: %w", err)
+	}
 
 	// Now read and validate the new roster
 	path, err := filepath.Abs(e.rosterPath)
@@ -701,6 +703,72 @@ func (e *Engine) Start() error {
 	}
 
 	e.started = true
+	return nil
+}
+
+// recoverApplies enumerates all conversations and turns to find any change sets
+// with in-progress applies that need recovery classification. It calls
+// journal.Store.RecoverApply for each, which classifies paths without writing.
+func (e *Engine) recoverApplies() error {
+	// List all conversations, paginating through them
+	cursor := ""
+	for {
+		convs, nextCursor, err := e.store.ListConversations(nil, cursor, 100)
+		if err != nil {
+			return fmt.Errorf("list conversations: %w", err)
+		}
+
+		for _, conv := range convs {
+			// Get all turns in this conversation
+			turns, err := e.store.GetConversationTurns(conv.ID)
+			if err != nil {
+				return fmt.Errorf("get conversation turns for %q: %w", conv.ID, err)
+			}
+
+			for _, turnInfo := range turns {
+				// Get the full turn row to access its candidate ID
+				turn, err := e.store.GetTurn(turnInfo.ID)
+				if err != nil {
+					return fmt.Errorf("get turn %q: %w", turnInfo.ID, err)
+				}
+
+				// Skip turns without a candidate or change set
+				if turn.CandidateID == "" {
+					continue
+				}
+
+				changeSetID, err := e.store.GetCandidateChangeSetID(turn.CandidateID)
+				if errors.Is(err, journal.ErrNoChangeSet) {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("get candidate change set id for %q: %w", turn.CandidateID, err)
+				}
+
+				// Recover the apply state without writing to the workspace
+				workspace := ""
+				if conv.Workspace != nil {
+					workspace = *conv.Workspace
+				}
+
+				// RecoverApply is idempotent: a change set with no unfinished
+				// apply is returned as it is, and one with an in-progress apply
+				// is classified and recorded.
+				_, err = e.store.RecoverApply(workspace, changeSetID)
+				if err != nil {
+					// Log the error but continue; an unrecoverable apply state
+					// is not fatal to the engine start.
+					log.Printf("warning: recover apply for change set %q: %v", changeSetID, err)
+				}
+			}
+		}
+
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+
 	return nil
 }
 

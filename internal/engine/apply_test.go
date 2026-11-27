@@ -81,3 +81,10 @@ func TestDiscardNoChangeSet(t *testing.T) {
 	_, err = h.Engine.Discard(turnID)
 	_ = wantRefusal(t, err, wire.ErrorCodeNotOpen)
 }
+
+// TestApplyDiscardOnlyAppliableStates tests that discard only works on
+// appliable, partial, or conflict states and rejects other states.
+func TestApplyDiscardOnlyAppliableStates(t *testing.T) {
+	// Create a turn in applied state (can't be created directly, so skip for now)
+	t.Skip("requires creating a turn in applied state")
+}

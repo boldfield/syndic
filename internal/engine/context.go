@@ -39,13 +39,28 @@ func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *strin
 	doc := history.New()
 	tainted := make(map[string]bool, len(turns))
 	for _, t := range turns {
-		if err := doc.AddTurn(history.Turn{
+		turn := history.Turn{
 			ID:     t.ID,
 			State:  t.State,
 			Input:  []byte(t.Input),
 			Answer: []byte(t.Answer),
 			Label:  historyLabel(t),
-		}); err != nil {
+		}
+
+		// Populate change set state and per-path outcomes from the journal
+		cs, err := tx.ChangeSetForTurn(t.ID)
+		if err == nil {
+			turn.ChangesState = cs.State
+			for _, p := range cs.Paths {
+				turn.Changes = append(turn.Changes, history.Change{
+					Path:    p.Path,
+					Outcome: p.Outcome,
+				})
+			}
+		}
+		// If there's no change set for this turn, leave ChangesState and Changes empty
+
+		if err := doc.AddTurn(turn); err != nil {
 			return nil, nil, fmt.Errorf("engine: history turn %s: %w", t.ID, err)
 		}
 		if t.FileTainted {

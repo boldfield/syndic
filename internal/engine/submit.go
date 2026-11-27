@@ -150,6 +150,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	if e.applyOpen != nil {
 		busy := refusal(wire.ErrorCodeBusy)
 		busy.TurnID = strPtr(e.applyOpen.id)
+		busy.Detail = strPtr("apply is open")
 		return wire.SubmitReply{}, busy
 	}
 
@@ -203,6 +204,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	if e.open != nil {
 		busy := refusal(wire.ErrorCodeBusy)
 		busy.TurnID = strPtr(e.open.id)
+		busy.Detail = strPtr("turn is open")
 		return wire.SubmitReply{}, busy
 	}
 
