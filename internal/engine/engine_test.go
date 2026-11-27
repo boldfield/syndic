@@ -860,3 +860,48 @@ integrator = "author"
 		t.Fatalf("detail = %v", we.Detail)
 	}
 }
+
+// A deliberate preset whose routes the routing policy forbids is refused when
+// the engine reads the roster, and nothing is dispatched for it.
+func TestDeliberateRoutingViolationRefusedBeforeDispatch(t *testing.T) {
+	toml := strings.ReplaceAll(enginetest.RosterTOML, `eligible_roles = ["author"]`, `eligible_roles = ["author", "reviewer"]`)
+	toml = strings.ReplaceAll(toml, `eligible_roles = ["reviewer"]`, `eligible_roles = ["author", "reviewer"]`)
+	toml = strings.Replace(toml, `endpoint = "local"
+eligible_roles = ["author", "reviewer"]
+pool = "default"
+accept_unknown_truncation`, `endpoint = "remote"
+eligible_roles = ["author", "reviewer"]
+pool = "default"
+accept_unknown_truncation`, 1)
+	toml += `
+[[endpoints]]
+name = "remote"
+base_url = "https://example.invalid/v1"
+declared_location = "cloud"
+declared_execution = "remote"
+declared_billing = "metered"
+network_dependency = "other"
+dialect = "chat_completions_v1"
+models = ["llama3"]
+
+[presets.deliberate]
+mode = "deliberate"
+proposers = ["author", "reviewer"]
+integrator = "author"
+`
+	h := enginetest.New(t, toml, nil, enginetest.NoStart())
+	err := h.Engine.Start()
+	var re *engine.RosterError
+	if !errors.As(err, &re) || !strings.Contains(err.Error(), `proposal from "author" to "reviewer"`) {
+		t.Fatalf("Start err = %v, want a *RosterError naming the refused route", err)
+	}
+	var attempts int
+	if err := h.DB.Conn().QueryRow(`SELECT COUNT(*) FROM attempts`).Scan(&attempts); err != nil || attempts != 0 {
+		t.Fatalf("attempts = %d, err %v", attempts, err)
+	}
+	for id, a := range h.Adapters {
+		if n := len(a.Calls()); n != 0 {
+			t.Fatalf("adapter %s received %d calls", id, n)
+		}
+	}
+}

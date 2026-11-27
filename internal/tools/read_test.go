@@ -138,7 +138,7 @@ func (f *readFixture) journaled(res Result, tc journal.ToolCall) {
 // write tools do.
 func (f *readFixture) stage(path, content string) {
 	f.t.Helper()
-	if _, err := observation.NewStore(f.j).Observe(f.turn, f.att, path, f.tools.liveReader(path)); err != nil {
+	if _, err := observation.NewStore(f.j).ObserveWithMode(f.turn, f.att, path, f.tools.liveReader(path)); err != nil {
 		f.t.Fatal(err)
 	}
 	if err := f.j.Tx(func(tx *journal.Tx) error {
@@ -497,5 +497,35 @@ func TestPathThroughSymlinkedDirectoryIsRefusedNotAbsent(t *testing.T) {
 				t.Errorf("real/x.txt: got %q (%s)", res.Content, res.ErrorCode)
 			}
 		})
+	}
+}
+
+// The owner-execute bit is taken from the live file with its content when
+// read_file first observes it, and a later chmod does not change the record.
+func TestReadRecordsOwnerExecBit(t *testing.T) {
+	f := newReadFixture(t, map[string]string{"run.sh": "#!/bin/sh\n", "plain.txt": "x"}, 1<<20)
+	if err := os.Chmod(filepath.Join(f.root, "run.sh"), 0o4755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(f.root, "plain.txt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"run.sh", "plain.txt"} {
+		if res, _ := f.read(map[string]any{"path": p}); res.ErrorCode != "" {
+			t.Fatalf("read %s: %s", p, res.ErrorCode)
+		}
+	}
+	// Flip both bits in the live tree after the first observation.
+	if err := os.Chmod(filepath.Join(f.root, "run.sh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(f.root, "plain.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := observation.NewStore(f.j)
+	for p, want := range map[string]bool{"run.sh": true, "plain.txt": false} {
+		if got, err := s.OwnerExec(f.turn, p); err != nil || got != want {
+			t.Errorf("OwnerExec(%s) = %v, %v; want %v, nil", p, got, err, want)
+		}
 	}
 }
