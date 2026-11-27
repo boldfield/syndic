@@ -10,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/journal"
 )
@@ -58,9 +60,12 @@ func (p *fakeSearchProvider) Request(ctx context.Context, host, query, credentia
 // lookup, dial and credential read.
 type searchRig struct {
 	s        *PinnedSearcher
+	screener *URLScreener
 	res      *stubResolver
 	ref      *stubReferee
 	provider *fakeSearchProvider
+	cred     CredentialSource
+	net      SearchNetwork
 	dials    []string
 	creds    atomic.Int32
 }
@@ -98,12 +103,12 @@ func (ps *providerServer) requests() []*http.Request {
 // addrs.
 func newSearchRig(t *testing.T, screener *URLScreener, target string, addrs map[string][]string, allow bool) *searchRig {
 	t.Helper()
-	g := &searchRig{res: &stubResolver{addrs: addrs}, ref: &stubReferee{allow: allow}, provider: &fakeSearchProvider{}}
-	cred := func() (string, error) {
+	g := &searchRig{screener: screener, res: &stubResolver{addrs: addrs}, ref: &stubReferee{allow: allow}, provider: &fakeSearchProvider{}}
+	g.cred = func() (string, error) {
 		g.creds.Add(1)
 		return searchCred, nil
 	}
-	n := &SearchNetwork{
+	g.net = SearchNetwork{
 		Resolver: g.res,
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			g.dials = append(g.dials, addr)
@@ -116,12 +121,45 @@ func newSearchRig(t *testing.T, screener *URLScreener, target string, addrs map[
 		},
 		TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // the test server's certificate is self-signed
 	}
-	s, err := NewPinnedSearcher(screener, g.ref, g.provider, searchHost, cred, n)
+	g.withResolver(t, g.res)
+	return g
+}
+
+// withResolver rebuilds the rig's searcher over r, keeping its screener,
+// referee, provider, dial seam and credential counter.
+func (g *searchRig) withResolver(t *testing.T, r Resolver) {
+	t.Helper()
+	n := g.net
+	n.Resolver = r
+	s, err := NewPinnedSearcher(g.screener, g.ref, g.provider, searchHost, g.cred, &n)
 	if err != nil {
 		t.Fatal(err)
 	}
 	g.s = s
-	return g
+}
+
+// blockingResolver is a stubResolver whose lookup waits: entered is closed
+// when the lookup starts, and the lookup answers once release is closed. It
+// stands in for a slow DNS during which the step can end.
+type blockingResolver struct {
+	*stubResolver
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingResolver(res *stubResolver) *blockingResolver {
+	return &blockingResolver{stubResolver: res, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	r.once.Do(func() { close(r.entered) })
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return r.stubResolver.LookupNetIP(ctx, network, host)
 }
 
 var searchAddrs = map[string][]string{searchHost: {"93.184.216.34"}}
@@ -265,6 +303,56 @@ func TestSearchRecheckAfterRefereeStopsBeforeResolution(t *testing.T) {
 		t.Fatalf("err = %v, want the recheck's error", err)
 	}
 	g.wantNothingSent(t, 1)
+}
+
+// Resolution is a wait. When the step ends while DNS is in flight, the
+// re-check after the resolution stops the query before the credential is read
+// or a connection made: the referee allowed, the lookup happened, and nothing
+// else did.
+func TestSearchRecheckAfterResolutionStopsBeforeCredential(t *testing.T) {
+	g := newSearchRig(t, NewURLScreener(0), "", searchAddrs, true)
+	dns := newBlockingResolver(g.res)
+	g.withResolver(t, dns)
+	stale := errors.New("step ended")
+	var ended atomic.Bool
+	recheck := func() error {
+		if ended.Load() {
+			return stale
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.s.Search(context.Background(), "go testing", recheck)
+		done <- err
+	}()
+	select {
+	case <-dns.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the lookup never started: the referee's allow and the first re-check should lead to resolution")
+	}
+	// The step ends while DNS is still waiting; then DNS answers.
+	ended.Store(true)
+	close(dns.release)
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Search did not return after the lookup was released")
+	}
+	if !errors.Is(err, stale) {
+		t.Fatalf("err = %v, want the recheck's error", err)
+	}
+	var r *RefusalError
+	if errors.As(err, &r) {
+		t.Fatalf("recheck error became a refusal %v", r)
+	}
+	if len(g.ref.calls) != 1 || len(g.res.hosts) != 1 {
+		t.Fatalf("referee %v lookups %v, want one each before the step ended", g.ref.calls, g.res.hosts)
+	}
+	if len(g.dials) != 0 || g.creds.Load() != 0 {
+		t.Fatalf("dials %v credential reads %d; a step that ended during DNS sends nothing", g.dials, g.creds.Load())
+	}
 }
 
 // A provider host resolving to a forbidden address is refused by the address
