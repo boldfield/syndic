@@ -253,7 +253,19 @@ type RoutingPolicy struct {
 }
 
 type WebConfig struct {
-	AllowedHosts []string `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	AllowedHosts []string      `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	Search       *SearchConfig `toml:"search"`        // web_search provider; absent means web_search is not offered
+}
+
+// SearchConfig names the web search provider and the secret it is called with
+// (v5 delta section 6). It selects among the providers the build supports and
+// carries no vendor-specific settings: Provider is matched against the
+// providers injected into the engine, so a name no build supports leaves
+// web_search unoffered.
+type SearchConfig struct {
+	Provider string     `toml:"provider"` // identifier of a supported provider
+	Host     string     `toml:"host"`     // hostname the provider is reached at (exact, no port)
+	Auth     *SecretRef `toml:"auth"`     // secret reference; sent only to Host
 }
 
 type RefereeConfig struct {

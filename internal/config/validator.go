@@ -13,6 +13,32 @@ import (
 	"golang.org/x/net/idna"
 )
 
+// validateSearchConfig checks [tools.web.search]: a provider name, an exact
+// provider hostname and a secret reference are all required.
+func validateSearchConfig(s *SearchConfig) []error {
+	if s == nil {
+		return nil
+	}
+	var errs []error
+	if s.Provider == "" {
+		errs = append(errs, errors.New("tools.web.search.provider is required"))
+	}
+	if strings.Contains(s.Host, "*") {
+		errs = append(errs, fmt.Errorf("tools.web.search.host %q must be an exact hostname", s.Host))
+	} else if err := validateAllowedHostPattern(s.Host); err != nil {
+		errs = append(errs, fmt.Errorf("tools.web.search.host: %w", err))
+	}
+	switch {
+	case s.Auth == nil:
+		errs = append(errs, errors.New("tools.web.search.auth (a secret reference) is required"))
+	case s.Auth.Source != "env" && s.Auth.Source != "file":
+		errs = append(errs, fmt.Errorf("tools.web.search.auth.source must be env or file, got %q", s.Auth.Source))
+	case s.Auth.Name == "":
+		errs = append(errs, errors.New("tools.web.search.auth.name is required"))
+	}
+	return errs
+}
+
 func validateAllowedHostPattern(pattern string) error {
 	if pattern == "" {
 		return errors.New("pattern cannot be empty")
@@ -784,6 +810,7 @@ func (r *Roster) Validate() error {
 					errs = append(errs, fmt.Errorf("tools.web.allowed_hosts: %w", err))
 				}
 			}
+			errs = append(errs, validateSearchConfig(r.Tools.Web.Search)...)
 		}
 	}
 

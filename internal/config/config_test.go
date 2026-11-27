@@ -3088,3 +3088,38 @@ func TestDeliberateOutputBoundsHash(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateSearchConfig(t *testing.T) {
+	auth := &SecretRef{Source: "env", Name: "SEARCH_KEY"}
+	cases := []struct {
+		name string
+		cfg  *SearchConfig
+		ok   bool
+	}{
+		{"absent", nil, true},
+		{"complete", &SearchConfig{Provider: "p", Host: "search.example.com", Auth: auth}, true},
+		{"empty table", &SearchConfig{}, false},
+		{"no provider", &SearchConfig{Host: "search.example.com", Auth: auth}, false},
+		{"no secret reference", &SearchConfig{Provider: "p", Host: "search.example.com"}, false},
+		{"bad secret source", &SearchConfig{Provider: "p", Host: "search.example.com", Auth: &SecretRef{Source: "x", Name: "n"}}, false},
+		{"unnamed secret", &SearchConfig{Provider: "p", Host: "search.example.com", Auth: &SecretRef{Source: "env"}}, false},
+		{"wildcard host", &SearchConfig{Provider: "p", Host: "*.example.com", Auth: auth}, false},
+		{"IP host", &SearchConfig{Provider: "p", Host: "10.0.0.1", Auth: auth}, false},
+		{"host with port", &SearchConfig{Provider: "p", Host: "search.example.com:443", Auth: auth}, false},
+	}
+	for _, c := range cases {
+		if errs := validateSearchConfig(c.cfg); (len(errs) == 0) != c.ok {
+			t.Errorf("%s: errors %v, want ok = %v", c.name, errs, c.ok)
+		}
+	}
+}
+
+func TestRosterValidatesSearchConfig(t *testing.T) {
+	r := makeBaseRoster()
+	r.ApplyDefaults()
+	r.Tools = &ToolsConfig{Web: &WebConfig{Search: &SearchConfig{}}}
+	r.ApplyDefaults()
+	if err := r.Validate(); err == nil || !strings.Contains(err.Error(), "tools.web.search") {
+		t.Fatalf("Validate() = %v, want a tools.web.search error", err)
+	}
+}
