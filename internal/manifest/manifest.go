@@ -456,6 +456,15 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 			if preset.Budgets.ReviewerMaxOutputTokens != nil {
 				bMap["reviewer_max_output_tokens"] = *preset.Budgets.ReviewerMaxOutputTokens
 			}
+			if preset.Budgets.ProposerMaxOutputTokens != nil {
+				bMap["proposer_max_output_tokens"] = *preset.Budgets.ProposerMaxOutputTokens
+			}
+			if preset.Budgets.CritiqueMaxOutputTokens != nil {
+				bMap["critique_max_output_tokens"] = *preset.Budgets.CritiqueMaxOutputTokens
+			}
+			if preset.Budgets.IntegratorMaxOutputTokens != nil {
+				bMap["integrator_max_output_tokens"] = *preset.Budgets.IntegratorMaxOutputTokens
+			}
 			if preset.Budgets.DeliveryMaxTokens != nil {
 				bMap["delivery_max_tokens"] = *preset.Budgets.DeliveryMaxTokens
 			}
@@ -515,6 +524,15 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 	if roster.Budgets.ReviewerMaxOutputTokens != nil {
 		budgets["reviewer_max_output_tokens"] = *roster.Budgets.ReviewerMaxOutputTokens
 	}
+	if roster.Budgets.ProposerMaxOutputTokens != nil {
+		budgets["proposer_max_output_tokens"] = *roster.Budgets.ProposerMaxOutputTokens
+	}
+	if roster.Budgets.CritiqueMaxOutputTokens != nil {
+		budgets["critique_max_output_tokens"] = *roster.Budgets.CritiqueMaxOutputTokens
+	}
+	if roster.Budgets.IntegratorMaxOutputTokens != nil {
+		budgets["integrator_max_output_tokens"] = *roster.Budgets.IntegratorMaxOutputTokens
+	}
 	if roster.Budgets.DeliveryMaxTokens != nil {
 		budgets["delivery_max_tokens"] = *roster.Budgets.DeliveryMaxTokens
 	}
@@ -567,6 +585,15 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 			}
 			if qp.Budgets.ReviewerMaxOutputTokens != nil {
 				bMap["reviewer_max_output_tokens"] = *qp.Budgets.ReviewerMaxOutputTokens
+			}
+			if qp.Budgets.ProposerMaxOutputTokens != nil {
+				bMap["proposer_max_output_tokens"] = *qp.Budgets.ProposerMaxOutputTokens
+			}
+			if qp.Budgets.CritiqueMaxOutputTokens != nil {
+				bMap["critique_max_output_tokens"] = *qp.Budgets.CritiqueMaxOutputTokens
+			}
+			if qp.Budgets.IntegratorMaxOutputTokens != nil {
+				bMap["integrator_max_output_tokens"] = *qp.Budgets.IntegratorMaxOutputTokens
 			}
 			if qp.Budgets.DeliveryMaxTokens != nil {
 				bMap["delivery_max_tokens"] = *qp.Budgets.DeliveryMaxTokens
