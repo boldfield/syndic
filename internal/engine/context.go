@@ -28,13 +28,16 @@ func historyLabel(t journal.HistoryTurn) string {
 // renderHistory builds the canonical history document of a conversation from
 // the journal, from contextFromTurn onward when given. It runs in the submit
 // Tx, so the bytes it returns are the ones admission, the stored document and
-// the context hash are all taken from. An unknown trim point is a refusal.
-func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *string) (*history.Document, error) {
+// the context hash are all taken from. An unknown trim point is a refusal. It
+// also returns which turns are file-tainted, by id: their answers may carry
+// workspace bytes, which the web canary must know.
+func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *string) (*history.Document, map[string]bool, error) {
 	turns, err := tx.ConversationHistory(conversationID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	doc := history.New()
+	tainted := make(map[string]bool, len(turns))
 	for _, t := range turns {
 		if err := doc.AddTurn(history.Turn{
 			ID:     t.ID,
@@ -43,17 +46,20 @@ func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *strin
 			Answer: []byte(t.Answer),
 			Label:  historyLabel(t),
 		}); err != nil {
-			return nil, fmt.Errorf("engine: history turn %s: %w", t.ID, err)
+			return nil, nil, fmt.Errorf("engine: history turn %s: %w", t.ID, err)
+		}
+		if t.FileTainted {
+			tainted[t.ID] = true
 		}
 	}
 	if contextFromTurn != nil {
 		if err := doc.SetContextFromTurn(*contextFromTurn); err != nil {
 			bad := refusal(wire.ErrorCodeBadRequest)
 			bad.Detail = strPtr("unknown_context_from_turn")
-			return nil, bad
+			return nil, nil, bad
 		}
 	}
-	return doc, nil
+	return doc, tainted, nil
 }
 
 // frozenHistory returns the document's hash and bytes to store, or "" and nil

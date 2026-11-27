@@ -3,6 +3,7 @@ package wire
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -695,5 +696,80 @@ func TestStderrSinkFromPipe(t *testing.T) {
 	}
 	if len(s.Bytes()) != MaxStderrBytes || s.Dropped() != total-MaxStderrBytes {
 		t.Fatalf("kept %d, dropped %d", len(s.Bytes()), s.Dropped())
+	}
+}
+
+// gateReader yields each message only when the test sends it, and tells
+// the test when a read has begun.
+type gateReader struct {
+	msgs    chan []byte
+	reading chan struct{}
+}
+
+func newGate() *gateReader {
+	return &gateReader{msgs: make(chan []byte), reading: make(chan struct{}, 8)}
+}
+
+func (g *gateReader) Next() ([]byte, error) {
+	g.reading <- struct{}{}
+	b, ok := <-g.msgs
+	if !ok {
+		return nil, io.EOF
+	}
+	return b, nil
+}
+
+func TestHandoffKeepsAMessageItsWaiterGaveUpOn(t *testing.T) {
+	g := newGate()
+	h := NewHandoff(g)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.NextContext(ctx)
+		done <- err
+	}()
+	<-g.reading
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	g.msgs <- []byte("late")
+	if _, err := h.NextContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a waiter whose ctx ended took a message: %v", err)
+	}
+	b, err := h.Next()
+	if err != nil || string(b) != "late" {
+		t.Fatalf("next = %q, %v", b, err)
+	}
+	if len(g.reading) != 0 {
+		t.Error("the held message was read again")
+	}
+	close(g.msgs)
+	if _, err := h.Next(); err != io.EOF {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAwaitContextStopsAndTheNextAwaitGetsItsReply(t *testing.T) {
+	g := newGate()
+	s := &Stream{Messages: g}
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.AwaitContext(ctx, 1)
+		errc <- err
+	}()
+	<-g.reading
+	cancel()
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	go func() {
+		g.msgs <- []byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)
+		g.msgs <- []byte(`{"jsonrpc":"2.0","id":2,"result":{"n":2}}`)
+	}()
+	r, err := s.AwaitContext(context.Background(), 2)
+	if err != nil || string(r.Result) != `{"n":2}` {
+		t.Fatalf("response = %+v, %v", r, err)
 	}
 }

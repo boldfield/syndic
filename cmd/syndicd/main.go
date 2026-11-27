@@ -154,6 +154,10 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
 
+	// SearchProviders is left unset: no web_search vendor has been chosen, so
+	// this build supports no provider and web_search is not offered whatever
+	// [tools.web.search] configures. The operator-selected integration is
+	// injected here, as a tools.SearchProvider, when one is chosen.
 	eng, err := engine.New(engine.Options{
 		Store:         store,
 		Hub:           eventHub,

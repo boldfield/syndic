@@ -13,7 +13,6 @@ import (
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
 	"github.com/boldfield/syndic/internal/prompt"
-	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -222,11 +221,6 @@ func budgetError(kind string) *wire.Error {
 	return err
 }
 
-// searchProvider reports whether the roster configures a web search provider.
-// The roster has no search provider setting yet, so none is configured and
-// web_search is never among a role's definitions.
-func (e *Engine) searchProvider() bool { return false }
-
 // roleTools are the tool definitions the effective preset gives the author
 // and the reviewers, from internal/tools.
 type roleTools struct {
@@ -235,11 +229,11 @@ type roleTools struct {
 }
 
 func (e *Engine) roleTools(eff config.Effective) (roleTools, error) {
-	author, err := tools.ForGroups(eff.Preset.Tools, e.searchProvider())
+	author, err := e.groupDefs(eff.Preset.Tools)
 	if err != nil {
 		return roleTools{}, err
 	}
-	reviewer, err := tools.ForGroups(eff.Preset.ReviewerTools, e.searchProvider())
+	reviewer, err := e.groupDefs(eff.Preset.ReviewerTools)
 	if err != nil {
 		return roleTools{}, err
 	}

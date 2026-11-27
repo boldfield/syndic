@@ -286,6 +286,11 @@ type Participant struct {
 	// preset gives them: its endpoint's referee is missing or has no usable
 	// probe record (v5 delta section 6).
 	WebOff *string `json:"web_off,omitempty"`
+	// SearchOff is why web_search is not offered to a participant that a
+	// preset gives web: no provider is configured under [tools.web.search],
+	// the named provider is not one this build supports, or the provider host
+	// fails a pre-send check or the allowlist (v5 delta section 6).
+	SearchOff *string `json:"search_off,omitempty"`
 }
 
 // ProbeSubject represents a probe target that is not a participant (e.g., a referee).

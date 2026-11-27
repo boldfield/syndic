@@ -85,7 +85,7 @@ func (e *Engine) executeToolStep(t *openTurn, req transport.CompleteRequest, att
 	}
 	e.mu.Unlock()
 
-	out, err := e.performToolStep(t, req, attemptID, res, remaining, patterns, hook)
+	out, err := e.performToolStep(t, t.author, req, attemptID, res, remaining, patterns, hook)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -114,18 +114,21 @@ func (e *Engine) executeToolStep(t *openTurn, req transport.CompleteRequest, att
 	e.releaseLocked(t.author)
 }
 
-// performToolStep executes the step over the conversation's confined
-// workspace, opened for this step and closed after it. e.mu is not held.
-func (e *Engine) performToolStep(t *openTurn, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, remaining int, patterns []string, hook func(turnID, attemptID, name string)) (toolStepOutcome, error) {
-	var effects map[string]toolEffect
+// performToolStep executes the step of caller, the author or a required
+// reviewer, over the conversation's confined workspace, opened for this step
+// and closed after it. The effects are the caller's: a web query is decided
+// by the referee of the caller's endpoint and accounted to the caller. e.mu
+// is not held.
+func (e *Engine) performToolStep(t *openTurn, caller string, req transport.CompleteRequest, attemptID string, res transport.CompleteResult, remaining int, patterns []string, hook func(turnID, attemptID, name string)) (toolStepOutcome, error) {
+	var fs *workspace.Confined
 	if t.workspace != "" {
-		fs, err := workspace.OpenConfined(t.workspace, patterns)
-		if err != nil {
+		var err error
+		if fs, err = workspace.OpenConfined(t.workspace, patterns); err != nil {
 			return toolStepOutcome{}, err
 		}
 		defer func() { _ = fs.Close() }()
-		effects = e.toolEffects(fs, t.id, attemptID, hook)
 	}
+	effects := e.toolEffects(fs, t, caller, attemptID, hook)
 	return runToolStep(e.store, toolStep{
 		attemptID: attemptID,
 		calls:     res.ToolCalls,

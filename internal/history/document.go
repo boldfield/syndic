@@ -469,6 +469,11 @@ func changePayload(c Change) []byte {
 	return []byte(c.Outcome + " " + c.Path)
 }
 
+// ChangeField returns the bytes of one change field as the document writes
+// them: the outcome, one space, then the path. Callers that account for what
+// a document carried to a model (the web canary) read the field through it.
+func ChangeField(c Change) []byte { return changePayload(c) }
+
 // parseChange reverses changePayload. No outcome followed by a space is a
 // prefix of another, so at most one matches and the rest is the path.
 func parseChange(s string) (Change, error) {
