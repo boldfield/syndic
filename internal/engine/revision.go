@@ -66,6 +66,8 @@ func (t *openTurn) resetRound() {
 	t.approved = map[string]bool{}
 	t.outputs = nil
 	t.reviewersBegun = 0
+	t.reviewerToolCalls = make(map[string]int)
+	t.reviewerLimited = make(map[string]bool)
 }
 
 func historyOf(t *openTurn) *history.Document {

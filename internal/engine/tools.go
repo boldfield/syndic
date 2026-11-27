@@ -541,3 +541,39 @@ func (e *Engine) toolStepMessages(req transport.CompleteRequest, res transport.C
 	}
 	return msgs, request.String(), nil
 }
+
+// toolLimitStatementReviewer is sent, with no tool definitions, to a reviewer that
+// has reached its call bound.
+const toolLimitStatementReviewer = "No further tool calls are available in this round: the bound on lookups has been reached. Give your verdict based on what you have checked."
+
+// reviewerToolDefs returns the definitions a dispatch of a reviewer offers:
+// the tools of the preset's reviewer_tools executable groups, which for the file
+// groups need the conversation to have a workspace. None are offered once the
+// reviewer has no calls remaining under its bound for the round; limited reports
+// that case, and the caller then sends the statement in their place. e.mu is held.
+func (e *Engine) reviewerToolDefs(t *openTurn, reviewerID string) (defs []transport.Tool, limited bool, err error) {
+	var groups []string
+	for _, g := range t.eff.Preset.ReviewerTools {
+		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, reviewerID) {
+			groups = append(groups, g)
+		}
+	}
+	if len(groups) == 0 {
+		return nil, false, nil
+	}
+	if e.reviewerCallsRemaining(t, reviewerID) <= 0 {
+		return nil, true, nil
+	}
+	defs, err = tools.ForGroups(groups, e.searchProvider())
+	return defs, false, err
+}
+
+// reviewerCallsRemaining is how many calls the reviewer has left under
+// tools.max_reviewer_calls for the current round. e.mu is held.
+func (e *Engine) reviewerCallsRemaining(t *openTurn, reviewerID string) int {
+	limit := 10
+	if e.roster != nil && e.roster.Tools != nil && e.roster.Tools.MaxReviewerCalls != nil {
+		limit = *e.roster.Tools.MaxReviewerCalls
+	}
+	return limit - t.reviewerToolCalls[reviewerID]
+}

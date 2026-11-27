@@ -760,14 +760,16 @@ func (e *Engine) deliveryTurn(row *journal.TurnRow) *openTurn {
 		return nil
 	}
 	t := &openTurn{
-		id:            row.ID,
-		mode:          row.Mode,
-		author:        eff.Preset.Author,
-		eff:           eff,
-		candidateHash: cand.ContentHash,
-		outputs:       make(map[string]string),
-		stopAttempt:   make(map[string]func() bool),
-		pending:       make(map[string]time.Time),
+		id:               row.ID,
+		mode:             row.Mode,
+		author:           eff.Preset.Author,
+		eff:              eff,
+		candidateHash:    cand.ContentHash,
+		outputs:          make(map[string]string),
+		stopAttempt:      make(map[string]func() bool),
+		pending:          make(map[string]time.Time),
+		reviewerToolCalls: make(map[string]int),
+		reviewerLimited:  make(map[string]bool),
 	}
 	texts, err := e.store.AttemptTexts(row.ID)
 	if err != nil {

@@ -67,9 +67,13 @@ type openTurn struct {
 	// offered. toolCallsUsed counts the author's calls that counted against
 	// tools.max_calls_per_turn; toolLimited is set once the author has been
 	// dispatched without definitions because the bound was reached.
-	workspace     string
-	toolCallsUsed int
-	toolLimited   bool
+	// reviewerToolCalls tracks per-reviewer, per-round tool calls. reviewerLimited
+	// tracks which reviewers have reached their round call limit.
+	workspace              string
+	toolCallsUsed          int
+	toolLimited            bool
+	reviewerToolCalls      map[string]int
+	reviewerLimited        map[string]bool
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
@@ -405,22 +409,24 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	}
 
 	t := &openTurn{
-		id:              turnID,
-		mode:            eff.Preset.Mode,
-		author:          eff.Preset.Author,
-		input:           req.Input,
-		history:         doc,
-		contextHash:     contextHash,
-		eff:             eff,
-		attemptDeadline: attempt,
-		turnDeadline:    turnDeadline,
-		workspace:       workspace,
-		required:        eff.Preset.RequiredReviewers,
-		approved:        map[string]bool{},
-		results:         map[string]reviewResult{},
-		maxRounds:       maxRounds,
-		stopAttempt:     map[string]func() bool{},
-		pending:         map[string]time.Time{},
+		id:               turnID,
+		mode:             eff.Preset.Mode,
+		author:           eff.Preset.Author,
+		input:            req.Input,
+		history:          doc,
+		contextHash:      contextHash,
+		eff:              eff,
+		attemptDeadline:  attempt,
+		turnDeadline:     turnDeadline,
+		workspace:        workspace,
+		required:         eff.Preset.RequiredReviewers,
+		approved:         map[string]bool{},
+		results:          map[string]reviewResult{},
+		maxRounds:        maxRounds,
+		stopAttempt:      map[string]func() bool{},
+		pending:          map[string]time.Time{},
+		reviewerToolCalls: make(map[string]int),
+		reviewerLimited:  make(map[string]bool),
 	}
 	e.open = t
 	e.armTurn(t)
