@@ -137,7 +137,8 @@ func chatLinesWithStarts(s State, in chatInput) (lines []string, lastTurn int, s
 // chatRows is chatLinesWithStarts with, for every line, the item it belongs to and the
 // characters of that item it shows. Item ids are stable across renders and widths; the
 // characters are counted in runes of the item's own text: a row's indent or mark and the
-// break between rows are not counted, so a character keeps its offset at every width.
+// break between rows are not counted, so a character keeps its offset at every width. An
+// empty row counts as one character, the line break it stands for.
 func chatRows(s State, in chatInput) (lines []string, rows []FollowRow, lastTurn int, starts []int) {
 	ids := chatTurns(s)
 	trimmed := trimmedTurns(s, ids)
@@ -219,6 +220,13 @@ func chatRows(s State, in chatInput) (lines []string, rows []FollowRow, lastTurn
 			char := 0
 			for _, l := range strings.Split(strings.Join(it.lines, "\n"), "\n") {
 				n := rowChars(l)
+				if n == 0 {
+					// A wrap never makes an empty row, so an empty row is a line break of
+					// the item's own text at every width. It holds that break as its one
+					// character, so it has an origin of its own and the next row does not
+					// share it.
+					n = 1
+				}
 				lines = append(lines, l)
 				rows = append(rows, FollowRow{Item: id, Char: char, End: char + n})
 				char += n

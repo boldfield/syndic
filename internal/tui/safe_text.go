@@ -38,7 +38,9 @@ type safeToken struct {
 //   - tab expands to the next multiple of four columns
 func safeTokens(data []byte) []safeToken {
 	const tabStop = 4
-	var toks []safeToken
+	// Most bytes are a token of their own; sizing for them once keeps a long answer,
+	// drawn again on every frame, from growing the slice over and over.
+	toks := make([]safeToken, 0, len(data))
 	col := 0
 	esc := func(s string) {
 		toks = append(toks, safeToken{text: s, width: len(s)})

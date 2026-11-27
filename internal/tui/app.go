@@ -72,6 +72,7 @@ type App struct {
 	chatRowsFn           func() ([]string, []FollowRow, []int) // tests only: stands in for the chat's rows
 	chatHeight           int                                   // tests only: when positive, the rows the chat shows
 	chatFollow           *Follow                               // where the chat tab stands: at the bottom, or holding a place by content
+	chatLaidOut          bool                                  // the chat follow holds the chat's rows as they are now: no message was handled since layoutChat
 	candidateIDByTurn    map[string]string
 	inputs               map[string]string           // what the user typed for each turn submitted by this process
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
@@ -532,7 +533,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // gives it: View only reads the model.
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := a.input.Width()
-	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
+	defer func() {
+		fitInput(&a.input, a.inputRows(), a.input.Width() != w)
+		// Any message can change what the chat draws.
+		a.chatLaidOut = false
+	}()
 
 	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
 		if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
@@ -799,9 +804,8 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if a.input.Value() != "" {
 				break
 			}
-			a.layoutChat()
 			if msg.String() == "home" {
-				a.chatFollow.Home()
+				a.moveChat((*Follow).Home)
 			} else {
 				a.chatFollow.End()
 			}
@@ -1491,13 +1495,23 @@ func (a *App) layoutChat() chatLayout {
 		lines, rows, _, starts = chatRows(a.state, a.chatIn())
 	}
 	first, bottom, count := a.chatFollow.Layout(rows, a.answerHeight())
+	a.chatLaidOut = true
 	return chatLayout{lines, starts, first, bottom, count}
+}
+
+// moveChat moves the chat on its rows as they are now. The View after the last message
+// laid them out, so a key draws the chat once, in the View that follows it, unless a
+// message was handled since.
+func (a *App) moveChat(m func(*Follow)) {
+	if !a.chatLaidOut {
+		a.layoutChat()
+	}
+	m(a.chatFollow)
 }
 
 // scrollAnswer moves the chat tab by delta lines, staying within the text.
 func (a *App) scrollAnswer(delta int) {
-	a.layoutChat()
-	a.chatFollow.Scroll(delta)
+	a.moveChat(func(f *Follow) { f.Scroll(delta) })
 }
 
 // tabGap separates the tab names in the tab bar.

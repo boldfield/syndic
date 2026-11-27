@@ -373,3 +373,28 @@ func TestChatOpeningThePlainDrawerHoldsTheAnchor(t *testing.T) {
 		t.Fatalf("after opening the drawer the first row shown is %q, want %q", got, shown)
 	}
 }
+
+func TestChatHoldsABlankRowAnchor(t *testing.T) {
+	a := chatFollowApp(t)
+	addTurn(a, "t1", 1, "approved", "before\n\nafter", numbered("ans line", 20))
+	_, rows, _, _ := chatRows(a.state, a.chatIn())
+	if rows[1].Item != "t1/input" || rows[1].Char == rows[2].Char {
+		t.Fatalf("the blank input row has no origin of its own: %+v then %+v", rows[1], rows[2])
+	}
+	chatScrollTo(a, 1)
+	want := window(a)
+	if want[0] != "" || want[1] != "  after" {
+		t.Fatalf("first rows shown are %q, want the blank input row then after", want[:2])
+	}
+	for _, sz := range []tea.WindowSizeMsg{{}, {Width: 45, Height: 14}, {Width: 120, Height: 14}} {
+		if sz.Width > 0 {
+			a.update(sz)
+		}
+		if l := a.layoutChat(); l.first != 1 || l.bottom {
+			t.Fatalf("at width %d the first row is %d (bottom %t), want the blank row 1", a.width, l.first, l.bottom)
+		}
+		if got := window(a)[:2]; got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("at width %d the first rows shown are %q, want %q", a.width, got, want[:2])
+		}
+	}
+}

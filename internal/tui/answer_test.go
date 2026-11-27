@@ -293,8 +293,10 @@ func TestAnswerLongCandidateScrollsToTheLastLine(t *testing.T) {
 	h := scripted(t, enginetest.Reply(strings.TrimRight(text.String(), "\n")), approve())
 	r := startAnswerRig(t, h)
 	r.typeLine("question")
-	// The chat starts at the bottom, so the approval line is shown (addendum 1, section 3).
-	untilView(t, r, "approved by")
+	// The chat starts at the bottom, so the approval line and the answer's last line are
+	// shown (addendum 1, section 3). The approval can be drawn before the answer is
+	// fetched, and paging before then would page over a chat shorter than the view.
+	untilView(t, r, "approved by", "line 4999\n")
 
 	// A waiter on the program's goroutine records every line any View showed.
 	seenLines := map[string]bool{}
