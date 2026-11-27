@@ -154,6 +154,11 @@ type Spec struct {
 	// Proxy is the listener to permit under N2, or nil for none, in which
 	// case N1 holds.
 	Proxy *Listener
+	// ServerPipes, set for a local MCP server (v9 delta, section 6,
+	// "Descriptors"), makes standard input and standard output two separate
+	// pipes to the engine and standard error a third, in place of a command's
+	// /dev/null input and one merged output pipe.
+	ServerPipes bool
 }
 
 // Backend is a sandbox mechanism on a platform at a stated configuration
