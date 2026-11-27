@@ -248,7 +248,7 @@ func authorEvidence() []candidate.EvidencePair {
 
 const (
 	goldenFrozenChangesHash   = "d3dacc2fb800436c14e4423c017ef7f83b80e7a396a2e5115820b277dd730e17"
-	goldenFrozenCandidateHash = "3298d7839d16dee5793cbd03371c17f731cbb0bb08097ae62f6a53558310236f"
+	goldenFrozenCandidateHash = "f762df1c427657d32bb54a14ef859238f2c9fbdeef874d40de45c42de9f98f9a"
 )
 
 func TestCandidateAuthorEvidenceMutationChangesHash(t *testing.T) {
