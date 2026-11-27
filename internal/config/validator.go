@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"slices"
@@ -485,6 +486,21 @@ func (r *Roster) Validate() error {
 							p.Endpoint, ep.DeclaredLocation, p.ID))
 					}
 				}
+			}
+		}
+	}
+
+	// The same routing policy, for every pair of participants between which
+	// a deliberate preset sends text. Nothing is omitted to make a preset fit.
+	for _, name := range slices.Sorted(maps.Keys(r.Presets)) {
+		preset := r.Presets[name]
+		if preset.Mode != ModeDeliberate {
+			continue
+		}
+		for _, tr := range preset.DeliberateTextRoutes() {
+			if why := r.routingRefusal(tr.To, endpointMap, seenAllowedDests); why != "" {
+				errs = append(errs, fmt.Errorf("preset %q: %s from %q to %q is refused by the routing policy: %s",
+					name, tr.Content, tr.From, tr.To, why))
 			}
 		}
 	}
@@ -1031,4 +1047,27 @@ func (r *Roster) validateDeliberatePreset(name string, preset Preset, known map[
 		}
 	}
 	return errs
+}
+
+// routingRefusal returns why the routing policy refuses to send text to the
+// participant, or "" when it may receive it. A participant the roster does
+// not declare is refused elsewhere.
+func (r *Roster) routingRefusal(id string, endpoints map[string]EndpointProfile, allowed map[string]bool) string {
+	for _, p := range r.Participants {
+		if p.ID != id || p.Route != "api" || p.Endpoint == "" {
+			continue
+		}
+		ep := endpoints[p.Endpoint]
+		if r.Policy.LocalOnly {
+			if ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud" {
+				return fmt.Sprintf("local_only rejects endpoint %q with declared_location %q", p.Endpoint, ep.DeclaredLocation)
+			}
+			if ep.DeclaredExecution != "local" {
+				return fmt.Sprintf("local_only rejects endpoint %q with declared_execution %q", p.Endpoint, ep.DeclaredExecution)
+			}
+		} else if (ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud") && !allowed[p.Endpoint] {
+			return fmt.Sprintf("endpoint %q (declared_location %q) is not in allowed_destinations", p.Endpoint, ep.DeclaredLocation)
+		}
+	}
+	return ""
 }

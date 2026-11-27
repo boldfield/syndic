@@ -43,6 +43,9 @@ func (p Preset) GrantsFileTools() bool {
 // WebParticipants returns the participants the preset gives web, author
 // first.
 func (p Preset) WebParticipants() []string {
+	if p.Mode == ModeDeliberate {
+		return p.deliberateEgressView().WebParticipants()
+	}
 	var ids []string
 	if slices.Contains(p.Tools, "web") {
 		ids = append(ids, p.Author)
@@ -60,6 +63,9 @@ func (p Preset) WebParticipants() []string {
 // preset that grants read or write reaches every participant, because diffs,
 // evidence and findings go to the other roles and history goes to everyone.
 func FileRoutes(p Preset, tainted bool) []FileRoute {
+	if p.Mode == ModeDeliberate {
+		p = p.deliberateEgressView()
+	}
 	authorRead := slices.Contains(p.Tools, "read")
 	authorWrite := slices.Contains(p.Tools, "write")
 	reviewerRead := slices.Contains(p.ReviewerTools, "read")
@@ -159,4 +165,26 @@ func (r *Roster) WebWithFileViolation(p Preset, tainted bool) []string {
 		return nil
 	}
 	return p.WebParticipants()
+}
+
+// deliberateEgressView maps a deliberate preset onto the author-and-reviewers
+// shape the egress rules are written for (v8 section 3): the integrator is
+// the author, and every other participant that takes part, proposer or
+// required reviewer, is a reviewer. D1's tool sets carry over unchanged.
+func (p Preset) deliberateEgressView() Preset {
+	v := p
+	v.Mode = "review"
+	v.Author = p.Integrator
+	v.RequiredReviewers = nil
+	for _, id := range p.Proposers {
+		if id != p.Integrator && !slices.Contains(v.RequiredReviewers, id) {
+			v.RequiredReviewers = append(v.RequiredReviewers, id)
+		}
+	}
+	for _, id := range p.EffectiveRequiredReviewers() {
+		if id != p.Integrator && !slices.Contains(v.RequiredReviewers, id) {
+			v.RequiredReviewers = append(v.RequiredReviewers, id)
+		}
+	}
+	return v
 }

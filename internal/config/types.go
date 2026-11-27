@@ -166,6 +166,57 @@ func (p Preset) ProposersWithoutVote() []string {
 	return out
 }
 
+// Content kinds that travel between the participants of a deliberate preset.
+const (
+	TextProposal    = "proposal"
+	TextCritique    = "critique"
+	TextDisposition = "disposition"
+	TextCandidate   = "candidate"
+)
+
+// TextRoute is one ordered pair of participants between which text travels
+// in a deliberate turn, and what travels.
+type TextRoute struct {
+	From, To string
+	Content  string
+}
+
+// DeliberateTextRoutes returns every ordered pair of participants between
+// which text travels (v8 section 3): each proposal goes to every other
+// proposer, to the integrator and to every required reviewer; each critique
+// goes to the integrator and to every required reviewer; each disposition and
+// the candidate go from the integrator to every required reviewer.
+func (p Preset) DeliberateTextRoutes() []TextRoute {
+	reviewers := p.EffectiveRequiredReviewers()
+	var out []TextRoute
+	add := func(from, to, content string) {
+		if from != to {
+			out = append(out, TextRoute{From: from, To: to, Content: content})
+		}
+	}
+	for _, from := range p.Proposers {
+		for _, to := range p.Proposers {
+			add(from, to, TextProposal)
+		}
+		for _, to := range reviewers {
+			if !slices.Contains(p.Proposers, to) {
+				add(from, to, TextProposal)
+			}
+		}
+	}
+	for _, from := range p.Proposers {
+		add(from, p.Integrator, TextCritique)
+		for _, to := range reviewers {
+			add(from, to, TextCritique)
+		}
+	}
+	for _, to := range reviewers {
+		add(p.Integrator, to, TextDisposition)
+		add(p.Integrator, to, TextCandidate)
+	}
+	return out
+}
+
 type QuickProfile struct {
 	Preset                    string   `toml:"preset"`
 	Drafts                    bool     `toml:"drafts"`
