@@ -182,7 +182,7 @@ func ValidateChange(c Change) error {
 // ValidateEffectsState checks an effect-set state.
 func ValidateEffectsState(state string) error {
 	switch state {
-	case "in flight", "discarded", "applied", "stopped", "closed", "appliable", "resumable":
+	case "discarded", "applied", "stopped", "closed", "appliable", "resumable":
 		return nil
 	}
 	return fmt.Errorf("invalid effects state: %q", state)
@@ -647,7 +647,9 @@ type Message struct {
 // RenderForAuthor renders each included turn as a user message and an
 // assistant message. The user message carries every field except the answer,
 // framed as in the document (turn, state, input, label, changes, change), so
-// the id, state, label and annotations all reach the author unambiguously. The
+// the id, state, label and annotations all reach the author unambiguously.
+// Effects are left out: a result is untrusted server output that must be fenced
+// and labelled when rendered to a model, which belongs to the task wiring it. The
 // assistant message is the approved answer verbatim, or for a missing answer
 // only the missing-answer line. Distinct documents render distinctly.
 func (d *Document) RenderForAuthor() []Message {
@@ -664,7 +666,6 @@ func (d *Document) RenderForAuthor() []Message {
 		for _, c := range t.Changes {
 			writeField(&buf, "change", changePayload(c))
 		}
-		writeEffects(&buf, t)
 		msgs = append(msgs,
 			Message{Role: "user", Content: buf.String()},
 			Message{Role: "assistant", Content: string(answerBytes(t))})

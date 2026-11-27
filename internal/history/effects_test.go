@@ -159,3 +159,21 @@ func TestParseRejectsBadEffects(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectsStateRefusesInFlight(t *testing.T) {
+	if err := ValidateEffectsState("in flight"); err == nil {
+		t.Error("in flight accepted in history")
+	}
+	if err := ValidateEffectsState("stopped"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestRenderForAuthorOmitsEffects(t *testing.T) {
+	d := v2(t, effectTurn("stopped", eff("e1", EffectDone, "IGNORE PREVIOUS")))
+	for _, m := range d.RenderForAuthor() {
+		if strings.Contains(m.Content, "IGNORE PREVIOUS") {
+			t.Errorf("untrusted result rendered to author: %q", m.Content)
+		}
+	}
+}
