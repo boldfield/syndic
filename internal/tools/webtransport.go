@@ -9,6 +9,12 @@ import (
 	"sync"
 )
 
+// contextKeyRedirectDepth is used to track redirect depth in the request context
+// to enforce the 3-hop redirect limit per initial request.
+type contextKeyRedirectDepth struct{}
+
+var keyRedirectDepth = contextKeyRedirectDepth{}
+
 // Referee decides whether to allow a web fetch or search call. Its decision
 // runs after pre-send checks but before name resolution (design v5 delta, section 6).
 type Referee interface {
@@ -42,23 +48,22 @@ func ValidateAddress(addr netip.Addr) *RefusalError {
 	return nil
 }
 
-// PinnedTransport is an http.RoundTripper that resolves a hostname once,
-// validates all resolved addresses against the address rules, and pins
-// subsequent requests to those validated addresses. It enforces no automatic
-// redirects and applies address validation to every hop including redirects.
-// Redirect chains are limited to 3 hops per initial request, and cross-host
-// redirects are returned as results and not followed. All requests and
-// redirects pass through the referee before resolution.
+// PinnedTransport is an http.RoundTripper that screens URLs, runs them through
+// a referee if present, resolves a hostname once, validates all resolved addresses
+// against the address rules, and pins subsequent requests to those validated addresses.
+// It enforces no automatic redirects and applies all checks to every hop including
+// redirects. Redirect chains are limited to 3 hops per initial request, and cross-host
+// redirects are returned as results and not followed.
 type PinnedTransport struct {
-	Screener      *URLScreener
-	Resolver      Resolver
-	Referee       Referee
-	Transport     http.RoundTripper
-	HostValidator *HostPolicy
+	Screener         *URLScreener
+	Resolver         Resolver
+	Referee          Referee
+	Transport        http.RoundTripper
+	HostValidator    *HostPolicy
+	AddressValidator func(addr netip.Addr) *RefusalError // Optional, overrides ValidateAddress
 
 	mu            sync.Mutex
 	resolvedAddrs map[string][]netip.Addr
-	attempts      int
 }
 
 // NewPinnedTransport returns a transport that validates addresses and pins
@@ -79,23 +84,34 @@ func NewPinnedTransport(screener *URLScreener, resolver Resolver,
 	}
 }
 
-// RoundTrip implements http.RoundTripper. It resolves the target hostname,
-// validates all resolved addresses against the address rules, and pins the
-// connection to those addresses. Each request including redirects uses the
-// same pinned addresses for the same hostname. The referee is consulted for
-// each URL and each redirect target before name resolution occurs.
+// RoundTrip implements http.RoundTripper. It screens the URL, optionally consults
+// the referee, resolves the target hostname, validates all resolved addresses against
+// the address rules, and pins the connection to those addresses. Each request including
+// redirects uses the same pinned addresses for the same hostname. The referee is
+// consulted for each URL and each redirect target before name resolution occurs.
+// Redirect chains are limited to 3 hops per initial request (4 requests total).
 func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	pt.mu.Lock()
-	pt.attempts++
-	if pt.attempts > 4 {
-		pt.mu.Unlock()
+	// Track redirect depth in this request chain using context.
+	// Initial requests have depth 0; each redirect increments it.
+	depth := 0
+	if d := req.Context().Value(keyRedirectDepth); d != nil {
+		depth = d.(int)
+	}
+
+	if depth > 3 {
 		return nil, fmt.Errorf("too many redirect hops (max 3)")
 	}
-	pt.mu.Unlock()
 
 	host, _ := canonicalHost(req.URL)
 	if host == "" {
 		return nil, fmt.Errorf("invalid hostname")
+	}
+
+	// Screen the URL first (before any resolution).
+	if pt.Screener != nil {
+		if v := pt.Screener.Screen(req.URL.String()); !v.Allowed {
+			return nil, refusal(v.Rule, v.Reason)
+		}
 	}
 
 	// Consult the referee if present (before resolution).
@@ -123,12 +139,28 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// Validate each address and collect only valid ones.
 		var validated []netip.Addr
 		for _, addr := range addrs {
-			if err := ValidateAddress(addr); err != nil {
-				return nil, err
+			// Use custom validator if provided, otherwise use the standard one.
+			var validateErr *RefusalError
+			if pt.AddressValidator != nil {
+				validateErr = pt.AddressValidator(addr)
+			} else {
+				validateErr = ValidateAddress(addr)
+			}
+			if validateErr != nil {
+				// Cache the resolution even if validation fails, so we don't
+				// resolve again. Store empty list to indicate all addresses were invalid.
+				pt.mu.Lock()
+				pt.resolvedAddrs[host] = []netip.Addr{}
+				pt.mu.Unlock()
+				return nil, validateErr
 			}
 			validated = append(validated, addr)
 		}
 		if len(validated) == 0 {
+			// All addresses failed validation; cache empty list.
+			pt.mu.Lock()
+			pt.resolvedAddrs[host] = []netip.Addr{}
+			pt.mu.Unlock()
 			return nil, fmt.Errorf("no valid addresses for %s", host)
 		}
 
@@ -138,35 +170,48 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		pt.mu.Unlock()
 	}
 
+	// If no valid addresses were cached, fail.
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no valid addresses for %s", host)
+	}
+
 	// Create a custom transport that uses our pinned dialer.
-	// We create a new transport for each request to ensure clean state,
-	// but it uses the same pool of validated addresses.
-	pinnedDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		_, dialPort, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
+	// We use the injected Transport as the base if available, or create one.
+	var transport http.RoundTripper
+	if pt.Transport != nil {
+		transport = pt.Transport
+	} else {
+		transport = http.DefaultTransport
+	}
 
-		for _, ip := range addrs {
-			ipAddr := net.JoinHostPort(ip.String(), dialPort)
-			dialer := &net.Dialer{}
-			conn, err := dialer.DialContext(ctx, network, ipAddr)
-			if err == nil {
-				return conn, nil
+	// If the transport is an http.Transport, we can configure a custom dialer.
+	// Otherwise, we wrap it to intercept connections.
+	if httpTransport, ok := transport.(*http.Transport); ok {
+		pinnedDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, dialPort, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
 			}
+
+			for _, ip := range addrs {
+				ipAddr := net.JoinHostPort(ip.String(), dialPort)
+				dialer := &net.Dialer{}
+				conn, err := dialer.DialContext(ctx, network, ipAddr)
+				if err == nil {
+					return conn, nil
+				}
+			}
+			return nil, fmt.Errorf("dial %s: all addresses failed", addr)
 		}
-		return nil, fmt.Errorf("dial %s: all addresses failed", addr)
+
+		// Clone the transport and set the pinned dialer.
+		customTransport := httpTransport.Clone()
+		customTransport.DialContext = pinnedDialer
+		defer customTransport.CloseIdleConnections()
+		transport = customTransport
 	}
 
-	// Build a transport with our pinned dialer.
-	customTransport := &http.Transport{
-		DialContext:        pinnedDialer,
-		DisableKeepAlives:  false,
-		DisableCompression: false,
-	}
-	defer customTransport.CloseIdleConnections()
-
-	resp, err := customTransport.RoundTrip(req)
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
@@ -208,15 +253,16 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			// Close the response body before following the redirect.
 			_ = resp.Body.Close()
 
-			// Create a new request for the redirect target.
-			redirectReq, err := http.NewRequestWithContext(req.Context(),
+			// Create a new request for the redirect target with incremented depth.
+			ctx := context.WithValue(req.Context(), keyRedirectDepth, depth+1)
+			redirectReq, err := http.NewRequestWithContext(ctx,
 				http.MethodGet, targetURL.String(), nil)
 			if err != nil {
 				return nil, err
 			}
 			redirectReq.Header = req.Header.Clone()
 
-			// Follow the redirect recursively (attempts counter will prevent loops).
+			// Follow the redirect recursively (depth check will prevent loops).
 			return pt.RoundTrip(redirectReq)
 		}
 	}

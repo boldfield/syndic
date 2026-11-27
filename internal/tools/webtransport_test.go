@@ -62,6 +62,17 @@ func (sr *stubResolver) LookupNetIP(ctx context.Context, network, host string) (
 	return sr.addrs[host], nil
 }
 
+// permitLoopback is an address validator for testing that permits loopback
+// (for use with httptest servers) but rejects other forbidden addresses.
+func permitLoopback(addr netip.Addr) *RefusalError {
+	// Allow loopback for testing
+	if addr.IsLoopback() {
+		return nil
+	}
+	// Apply all other standard checks
+	return ValidateAddress(addr)
+}
+
 func TestValidateAddress(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -366,8 +377,8 @@ func TestMaxRedirectHops(t *testing.T) {
 	hopCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hopCount++
-		if hopCount <= 3 {
-			// Redirect to same host.
+		if hopCount <= 4 {
+			// Redirect to same host (4 redirects total).
 			w.Header().Set("Location", fmt.Sprintf("/redirect%d", hopCount+1))
 			w.WriteHeader(http.StatusSeeOther)
 		} else {
@@ -394,10 +405,11 @@ func TestMaxRedirectHops(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:      screener,
-		Resolver:      resolver,
-		Transport:     innerTransport,
-		resolvedAddrs: make(map[string][]netip.Addr),
+		Screener:         screener,
+		Resolver:         resolver,
+		Transport:        innerTransport,
+		AddressValidator: permitLoopback,
+		resolvedAddrs:    make(map[string][]netip.Addr),
 	}
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
@@ -441,17 +453,20 @@ func TestSameHostRedirectAllowed(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:      screener,
-		Resolver:      resolver,
-		Transport:     innerTransport,
-		resolvedAddrs: make(map[string][]netip.Addr),
+		Screener:         screener,
+		Resolver:         resolver,
+		Transport:        innerTransport,
+		AddressValidator: permitLoopback,
+		resolvedAddrs:    make(map[string][]netip.Addr),
 	}
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
-	_, err := transport.RoundTrip(req)
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		t.Logf("RoundTrip error (may be network-related): %v", err)
+		t.Fatalf("RoundTrip error: %v", err)
 	}
+	defer func() { _ = resp.Body.Close() }()
+
 	// Verify only one lookup (same-host redirect uses cached resolution).
 	lookups := resolver.Lookups()
 	if len(lookups) != 1 {
@@ -483,16 +498,17 @@ func TestCrossHostRedirectNotFollowed(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:      screener,
-		Resolver:      resolver,
-		Transport:     innerTransport,
-		resolvedAddrs: make(map[string][]netip.Addr),
+		Screener:         screener,
+		Resolver:         resolver,
+		Transport:        innerTransport,
+		AddressValidator: permitLoopback,
+		resolvedAddrs:    make(map[string][]netip.Addr),
 	}
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts1.URL+"/start", nil)
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
-		t.Logf("RoundTrip error (may be network-related): %v", err)
+		t.Fatalf("RoundTrip error: %v", err)
 	}
 	// Cross-host redirect should be returned, not followed.
 	if resp == nil {
@@ -516,21 +532,33 @@ func TestFetchRefusesScreenerDenied(t *testing.T) {
 	// Acceptance: Transport.Fetch refuses URLs the screener denies,
 	// without calling the resolver.
 
+	// Use a 16-byte canary (minimum required by screener design)
+	canary := []byte("secret-canary-01")
+
 	screener := NewURLScreener(0)
-	screener.AddBytes(RouteSnapshotRead, []byte("secret"))
+	screener.AddBytes(RouteSnapshotRead, canary)
 
 	resolver := newTestRecordingResolver()
 	resolver.addrs["example.com"] = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+
+	// Use a fake transport that never dials (for testing).
+	fakeTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			t.Fatalf("Should not dial for screener-refused URL; got dial to %s", addr)
+			return nil, fmt.Errorf("unexpected dial")
+		},
+	}
 
 	transport := &Transport{
 		Screener:      screener,
 		Resolver:      resolver,
 		HostValidator: nil,
-		Transport:     http.DefaultTransport,
+		Transport:     fakeTransport,
 	}
 
 	// URL with file content should be refused (screener denies).
-	_, err := transport.Fetch(context.Background(), "https://example.com/?q=secret")
+	testURL := "https://example.com/?q=" + string(canary)
+	_, err := transport.Fetch(context.Background(), testURL)
 	if err == nil {
 		t.Fatalf("Fetch() succeeded for URL with file content")
 	}
