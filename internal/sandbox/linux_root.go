@@ -49,6 +49,11 @@ func (n *namespaces) Prepare(cmd *exec.Cmd) error {
 	if err := buildRoot(n.plan); err != nil {
 		return err
 	}
+	if n.plan.Proxy != nil {
+		if err := startProxy(*n.plan.Proxy); err != nil {
+			return err
+		}
+	}
 	// Not dumpable: the command, running as the same identity, can neither
 	// trace the supervisor nor see it in a proc mounted with hidepid.
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
