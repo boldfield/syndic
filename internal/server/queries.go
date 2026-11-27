@@ -240,6 +240,12 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			ValidationStatus: v.ValidationStatus,
 			Reason:           v.Reason,
 		}
+		// Get verdict evidence (tool results and observations it used)
+		evidence, err := store.GetVerdictEvidence(v.ID)
+		if err == nil {
+			verdictRecord.ResultIDs = evidence.ResultIDs
+			verdictRecord.ObservationIDs = evidence.ObservationIDs
+		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}
 

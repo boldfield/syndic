@@ -234,6 +234,30 @@ func (c *Client) Release(ctx context.Context, req wire.ReleaseRequest) (wire.Rel
 	return reply, nil
 }
 
+func (c *Client) Apply(ctx context.Context, turnID string) (wire.ApplyReply, error) {
+	var reply wire.ApplyReply
+	body, err := c.doRequest(ctx, wire.RequestApply, wire.ApplyRequest{TurnID: turnID})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal apply reply: %w", err)
+	}
+	return reply, nil
+}
+
+func (c *Client) Discard(ctx context.Context, turnID string) (wire.DiscardReply, error) {
+	var reply wire.DiscardReply
+	body, err := c.doRequest(ctx, wire.RequestDiscard, wire.DiscardRequest{TurnID: turnID})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal discard reply: %w", err)
+	}
+	return reply, nil
+}
+
 func (c *Client) Turn(ctx context.Context, turnID string) (wire.TurnReply, error) {
 	var reply wire.TurnReply
 	body, err := c.doRequest(ctx, wire.RequestTurn, wire.TurnRequest{TurnID: turnID})

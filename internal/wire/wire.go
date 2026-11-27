@@ -478,11 +478,13 @@ type ReportedUsage struct {
 }
 
 type VerdictRecord struct {
-	ID               string `json:"id"`
-	AttemptID        string `json:"attempt_id"`
-	Parsed           bool   `json:"parsed"`
-	ValidationStatus string `json:"validation_status"`
-	Reason           string `json:"reason,omitempty"`
+	ID               string   `json:"id"`
+	AttemptID        string   `json:"attempt_id"`
+	Parsed           bool     `json:"parsed"`
+	ValidationStatus string   `json:"validation_status"`
+	Reason           string   `json:"reason,omitempty"`
+	ResultIDs        []string `json:"result_ids,omitempty"`
+	ObservationIDs   []string `json:"observation_ids,omitempty"`
 }
 
 type OpenBlock struct {
