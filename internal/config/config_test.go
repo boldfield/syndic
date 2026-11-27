@@ -767,6 +767,27 @@ func TestValidateViolations(t *testing.T) {
 			wantMsgs: []string{"reviewer_max_output_tokens", "at least 1"},
 		},
 		{
+			name: "proposer_max_output_tokens zero",
+			mutate: func(r *Roster) {
+				r.Budgets.ProposerMaxOutputTokens = intp(0)
+			},
+			wantMsgs: []string{"proposer_max_output_tokens", "at least 1"},
+		},
+		{
+			name: "critique_max_output_tokens zero",
+			mutate: func(r *Roster) {
+				r.Budgets.CritiqueMaxOutputTokens = intp(0)
+			},
+			wantMsgs: []string{"critique_max_output_tokens", "at least 1"},
+		},
+		{
+			name: "integrator_max_output_tokens zero",
+			mutate: func(r *Roster) {
+				r.Budgets.IntegratorMaxOutputTokens = intp(0)
+			},
+			wantMsgs: []string{"integrator_max_output_tokens", "at least 1"},
+		},
+		{
 			name: "delivery_max_tokens zero",
 			mutate: func(r *Roster) {
 				dmt := 0
@@ -2990,6 +3011,80 @@ func TestAllowlistRejectsNonHostnames(t *testing.T) {
 	for _, p := range []string{"example.com", "*.example.com", "**.example.com", "xn--bcher-kva.de", "a-b.example.com", "xn--ll-0ea.cat", "*.xn--ll-0ea.cat"} {
 		if err := validateAllowedHostPattern(p); err != nil {
 			t.Errorf("validateAllowedHostPattern(%q) = %v, want nil", p, err)
+		}
+	}
+}
+
+func TestDeliberateOutputBoundsDefaultsAndPrecedence(t *testing.T) {
+	r, err := Load("testdata/example.toml")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	get := func(eff Effective) [3]int {
+		return [3]int{*eff.Budgets.ProposerMaxOutputTokens, *eff.Budgets.CritiqueMaxOutputTokens, *eff.Budgets.IntegratorMaxOutputTokens}
+	}
+	eff, err := r.Resolve("solo", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := get(eff); got != [3]int{4096, 2048, 6144} {
+		t.Fatalf("defaults = %v", got)
+	}
+
+	// A preset's budgets override the table.
+	solo := r.Presets["solo"]
+	solo.Budgets = &Budgets{ProposerMaxOutputTokens: intp(1000), CritiqueMaxOutputTokens: intp(900), IntegratorMaxOutputTokens: intp(800)}
+	r.Presets["solo"] = solo
+	eff, _ = r.Resolve("solo", "")
+	if got := get(eff); got != [3]int{1000, 900, 800} {
+		t.Fatalf("preset override = %v", got)
+	}
+
+	// A quick profile's budgets override the preset's.
+	q := r.Quick["fast"]
+	q.Preset = "solo"
+	q.Budgets = &Budgets{ProposerMaxOutputTokens: intp(500), CritiqueMaxOutputTokens: intp(400), IntegratorMaxOutputTokens: intp(300)}
+	r.Quick["fast"] = q
+	eff, err = r.Resolve("", "fast")
+	if err != nil {
+		t.Fatalf("Resolve quick: %v", err)
+	}
+	if got := get(eff); got != [3]int{500, 400, 300} {
+		t.Fatalf("quick override = %v", got)
+	}
+}
+
+func intp(v int) *int { return &v }
+
+func TestDeliberateOutputBoundsHash(t *testing.T) {
+	for _, field := range []string{"proposer", "critique", "integrator"} {
+		r, err := Load("testdata/example.toml")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		before, err := r.QuickDefinitionSHA256("fast")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := r.Quick["fast"]
+		if q.Budgets == nil {
+			q.Budgets = &Budgets{}
+		}
+		switch field {
+		case "proposer":
+			q.Budgets.ProposerMaxOutputTokens = intp(7)
+		case "critique":
+			q.Budgets.CritiqueMaxOutputTokens = intp(7)
+		case "integrator":
+			q.Budgets.IntegratorMaxOutputTokens = intp(7)
+		}
+		r.Quick["fast"] = q
+		after, err := r.QuickDefinitionSHA256("fast")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before == after {
+			t.Errorf("%s: hash unchanged by a changed bound", field)
 		}
 	}
 }

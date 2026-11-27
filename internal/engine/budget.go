@@ -185,6 +185,37 @@ func (pb partBudget) standIn(maxOut int) string {
 	return strings.Repeat("x", budget.StandInBytes(maxOut, pb.bytesPerToken))
 }
 
+// proposerOutput, critiqueOutput and integratorOutput are the
+// MaxOutputTokens a deliberate-mode request of this participant carries in
+// each role, clamped to its probe output bound. A deliberate preset never
+// reads author_max_output_tokens.
+func (pb partBudget) proposerOutput(eff config.Effective) int {
+	return pb.maxOutput(*eff.Budgets.ProposerMaxOutputTokens)
+}
+
+func (pb partBudget) critiqueOutput(eff config.Effective) int {
+	return pb.maxOutput(*eff.Budgets.CritiqueMaxOutputTokens)
+}
+
+func (pb partBudget) integratorOutput(eff config.Effective) int {
+	return pb.maxOutput(*eff.Budgets.IntegratorMaxOutputTokens)
+}
+
+// proposalStandIn and critiqueStandIn are the stand-in texts for a proposal
+// and a critique this participant writes; candidateStandIn is the stand-in
+// for the integrator's candidate and its disposition together.
+func (pb partBudget) proposalStandIn(eff config.Effective) string {
+	return pb.standIn(pb.proposerOutput(eff))
+}
+
+func (pb partBudget) critiqueStandIn(eff config.Effective) string {
+	return pb.standIn(pb.critiqueOutput(eff))
+}
+
+func (pb partBudget) candidateStandIn(eff config.Effective) string {
+	return pb.standIn(pb.integratorOutput(eff))
+}
+
 func budgetError(kind string) *wire.Error {
 	err := refusal(wire.ErrorCodeBudget)
 	err.Budget = strPtr(kind)
