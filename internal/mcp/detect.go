@@ -191,8 +191,10 @@ func fromVersions(versions []string) Decision {
 }
 
 // fromAnswer decides from an answer that is a discovery result or a
-// current-revision error. ok is false when it is neither.
-func fromAnswer(a Answer) (Decision, bool) {
+// current-revision error. ok is false when it is neither. A result that is
+// not a discovery result is a malformed success, and so a failure, when
+// success is true; otherwise it is neither.
+func fromAnswer(a Answer, success bool) (Decision, bool) {
 	if a.Error != nil {
 		if !currentError(a.Error) {
 			return Decision{}, false
@@ -212,6 +214,9 @@ func fromAnswer(a Answer) (Decision, bool) {
 		Supported []string `json:"supportedVersions"`
 	}
 	if err := json.Unmarshal(a.Result, &res); err != nil || res.Supported == nil {
+		if !success {
+			return Decision{}, false
+		}
 		return failed(errors.New("mcp: malformed server/discover result")), true
 	}
 	return fromVersions(res.Supported), true
@@ -245,7 +250,7 @@ func DetectHTTP(ctx context.Context, protocol string, send func(context.Context)
 	if a.Status == 401 || a.Status == 403 || a.Status >= 500 {
 		return failed(&StatusFailure{Status: a.Status, Err: statusCause(a)})
 	}
-	if d, ok := fromAnswer(a); ok {
+	if d, ok := fromAnswer(a, a.Status >= 200 && a.Status < 300); ok {
 		return d
 	}
 	if legacyStatus(a.Status) {
@@ -308,7 +313,7 @@ func DetectStdio(protocol string, timeout time.Duration, exchange func() (Answer
 		if r.err != nil || (r.a.Error != nil && r.a.Error.Code == codeMethodNotFound) {
 			return legacy()
 		}
-		if d, ok := fromAnswer(r.a); ok {
+		if d, ok := fromAnswer(r.a, true); ok {
 			return d
 		}
 		return legacy()

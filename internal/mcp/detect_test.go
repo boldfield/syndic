@@ -2,6 +2,8 @@ package mcp_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -246,22 +248,99 @@ func TestDiscoverStdioSilentThenInitialize(t *testing.T) {
 	if d.Outcome != mcp.OutcomeLegacy {
 		t.Fatalf("%+v", d)
 	}
-	params, err := client.InitializeParams(info)
-	if err != nil {
+	if _, err := client.OpenLegacyStdio(c.W, s, info); err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteLine(c.W, wire.NewRequest(2, "initialize", params)); err != nil {
-		t.Fatal(err)
-	}
-	r, err := s.Await(2)
-	if err != nil || r.Error != nil {
-		t.Fatalf("initialize: %v %+v", err, r)
-	}
-	if err := client.CheckInitializeResult(r); err != nil {
-		t.Fatal(err)
-	}
-	if m := srv.Methods(); len(m) != 2 || m[0] != "server/discover" || m[1] != "initialize" {
+	if m := srv.Methods(); len(m) != 3 || m[0] != "server/discover" || m[1] != "initialize" || m[2] != "notifications/initialized" {
 		t.Errorf("sent %v", m)
+	}
+}
+
+// A discovery answer that comes after the wait is not taken as the answer to
+// the legacy initialize that follows.
+func TestDiscoverStdioLateAnswerThenInitialize(t *testing.T) {
+	srv := mcptest.New(mcptest.Config{
+		Revisions: []string{mcptest.Legacy},
+		Discover:  &mcptest.Reply{Delay: 150 * time.Millisecond, Error: &mcptest.RPCError{Code: -32601, Message: "unknown method"}},
+		Initialize: &mcptest.Reply{Delay: 400 * time.Millisecond, Result: map[string]any{
+			"protocolVersion": mcptest.Legacy,
+			"capabilities":    map[string]any{},
+			"serverInfo":      map[string]any{"name": "fake", "version": "0"},
+		}},
+	})
+	c := srv.Stdio(t)
+	s := &wire.Stream{Messages: wire.NewLineReader(c.R, wire.Limits{})}
+	info := client.DefaultClientInfo()
+	d := client.DiscoverStdio(mcp.ProtocolAuto, 100*time.Millisecond, c.W, s, info)
+	if d.Outcome != mcp.OutcomeLegacy {
+		t.Fatalf("%+v", d)
+	}
+	if _, err := client.OpenLegacyStdio(c.W, s, info); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// chattyReader yields one notification after a pause and then nothing.
+type chattyReader struct {
+	after time.Duration
+	sent  bool
+	stop  chan struct{}
+}
+
+func (r *chattyReader) Next() ([]byte, error) {
+	if !r.sent {
+		r.sent = true
+		time.Sleep(r.after)
+		return []byte(`{"jsonrpc":"2.0","method":"notifications/message","params":{}}`), nil
+	}
+	<-r.stop
+	return nil, io.EOF
+}
+
+func TestDiscoverStdioTimeoutBoundsWholeExchange(t *testing.T) {
+	r := &chattyReader{after: 75 * time.Millisecond, stop: make(chan struct{})}
+	t.Cleanup(func() { close(r.stop) })
+	s := &wire.Stream{Messages: r}
+	start := time.Now()
+	d := client.DiscoverStdio(mcp.ProtocolAuto, 100*time.Millisecond, io.Discard, s, client.DefaultClientInfo())
+	if d.Outcome != mcp.OutcomeLegacy {
+		t.Fatalf("%+v", d)
+	}
+	if el := time.Since(start); el > 160*time.Millisecond {
+		t.Errorf("waited %v", el)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestDiscoverStdioSendFailureIsUnoffered(t *testing.T) {
+	r := &chattyReader{stop: make(chan struct{})}
+	t.Cleanup(func() { close(r.stop) })
+	s := &wire.Stream{Messages: r}
+	d := client.DiscoverStdio(mcp.ProtocolAuto, time.Second, failWriter{}, s, client.DefaultClientInfo())
+	var se *mcp.SendError
+	if d.Outcome != mcp.OutcomeUnoffered || !errors.As(d.Err, &se) {
+		t.Fatalf("%+v", d)
+	}
+}
+
+// A 400, 404 or 405 whose body is a result but not a discovery result shows a
+// legacy server by the status; the same on a success is a malformed success.
+func TestDetectHTTPOtherResultOnLegacyStatus(t *testing.T) {
+	for _, body := range []map[string]any{{"hello": 1}, {"capabilities": map[string]any{}}} {
+		for _, st := range []int{400, 404, 405} {
+			d, srv := httpDetect(t, mcptest.Config{Discover: &mcptest.Reply{Status: st, Result: body}}, mcp.ProtocolAuto)
+			if d.Outcome != mcp.OutcomeLegacy {
+				t.Errorf("%d %v: %+v", st, body, d)
+			}
+			onlyDiscover(t, srv)
+		}
+		d, _ := httpDetect(t, mcptest.Config{Discover: &mcptest.Reply{Result: body}}, mcp.ProtocolAuto)
+		if d.Outcome != mcp.OutcomeUnoffered || d.Err == nil {
+			t.Errorf("200 %v: %+v", body, d)
+		}
 	}
 }
 
