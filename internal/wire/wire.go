@@ -146,6 +146,7 @@ type Error struct {
 	Participant  *string         `json:"participant,omitempty"`
 	QuickProfile *string         `json:"quick_profile,omitempty"`
 	Budget       *string         `json:"budget,omitempty"`
+	Phase        *string         `json:"phase,omitempty"`
 	Admission    *int64          `json:"admission,omitempty"`
 	Estimated    *int64          `json:"estimated,omitempty"`
 	Limit        *int64          `json:"limit,omitempty"`
@@ -388,6 +389,17 @@ type SubmitReply struct {
 	WorstCaseEstimatedTokens int64  `json:"worst_case_estimated_tokens"`
 	ConversationID           string `json:"conversation_id"`
 	ContextHash              string `json:"context_hash"`
+	// Phases is the first-round projection of a deliberate turn, per phase.
+	Phases []PhaseEstimate `json:"phases,omitempty"`
+}
+
+// PhaseEstimate is one projected request of a deliberate turn: the estimate of
+// its rendered prompt and its output bound.
+type PhaseEstimate struct {
+	Phase           string `json:"phase"`
+	Participant     string `json:"participant"`
+	EstimatedTokens int64  `json:"estimated_tokens"`
+	MaxOutputTokens int64  `json:"max_output_tokens"`
 }
 
 type CancelRequest struct {

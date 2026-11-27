@@ -447,7 +447,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		go e.runTurn(t)
 	}
 
-	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), WorstCaseEstimatedTokens: int64(rec.WorstCaseProjected), ConversationID: convID, ContextHash: contextHash}
+	reply := wire.SubmitReply{TurnID: turnID, Preset: eff.PresetName, EstimatedTokens: int64(rec.Projected), WorstCaseEstimatedTokens: int64(rec.WorstCaseProjected), Phases: rec.Phases, ConversationID: convID, ContextHash: contextHash}
 	if eff.QuickProfile != "" {
 		reply.QuickProfile = strPtr(eff.QuickProfile)
 	}
