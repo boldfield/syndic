@@ -334,7 +334,8 @@ func (e *Engine) startReviewerStep(t *openTurn, d reviewerDispatch, prior transp
 	}
 	if err != nil {
 		if r, ok := asRefusal(err); ok {
-			e.finishBudget(t, r)
+			// Failed lookup-context admission fails that reviewer, not the turn.
+			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+d.participant+":"+r.reason())
 		} else {
 			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+d.participant+":error")
 		}
@@ -764,13 +765,14 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		if isToolStep {
 			// Reviewer tool step accepted but not parsed as a verdict; text is
 			// journaled. If the reviewer has no tool definitions (tool limited or
-			// not offered), it ends the turn; otherwise the calls run after this
-			// transaction commits.
+			// not offered), tool calls are a reviewer failure. Otherwise the calls
+			// run after this transaction commits.
 			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
 				return err
 			}
 			if t.reviewerLimited[d.participant] || len(d.req.Tools) == 0 {
-				endState, endReason = StateIncomplete, reasonToolStepNotOffered
+				// Tool calls in reply to the final tool-free attempt are a reviewer failure.
+				endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":tool_calls_when_limited"
 				term, err = e.endIn(tx, emit, t, endState, endReason)
 			} else {
 				toolStep = true
