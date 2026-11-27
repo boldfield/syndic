@@ -1599,6 +1599,9 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	endpointsObj := rosterObj["endpoints"].([]interface{})
 	endpointDefault := endpointsObj[0].(map[string]interface{})
 
+	if endpointDefault["referee_mcp_template_hash"] != referee.MCPTemplateHash() {
+		t.Errorf("referee_mcp_template_hash should be frozen in manifest, got %v", endpointDefault["referee_mcp_template_hash"])
+	}
 	if endpointDefault["referee_command_template_hash"] != referee.CommandTemplateHash() {
 		t.Errorf("referee_command_template_hash should be frozen in manifest, got %v", endpointDefault["referee_command_template_hash"])
 	}
@@ -1803,7 +1806,7 @@ func TestBuild_Referees(t *testing.T) {
 		t.Fatalf("referees %+v, want one per endpoint naming a referee model", built.Referees)
 	}
 	cloud := built.Referees["cloud"]
-	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.CommandTemplateHash != referee.CommandTemplateHash() || cloud.BytesPerToken == nil {
+	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.CommandTemplateHash != referee.CommandTemplateHash() || cloud.MCPTemplateHash != referee.MCPTemplateHash() || cloud.BytesPerToken == nil {
 		t.Fatalf("cloud referee %+v", cloud)
 	}
 	plain := built.Referees["plain"]
