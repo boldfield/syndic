@@ -18,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -161,6 +162,23 @@ type Options struct {
 	// wait inside an effect. It exists for tests of a cancel that lands while
 	// a call is executing; the daemon never sets it.
 	BeforeToolEffect func(turnID, attemptID, name string)
+
+	// SearchProviders are the web_search provider implementations this build
+	// supports; [tools.web.search].provider names one by tools.SearchProvider
+	// .Name. This is the injection seam for the operator-selected search
+	// integration (v5 delta section 6, pre-send check 6). No vendor has been
+	// chosen: the daemon injects none, so web_search stays unoffered in
+	// production whatever the roster configures, and the participants reply
+	// says so. Tests inject fakes.
+	SearchProviders []tools.SearchProvider
+	// SearchNetwork, when set, replaces the resolver, dialer and TLS
+	// configuration of the pinned provider connection. It exists for tests,
+	// which record lookups and carry the connection to httptest; the daemon
+	// never sets it, and nil selects the system resolver and dialer.
+	SearchNetwork *tools.SearchNetwork
+	// Secrets resolves the search provider credential; nil means the env and
+	// file resolver over SecretsDir, as the adapters use.
+	Secrets config.SecretResolver
 }
 
 // Engine is the review engine.
@@ -182,6 +200,9 @@ type Engine struct {
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
 	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	searchProviders map[string]tools.SearchProvider         // injected web_search providers by name; see Options.SearchProviders
+	searchNet       *tools.SearchNetwork                    // nil means the system resolver and dialer
+	secrets         config.SecretResolver
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -271,6 +292,9 @@ func New(o Options) (*Engine, error) {
 		newAdapter:      o.NewAdapter,
 		changeLines:     o.AuthorChangeLines,
 		beforeEffect:    o.BeforeToolEffect,
+		searchProviders: make(map[string]tools.SearchProvider, len(o.SearchProviders)),
+		searchNet:       o.SearchNetwork,
+		secrets:         o.Secrets,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),
@@ -288,6 +312,18 @@ func New(o Options) (*Engine, error) {
 		stoppingCh:      make(chan struct{}),
 	}
 	e.cancelersOut = sync.NewCond(&e.mu)
+	for _, p := range o.SearchProviders {
+		if p == nil || p.Name() == "" {
+			return nil, errors.New("engine: a search provider must have a name")
+		}
+		if e.searchProviders[p.Name()] != nil {
+			return nil, fmt.Errorf("engine: two search providers named %q", p.Name())
+		}
+		e.searchProviders[p.Name()] = p
+	}
+	if e.secrets == nil {
+		e.secrets = config.NewEnvFileResolver(o.SecretsDir)
+	}
 	if e.clock == nil {
 		e.clock = realClock{}
 	}
