@@ -1011,3 +1011,22 @@ func TestParticipantDetailShowsWebNotOffered(t *testing.T) {
 		t.Fatalf("participant with web offered shows a reason:\n%s", other)
 	}
 }
+
+func TestParticipantDetailShowsSearchNotOffered(t *testing.T) {
+	reason := "search_provider_unsupported:fake"
+	reply := wire.StatusReply{Participants: []wire.Participant{
+		{ID: "author", State: "idle", SearchOff: &reason},
+		{ID: "other", State: "idle"},
+	}}
+	s := MergeStatus(NewState(), &reply)
+	now := time.Now()
+
+	got := strings.Join(participantDetail(s, s.Participants["author"], now), "\n")
+	if !strings.Contains(got, "web_search: not offered, search_provider_unsupported:fake") {
+		t.Fatalf("detail missing the search-off reason:\n%s", got)
+	}
+	other := strings.Join(participantDetail(s, s.Participants["other"], now), "\n")
+	if strings.Contains(other, "web_search: not offered") {
+		t.Fatalf("participant with search offered shows a reason:\n%s", other)
+	}
+}

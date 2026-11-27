@@ -266,6 +266,9 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 		if reason := e.webOffReason(p.Endpoint); reason != "" {
 			ws.WebOff = &reason
 		}
+		if reason := e.searchOffReason(); reason != "" {
+			ws.SearchOff = &reason
+		}
 	}
 	return ws
 }

@@ -652,6 +652,11 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 			if len(roster.Tools.Web.AllowedHosts) > 0 {
 				webMap["allowed_hosts"] = roster.Tools.Web.AllowedHosts
 			}
+			// The search provider and host, never the credential reference's
+			// value: the manifest records what the roster configures.
+			if sc := roster.Tools.Web.Search; sc != nil {
+				webMap["search"] = map[string]interface{}{"provider": sc.Provider, "host": sc.Host}
+			}
 			if len(webMap) > 0 {
 				toolsMap["web"] = webMap
 			}

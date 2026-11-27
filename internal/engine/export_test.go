@@ -140,6 +140,13 @@ func (e *Engine) WebOffReason(endpoint string) string {
 	return e.webOffReason(endpoint)
 }
 
+// SearchOffReason is why web_search is not offered, or empty when it is.
+func (e *Engine) SearchOffReason() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.searchOffReason()
+}
+
 // RefereeAdapterCount is how many referee attempts have an adapter kept for
 // cancelling their held work.
 func (e *Engine) RefereeAdapterCount() int {

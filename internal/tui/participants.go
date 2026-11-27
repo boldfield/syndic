@@ -277,6 +277,9 @@ func participantDetail(s State, p ParticipantInfo, now time.Time) []string {
 	if p.WebOff != "" {
 		lines = append(lines, "  web: not offered, "+plain(p.WebOff))
 	}
+	if p.SearchOff != "" {
+		lines = append(lines, "  web_search: not offered, "+plain(p.SearchOff))
+	}
 	// The design takes the output bound from the probe record alone.
 	lines = append(lines, "  context bound: "+bound(p.ContextBound, p.ContextSource)+"  output bound: "+bound(p.OutputBound, "probe"))
 	bpt := "-"
