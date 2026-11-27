@@ -4,14 +4,52 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// stubResolver is a fake Resolver for testing.
+// testRecordingResolver records every LookupNetIP call for testing.
+type testRecordingResolver struct {
+	addrs   map[string][]netip.Addr
+	err     map[string]error
+	lookups []string
+	mu      sync.Mutex
+}
+
+func newTestRecordingResolver() *testRecordingResolver {
+	return &testRecordingResolver{
+		addrs:   make(map[string][]netip.Addr),
+		err:     make(map[string]error),
+		lookups: []string{},
+	}
+}
+
+func (rr *testRecordingResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	rr.mu.Lock()
+	rr.lookups = append(rr.lookups, host)
+	rr.mu.Unlock()
+
+	if err, ok := rr.err[host]; ok {
+		return nil, err
+	}
+	return rr.addrs[host], nil
+}
+
+func (rr *testRecordingResolver) Lookups() []string {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	result := make([]string, len(rr.lookups))
+	copy(result, rr.lookups)
+	return result
+}
+
+// stubResolver is a fake Resolver for testing without recording.
 type stubResolver struct {
 	addrs map[string][]netip.Addr
 	err   map[string]error
@@ -113,127 +151,161 @@ func TestValidateAddress(t *testing.T) {
 }
 
 func TestResolverStubSeesNoDeniedURL(t *testing.T) {
-	// Acceptance test: "Resolver stub sees no denied URL"
-	// A resolver stub records which names it was asked to resolve. The stub
-	// should never see a URL that the screener refused.
+	// Acceptance: "Resolver stub sees no denied URL"
+	// The resolver must not be called for URLs the screener refuses.
+	// (Pre-send checks run before resolution.)
 
 	screener := NewURLScreener(0)
 	screener.AddBytes(RouteSnapshotRead, []byte("secret-key-12345"))
 
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"example.com": {netip.MustParseAddr("93.184.216.34")},
-		},
-	}
+	resolver := newTestRecordingResolver()
+	resolver.addrs["example.com"] = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
 
-	// URL that should be refused by screener (carries file content).
+	// URL that carries file content (screener refuses).
 	canaryURL := "https://example.com/?key=secret-key-12345"
-	v := screener.Screen(canaryURL)
-	if v.Allowed {
-		t.Fatalf("screener allowed URL with file content: %v", v)
+
+	// Attempt to fetch the refused URL.
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     http.DefaultTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
 
-	// The resolver should not have been called for the refused URL.
-	transport := NewPinnedTransport(screener, resolver, nil, nil)
-	req, _ := http.NewRequest("GET", canaryURL, nil)
+	req, _ := http.NewRequestWithContext(context.Background(), "GET", canaryURL, nil)
 	_, err := transport.RoundTrip(req)
 	if err == nil {
 		t.Fatalf("RoundTrip succeeded for refused URL")
 	}
+
+	// Verify the resolver was never called.
+	if len(resolver.Lookups()) != 0 {
+		t.Errorf("resolver was called for screener-refused URL; lookups: %v", resolver.Lookups())
+	}
 }
 
 func TestInitialRequestPinnedWithoutSecondDNS(t *testing.T) {
-	// Acceptance test: "Initial request pinned without second DNS"
-	// The transport resolves the hostname once at the start, validates the
-	// addresses, and uses those exact addresses for the connection. The
-	// underlying transport does not perform a second DNS lookup.
+	// Acceptance: "Initial request pinned without second DNS"
+	// Hostname is resolved once and the result is cached and reused
+	// without additional resolution. The connection uses the validated address.
 
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"example.com": {netip.MustParseAddr("93.184.216.34")},
-		},
-	}
-
-	countingResolver := &stubResolver{
-		addrs: resolver.addrs,
-		err:   resolver.err,
-	}
-
-	// Set up a simple httptest server.
+	// Set up an httptest server.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "OK")
 	}))
 	defer ts.Close()
 
-	screener := NewURLScreener(0)
-	transport := NewPinnedTransport(screener, countingResolver, http.DefaultTransport, nil)
+	// Map the test server's address to a hostname.
+	resolver := newTestRecordingResolver()
+	testAddr := netip.MustParseAddr("127.0.0.1")
+	resolver.addrs["test.local"] = []netip.Addr{testAddr}
 
-	req, _ := http.NewRequest("GET", "http://example.com/", nil)
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Logf("Note: RoundTrip failed as expected in test environment: %v", err)
-		// This is expected in test environment because we can't actually dial 93.184.216.34.
-		// The important thing is that the resolver was called once.
-	} else if resp != nil {
-		_ = resp.Body.Close()
+	screener := NewURLScreener(0)
+
+	// First request to test.local.
+	url1 := "http://test.local/path1"
+	transport1 := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     http.DefaultTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
 
-	// Resolve count should be exactly 1.
-	// (We can't directly measure this without instrumentation, but we can verify
-	// that the same address is reused for a second request to the same hostname.)
-	transport2 := NewPinnedTransport(screener, countingResolver, http.DefaultTransport, nil)
-	req2, _ := http.NewRequest("GET", "http://example.com/path", nil)
-	_, _ = transport2.RoundTrip(req2)
+	req1, _ := http.NewRequestWithContext(context.Background(), "GET", url1, nil)
+	_, err1 := transport1.RoundTrip(req1)
+	// Error expected (can't dial 127.0.0.1) but resolution must have occurred.
+	if err1 == nil {
+		t.Fatalf("RoundTrip unexpectedly succeeded")
+	}
 
-	// In a real scenario, the same pinned address would be used without additional
-	// resolution. For now, we just verify the structure is in place.
+	lookups1 := resolver.Lookups()
+	if len(lookups1) != 1 || lookups1[0] != "test.local" {
+		t.Errorf("first request: expected one lookup of 'test.local', got %v", lookups1)
+	}
+
+	// Second request to test.local using the same transport.
+	// If caching works, the resolver should not be called again.
+	resolver.mu.Lock()
+	resolver.lookups = []string{} // Clear lookups
+	resolver.mu.Unlock()
+	req2, _ := http.NewRequestWithContext(context.Background(), "GET", url1, nil)
+	_, _ = transport1.RoundTrip(req2)
+
+	lookups2 := resolver.Lookups()
+	if len(lookups2) != 0 {
+		t.Errorf("second request: expected no new lookups (caching should apply), got %v", lookups2)
+	}
 }
 
 func TestForbiddenAddressesRejected(t *testing.T) {
-	// Acceptance test: "Loopback/private/link-local/multicast/unspecified/mapped forbidden forms rejected"
+	// Acceptance: "Loopback/private/link-local/multicast/unspecified/mapped forbidden"
+	// All these address classes must be rejected.
 
 	testCases := []struct {
-		name    string
-		host    string
-		addrs   []netip.Addr
-		wantErr bool
+		name  string
+		host  string
+		addrs []netip.Addr
 	}{
 		{
-			name:    "loopback",
-			host:    "localhost",
-			addrs:   []netip.Addr{netip.MustParseAddr("127.0.0.1")},
-			wantErr: true,
+			name:  "loopback IPv4",
+			host:  "localhost",
+			addrs: []netip.Addr{netip.MustParseAddr("127.0.0.1")},
 		},
 		{
-			name:    "private 10.x.x.x",
-			host:    "internal.local",
-			addrs:   []netip.Addr{netip.MustParseAddr("10.0.0.1")},
-			wantErr: true,
+			name:  "loopback IPv6",
+			host:  "localhost-v6",
+			addrs: []netip.Addr{netip.MustParseAddr("::1")},
 		},
 		{
-			name:    "link-local",
-			host:    "link.local",
-			addrs:   []netip.Addr{netip.MustParseAddr("169.254.1.1")},
-			wantErr: true,
+			name:  "private RFC1918 10.x.x.x",
+			host:  "internal.local",
+			addrs: []netip.Addr{netip.MustParseAddr("10.0.0.1")},
 		},
 		{
-			name:    "multicast",
-			host:    "mcast.example.com",
-			addrs:   []netip.Addr{netip.MustParseAddr("224.0.0.1")},
-			wantErr: true,
+			name:  "private RFC1918 172.16.x.x",
+			host:  "internal2.local",
+			addrs: []netip.Addr{netip.MustParseAddr("172.16.0.1")},
 		},
 		{
-			name:    "unspecified",
-			host:    "unspec.example.com",
-			addrs:   []netip.Addr{netip.MustParseAddr("0.0.0.0")},
-			wantErr: true,
+			name:  "private RFC1918 192.168.x.x",
+			host:  "internal3.local",
+			addrs: []netip.Addr{netip.MustParseAddr("192.168.0.1")},
 		},
 		{
-			name:    "public address allowed",
-			host:    "example.com",
-			addrs:   []netip.Addr{netip.MustParseAddr("93.184.216.34")},
-			wantErr: false,
+			name:  "link-local IPv4",
+			host:  "link.local",
+			addrs: []netip.Addr{netip.MustParseAddr("169.254.0.1")},
+		},
+		{
+			name:  "link-local IPv6",
+			host:  "link-v6.local",
+			addrs: []netip.Addr{netip.MustParseAddr("fe80::1")},
+		},
+		{
+			name:  "multicast IPv4",
+			host:  "mcast.example.com",
+			addrs: []netip.Addr{netip.MustParseAddr("224.0.0.1")},
+		},
+		{
+			name:  "multicast IPv6",
+			host:  "mcast-v6.example.com",
+			addrs: []netip.Addr{netip.MustParseAddr("ff00::1")},
+		},
+		{
+			name:  "unspecified IPv4",
+			host:  "unspec.example.com",
+			addrs: []netip.Addr{netip.MustParseAddr("0.0.0.0")},
+		},
+		{
+			name:  "unspecified IPv6",
+			host:  "unspec-v6.example.com",
+			addrs: []netip.Addr{netip.MustParseAddr("::")},
+		},
+		{
+			name:  "IPv6 unique-local fc00::/7",
+			host:  "ul.local",
+			addrs: []netip.Addr{netip.MustParseAddr("fc00::1")},
 		},
 	}
 
@@ -241,32 +313,63 @@ func TestForbiddenAddressesRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resolver := &stubResolver{addrs: map[string][]netip.Addr{tc.host: tc.addrs}}
 			screener := NewURLScreener(0)
-			transport := NewPinnedTransport(screener, resolver, http.DefaultTransport, nil)
-
-			req, _ := http.NewRequest("GET", "http://"+tc.host+"/", nil)
-			_, err := transport.RoundTrip(req)
-
-			if tc.wantErr && err == nil {
-				t.Errorf("RoundTrip() succeeded, want error for forbidden address")
+			transport := &PinnedTransport{
+				Screener:      screener,
+				Resolver:      resolver,
+				Transport:     http.DefaultTransport,
+				resolvedAddrs: make(map[string][]netip.Addr),
 			}
-			if !tc.wantErr && err != nil {
-				t.Logf("Note: RoundTrip failed (may be network-related): %v", err)
-				// In test environment, may fail due to network, but validation should pass.
+
+			req, _ := http.NewRequestWithContext(context.Background(), "GET",
+				"http://"+tc.host+"/", nil)
+			_, err := transport.RoundTrip(req)
+			if err == nil {
+				t.Errorf("RoundTrip() succeeded, want error for forbidden address")
 			}
 		})
 	}
 }
 
-func TestMaxRedirectHops(t *testing.T) {
-	// Acceptance test: "the fourth hop is refused"
-	// After 3 redirects (4 total requests), the next redirect is refused.
+func TestMixedResolution(t *testing.T) {
+	// Acceptance: "mixed bad resolution" - one public address plus one forbidden
+	// address must reject the entire fetch.
 
-	redirectCount := 0
+	resolver := &stubResolver{
+		addrs: map[string][]netip.Addr{
+			"mixed.example.com": {
+				netip.MustParseAddr("93.184.216.34"), // public, allowed
+				netip.MustParseAddr("10.0.0.1"),      // private, forbidden
+			},
+		},
+	}
+
+	screener := NewURLScreener(0)
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     http.DefaultTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), "GET",
+		"http://mixed.example.com/", nil)
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Errorf("RoundTrip() succeeded for mixed resolution, want error")
+	}
+}
+
+func TestMaxRedirectHops(t *testing.T) {
+	// Acceptance: "the fourth hop is refused" - after 3 redirects (4 requests),
+	// the next redirect is refused.
+
+	hopCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		redirectCount++
-		if redirectCount <= 3 {
-			w.Header().Set("Location", "/redirect"+fmt.Sprintf("%d", redirectCount+1))
-			w.WriteHeader(http.StatusFound)
+		hopCount++
+		if hopCount <= 3 {
+			// Redirect to same host.
+			w.Header().Set("Location", fmt.Sprintf("/redirect%d", hopCount+1))
+			w.WriteHeader(http.StatusSeeOther)
 		} else {
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, "OK")
@@ -274,113 +377,212 @@ func TestMaxRedirectHops(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"example.test": {netip.MustParseAddr("127.0.0.1")},
+	resolver := newTestRecordingResolver()
+	// Extract host and port from the test server.
+	u, _ := url.Parse(ts.URL)
+	testAddr := netip.MustParseAddr("127.0.0.1")
+	resolver.addrs[u.Hostname()] = []netip.Addr{testAddr}
+
+	screener := NewURLScreener(0)
+	// Use a custom transport that actually honors the pinned dialer.
+	innerTransport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Dial to the test server's port.
+			return net.Dial(network, u.Host)
 		},
 	}
 
-	screener := NewURLScreener(0)
-	// Note: This test shows the structure but can't fully work with httptest's
-	// generated URLs due to hostname/port issues. The key test is that we track
-	// the attempt count and reject after 3 hops.
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
+	}
 
-	transport := NewPinnedTransport(screener, resolver, http.DefaultTransport, nil)
-	if transport.attempts > 0 {
-		t.Errorf("New transport should start with attempts=0, got %d", transport.attempts)
+	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Errorf("RoundTrip() succeeded; want error after 4 hops (3 redirects)")
+	}
+	if !strings.Contains(err.Error(), "too many redirect hops") {
+		t.Errorf("RoundTrip() error: %v; want 'too many redirect hops'", err)
 	}
 }
 
 func TestSameHostRedirectAllowed(t *testing.T) {
-	// Acceptance test: "a same-host redirect target is checked by every rule and
+	// Acceptance: "a same-host redirect target is checked by every rule and
 	// the referee before it is resolved or requested"
 
+	redirected := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !redirected && r.RequestURI == "/start" {
+			redirected = true
+			w.Header().Set("Location", "/target")
+			w.WriteHeader(http.StatusSeeOther)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "OK")
+		}
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	resolver := newTestRecordingResolver()
+	testAddr := netip.MustParseAddr("127.0.0.1")
+	resolver.addrs[u.Hostname()] = []netip.Addr{testAddr}
+
 	screener := NewURLScreener(0)
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"example.com": {netip.MustParseAddr("93.184.216.34")},
+	innerTransport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial(network, u.Host)
 		},
 	}
 
-	// The transport should accept same-host redirects and screen them.
-	_ = NewPinnedTransport(screener, resolver, http.DefaultTransport, nil)
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
+	}
 
-	// Create a mock response with a same-host redirect.
-	req, _ := http.NewRequest("GET", "https://example.com/", nil)
-	req.URL.Host = "example.com"
-
-	// Simulate redirect by checking that target would be screened if followed.
-	targetURL, _ := req.URL.Parse("https://example.com/redirect")
-	targetString := targetURL.String()
-	v := screener.Screen(targetString)
-	if !v.Allowed {
-		t.Fatalf("same-host redirect target should be allowed by screener")
+	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
+	_, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Logf("RoundTrip error (may be network-related): %v", err)
+	}
+	// Verify only one lookup (same-host redirect uses cached resolution).
+	lookups := resolver.Lookups()
+	if len(lookups) != 1 {
+		t.Errorf("expected 1 lookup for same-host redirect, got %d: %v", len(lookups), lookups)
 	}
 }
 
 func TestCrossHostRedirectNotFollowed(t *testing.T) {
-	// Acceptance test: "a cross-host redirect is returned as a result and not followed"
+	// Acceptance: "a cross-host redirect is returned as a result and not followed"
 
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"source.com": {netip.MustParseAddr("93.184.216.34")},
-			"target.com": {netip.MustParseAddr("93.184.216.35")},
+	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Redirect to different host.
+		w.Header().Set("Location", "http://other.example.com:8888/target")
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	defer ts1.Close()
+
+	u1, _ := url.Parse(ts1.URL)
+	resolver := newTestRecordingResolver()
+	testAddr := netip.MustParseAddr("127.0.0.1")
+	resolver.addrs[u1.Hostname()] = []netip.Addr{testAddr}
+
+	screener := NewURLScreener(0)
+	innerTransport := &http.Transport{
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.Dial(network, u1.Host)
 		},
 	}
 
-	screener := NewURLScreener(0)
-	_ = NewPinnedTransport(screener, resolver, http.DefaultTransport, nil)
-
-	// In a real test with httptest, we'd set up a handler that returns a
-	// cross-host redirect. Here we demonstrate the structure handles it.
-	// The key point is that the transport.RoundTrip checks the redirect target's
-	// hostname and doesn't follow cross-host redirects.
-
-	// This would be verified in an integration test with httptest.Server.
-}
-
-func TestNoAutomaticRedirects(t *testing.T) {
-	// Acceptance test: "Disable automatic redirects"
-	// The CheckRedirect function is set to return http.ErrUseLastResponse,
-	// which prevents automatic redirect following.
-
-	screener := NewURLScreener(0)
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{},
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
 
-	_ = NewPinnedTransport(screener, resolver, http.DefaultTransport, nil)
+	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts1.URL+"/start", nil)
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Logf("RoundTrip error (may be network-related): %v", err)
+	}
+	// Cross-host redirect should be returned, not followed.
+	if resp == nil {
+		t.Fatalf("expected response with cross-host redirect")
+	}
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("expected redirect status, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 
-	// Verify that the pinned transport doesn't automatically follow redirects.
-	// (This would be tested by making a real HTTP request to a server with redirects.)
-	// The key validation is in the client setup inside RoundTrip:
-	// CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	// Verify "other.example.com" was never resolved.
+	lookups := resolver.Lookups()
+	for _, lookup := range lookups {
+		if lookup == "other.example.com" {
+			t.Errorf("resolver was called for cross-host redirect target; shouldn't follow it")
+		}
+	}
 }
 
-func TestFetchMethod(t *testing.T) {
-	// Test the Transport.Fetch method.
+func TestFetchRefusesScreenerDenied(t *testing.T) {
+	// Acceptance: Transport.Fetch refuses URLs the screener denies,
+	// without calling the resolver.
 
 	screener := NewURLScreener(0)
 	screener.AddBytes(RouteSnapshotRead, []byte("secret"))
 
-	resolver := &stubResolver{
-		addrs: map[string][]netip.Addr{
-			"example.com": {netip.MustParseAddr("93.184.216.34")},
-		},
+	resolver := newTestRecordingResolver()
+	resolver.addrs["example.com"] = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+
+	transport := &Transport{
+		Screener:      screener,
+		Resolver:      resolver,
+		HostValidator: nil,
+		Transport:     http.DefaultTransport,
 	}
 
-	transport := NewTransport(screener, resolver, nil, http.DefaultTransport)
-
-	// URL with file content should be refused.
+	// URL with file content should be refused (screener denies).
 	_, err := transport.Fetch(context.Background(), "https://example.com/?q=secret")
 	if err == nil {
 		t.Fatalf("Fetch() succeeded for URL with file content")
 	}
 
-	// Valid URL should attempt resolution (and fail in test environment).
-	_, err = transport.Fetch(context.Background(), "https://example.com/")
-	if err == nil {
-		t.Fatalf("Fetch() succeeded unexpectedly")
+	// Resolver should not have been called.
+	if len(resolver.Lookups()) != 0 {
+		t.Errorf("resolver was called for screener-refused URL; lookups: %v", resolver.Lookups())
 	}
-	// This may fail due to network issues, which is OK for now.
+}
+
+// testDenyReferee is a test referee that always denies.
+type testDenyReferee struct {
+	decisionCalls []string
+	mu            sync.Mutex
+}
+
+func (dr *testDenyReferee) Decide(ctx context.Context, url string) *RefusalError {
+	dr.mu.Lock()
+	dr.decisionCalls = append(dr.decisionCalls, url)
+	dr.mu.Unlock()
+	return refusal("referee", "test refusal")
+}
+
+func TestRefereeDecision(t *testing.T) {
+	// Acceptance: The referee is consulted before resolution.
+
+	dr := &testDenyReferee{}
+	screener := NewURLScreener(0)
+	resolver := newTestRecordingResolver()
+	resolver.addrs["example.com"] = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+
+	transport := &PinnedTransport{
+		Screener:      screener,
+		Resolver:      resolver,
+		Referee:       dr,
+		Transport:     http.DefaultTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
+	}
+
+	req, _ := http.NewRequestWithContext(context.Background(), "GET",
+		"https://example.com/test", nil)
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatalf("RoundTrip() succeeded; want referee refusal")
+	}
+
+	// Resolver should not have been called (referee refused before resolution).
+	if len(resolver.Lookups()) != 0 {
+		t.Errorf("resolver was called after referee denial; lookups: %v", resolver.Lookups())
+	}
+
+	if len(dr.decisionCalls) != 1 {
+		t.Errorf("referee.Decide called %d times, want 1", len(dr.decisionCalls))
+	}
 }

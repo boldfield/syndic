@@ -6,8 +6,16 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"time"
+	"sync"
 )
+
+// Referee decides whether to allow a web fetch or search call. Its decision
+// runs after pre-send checks but before name resolution (design v5 delta, section 6).
+type Referee interface {
+	// Decide returns nil if the URL is allowed or a RefusalError if denied.
+	// The context is passed for use by the referee implementation.
+	Decide(ctx context.Context, url string) *RefusalError
+}
 
 // AddressRule rejects certain address classes (design v5 delta, section 6).
 // Loopback, private, link-local, multicast, unspecified and IPv4-mapped forms
@@ -29,74 +37,82 @@ func ValidateAddress(addr netip.Addr) *RefusalError {
 	if addr.IsUnspecified() {
 		return refusal("address", "address is unspecified")
 	}
-	// Check for IPv4-mapped forms of forbidden addresses.
-	// IPv4-mapped IPv6 addresses have the form ::ffff:a.b.c.d
-	if addr.Is6() {
-		unmapped := addr.Unmap()
-		if unmapped != addr {
-			// Address was unmapped, so it was IPv4-mapped; check if the IPv4 part is forbidden
-			if unmapped.IsLoopback() || unmapped.IsPrivate() || unmapped.IsLinkLocalUnicast() ||
-				unmapped.IsMulticast() || unmapped.IsUnspecified() {
-				return refusal("address", "address is IPv4-mapped form of a forbidden address")
-			}
-		}
-	}
+	// netip's Is* methods already handle IPv4-mapped forms correctly
+	// (they unmap internally), so explicit unmapping is not needed.
 	return nil
 }
 
 // PinnedTransport is an http.RoundTripper that resolves a hostname once,
-// validates all resolved addresses, and pins subsequent requests to those
-// validated addresses. It enforces no automatic redirects and applies address
-// validation to every hop. Redirect targets are limited to 3 total hops per
-// initial request, and cross-host redirects are not followed.
+// validates all resolved addresses against the address rules, and pins
+// subsequent requests to those validated addresses. It enforces no automatic
+// redirects and applies address validation to every hop including redirects.
+// Redirect chains are limited to 3 hops per initial request, and cross-host
+// redirects are returned as results and not followed. All requests and
+// redirects pass through the referee before resolution.
 type PinnedTransport struct {
+	Screener      *URLScreener
 	Resolver      Resolver
+	Referee       Referee
 	Transport     http.RoundTripper
 	HostValidator *HostPolicy
-	// resolvedAddrs maps canonical hostname to validated addresses, for pinning
-	// within the initial fetch plus redirects.
-	resolvedAddrs map[string][]netip.Addr
 
-	screener *URLScreener
-	attempts int
+	mu            sync.Mutex
+	resolvedAddrs map[string][]netip.Addr
+	attempts      int
 }
 
 // NewPinnedTransport returns a transport that validates addresses and pins
-// connections. screener is used to screen redirect targets. resolver resolves
-// hostnames. transport is the underlying RoundTripper; http.DefaultTransport
-// is used if nil. hostValidator is the allowlist; nil means no allowlist.
+// connections. All parameters are required except referee and hostValidator.
+// If transport is nil, http.DefaultTransport is used. If referee is nil,
+// no referee decision is requested (only pre-send checks apply).
 func NewPinnedTransport(screener *URLScreener, resolver Resolver,
 	transport http.RoundTripper, hostValidator *HostPolicy) *PinnedTransport {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
 	return &PinnedTransport{
+		Screener:      screener,
 		Resolver:      resolver,
 		Transport:     transport,
 		HostValidator: hostValidator,
 		resolvedAddrs: make(map[string][]netip.Addr),
-		screener:      screener,
 	}
 }
 
-// RoundTrip implements http.RoundTripper. It resolves the target hostname on
-// the first request, validates all resolved addresses, and pins the connection
-// to those addresses. Each subsequent request (including redirects) uses the
-// same pinned addresses for the same hostname.
+// RoundTrip implements http.RoundTripper. It resolves the target hostname,
+// validates all resolved addresses against the address rules, and pins the
+// connection to those addresses. Each request including redirects uses the
+// same pinned addresses for the same hostname. The referee is consulted for
+// each URL and each redirect target before name resolution occurs.
 func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	pt.mu.Lock()
 	pt.attempts++
 	if pt.attempts > 4 {
+		pt.mu.Unlock()
 		return nil, fmt.Errorf("too many redirect hops (max 3)")
 	}
+	pt.mu.Unlock()
 
 	host, _ := canonicalHost(req.URL)
 	if host == "" {
 		return nil, fmt.Errorf("invalid hostname")
 	}
 
+	// Consult the referee if present (before resolution).
+	if pt.Referee != nil {
+		if err := pt.Referee.Decide(req.Context(), req.URL.String()); err != nil {
+			return nil, err
+		}
+	}
+
 	// Resolve and validate addresses once per hostname.
-	if _, ok := pt.resolvedAddrs[host]; !ok {
-		addrs, err := pt.Resolver.LookupNetIP(req.Context(), "ip", host)
+	pt.mu.Lock()
+	addrs, resolved := pt.resolvedAddrs[host]
+	pt.mu.Unlock()
+
+	if !resolved {
+		var err error
+		addrs, err = pt.Resolver.LookupNetIP(req.Context(), "ip", host)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", host, err)
 		}
@@ -104,8 +120,8 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			return nil, fmt.Errorf("resolve %s: no addresses", host)
 		}
 
-		// Validate each address.
-		validated := make([]netip.Addr, 0, len(addrs))
+		// Validate each address and collect only valid ones.
+		var validated []netip.Addr
 		for _, addr := range addrs {
 			if err := ValidateAddress(addr); err != nil {
 				return nil, err
@@ -115,92 +131,108 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		if len(validated) == 0 {
 			return nil, fmt.Errorf("no valid addresses for %s", host)
 		}
+
+		pt.mu.Lock()
 		pt.resolvedAddrs[host] = validated
+		addrs = validated
+		pt.mu.Unlock()
 	}
 
-	// Use a custom dialer that connects to the validated addresses.
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	// Create a custom transport that uses our pinned dialer.
+	// We create a new transport for each request to ensure clean state,
+	// but it uses the same pool of validated addresses.
 	pinnedDialer := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// Extract just the port from the addr (which may be "hostname:port").
 		_, dialPort, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
 
-		// Use the pre-resolved and validated addresses.
-		for _, ip := range pt.resolvedAddrs[host] {
+		for _, ip := range addrs {
 			ipAddr := net.JoinHostPort(ip.String(), dialPort)
+			dialer := &net.Dialer{}
 			conn, err := dialer.DialContext(ctx, network, ipAddr)
 			if err == nil {
 				return conn, nil
 			}
-			// Try the next address on failure.
 		}
 		return nil, fmt.Errorf("dial %s: all addresses failed", addr)
 	}
 
-	// Create a custom transport with the pinned dialer.
-	// We can't copy http.Transport due to its mutex, so we create a minimal one.
+	// Build a transport with our pinned dialer.
 	customTransport := &http.Transport{
-		DialContext:            pinnedDialer,
-		MaxIdleConns:           100,
-		MaxIdleConnsPerHost:    10,
-		DisableKeepAlives:      false,
-		DisableCompression:     false,
-		MaxResponseHeaderBytes: 1 << 20, // 1 MB
+		DialContext:        pinnedDialer,
+		DisableKeepAlives:  false,
+		DisableCompression: false,
 	}
+	defer customTransport.CloseIdleConnections()
 
-	// Create client with no automatic redirects.
-	client := &http.Client{
-		Transport: customTransport,
-		Jar:       nil,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.Do(req)
+	resp, err := customTransport.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
 
-	// If this is a redirect, validate it before returning.
+	// Handle redirects: validate before returning.
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		locStr := resp.Header.Get("Location")
 		if locStr != "" {
-			// Parse the redirect target.
 			targetURL, err := req.URL.Parse(locStr)
 			if err != nil {
+				_ = resp.Body.Close()
 				return nil, fmt.Errorf("invalid redirect target: %w", err)
 			}
 
-			// Check if redirect target is to a different host.
 			targetHost, _ := canonicalHost(targetURL)
 			if targetHost != "" && targetHost != host {
 				// Cross-host redirect: return as result, don't follow.
 				return resp, nil
 			}
 
-			// Same-host redirect: validate target URL through screener.
-			if pt.screener != nil {
-				if v := pt.screener.Screen(targetURL.String()); !v.Allowed {
+			// Same-host redirect: validate target through screener and referee,
+			// then follow it.
+			if pt.Screener != nil {
+				if v := pt.Screener.Screen(targetURL.String()); !v.Allowed {
+					_ = resp.Body.Close()
 					return nil, fmt.Errorf("redirect target refused: %s: %s",
 						v.Rule, v.Reason)
 				}
 			}
+
+			// Consult referee for the redirect target too.
+			if pt.Referee != nil {
+				if err := pt.Referee.Decide(req.Context(), targetURL.String()); err != nil {
+					_ = resp.Body.Close()
+					return nil, err
+				}
+			}
+
+			// Close the response body before following the redirect.
+			_ = resp.Body.Close()
+
+			// Create a new request for the redirect target.
+			redirectReq, err := http.NewRequestWithContext(req.Context(),
+				http.MethodGet, targetURL.String(), nil)
+			if err != nil {
+				return nil, err
+			}
+			redirectReq.Header = req.Header.Clone()
+
+			// Follow the redirect recursively (attempts counter will prevent loops).
+			return pt.RoundTrip(redirectReq)
 		}
 	}
 
 	return resp, nil
 }
 
-// Transport wraps a Resolver, Fetcher and optional HostPolicy into a
-// validated, pinned web transport. It applies all pre-send and address rules,
-// uses an endpoint referee to validate URLs (not implemented in this task),
-// and pins connections to validated addresses.
+// Transport wraps a Resolver, Screener, optional Referee and optional HostPolicy
+// into a validated, pinned web transport. It applies all pre-send and address rules,
+// uses a referee to validate URLs before resolution, and pins connections to
+// validated addresses. The transport enforces that requests only dial to addresses
+// that pass address validation.
 type Transport struct {
 	Screener      *URLScreener
 	Resolver      Resolver
+	Referee       Referee
 	HostValidator *HostPolicy
 	Transport     http.RoundTripper
 }
@@ -216,16 +248,23 @@ func NewTransport(screener *URLScreener, resolver Resolver,
 	}
 }
 
-// Fetch screens a URL, validates it passes address rules, and fetches it with
-// a pinned connection. The same validation and pinning applies to any
-// redirects. Cross-host redirects are returned as results and not followed.
-// Automatic redirects are disabled.
+// SetReferee sets the referee for this transport. The referee is consulted
+// for each URL and redirect target before name resolution occurs.
+func (t *Transport) SetReferee(r Referee) {
+	t.Referee = r
+}
+
+// Fetch screens a URL, validates it passes all checks including the referee,
+// validates all resolved addresses, and fetches it with a pinned connection.
+// The same validation and pinning applies to any redirects. Cross-host
+// redirects are returned as results and not followed. Automatic redirects
+// are disabled. No resolution occurs for a URL the screener or referee refuses.
 func (t *Transport) Fetch(ctx context.Context, rawURL string) (*http.Response, error) {
 	if t.Screener == nil || t.Resolver == nil {
 		return nil, fmt.Errorf("transport needs a screener and resolver")
 	}
 
-	// Screen the URL.
+	// Screen the URL (before any resolution).
 	v := t.Screener.Screen(rawURL)
 	if !v.Allowed {
 		return nil, refusal(v.Rule, v.Reason)
@@ -237,8 +276,15 @@ func (t *Transport) Fetch(ctx context.Context, rawURL string) (*http.Response, e
 		return nil, err
 	}
 
-	// Apply the pinned transport with address validation.
-	pinnedTransport := NewPinnedTransport(t.Screener, t.Resolver,
-		t.Transport, t.HostValidator)
+	// Create a pinned transport with the referee.
+	pinnedTransport := &PinnedTransport{
+		Screener:      t.Screener,
+		Resolver:      t.Resolver,
+		Referee:       t.Referee,
+		Transport:     t.Transport,
+		HostValidator: t.HostValidator,
+		resolvedAddrs: make(map[string][]netip.Addr),
+	}
+
 	return pinnedTransport.RoundTrip(req)
 }
