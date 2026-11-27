@@ -127,7 +127,7 @@ type ToolResult struct {
 type Observation struct {
 	ID              string
 	TurnID          string
-	AttemptID       string
+	AttemptID       sql.NullString
 	SnapshotVersion int
 	Path            string
 	Kind            string
@@ -678,7 +678,15 @@ func (tx *Tx) RecordObservation(turnID, attemptID, path, kind string, content []
 	if err := tx.emitTools(turnID, "observation", payload); err != nil {
 		return Observation{}, err
 	}
-	o := Observation{ID: id, TurnID: turnID, AttemptID: attemptID, SnapshotVersion: version, Path: path, Kind: kind, JournalSeq: seq}
+	o := Observation{
+		ID:              id,
+		TurnID:          turnID,
+		AttemptID:       sql.NullString{String: attemptID, Valid: true},
+		SnapshotVersion: version,
+		Path:            path,
+		Kind:            kind,
+		JournalSeq:      seq,
+	}
 	if contentSHA != nil {
 		o.ContentSHA256 = *contentSHA
 	}

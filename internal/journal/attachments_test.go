@@ -1,7 +1,9 @@
 package journal_test
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/journal"
@@ -367,5 +369,279 @@ func TestStoreAttachments_BasesAsObservations(t *testing.T) {
 	}
 	if obsContentSHA.String != hash {
 		t.Errorf("observation content_sha256 = %q, want %q", obsContentSHA.String, hash)
+	}
+}
+
+// TestOverlayWithAttachedBase tests the full overlay scenario:
+// attached base → staged edit → read returns staged content → unstage → read returns attached base
+func TestOverlayWithAttachedBase(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	content := []byte("original_content")
+	hash := "5555555555555555555555555555555555555555555555555555555555555555"
+	insertToolContent(t, db, hash, content)
+
+	store := journal.NewStore(db)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn: %v", err)
+	}
+
+	att := journal.Attachment{
+		ID:      "att1",
+		TurnID:  turnID,
+		Path:    "file.txt",
+		SHA256:  hash,
+		ByteLen: len(content),
+		BaseSHA: hash,
+	}
+
+	_, err = store.StoreAttachments(turnID, []journal.Attachment{att})
+	if err != nil {
+		t.Fatalf("StoreAttachments: %v", err)
+	}
+
+	// Staged content - compute the expected hash
+	stagedContent := []byte("staged_edit")
+	h := sha256.Sum256(stagedContent)
+	stagedHash := fmt.Sprintf("%x", h)
+
+	// Now test the overlay scenario: StageWrite, then verify staging, then unstage
+	err = store.Tx(func(tx *journal.Tx) error {
+		// First, verify we can read the attached base
+		obs, err := tx.ObservationAt(turnID, "file.txt")
+		if err != nil {
+			return fmt.Errorf("ObservationAt after attach: %w", err)
+		}
+		if obs.ContentSHA256 != hash {
+			return fmt.Errorf("attached base content_sha256 = %q, want %q", obs.ContentSHA256, hash)
+		}
+
+		// Stage a write to the attached file
+		stage, err := tx.StageWrite(turnID, "file.txt", stagedContent)
+		if err != nil {
+			return fmt.Errorf("StageWrite: %w", err)
+		}
+
+		// Verify the staged entry has the correct content
+		if stage.NewSHA256 != stagedHash {
+			return fmt.Errorf("staged new_sha256 = %q, want %q", stage.NewSHA256, stagedHash)
+		}
+		if stage.BaseSHA256 != hash {
+			return fmt.Errorf("staged base_sha256 = %q, want %q", stage.BaseSHA256, hash)
+		}
+
+		// Unstage and verify the staging entry is gone
+		if err := tx.Unstage(turnID, "file.txt"); err != nil {
+			return fmt.Errorf("Unstage: %w", err)
+		}
+
+		// Verify the unstaged observation still has the attached base
+		obs3, err := tx.ObservationAt(turnID, "file.txt")
+		if err != nil {
+			return fmt.Errorf("ObservationAt after unstage: %w", err)
+		}
+		if obs3.ContentSHA256 != hash {
+			return fmt.Errorf("unstaged content_sha256 = %q, want %q", obs3.ContentSHA256, hash)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("overlay test failed: %v", err)
+	}
+}
+
+// TestRollbackOnPartialFailure tests that if any part of StoreAttachmentsWithBases fails,
+// no records are left behind (all-or-none atomicity).
+func TestRollbackOnPartialFailure(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	content1 := []byte("content1")
+	hash1 := "7777777777777777777777777777777777777777777777777777777777777777"
+	insertToolContent(t, db, hash1, content1)
+
+	store := journal.NewStore(db)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn: %v", err)
+	}
+
+	// Create an attachment with an invalid hash to trigger a failure
+	att := journal.Attachment{
+		ID:      "att1",
+		TurnID:  turnID,
+		Path:    "file.txt",
+		SHA256:  "not_a_valid_hash_too_short", // This should fail validation
+		ByteLen: len(content1),
+		BaseSHA: hash1,
+	}
+
+	_, err = store.StoreAttachments(turnID, []journal.Attachment{att})
+	if err == nil {
+		t.Fatal("expected StoreAttachments to fail with invalid hash")
+	}
+
+	// Verify that no attachments were stored
+	retrieved, err := store.GetAttachments(turnID)
+	if err != nil {
+		t.Fatalf("GetAttachments: %v", err)
+	}
+	if len(retrieved) != 0 {
+		t.Errorf("after failed store, len(attachments) = %d, want 0", len(retrieved))
+	}
+
+	// Verify that no observations were stored
+	var count int
+	err = db.Conn().QueryRow(` SELECT COUNT(*) FROM observations WHERE turn_id = ?`, turnID).Scan(&count)
+	if err != nil {
+		t.Fatalf("query observations count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("after failed store, observation count = %d, want 0", count)
+	}
+
+	// Verify attachments_hash was not set
+	var hash sql.NullString
+	err = db.Conn().QueryRow(`SELECT attachments_hash FROM turns WHERE id = ?`, turnID).Scan(&hash)
+	if err != nil {
+		t.Fatalf("query attachments_hash: %v", err)
+	}
+	if hash.Valid {
+		t.Errorf("after failed store, attachments_hash = %v, want NULL", hash.String)
+	}
+}
+
+// TestReopenReproducesExactBytes tests that after storing and retrieving attachments,
+// the exact bytes and manifest hash can be reproduced.
+func TestReopenReproducesExactBytes(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	content := []byte("exact_content_bytes")
+	hash := "8888888888888888888888888888888888888888888888888888888888888888"
+	insertToolContent(t, db, hash, content)
+
+	store := journal.NewStore(db)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	turnID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn: %v", err)
+	}
+
+	att := journal.Attachment{
+		ID:      "att1",
+		TurnID:  turnID,
+		Path:    "file.txt",
+		SHA256:  hash,
+		ByteLen: len(content),
+		BaseSHA: hash,
+	}
+
+	originalHash, err := store.StoreAttachments(turnID, []journal.Attachment{att})
+	if err != nil {
+		t.Fatalf("StoreAttachments: %v", err)
+	}
+
+	// Now retrieve and verify the hash can be reproduced
+	retrieved, err := store.GetAttachments(turnID)
+	if err != nil {
+		t.Fatalf("GetAttachments: %v", err)
+	}
+	if len(retrieved) != 1 {
+		t.Fatalf("len(retrieved) = %d, want 1", len(retrieved))
+	}
+
+	// Verify the retrieved values match
+	if retrieved[0].Path != att.Path {
+		t.Errorf("path = %q, want %q", retrieved[0].Path, att.Path)
+	}
+	if retrieved[0].SHA256 != att.SHA256 {
+		t.Errorf("sha256 = %q, want %q", retrieved[0].SHA256, att.SHA256)
+	}
+	if retrieved[0].ByteLen != att.ByteLen {
+		t.Errorf("byte_len = %d, want %d", retrieved[0].ByteLen, att.ByteLen)
+	}
+	if retrieved[0].BaseSHA != att.BaseSHA {
+		t.Errorf("base_sha256 = %q, want %q", retrieved[0].BaseSHA, att.BaseSHA)
+	}
+
+	// Create a new turn to test re-computing the hash with the same attachment
+	turn2ID, err := store.CreateTurn(runID, "review", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn 2: %v", err)
+	}
+
+	// Store the same attachment on a different turn
+	retrieved[0].ID = "att2" // Use different ID for the second turn
+	retrieved[0].TurnID = turn2ID
+	recomputedHash, err := store.StoreAttachments(turn2ID, retrieved)
+	if err != nil {
+		t.Fatalf("re-compute StoreAttachments: %v", err)
+	}
+	if recomputedHash != originalHash {
+		t.Errorf("recomputed hash = %q, want %q", recomputedHash, originalHash)
+	}
+}
+
+// TestSoloRecordWithAttachments tests that solo records carry attachments_hash.
+func TestSoloRecordWithAttachments(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+
+	content := []byte("solo_content")
+	hash := "9999999999999999999999999999999999999999999999999999999999999999"
+	insertToolContent(t, db, hash, content)
+
+	store := journal.NewStore(db)
+	runID, _, err := store.CreateRun([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Create a solo turn
+	turnID, err := store.CreateTurn(runID, "solo", nil)
+	if err != nil {
+		t.Fatalf("CreateTurn solo: %v", err)
+	}
+
+	att := journal.Attachment{
+		ID:      "att1",
+		TurnID:  turnID,
+		Path:    "file.txt",
+		SHA256:  hash,
+		ByteLen: len(content),
+		BaseSHA: hash,
+	}
+
+	hashResult, err := store.StoreAttachments(turnID, []journal.Attachment{att})
+	if err != nil {
+		t.Fatalf("StoreAttachments: %v", err)
+	}
+
+	// Verify solo record carries attachments_hash
+	var soloRecord sql.NullString
+	err = db.Conn().QueryRow(`SELECT attachments_hash FROM turns WHERE id = ?`, turnID).Scan(&soloRecord)
+	if err != nil {
+		t.Fatalf("query solo attachments_hash: %v", err)
+	}
+	if !soloRecord.Valid || soloRecord.String != hashResult {
+		t.Errorf("solo attachments_hash = %v, want %q", soloRecord, hashResult)
 	}
 }

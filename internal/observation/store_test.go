@@ -213,12 +213,12 @@ func TestObservationBoundToAttemptAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.AttemptID != f.author || a.SnapshotVersion != 1 || b.AttemptID != second || b.SnapshotVersion != 2 {
+	if !a.AttemptID.Valid || a.AttemptID.String != f.author || a.SnapshotVersion != 1 || !b.AttemptID.Valid || b.AttemptID.String != second || b.SnapshotVersion != 2 {
 		t.Fatalf("a = %+v, b = %+v", a, b)
 	}
 	// A later touch from another attempt keeps the original binding.
 	c, err := s.Observe(f.turn, second, "a", fileReader(&reads, "A2"))
-	if err != nil || c.AttemptID != f.author {
+	if err != nil || !c.AttemptID.Valid || c.AttemptID.String != f.author {
 		t.Fatalf("c = %+v, %v", c, err)
 	}
 }

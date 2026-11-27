@@ -1,12 +1,12 @@
 package journal
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/boldfield/syndic/internal/candidate"
 )
 
 // Attachment represents a file attached to a turn.
@@ -92,9 +92,20 @@ func (tx *Tx) StoreAttachmentsWithBases(turnID string, attachments []Attachment)
 		}
 	}
 
-	// Compute attachments_hash using the canonical manifest format.
-	// This must stay synchronized with candidate.AttachmentManifestHash.
-	hash := computeAttachmentsHash(attachments)
+	// Compute attachments_hash using the canonical function.
+	// Convert journal.Attachment to candidate.Attachment
+	candAttachments := make([]candidate.Attachment, len(attachments))
+	for i, att := range attachments {
+		candAttachments[i] = candidate.Attachment{
+			Path:          att.Path,
+			ContentSHA256: att.SHA256,
+			ContentLen:    int64(att.ByteLen),
+		}
+	}
+	hash, err := candidate.AttachmentManifestHash(candAttachments)
+	if err != nil {
+		return "", fmt.Errorf("compute attachments hash: %w", err)
+	}
 
 	// Set attachments_hash on the turn
 	if _, err := tx.tx.Exec(`
@@ -111,30 +122,6 @@ func (tx *Tx) StoreAttachmentsWithBases(turnID string, attachments []Attachment)
 	}
 
 	return hash, nil
-}
-
-// computeAttachmentsHash computes the SHA-256 of the attachments manifest.
-// The manifest begins with "syndic-attachments/v1\n" followed by one line
-// per attachment (sorted by path): "path_len:path\nsha256\nbyte_len\n".
-//
-// IMPORTANT: This implementation must stay synchronized with
-// candidate.AttachmentManifestHash. Any changes here must be reflected there.
-func computeAttachmentsHash(attachments []Attachment) string {
-	if len(attachments) == 0 {
-		return "none"
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString("syndic-attachments/v1\n")
-
-	for _, att := range attachments {
-		fmt.Fprintf(&buf, "%d:%s\n", len(att.Path), att.Path)
-		fmt.Fprintf(&buf, "%s\n", att.SHA256)
-		fmt.Fprintf(&buf, "%d\n", att.ByteLen)
-	}
-
-	hash := sha256.Sum256(buf.Bytes())
-	return fmt.Sprintf("%x", hash)
 }
 
 // GetAttachments retrieves all attachments for a turn, with their base SHAs
