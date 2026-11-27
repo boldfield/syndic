@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -100,7 +101,7 @@ func TestCurrentHTTPFollowsNoRedirectAndRetriesNothing(t *testing.T) {
 	c := &CurrentHTTP{URL: ts.URL, Transport: http.DefaultTransport, Info: DefaultClientInfo()}
 	_, err := c.Send(context.Background(), 1, "tools/list", nil)
 	var se *StatusError
-	if !asStatus(err, &se) || se.Status != http.StatusTemporaryRedirect {
+	if !errors.As(err, &se) || se.Status != http.StatusTemporaryRedirect {
 		t.Fatalf("err = %v", err)
 	}
 	if hits != 1 {
@@ -108,29 +109,17 @@ func TestCurrentHTTPFollowsNoRedirectAndRetriesNothing(t *testing.T) {
 	}
 }
 
-func asStatus(err error, target **StatusError) bool {
-	for err != nil {
-		if s, ok := err.(*StatusError); ok {
-			*target = s
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
-}
-
 func TestCurrentHTTPErrorBodyAndEmpty404(t *testing.T) {
 	srv := mcptest.New(mcptest.Config{Statuses: map[string]int{"tools/list": 404}})
 	ts := srv.HTTP(t)
 	c := &CurrentHTTP{URL: ts.URL, Transport: http.DefaultTransport, Info: DefaultClientInfo()}
-	_, err := c.Send(context.Background(), 1, "tools/list", nil)
+	rep, err := c.Send(context.Background(), 1, "tools/list", nil)
 	var se *StatusError
-	if err != nil && !asStatus(err, &se) {
+	if err != nil {
 		t.Fatalf("err = %v", err)
+	}
+	if rep.Status != http.StatusNotFound || len(rep.Response.Result) == 0 {
+		t.Fatalf("reply = %+v", rep)
 	}
 
 	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -139,7 +128,7 @@ func TestCurrentHTTPErrorBodyAndEmpty404(t *testing.T) {
 	defer empty.Close()
 	c.URL = empty.URL
 	_, err = c.Send(context.Background(), 1, "server/discover", nil)
-	if !asStatus(err, &se) || se.Status != 404 {
+	if !errors.As(err, &se) || se.Status != 404 {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -179,5 +168,18 @@ func TestEncodeHeaderValue(t *testing.T) {
 		if got := EncodeHeaderValue(in); got != want {
 			t.Errorf("%q -> %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCurrentHTTPNeedsTransport(t *testing.T) {
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer ts.Close()
+	c := &CurrentHTTP{URL: ts.URL, Info: DefaultClientInfo()}
+	if _, err := c.Send(context.Background(), 1, "tools/list", nil); err == nil {
+		t.Fatal("no error without a transport")
+	}
+	if hits != 0 {
+		t.Errorf("%d hits", hits)
 	}
 }

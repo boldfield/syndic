@@ -135,6 +135,9 @@ func (e *StatusError) Unwrap() error { return e.Err }
 // Redirects are not followed and nothing is retried. Cancelling ctx closes
 // the connection, which is how the revision cancels a request over HTTP.
 func (c *CurrentHTTP) Send(ctx context.Context, id int64, method string, params json.RawMessage) (HTTPReply, error) {
+	if c.Transport == nil {
+		return HTTPReply{}, errors.New("mcp: no transport; the client dials nothing itself")
+	}
 	req, err := CurrentRequest(id, method, params, c.Info)
 	if err != nil {
 		return HTTPReply{}, err
