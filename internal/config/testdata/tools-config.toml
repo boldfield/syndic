@@ -37,6 +37,16 @@ file_egress_destinations    = ["local", "trusted"]
 [tools.web]
 allowed_hosts = ["*.anthropic.com", "*.github.com"]
 
+# The web_search provider. web_search is offered only with this table set, a
+# provider implementation of that name built into the engine, and a host that
+# passes the pre-send checks and the allowlist above. The query is sent to
+# this host whatever else is set. The credential named by auth goes to this
+# host only and is never journaled.
+[tools.web.search]
+provider = "example-search"
+host = "search.anthropic.com"
+auth = { source = "env", name = "SEARCH_API_KEY" }
+
 [tools.referee]
 max_output_tokens = 64
 

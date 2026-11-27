@@ -11,6 +11,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
@@ -336,6 +337,16 @@ func (e *Engine) dispatchReviewer(t *openTurn, id string, step *reviewerStep, la
 			if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
 				return err
 			}
+			// The diffs are file-derived content given as evidence: canary
+			// material for the turn's web queries (v5 delta section 6, check
+			// 1). The whole rendered diff is material, exactly as the reviewer
+			// is given it: the body with its +/- prefixes and the ---/+++
+			// headers. So from the first review on, a staged path's name is
+			// canary material too, though the write that staged it did not
+			// make it so. A lookup step's continuation keeps the packet.
+			if t.screener != nil {
+				t.screener.AddBytes(tools.RouteDiff, []byte(t.pkt.diffs))
+			}
 			if delimiter, err = e.newDelimiter(t); err != nil {
 				return err
 			}
@@ -471,7 +482,7 @@ func (e *Engine) executeReviewerStep(t *openTurn, d reviewerDispatch, res transp
 	}
 	e.mu.Unlock()
 
-	out, err := e.performToolStep(t, d.req, d.attemptID, res, remaining, patterns, hook)
+	out, err := e.performToolStep(t, d.participant, d.req, d.attemptID, res, remaining, patterns, hook)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
