@@ -2,11 +2,12 @@ package tui
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/boldfield/syndic/internal/wire"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -32,13 +33,40 @@ type transcriptInput struct {
 // transcriptLines renders the whole transcript tab for the turn, unclipped,
 // wrapped to width cells.
 func transcriptLines(s State, turnID string, in transcriptInput, width int) []string {
+	lines, _ := transcriptRows(s, turnID, in, width)
+	return lines
+}
+
+// transcriptRows is transcriptLines with, for every line, the item it belongs to and the
+// characters of that item it shows. An item is a transcript entry, named by its ref, which
+// is stable while its body loads; the title and the empty-transcript notes are items of
+// their own. Characters are counted in runes of the row's text without its indent, and an
+// empty row counts as one character, the line break it stands for.
+func transcriptRows(s State, turnID string, in transcriptInput, width int) ([]string, []FollowRow) {
 	width = max(width, 1)
-	if turnID == "" {
-		return []string{"no turn yet"}
+	var lines []string
+	var rows []FollowRow
+	chars := map[string]int{}
+	add := func(item string, ls ...string) {
+		lines = append(lines, ls...)
+		for _, l := range ls {
+			n := utf8.RuneCountInString(strings.TrimPrefix(strings.TrimRight(ansi.Strip(l), " "), contentPrefix))
+			if n == 0 {
+				n = 1
+			}
+			c := chars[item]
+			rows = append(rows, FollowRow{Item: item, Char: c, End: c + n})
+			chars[item] = c + n
+		}
 	}
-	lines := []string{"transcript of turn " + turnID, ""}
+	if turnID == "" {
+		add("none", "no turn yet")
+		return lines, rows
+	}
+	add("title", "transcript of turn "+turnID, "")
 	if len(in.items) == 0 {
-		return append(lines, "(no messages yet)")
+		add("empty", "(no messages yet)")
+		return lines, rows
 	}
 
 	present := map[string]bool{}
@@ -68,19 +96,19 @@ func transcriptLines(s State, turnID string, in transcriptInput, width int) []st
 			continue
 		}
 		if rid, ok := repairOf[id]; isAttempt && ok {
-			lines = append(lines, repairPair(s, in, it, itemOf(in.items, "attempt:"+rid), width)...)
-			lines = append(lines, blockRowLines(blocks[id], width)...)
-			lines = append(lines, blockRowLines(blocks[rid], width)...)
+			add(it.Ref, repairPair(s, in, it, itemOf(in.items, "attempt:"+rid), width)...)
+			add(it.Ref, blockRowLines(blocks[id], width)...)
+			add(it.Ref, blockRowLines(blocks[rid], width)...)
 		} else {
-			lines = append(lines, wrapHeader(headerParts(s, in, it), width)...)
-			lines = append(lines, SafeTextWithPrefix(bodyText(s, in, it), width)...)
+			add(it.Ref, wrapHeader(headerParts(s, in, it), width)...)
+			add(it.Ref, SafeTextWithPrefix(bodyText(s, in, it), width)...)
 			if isAttempt {
-				lines = append(lines, blockRowLines(blocks[id], width)...)
+				add(it.Ref, blockRowLines(blocks[id], width)...)
 			}
 		}
-		lines = append(lines, "")
+		add(it.Ref, "")
 	}
-	return lines
+	return lines, rows
 }
 
 func itemOf(items []wire.TranscriptItem, ref string) wire.TranscriptItem {
@@ -190,11 +218,6 @@ func transcriptRefs(items []wire.TranscriptItem) []string {
 		}
 	}
 	return refs
-}
-
-// transcriptPending reports whether any body the items point at is still being fetched.
-func transcriptPending(items []wire.TranscriptItem, cc *ContentCache) bool {
-	return slices.ContainsFunc(transcriptRefs(items), func(ref string) bool { return !cc.Get(ref).Ready })
 }
 
 // repairPair draws an attempt beside its repair, or stacked when the width
