@@ -74,7 +74,7 @@ Held by `internal/tui.TestChatStatusLineIsLastAt80x24`,
 suffice, and otherwise as much of it as step 8 leaves. Held by
 `internal/tui.TestFitStatusLineEveryWidthAndState` (in full, at every width from 80 to 200),
 `internal/tui.TestFitStatusLineFixtures` (with the state shortened) and
-`internal/tui.TestFitStatusLineBelowThat` (cut by step 8).
+`internal/tui.TestFitStatusLineQuickProfileCutByStep8` (cut by step 8 while the profile governs).
 
 The v6 section 8 line is also what `docs/acceptance/v6-presentation.md` records, in its
 amended form; v5's `docs/acceptance/milestone-d.md` cites the older form, which these
