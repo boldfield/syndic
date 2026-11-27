@@ -11,6 +11,7 @@ import (
 	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/manifest"
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
@@ -124,7 +125,13 @@ type partBudget struct {
 // budgetFor returns the participant's constants, or the name of the first
 // one it lacks: context_bound, tokens_per_byte_max, bytes_per_token.
 func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string) {
-	mp := e.built.Participants[id]
+	ep := e.endpoint(e.participantConfig(id).Endpoint)
+	return budgetConstants(eff, id, e.built.Participants[id], ep)
+}
+
+// budgetConstants is budgetFor for an identity with a manifest record and the
+// profile of the endpoint it runs on, such as a participant's or a referee's.
+func budgetConstants(eff config.Effective, id string, mp manifest.Participant, ep config.EndpointProfile) (partBudget, string) {
 	pb := partBudget{
 		id:          id,
 		outputBound: mp.OutputBound,
@@ -134,7 +141,6 @@ func (e *Engine) budgetFor(eff config.Effective, id string) (partBudget, string)
 		},
 		margin: *eff.Budgets.ContextMargin,
 	}
-	ep := e.endpoint(e.participantConfig(id).Endpoint)
 	switch {
 	case mp.ContextBound == nil:
 		return pb, "context_bound"
@@ -475,6 +481,12 @@ func (e *Engine) reserve(tx *journal.Tx, t *openTurn, id string, msgs []transpor
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 	}
+	return reserveWith(tx, t, pb, msgs, defs, maxOut)
+}
+
+// reserveWith is reserve for an identity whose constants are already known.
+func reserveWith(tx *journal.Tx, t *openTurn, pb partBudget, msgs []transport.Message, defs []transport.Tool, maxOut int) (int, error) {
+	id := pb.id
 	adm := pb.admission(msgs, defs)
 	if !budget.Fits(adm, maxOut, pb.usable()) {
 		return 0, &budgetRefusal{kind: budgetContext, participant: id, admission: satAdd(adm, maxOut), limit: pb.usable()}

@@ -356,7 +356,7 @@ func (e *Engine) cancelAttempts(holds []*hold) error {
 		if e.crashHook != nil && e.crashHook() {
 			return nil
 		}
-		status, err := e.adapterFor(h.participant).Cancel(context.Background(), h.attemptID)
+		status, err := e.adapterForAttempt(h).Cancel(context.Background(), h.attemptID)
 		confirmed := err == nil && status.ServerConfirmed == transport.TriYes
 		if err := e.afterCancel(h, confirmed); err != nil && first == nil {
 			first = err

@@ -113,3 +113,29 @@ func (e *Engine) ReserveOpen(id string, msgs []transport.Message, defs []transpo
 	})
 	return est, charged, err
 }
+
+// RefereeOutcome is the decision of the referee on one web call.
+type RefereeOutcome struct {
+	Allow     bool
+	Reason    string
+	Cause     string
+	AttemptID string
+}
+
+// DispatchReferee asks the referee about a web call of the open turn, as a web
+// effect does with the caller's slot held. It returns the decision, or the
+// error that left none.
+func (e *Engine) DispatchReferee(turnID, caller, callID, name, target string) (RefereeOutcome, error) {
+	out, err := e.dispatchReferee(refereeCall{turnID: turnID, caller: caller, callID: callID, name: name, target: target})
+	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
+}
+
+// ErrToolAbandoned is what an effect returns when its call must not run.
+var ErrToolAbandoned = errToolAbandoned
+
+// WebOffReason is why web is not offered to the callers of the endpoint.
+func (e *Engine) WebOffReason(endpoint string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.webOffReason(endpoint)
+}

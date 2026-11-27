@@ -230,6 +230,11 @@ type Engine struct {
 	stoppingCh    chan struct{}
 	gate          sync.Mutex
 	closed        bool
+
+	// refereeAdapters is the adapter of each referee attempt that may still
+	// need a cancel, by attempt id: a referee does not run on its caller's.
+	// Owned by mu.
+	refereeAdapters map[string]transport.Adapter
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -270,6 +275,7 @@ func New(o Options) (*Engine, error) {
 		queued:          make(map[string]bool),
 		pools:           make(map[string]*pool),
 		holds:           make(map[string]*hold),
+		refereeAdapters: make(map[string]transport.Adapter),
 		orphanedHolds:   make(map[string]*hold),
 		calling:         make(map[string]bool),
 		cancelled:       make(map[string]bool),
@@ -482,6 +488,7 @@ func (e *Engine) Start() error {
 		adapters[p.ID] = adapter
 		versions[p.ID] = version
 	}
+	e.addRefereeAdapters(roster, adapters, versions)
 
 	startedAt := e.clock.Now().UTC()
 	build := func() (manifest.Built, error) {

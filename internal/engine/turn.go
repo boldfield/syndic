@@ -189,6 +189,17 @@ func (e *Engine) adapterFor(id string) transport.Adapter {
 	return e.adapters[id]
 }
 
+// adapterForAttempt is the adapter a held attempt was sent through: its
+// participant's, or the referee's for a referee attempt.
+func (e *Engine) adapterForAttempt(h *hold) transport.Adapter {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if a := e.refereeAdapters[h.attemptID]; a != nil {
+		return a
+	}
+	return e.adapters[h.participant]
+}
+
 // dispatchAuthor records the request message and the first author attempt
 // of the round, and moves the turn to author_dispatched or
 // revision_dispatched, all in one transaction. e.mu is held.

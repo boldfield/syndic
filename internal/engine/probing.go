@@ -50,12 +50,6 @@ type refereeIdentity struct {
 	Model    string
 }
 
-// refereeIdentities returns the referee models the roster names. The roster
-// has no referee configuration yet, so none: the referee task fills this in
-// and start-time probing already selects, probes and records whatever it
-// returns exactly as it does a participant.
-var refereeIdentities = func(*config.Roster) []refereeIdentity { return nil }
-
 // probeTarget is one {endpoint, model} identity to probe. Participants lists
 // the roster participants that stay unprobed without it; it is empty for a
 // referee identity no participant names.
@@ -647,5 +641,16 @@ func withProbeFailures(b manifest.Built, failed map[string]probeFailureDetail) m
 		parts[id] = mp
 	}
 	b.Participants = parts
+	// A referee that failed its probe carries the failure the same way.
+	refs := make(map[string]manifest.Referee, len(b.Referees))
+	for name, r := range b.Referees {
+		if detail, ok := failed[manifest.RefereeLabel(r.RunEndpoint, r.Model)]; ok && !r.Usable {
+			r.Detail = probeFailedPrefix + detail.reason
+			r.FailingStep = detail.failingStep
+			r.ServerStatus = detail.serverStat
+		}
+		refs[name] = r
+	}
+	b.Referees = refs
 	return b
 }
