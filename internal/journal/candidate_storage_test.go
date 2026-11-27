@@ -66,7 +66,7 @@ func TestLegacyV1StoredCandidateReadability(t *testing.T) {
 
 	// Assertion 3: Compute the v2 hash from the same content and verify it does NOT
 	// equal the v1 hash. This demonstrates that the stored candidate was not silently
-	// rehashed into v2 and that v1 and v2 hashes remain distinct.
+	// rehashed and that v1 and v2 hashes remain distinct.
 	v2Identity := candidate.Identity{
 		ManifestHash:    "abc123",
 		TurnID:          "turn1",
@@ -81,7 +81,7 @@ func TestLegacyV1StoredCandidateReadability(t *testing.T) {
 		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
 
-	v2Hash, err := candidate.Hash(v2Identity)
+	v2Hash, err := candidate.HashV2(v2Identity)
 	if err != nil {
 		t.Fatalf("Failed to compute v2 hash: %v", err)
 	}
