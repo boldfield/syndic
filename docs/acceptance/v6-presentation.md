@@ -218,6 +218,8 @@ No test cited here is skipped; `TestV6PresentationLedger` enforces that on every
 | With `TERM=dumb` every screen renders with no escape sequence | `internal/tui/term.go:ApplyTerminalCapabilities`, `internal/tui/app.go:App.plainMode` | `internal/tui.TestV6DumbEveryScreenHasNoEscape`, `internal/tui.TestV6CoverageDumbTerminalEveryScreenHasNoEscape`, `internal/tui.TestV6PlainTerminalGoldenFrame` |
 | `/help` lists every command, flag and key of this delta | `internal/tui/commands.go:cmdHelp` | `internal/tui.TestHelpListsEveryCommandAndKey`, `internal/tui.TestHelpListsMouseAndNotify`, `internal/tui.TestV6CoverageHelpListsEveryFlag`, `cmd/syndic.TestV6CoverageHelpListsEveryParsedFlag` |
 
+The status-line row above, and the status-line rows of §1, are amended by v6 addendum 1; see `docs/acceptance/v6-addendum-1.md`.
+
 ### Subscription boundary (wire level, supports the notify rows)
 
 These engine-side frame tests prove only the wire ordering that the TUI notice and bell
