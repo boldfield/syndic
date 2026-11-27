@@ -184,8 +184,13 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 				wantDefs = authorDefs
 			}
 			if call.Request.Envelope.Phase == "review" {
-				// Reviewer requests carry reviewer_tools definitions
-				wantDefs = reviewerDefs
+				// Reviewer requests carry reviewer_tools definitions unless they are repair attempts
+				row := getAttempt(t, h, call.Request.Envelope.AttemptID)
+				if row.RepairOf == nil {
+					// Not a repair: should have definitions
+					wantDefs = reviewerDefs
+				}
+				// If it's a repair, wantDefs stays 0 (repair carries no definitions)
 			}
 			if len(call.Request.Tools) != wantDefs {
 				t.Errorf("%s %s request carries %d definitions, want %d", id, call.Request.Envelope.Phase, len(call.Request.Tools), wantDefs)

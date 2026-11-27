@@ -645,7 +645,7 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := t.repairMessages(originalDispatch.attemptID, delimiter, blocks, originalOutput, repairAttemptID)
+	msgs, err := t.repairMessages(originalDispatch.attemptID, delimiter, blocks, originalOutput, repairAttemptID, originalDispatch.req.Messages)
 	if err != nil {
 		return nil, err
 	}

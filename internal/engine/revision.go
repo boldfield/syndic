@@ -127,12 +127,45 @@ func (t *openTurn) reviewerMessages(attemptID, delimiter string, blocks []journa
 }
 
 // repairMessages builds the repair request for a malformed verdict, in the
-// envelope of the round.
-func (t *openTurn) repairMessages(originalAttemptID, delimiter string, blocks []journal.ReviewerBlock, output, repairAttemptID string) ([]transport.Message, error) {
+// envelope of the round. When originalMessages is non-nil, it uses them
+// (which may include earlier tool results) instead of rebuilding from the input.
+func (t *openTurn) repairMessages(originalAttemptID, delimiter string, blocks []journal.ReviewerBlock, output, repairAttemptID string, originalMessages []transport.Message) ([]transport.Message, error) {
+	// Build the base repair response
+	var baseRepair []transport.Message
+	var err error
 	if t.round == 0 {
-		return prompt.Repair(t.reviewInput(originalAttemptID, delimiter), output, repairAttemptID)
+		baseRepair, err = prompt.Repair(t.reviewInput(originalAttemptID, delimiter), output, repairAttemptID)
+	} else {
+		baseRepair, err = prompt.RepairRevision(t.reviewerRevisionInput(originalAttemptID, delimiter, blocks), output, repairAttemptID)
 	}
-	return prompt.RepairRevision(t.reviewerRevisionInput(originalAttemptID, delimiter, blocks), output, repairAttemptID)
+	if err != nil {
+		return nil, err
+	}
+
+	// If originalMessages are provided, merge tool results into the repair
+	if len(originalMessages) > 0 {
+		// Extract tool messages (calls and results) from originalMessages
+		toolMsgs := make([]transport.Message, 0)
+		for i := 1; i < len(originalMessages); i++ {
+			msg := originalMessages[i]
+			// Include tool calls and tool results, skip user messages from later attempts
+			if msg.Role == "tool" || (msg.Role == "assistant" && len(msg.ToolCalls) > 0) {
+				toolMsgs = append(toolMsgs, msg)
+			}
+		}
+
+		// If there are tool messages, insert them into the repair
+		// baseRepair structure: [system, user_input, assistant_malformed, user_instruction]
+		if len(toolMsgs) > 0 {
+			merged := make([]transport.Message, 0, len(baseRepair)+len(toolMsgs))
+			merged = append(merged, baseRepair[0])     // system
+			merged = append(merged, baseRepair[1])     // user input
+			merged = append(merged, toolMsgs...)       // tool messages
+			merged = append(merged, baseRepair[2:]...) // rest
+			return merged, nil
+		}
+	}
+	return baseRepair, nil
 }
 
 func (t *openTurn) reviewInput(attemptID, delimiter string) prompt.ReviewInput {
@@ -198,7 +231,7 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 		}
 		maxOut := rb.maxOutput(*t.eff.Budgets.ReviewerMaxOutputTokens)
 		total = satAdd(total, satAdd(rb.estimate(msgs, nil), maxOut))
-		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
+		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken, nil)
 		if err != nil {
 			return 0, err
 		}
