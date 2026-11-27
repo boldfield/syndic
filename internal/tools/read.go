@@ -74,6 +74,16 @@ type ReadTools struct {
 	// recordOnly serves reads from what the record already holds: a path it
 	// does not hold reads as absent, and nothing is observed or journaled.
 	recordOnly bool
+	// frozen, when set, is the record and overlay captured when a recordOnly
+	// reader was built; later changes to either are not seen.
+	frozen *frozenView
+}
+
+// frozenView is the turn's observations by path and its staging map at one
+// moment.
+type frozenView struct {
+	obs     map[string]journal.Observation
+	staging map[string]string
 }
 
 // NewReadTools returns the read tools for attemptID of turnID over the
@@ -278,6 +288,12 @@ func (t *ReadTools) view(path string, staging map[string]string) (view, error) {
 // recorded returns the turn's observation of path, or an absent one when the
 // record holds none. It observes nothing.
 func (t *ReadTools) recorded(path string) (o journal.Observation, err error) {
+	if t.frozen != nil {
+		if o, ok := t.frozen.obs[path]; ok {
+			return o, nil
+		}
+		return journal.Observation{Kind: journal.ObservationAbsent}, nil
+	}
 	err = t.j.Tx(func(tx *journal.Tx) error {
 		var txErr error
 		o, txErr = tx.ObservationAt(t.turnID, path)
@@ -291,6 +307,9 @@ func (t *ReadTools) recorded(path string) (o journal.Observation, err error) {
 
 // loadStaging returns the turn's staged paths with their content hashes.
 func (t *ReadTools) loadStaging() (map[string]string, error) {
+	if t.frozen != nil {
+		return t.frozen.staging, nil
+	}
 	var entries []journal.StagingEntry
 	if err := t.j.Tx(func(tx *journal.Tx) (err error) {
 		entries, err = tx.Staging(t.turnID)

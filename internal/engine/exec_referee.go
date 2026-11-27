@@ -158,7 +158,10 @@ func (e *Engine) dispatchCommandReferee(c commandCall) (refereeOutcome, error) {
 		return refereeOutcome{}, err
 	}
 	defer func() { _ = fs.Close() }()
-	reader := tools.NewRefereeReader(e.store, fs, t.id, resultBytes)
+	reader, err := tools.NewRefereeReader(e.store, fs, t.id, resultBytes)
+	if err != nil {
+		return refereeOutcome{}, err
+	}
 
 	msgs := referee.CommandPromptMessages(referee.CommandPayload{
 		UserInput:  t.input,
@@ -230,7 +233,7 @@ func (e *Engine) dispatchCommandReferee(c commandCall) (refereeOutcome, error) {
 // for the tool being one of the three read tools, its arguments validating
 // against the tool's schema, and a read remaining under maxReads, having
 // already made used; one that fails is answered with a tool error and does not
-// count, and the others still run. A read that returns a tool error counts. It
+// count (intended: the decision as a whole has the turn deadline), and the others still run. A read that returns a tool error counts. It
 // returns an outcome for every call and the reads that ran.
 func (e *Engine) runRefereeReads(reader *tools.RefereeReader, defs []transport.Tool, attemptID string, calls []transport.ToolCall, used, maxReads int) ([]toolCallOutcome, []refereeRead, error) {
 	schemas := make(map[string]map[string]interface{}, len(defs))

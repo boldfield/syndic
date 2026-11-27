@@ -19,12 +19,36 @@ type RefereeReader struct {
 	t *ReadTools
 }
 
-// NewRefereeReader returns a reader for turnID. maxResultBytes <= 0 selects
+// NewRefereeReader returns a reader for turnID over the record and overlay as
+// they stand now: later observations and staging changes are not seen, so the
+// view is the one the decision began with. maxResultBytes <= 0 selects
 // DefaultMaxResultBytes.
-func NewRefereeReader(j *journal.Store, fs *workspace.Confined, turnID string, maxResultBytes int) *RefereeReader {
+func NewRefereeReader(j *journal.Store, fs *workspace.Confined, turnID string, maxResultBytes int) (*RefereeReader, error) {
 	t := NewReadTools(j, fs, turnID, "", maxResultBytes)
 	t.recordOnly = true
-	return &RefereeReader{t: t}
+	f := &frozenView{obs: map[string]journal.Observation{}, staging: map[string]string{}}
+	err := j.Tx(func(tx *journal.Tx) error {
+		obs, err := tx.Observations(turnID)
+		if err != nil {
+			return err
+		}
+		for _, o := range obs {
+			f.obs[o.Path] = o
+		}
+		st, err := tx.Staging(turnID)
+		if err != nil {
+			return err
+		}
+		for _, e := range st {
+			f.staging[e.Path] = e.NewSHA256
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tools: freeze referee view: %w", err)
+	}
+	t.frozen = f
+	return &RefereeReader{t: t}, nil
 }
 
 // Read executes the named read tool. A failure the referee is told about is a
