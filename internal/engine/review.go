@@ -770,9 +770,13 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
 				return err
 			}
-			if t.reviewerLimited[d.participant] || len(d.req.Tools) == 0 {
+			if t.reviewerLimited[d.participant] {
 				// Tool calls in reply to the final tool-free attempt are a reviewer failure.
 				endState, endReason = StateIncomplete, reasonReviewerFailed+d.participant+":tool_calls_when_limited"
+				term, err = e.endIn(tx, emit, t, endState, endReason)
+			} else if len(d.req.Tools) == 0 {
+				// Reviewer was never offered tools.
+				endState, endReason = StateIncomplete, reasonToolStepNotOffered
 				term, err = e.endIn(tx, emit, t, endState, endReason)
 			} else {
 				toolStep = true
