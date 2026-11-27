@@ -214,3 +214,26 @@ func TestDeliberateFileEgress(t *testing.T) {
 		})
 	}
 }
+
+func TestDeliberateWebParticipantsIncludeIntegrator(t *testing.T) {
+	p := deliberateRoster(func(p *Preset) {
+		p.ReviewerTools = []string{"web"}
+		p.RequiredReviewers = []string{"b", "d"}
+	}).Presets["deliberate"]
+	if got := p.WebParticipants(); !slices.Contains(got, "a") || !slices.Contains(got, "b") || !slices.Contains(got, "d") {
+		t.Fatalf("WebParticipants() = %v, want the integrator, b and d", got)
+	}
+}
+
+func TestDeliberateWebWithFile(t *testing.T) {
+	off := false
+	r := deliberateRoster(func(p *Preset) {
+		p.Tools = []string{"read"}
+		p.ReviewerTools = []string{"web"}
+		p.AllowWebWithRead = &off
+	})
+	got := r.WebWithFileViolation(r.Presets["deliberate"], false)
+	if !slices.Contains(got, "a") {
+		t.Fatalf("WebWithFileViolation() = %v, want the integrator among them", got)
+	}
+}

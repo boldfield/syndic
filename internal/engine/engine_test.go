@@ -862,7 +862,7 @@ integrator = "author"
 }
 
 // A deliberate preset whose routes the routing policy forbids is refused when
-// the roster is validated, so no engine exists to dispatch anything for it.
+// the engine reads the roster, and nothing is dispatched for it.
 func TestDeliberateRoutingViolationRefusedBeforeDispatch(t *testing.T) {
 	toml := strings.ReplaceAll(enginetest.RosterTOML, `eligible_roles = ["author"]`, `eligible_roles = ["author", "reviewer"]`)
 	toml = strings.ReplaceAll(toml, `eligible_roles = ["reviewer"]`, `eligible_roles = ["author", "reviewer"]`)
@@ -889,15 +889,19 @@ mode = "deliberate"
 proposers = ["author", "reviewer"]
 integrator = "author"
 `
-	path := filepath.Join(t.TempDir(), "roster.toml")
-	if err := os.WriteFile(path, []byte(toml), 0o600); err != nil {
-		t.Fatal(err)
+	h := enginetest.New(t, toml, nil, enginetest.NoStart())
+	err := h.Engine.Start()
+	var re *engine.RosterError
+	if !errors.As(err, &re) || !strings.Contains(err.Error(), `proposal from "author" to "reviewer"`) {
+		t.Fatalf("Start err = %v, want a *RosterError naming the refused route", err)
 	}
-	roster, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
+	var attempts int
+	if err := h.DB.Conn().QueryRow(`SELECT COUNT(*) FROM attempts`).Scan(&attempts); err != nil || attempts != 0 {
+		t.Fatalf("attempts = %d, err %v", attempts, err)
 	}
-	if err := roster.Validate(); err == nil || !strings.Contains(err.Error(), `proposal from "author" to "reviewer"`) {
-		t.Fatalf("Validate() = %v, want a routing refusal", err)
+	for id, a := range h.Adapters {
+		if n := len(a.Calls()); n != 0 {
+			t.Fatalf("adapter %s received %d calls", id, n)
+		}
 	}
 }

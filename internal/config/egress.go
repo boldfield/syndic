@@ -44,7 +44,14 @@ func (p Preset) GrantsFileTools() bool {
 // first.
 func (p Preset) WebParticipants() []string {
 	if p.Mode == ModeDeliberate {
-		return p.deliberateEgressView().WebParticipants()
+		v := p.deliberateEgressView()
+		ids := v.WebParticipants()
+		// The integrator also proposes and critiques, so it holds
+		// reviewer_tools in those phases.
+		if slices.Contains(p.ReviewerTools, "web") && !slices.Contains(ids, p.Integrator) {
+			ids = append(ids, p.Integrator)
+		}
+		return ids
 	}
 	var ids []string
 	if slices.Contains(p.Tools, "web") {
