@@ -24,6 +24,7 @@ type Identity struct {
 	ContextHash     string         // v2: empty for none, or 64-char lowercase hex SHA-256
 	Round           int            // v2: revision round number
 	ChangesHash     string         // v2: empty for none, or 64-char lowercase hex SHA-256
+	Attachments     []Attachment   // v3: attachment metadata in canonical order
 }
 
 // IdentityV1 represents a v1 candidate for reconstructing historical records.
@@ -36,9 +37,10 @@ type IdentityV1 struct {
 	EvidenceIDs     []string // v1: opaque evidence IDs
 }
 
-// Canonical computes the canonical form of an identity in v2 format.
-// Returns bytes for v2 format including context, round, and changes fields.
+// Canonical computes the canonical form of an identity in v3 format.
+// Returns bytes for v3 format including context, round, changes, and attachments fields.
 // Evidence must be in call_id:result_sha256 format.
+// Attachments are automatically sorted in ascending byte order of path.
 func Canonical(id Identity) ([]byte, error) {
 	if err := validateIdentity(id); err != nil {
 		return nil, err
@@ -46,7 +48,7 @@ func Canonical(id Identity) ([]byte, error) {
 
 	var buf bytes.Buffer
 
-	buf.WriteString("syndic-candidate/v2\n")
+	buf.WriteString("syndic-candidate/v3\n")
 	fmt.Fprintf(&buf, "manifest:%s\n", id.ManifestHash)
 	fmt.Fprintf(&buf, "turn:%s\n", id.TurnID)
 	fmt.Fprintf(&buf, "author_attempt:%s\n", id.AuthorAttemptID)
@@ -80,6 +82,13 @@ func Canonical(id Identity) ([]byte, error) {
 	} else {
 		fmt.Fprintf(&buf, "changes:%s\n", id.ChangesHash)
 	}
+
+	// v3 field: attachments
+	attachmentsHash, err := AttachmentManifestHash(id.Attachments)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(&buf, "attachments:%s\n", attachmentsHash)
 
 	return buf.Bytes(), nil
 }
