@@ -162,3 +162,19 @@ func TestFitStatusLineNextPreset(t *testing.T) {
 		t.Errorf("next must go before the meter: %q", got)
 	}
 }
+
+func TestFitStatusLineQuickProfileCutByStep8(t *testing.T) {
+	it := fxItems()
+	it.quick = "quick:fastcheck123"
+	// Steps 6 and 7 cannot make room, so step 8 cuts; as much of the quick
+	// profile as fits stays visible.
+	for w, want := range map[int]string{
+		40: "review · quick:fastcheck123 · 48213/200…",
+		25: "review · quick:fastcheck…",
+	} {
+		got := fitStatusLine(it, w)
+		if got != want || cellWidth(got) > w {
+			t.Errorf("w=%d: %q want %q", w, got, want)
+		}
+	}
+}
