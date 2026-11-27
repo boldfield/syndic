@@ -753,6 +753,12 @@ func (r *Roster) Validate() error {
 		if r.Tools.Referee != nil && r.Tools.Referee.MaxOutputTokens != nil && *r.Tools.Referee.MaxOutputTokens < 1 {
 			errs = append(errs, fmt.Errorf("tools.referee.max_output_tokens must be at least 1"))
 		}
+		if r.Tools.Referee != nil && r.Tools.Referee.ExecMaxOutputTokens != nil && *r.Tools.Referee.ExecMaxOutputTokens < 1 {
+			errs = append(errs, fmt.Errorf("tools.referee.exec_max_output_tokens must be at least 1"))
+		}
+		if r.Tools.Referee != nil && r.Tools.Referee.MaxReads != nil && *r.Tools.Referee.MaxReads < 1 {
+			errs = append(errs, fmt.Errorf("tools.referee.max_reads must be at least 1"))
+		}
 
 		// Validate file_egress_destinations reference valid endpoints
 		for _, dest := range r.Tools.FileEgressDestinations {
