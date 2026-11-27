@@ -58,15 +58,25 @@ type Deadlines struct {
 	Provisional *bool     `toml:"provisional"`
 }
 
+// Defaults of the deliberate-mode output bounds (v8 section 4).
+const (
+	DefaultProposerMaxOutputTokens   = 4096
+	DefaultCritiqueMaxOutputTokens   = 2048
+	DefaultIntegratorMaxOutputTokens = 6144
+)
+
 type Budgets struct {
-	CalibrationSafety       *float64 `toml:"calibration_safety"`
-	MessageOverheadTokens   *int     `toml:"message_overhead_tokens"`
-	RequestOverheadTokens   *int     `toml:"request_overhead_tokens"`
-	ContextMargin           *float64 `toml:"context_margin"`
-	AuthorMaxOutputTokens   *int     `toml:"author_max_output_tokens"`
-	ReviewerMaxOutputTokens *int     `toml:"reviewer_max_output_tokens"`
-	DeliveryMaxTokens       *int     `toml:"delivery_max_tokens"`
-	TurnMaxEstimatedTokens  *int     `toml:"turn_max_estimated_tokens"`
+	CalibrationSafety         *float64 `toml:"calibration_safety"`
+	MessageOverheadTokens     *int     `toml:"message_overhead_tokens"`
+	RequestOverheadTokens     *int     `toml:"request_overhead_tokens"`
+	ContextMargin             *float64 `toml:"context_margin"`
+	AuthorMaxOutputTokens     *int     `toml:"author_max_output_tokens"`
+	ReviewerMaxOutputTokens   *int     `toml:"reviewer_max_output_tokens"`
+	ProposerMaxOutputTokens   *int     `toml:"proposer_max_output_tokens"`
+	CritiqueMaxOutputTokens   *int     `toml:"critique_max_output_tokens"`
+	IntegratorMaxOutputTokens *int     `toml:"integrator_max_output_tokens"`
+	DeliveryMaxTokens         *int     `toml:"delivery_max_tokens"`
+	TurnMaxEstimatedTokens    *int     `toml:"turn_max_estimated_tokens"`
 }
 
 type Revision struct {
@@ -328,6 +338,18 @@ func (r *Roster) ApplyDefaults() {
 		rmot := 2048
 		r.Budgets.ReviewerMaxOutputTokens = &rmot
 	}
+	if r.Budgets.ProposerMaxOutputTokens == nil {
+		v := DefaultProposerMaxOutputTokens
+		r.Budgets.ProposerMaxOutputTokens = &v
+	}
+	if r.Budgets.CritiqueMaxOutputTokens == nil {
+		v := DefaultCritiqueMaxOutputTokens
+		r.Budgets.CritiqueMaxOutputTokens = &v
+	}
+	if r.Budgets.IntegratorMaxOutputTokens == nil {
+		v := DefaultIntegratorMaxOutputTokens
+		r.Budgets.IntegratorMaxOutputTokens = &v
+	}
 	if r.Budgets.DeliveryMaxTokens == nil {
 		dmt := 64
 		r.Budgets.DeliveryMaxTokens = &dmt
@@ -494,6 +516,15 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 		if preset.Budgets.ReviewerMaxOutputTokens != nil {
 			result.Budgets.ReviewerMaxOutputTokens = preset.Budgets.ReviewerMaxOutputTokens
 		}
+		if preset.Budgets.ProposerMaxOutputTokens != nil {
+			result.Budgets.ProposerMaxOutputTokens = preset.Budgets.ProposerMaxOutputTokens
+		}
+		if preset.Budgets.CritiqueMaxOutputTokens != nil {
+			result.Budgets.CritiqueMaxOutputTokens = preset.Budgets.CritiqueMaxOutputTokens
+		}
+		if preset.Budgets.IntegratorMaxOutputTokens != nil {
+			result.Budgets.IntegratorMaxOutputTokens = preset.Budgets.IntegratorMaxOutputTokens
+		}
 		if preset.Budgets.DeliveryMaxTokens != nil {
 			result.Budgets.DeliveryMaxTokens = preset.Budgets.DeliveryMaxTokens
 		}
@@ -531,6 +562,15 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 		}
 		if quickProf.Budgets.ReviewerMaxOutputTokens != nil {
 			result.Budgets.ReviewerMaxOutputTokens = quickProf.Budgets.ReviewerMaxOutputTokens
+		}
+		if quickProf.Budgets.ProposerMaxOutputTokens != nil {
+			result.Budgets.ProposerMaxOutputTokens = quickProf.Budgets.ProposerMaxOutputTokens
+		}
+		if quickProf.Budgets.CritiqueMaxOutputTokens != nil {
+			result.Budgets.CritiqueMaxOutputTokens = quickProf.Budgets.CritiqueMaxOutputTokens
+		}
+		if quickProf.Budgets.IntegratorMaxOutputTokens != nil {
+			result.Budgets.IntegratorMaxOutputTokens = quickProf.Budgets.IntegratorMaxOutputTokens
 		}
 		if quickProf.Budgets.DeliveryMaxTokens != nil {
 			result.Budgets.DeliveryMaxTokens = quickProf.Budgets.DeliveryMaxTokens
@@ -570,6 +610,21 @@ func (r *Roster) QuickDefinitionSHA256(name string) (string, error) {
 	}
 	if resolved.Budgets.ReviewerMaxOutputTokens != nil {
 		budgetsMap["reviewer_max_output_tokens"] = *resolved.Budgets.ReviewerMaxOutputTokens
+	}
+	// Omitted at its default so a definition that sets none of the deliberate
+	// bounds keeps the hash it had before they existed.
+	if resolved.Budgets.ProposerMaxOutputTokens != nil && *resolved.Budgets.ProposerMaxOutputTokens != DefaultProposerMaxOutputTokens {
+		budgetsMap["proposer_max_output_tokens"] = *resolved.Budgets.ProposerMaxOutputTokens
+	}
+	// Omitted at its default so a definition that sets none of the deliberate
+	// bounds keeps the hash it had before they existed.
+	if resolved.Budgets.CritiqueMaxOutputTokens != nil && *resolved.Budgets.CritiqueMaxOutputTokens != DefaultCritiqueMaxOutputTokens {
+		budgetsMap["critique_max_output_tokens"] = *resolved.Budgets.CritiqueMaxOutputTokens
+	}
+	// Omitted at its default so a definition that sets none of the deliberate
+	// bounds keeps the hash it had before they existed.
+	if resolved.Budgets.IntegratorMaxOutputTokens != nil && *resolved.Budgets.IntegratorMaxOutputTokens != DefaultIntegratorMaxOutputTokens {
+		budgetsMap["integrator_max_output_tokens"] = *resolved.Budgets.IntegratorMaxOutputTokens
 	}
 	if resolved.Budgets.DeliveryMaxTokens != nil {
 		budgetsMap["delivery_max_tokens"] = *resolved.Budgets.DeliveryMaxTokens
