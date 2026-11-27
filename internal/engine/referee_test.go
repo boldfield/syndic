@@ -347,6 +347,19 @@ func TestRefereeAdapterErrorHoldsCapacity(t *testing.T) {
 	if holds, err := run.h.Store.UnreleasedHolds(); err != nil || len(holds) != 1 {
 		t.Fatalf("holds %+v, err %v", holds, err)
 	}
+	// The adapter of the held attempt is kept only while its hold stands.
+	if n := run.h.Engine.RefereeAdapterCount(); n != 1 {
+		t.Fatalf("%d referee adapters kept while the hold stands, want 1", n)
+	}
+	if _, err := run.h.Engine.Release(wire.ReleaseRequest{Pool: "default", Reason: "checked"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := run.h.Engine.RefereeAdapterCount(); n != 0 {
+		t.Fatalf("%d referee adapters kept after the hold was released, want none", n)
+	}
+	if holds, err := run.h.Store.UnreleasedHolds(); err != nil || len(holds) != 0 {
+		t.Fatalf("holds %+v, err %v after the release", holds, err)
+	}
 }
 
 // A result that arrives after the turn moved on (here a cancel lands while the

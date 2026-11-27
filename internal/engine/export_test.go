@@ -139,3 +139,11 @@ func (e *Engine) WebOffReason(endpoint string) string {
 	defer e.mu.Unlock()
 	return e.webOffReason(endpoint)
 }
+
+// RefereeAdapterCount is how many referee attempts have an adapter kept for
+// cancelling their held work.
+func (e *Engine) RefereeAdapterCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.refereeAdapters)
+}

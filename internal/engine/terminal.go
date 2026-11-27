@@ -409,12 +409,14 @@ func releaseHoldIn(tx *journal.Tx, emit hub.Emit, h *hold, how, reason string) e
 }
 
 // dropHold forgets a hold whose row was released and lets its pools' queues
-// move. e.mu is held.
+// move. A referee attempt's adapter was kept only so the held attempt could be
+// cancelled; with the hold gone it is dropped too. e.mu is held.
 func (e *Engine) dropHold(h *hold) {
 	if e.holds[h.attemptID] != h {
 		return
 	}
 	delete(e.holds, h.attemptID)
+	delete(e.refereeAdapters, h.attemptID)
 	if h.stop != nil {
 		h.stop()
 	}

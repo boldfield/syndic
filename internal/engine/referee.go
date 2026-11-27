@@ -29,7 +29,14 @@ const (
 	// phaseReferee is the phase of a referee decision's attempt.
 	phaseReferee = "referee"
 
-	// eventRefereeDecision is the journaled decision of a web call.
+	// eventRefereeDecision is the journaled decision of a web call. v5 delta
+	// section 6 (Accounting) names the event referee_decision{call_id,
+	// attempt_id, verdict, reason_sha256}; that kind is already emitted, with a
+	// different payload (decision_id, decision, reason, cause), by
+	// journal.Tx.RecordRefereeDecision for a bash call (v7 delta), and one
+	// kind cannot carry two payloads. The web decision therefore has a kind of
+	// its own, with the design's four fields. The design's name is a
+	// deviation for its owner to ratify.
 	eventRefereeDecision = "web_referee_decision"
 
 	// defaultRefereeMaxOutputTokens is tools.referee.max_output_tokens when
