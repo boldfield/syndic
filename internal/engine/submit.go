@@ -12,6 +12,7 @@ import (
 	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -70,6 +71,11 @@ type openTurn struct {
 	workspace     string
 	toolCallsUsed int
 	toolLimited   bool
+	// screener applies the pre-send checks to the turn's web queries; its
+	// canary corpus holds every file-derived byte sequence the turn has
+	// carried to the model, seeded from the history at submit and fed by
+	// each file-tool effect. It is safe for concurrent use.
+	screener *tools.URLScreener
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
@@ -298,6 +304,8 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	var (
 		turnID, convID, contextHash, workspace string
 		doc                                    *history.Document
+		taintedTurns                           map[string]bool
+		screener                               *tools.URLScreener
 		rec                                    budgetRecord
 	)
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -329,7 +337,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		// The history is rendered once, here, and admission, the stored
 		// document and the context hash are all taken from these bytes.
-		if doc, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
+		if doc, taintedTurns, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
+			return err
+		}
+		if screener, err = e.newTurnScreener(); err != nil {
+			return err
+		}
+		if err := seedHistoryCorpus(tx, screener, doc, taintedTurns); err != nil {
 			return err
 		}
 		// The taint comes from every turn the journal records for the
@@ -415,6 +429,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
 		workspace:       workspace,
+		screener:        screener,
 		required:        eff.Preset.RequiredReviewers,
 		approved:        map[string]bool{},
 		results:         map[string]reviewResult{},

@@ -16,6 +16,7 @@ import (
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
@@ -121,6 +122,9 @@ type options struct {
 	clockStart     time.Time
 	changeLines    func(transport.CompleteResult) []string
 	beforeEffect   func(turnID, attemptID, name string)
+	providers      []tools.SearchProvider
+	searchNet      *tools.SearchNetwork
+	secrets        config.SecretResolver
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -194,6 +198,23 @@ func WithAuthorChangeLines(f func(transport.CompleteResult) []string) Option {
 // step once f returns. A test of a cancel landing mid-step cancels in f.
 func WithBeforeToolEffect(f func(turnID, attemptID, name string)) Option {
 	return func(o *options) { o.beforeEffect = f }
+}
+
+// WithSearchProvider injects a web_search provider, as the daemon would
+// through Options.SearchProviders.
+func WithSearchProvider(p tools.SearchProvider) Option {
+	return func(o *options) { o.providers = append(o.providers, p) }
+}
+
+// WithSearchNetwork replaces the resolver, dialer and TLS configuration of
+// the search provider connection.
+func WithSearchNetwork(n *tools.SearchNetwork) Option {
+	return func(o *options) { o.searchNet = n }
+}
+
+// WithSecrets replaces the resolver of the search provider credential.
+func WithSecrets(r config.SecretResolver) Option {
+	return func(o *options) { o.secrets = r }
 }
 
 // NoStart builds the engine without starting it.
@@ -314,6 +335,9 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		NoStartupProbes:   true,
 		AuthorChangeLines: o.changeLines,
 		BeforeToolEffect:  o.beforeEffect,
+		SearchProviders:   o.providers,
+		SearchNetwork:     o.searchNet,
+		Secrets:           o.secrets,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {

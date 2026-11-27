@@ -389,20 +389,27 @@ const toolResultNote = "The result of your tool call is given below between deli
 // has reached its call bound.
 const toolLimitStatement = "No further tool calls are available in this turn: the bound on tool calls has been reached. Answer from what you have."
 
-// executableGroups are the tool groups the engine can execute. The web group
-// has no fetch or search implementation yet and so is never offered: a call
-// naming one of its tools is answered not_offered.
-var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
+// fileGroups are the tool groups whose tools work on the conversation's
+// workspace; they are offered only when the turn has one. The web group's
+// web_search is offered when a configured, supported provider exists and the
+// caller's referee is usable (websearch.go); web_fetch has no effect in the
+// engine yet and is never offered, so a call naming it is answered
+// not_offered.
+var fileGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
-// offers: the tools of the preset's executable groups, which for the file
-// groups need the conversation to have a workspace. None are offered once
-// the author has no calls remaining under its bound; limited reports that
-// case, and the caller then sends the statement in their place. e.mu is held.
+// offers: the tools of the preset's groups the engine can execute, which for
+// the file groups need the conversation to have a workspace and for the web
+// group need a search provider. None are offered once the author has no calls
+// remaining under its bound; limited reports that case, and the caller then
+// sends the statement in their place. e.mu is held.
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
 	var groups []string
 	for _, g := range t.eff.Preset.Tools {
-		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author) {
+		switch {
+		case fileGroups[g] && t.workspace != "" && e.groupOffered(g, t.author):
+			groups = append(groups, g)
+		case g == tools.GroupWeb && e.searchOffered() && e.groupOffered(g, t.author):
 			groups = append(groups, g)
 		}
 	}
@@ -412,7 +419,7 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 	if e.authorCallsRemaining(t) <= 0 {
 		return nil, true, nil
 	}
-	defs, err = tools.ForGroups(groups, e.searchProvider())
+	defs, err = e.groupDefs(groups)
 	return defs, false, err
 }
 
@@ -458,32 +465,45 @@ func (e *Engine) toolStepRefusal(t *openTurn, req transport.CompleteRequest) str
 	}
 }
 
-// toolEffects returns an effect for each tool the author may be offered,
-// over the confined workspace, for the attempt whose step is executing. The
-// tools journal their own results against the accepted call. Each effect
-// re-checks the step after the hook, which stands in for a wait inside it.
-func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
-	read := tools.NewReadTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
-	write := tools.NewWriteTools(e.store, fs, turnID, attemptID, e.maxResultBytes())
-	wrap := func(run func(callID string, args json.RawMessage) (tools.Result, error)) toolEffect {
-		return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
-			if hook != nil {
-				hook(turnID, attemptID, call.Name)
-				if err := recheck(); err != nil {
-					return tools.Result{}, err
+// toolEffects returns an effect for each tool the author may be offered, for
+// the attempt whose step is executing: the file tools over the confined
+// workspace when the turn has one (fs is nil otherwise), and web_search when
+// a provider is configured and supported. The tools journal their own
+// results against the accepted call. Each effect re-checks the step after
+// the hook, which stands in for a wait inside it. The file-derived bytes an
+// executed file call carries to the model are added to the turn's web
+// screener, so a later query carrying them is refused.
+func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
+	effects := map[string]toolEffect{}
+	if fs != nil {
+		read := tools.NewReadTools(e.store, fs, t.id, attemptID, e.maxResultBytes())
+		write := tools.NewWriteTools(e.store, fs, t.id, attemptID, e.maxResultBytes())
+		wrap := func(run func(callID string, args json.RawMessage) (tools.Result, error)) toolEffect {
+			return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
+				if hook != nil {
+					hook(t.id, attemptID, call.Name)
+					if err := recheck(); err != nil {
+						return tools.Result{}, err
+					}
 				}
+				res, err := run(call.ID, args)
+				if err == nil {
+					e.exposeFileBytes(t, call.Name, args, res)
+				}
+				return res, err
 			}
-			return run(call.ID, args)
 		}
+		effects[tools.NameReadFile] = wrap(read.ReadFile)
+		effects[tools.NameListDir] = wrap(read.ListDir)
+		effects[tools.NameSearchFiles] = wrap(read.SearchFiles)
+		effects[tools.NameWriteFile] = wrap(write.WriteFile)
+		effects[tools.NameEditFile] = wrap(write.EditFile)
+		effects[tools.NameUnstage] = wrap(write.Unstage)
 	}
-	return map[string]toolEffect{
-		tools.NameReadFile:    wrap(read.ReadFile),
-		tools.NameListDir:     wrap(read.ListDir),
-		tools.NameSearchFiles: wrap(read.SearchFiles),
-		tools.NameWriteFile:   wrap(write.WriteFile),
-		tools.NameEditFile:    wrap(write.EditFile),
-		tools.NameUnstage:     wrap(write.Unstage),
+	if e.searchOffered() {
+		effects[tools.NameWebSearch] = e.webSearchEffect(t, attemptID, hook)
 	}
+	return effects
 }
 
 // toolStepMessages renders the next author attempt's messages from the

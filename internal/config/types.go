@@ -253,7 +253,35 @@ type RoutingPolicy struct {
 }
 
 type WebConfig struct {
-	AllowedHosts []string `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	AllowedHosts []string      `toml:"allowed_hosts"` // allowlist patterns for web fetch
+	Search       *SearchConfig `toml:"search"`        // the web_search provider; absent means web_search is not offered
+}
+
+// SearchConfig is [tools.web.search]: the search provider behind web_search
+// (v5 delta section 6, "The tools" and pre-send check 6). web_search is
+// offered only when this table is set, names a provider the engine was built
+// with, and Host would pass the pre-send checks and the allowlist. The query
+// is sent to Host whatever else is set: the provider receives it.
+//
+// No vendor has been chosen. The engine takes its provider implementations
+// through an injection seam (engine.Options.SearchProviders) and the daemon
+// injects none, so in this build a configured table alone leaves web_search
+// unoffered; the participants reply names the reason.
+type SearchConfig struct {
+	// Provider names the provider implementation to use. It must match the
+	// name of an injected provider; an unknown name leaves web_search
+	// unoffered rather than failing the roster, since which providers exist is
+	// a property of the build, not of the roster.
+	Provider string `toml:"provider"`
+	// Host is the provider's hostname: no scheme, port, path or wildcard, and
+	// not an IP literal. It is checked by the shape rules and the allowlist
+	// before web_search is offered, resolved only after a query is allowed,
+	// and the connection is pinned to the validated address.
+	Host string `toml:"host"`
+	// Auth is the required secret reference of the provider credential. The
+	// credential is resolved when an allowed query is about to be sent, is
+	// placed in the request to Host only, and is never journaled.
+	Auth *SecretRef `toml:"auth"`
 }
 
 type RefereeConfig struct {

@@ -784,6 +784,7 @@ func (r *Roster) Validate() error {
 					errs = append(errs, fmt.Errorf("tools.web.allowed_hosts: %w", err))
 				}
 			}
+			errs = append(errs, validateSearchConfig(r.Tools.Web.Search)...)
 		}
 	}
 
@@ -1090,4 +1091,44 @@ func (r *Roster) routingRefusals(p Participant, endpoints map[string]EndpointPro
 		reasons = append(reasons, fmt.Sprintf("endpoint %q (declared_location %q) must be in allowed_destinations", p.Endpoint, ep.DeclaredLocation))
 	}
 	return reasons
+}
+
+// validateSearchConfig checks [tools.web.search] (v5 delta section 6): a
+// provider name, a plain hostname and a secret reference are each required.
+// Whether the named provider exists is not a roster question (see
+// SearchConfig.Provider) and is not checked here.
+func validateSearchConfig(sc *SearchConfig) []error {
+	if sc == nil {
+		return nil
+	}
+	var errs []error
+	if sc.Provider == "" {
+		errs = append(errs, errors.New("tools.web.search.provider is required"))
+	}
+	if err := validateSearchHost(sc.Host); err != nil {
+		errs = append(errs, fmt.Errorf("tools.web.search.host: %w", err))
+	}
+	switch {
+	case sc.Auth == nil:
+		errs = append(errs, errors.New("tools.web.search.auth is required: a secret reference {source, name}"))
+	case sc.Auth.Source != "env" && sc.Auth.Source != "file":
+		errs = append(errs, fmt.Errorf("tools.web.search.auth.source must be env or file, got %q", sc.Auth.Source))
+	case sc.Auth.Name == "":
+		errs = append(errs, errors.New("tools.web.search.auth.name is required"))
+	}
+	return errs
+}
+
+// validateSearchHost checks the provider hostname: one exact host, with no
+// wildcard, scheme, userinfo, port, path or IP literal.
+func validateSearchHost(host string) error {
+	switch {
+	case host == "":
+		return errors.New("required")
+	case strings.Contains(host, "*"):
+		return fmt.Errorf("%q must be one exact hostname, not a pattern", host)
+	case strings.Contains(host, "://"), strings.Contains(host, "@"):
+		return fmt.Errorf("%q must be a hostname without scheme or credentials", host)
+	}
+	return validateAllowedHostPattern(host)
 }

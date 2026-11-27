@@ -11,6 +11,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/verdict"
 	"github.com/boldfield/syndic/internal/wire"
@@ -295,6 +296,11 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		// from the live workspace.
 		if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
 			return err
+		}
+		// The diffs are file-derived content given as evidence: canary
+		// material for the turn's web queries (v5 delta section 6, check 1).
+		if t.screener != nil {
+			t.screener.AddBytes(tools.RouteDiff, []byte(t.pkt.diffs))
 		}
 		delimiter, err := e.newDelimiter(t)
 		if err != nil {
