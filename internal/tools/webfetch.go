@@ -100,11 +100,15 @@ func (t *WebFetchTools) Fetch(ctx context.Context, rawURL string) (Result, error
 		if err != nil {
 			return fetchError(ErrCodeFetch, "reading the response failed"), nil
 		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body = []byte(fmt.Sprintf("HTTP status %d\n%s", resp.StatusCode, body))
+			if len(body) > t.maxResultBytes {
+				return fetchError(ErrCodeTooLarge, "result too large: more than %d bytes", t.maxResultBytes), nil
+			}
+			return Result{Content: body, ErrorCode: ErrCodeHTTPStatus}, nil
+		}
 		if len(body) > t.maxResultBytes {
 			return fetchError(ErrCodeTooLarge, "result too large: more than %d bytes", t.maxResultBytes), nil
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return Result{Content: []byte(fmt.Sprintf("HTTP status %d\n%s", resp.StatusCode, body)), ErrorCode: ErrCodeHTTPStatus}, nil
 		}
 		return Result{Content: body}, nil
 	}

@@ -190,3 +190,22 @@ func TestWebFetchSameHostHopAddressRefusedWithoutDial(t *testing.T) {
 		t.Fatalf("lookups %d referee %d dials %d hits %d", fr.n, len(g.ref.calls), len(g.dials), hits.Load())
 	}
 }
+
+// A non-2xx body exactly at the limit is too_large once the status prefix is
+// counted, never an http_error result above the bound.
+func TestWebFetchNon2xxExactLimitIsTooLarge(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprint(w, strings.Repeat("x", 100))
+	}))
+	defer ts.Close()
+	g := newPinRig(t, ts.Listener.Addr().String(), okAddrs)
+	res, _ := NewWebFetchTools(g.f, 100).Fetch(context.Background(), "http://ok.test/")
+	if res.ErrorCode != ErrCodeTooLarge || string(res.Content) != "result too large: more than 100 bytes" {
+		t.Fatalf("res %q %q", res.Content, res.ErrorCode)
+	}
+	res, _ = NewWebFetchTools(g.f, 200).Fetch(context.Background(), "http://ok.test/")
+	if res.ErrorCode != ErrCodeHTTPStatus || len(res.Content) > 200 {
+		t.Fatalf("under-limit res %q %q", res.Content, res.ErrorCode)
+	}
+}
