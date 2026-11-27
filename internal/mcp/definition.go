@@ -163,10 +163,6 @@ func BuildDefinition(tool []byte, maxBytes int) (*Definition, error) {
 	return d, nil
 }
 
-func isNull(raw json.RawMessage) bool {
-	return string(raw) == "null"
-}
-
 // sortedKeys returns the member names of m in byte order, so that every walk
 // visits members in the same order and reports the same reason.
 func sortedKeys(m map[string]any) []string {
