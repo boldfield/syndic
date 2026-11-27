@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/mcp/jcs"
@@ -147,39 +148,103 @@ func checkSchema(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		return notOffered(ReasonMalformed, "inputSchema: %v", err)
 	}
-	if d, ok := schema["$schema"]; ok {
-		s, isStr := d.(string)
-		if !isStr || strings.TrimSuffix(s, "#") != dialect2020 {
-			return notOffered(ReasonDialect, "$schema %v is not JSON Schema 2020-12", d)
-		}
-	}
-	return walk(schema)
+	return walk(schema, true)
 }
 
-// walk visits every object member at any depth. The jcs parse has already
-// bounded nesting, so recursion here is bounded too.
-func walk(v any) error {
+// nameMaps are keywords whose value is an object from a name to a subschema:
+// the member names there are data, not keywords.
+var nameMaps = map[string]bool{
+	"properties": true, "patternProperties": true, "$defs": true,
+	"definitions": true, "dependentSchemas": true,
+}
+
+// dataKeywords hold instance data, not schemas.
+var dataKeywords = map[string]bool{
+	"enum": true, "const": true, "default": true, "examples": true,
+}
+
+// refKeywords are the reference keywords; each may point only inside the
+// same schema.
+var refKeywords = map[string]bool{
+	"$ref": true, "$dynamicRef": true, "$recursiveRef": true,
+}
+
+// walk visits every object member at any depth, in sorted order so the reason
+// reported is the same on every listing. keyword says whether the members of
+// an object are schema keywords; x-mcp-header is refused everywhere, while
+// $schema and the reference keywords are checked only in keyword position, so
+// a property that happens to be named $ref is not mistaken for a reference.
+// The jcs parse has already bounded nesting, so recursion here is bounded too.
+func walk(v any, keyword bool) error {
 	switch t := v.(type) {
 	case map[string]any:
-		for k, child := range t {
-			switch k {
-			case "x-mcp-header":
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			child := t[k]
+			if k == "x-mcp-header" {
 				return notOffered(ReasonXMCPHeader, "x-mcp-header in the schema")
-			case "$ref":
-				ref, ok := child.(string)
-				if !ok || !strings.HasPrefix(ref, "#") {
-					return notOffered(ReasonExternalRef, "$ref %v points outside the schema", child)
+			}
+			if keyword {
+				switch {
+				case k == "$schema":
+					s, ok := child.(string)
+					if !ok || strings.TrimSuffix(s, "#") != dialect2020 {
+						return notOffered(ReasonDialect, "$schema %v is not JSON Schema 2020-12", child)
+					}
+				case refKeywords[k]:
+					ref, ok := child.(string)
+					if !ok {
+						return notOffered(ReasonExternalRef, "%s is not a string", k)
+					}
+					if !strings.HasPrefix(ref, "#") {
+						return notOffered(ReasonExternalRef, "%s %q points outside the schema", k, ref)
+					}
 				}
 			}
-			if err := walk(child); err != nil {
+			var err error
+			switch {
+			case keyword && nameMaps[k]:
+				err = walkNames(child)
+			case !keyword || dataKeywords[k]:
+				err = walk(child, false)
+			default:
+				err = walk(child, true)
+			}
+			if err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range t {
-			if err := walk(child); err != nil {
+			if err := walk(child, keyword); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// walkNames walks an object of name to subschema.
+func walkNames(v any) error {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return walk(v, true)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if k == "x-mcp-header" {
+			return notOffered(ReasonXMCPHeader, "x-mcp-header in the schema")
+		}
+		if err := walk(m[k], true); err != nil {
+			return err
 		}
 	}
 	return nil

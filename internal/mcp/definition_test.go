@@ -2,10 +2,7 @@ package mcp
 
 import (
 	"errors"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -96,6 +93,11 @@ func TestNotOffered(t *testing.T) {
 		{"ref https", `{"name":"t","inputSchema":{"$ref":"https://example.com/s.json"}}`, 0, ReasonExternalRef},
 		{"ref file", `{"name":"t","inputSchema":{"properties":{"a":{"$ref":"other.json#/x"}}}}`, 0, ReasonExternalRef},
 		{"header deep", `{"name":"t","inputSchema":{"a":{"b":{"c":[{"d":{"x-mcp-header":"X"}}]}}}}`, 0, ReasonXMCPHeader},
+		{"embedded dialect", `{"name":"t","inputSchema":{"$defs":{"x":{"$schema":"http://json-schema.org/draft-07/schema#"}}}}`, 0, ReasonDialect},
+		{"dynamicRef", `{"name":"t","inputSchema":{"$dynamicRef":"https://e.com/x#m"}}`, 0, ReasonExternalRef},
+		{"recursiveRef", `{"name":"t","inputSchema":{"$recursiveRef":"other.json"}}`, 0, ReasonExternalRef},
+		{"ref not string", `{"name":"t","inputSchema":{"$ref":{"type":"string"}}}`, 0, ReasonExternalRef},
+		{"both, header first", `{"name":"t","inputSchema":{"$ref":"x.json","x-mcp-header":"X"}}`, 0, ReasonExternalRef},
 		{"header defs", `{"name":"t","inputSchema":{"$defs":{"x":{"x-mcp-header":"X"}}}}`, 0, ReasonXMCPHeader},
 	}
 	for _, c := range cases {
@@ -108,6 +110,8 @@ func TestNotOffered(t *testing.T) {
 func TestAccepted(t *testing.T) {
 	build(t, `{"name":"t","inputSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"x":{"type":"string"}},"properties":{"a":{"$ref":"#/$defs/x"}}}}`)
 	build(t, `{"name":"t","inputSchema":{"type":"object"}}`)
+	// A property named $ref is a name, not a reference.
+	build(t, `{"name":"t","inputSchema":{"properties":{"$ref":{"type":"string"}},"default":{"$ref":"x.json"}}}`)
 	// Exactly at the bound is offered.
 	d := build(t, tool("d", ""))
 	if _, err := BuildDefinition([]byte(tool("d", "")), len(d.Bytes)); err != nil {
@@ -116,22 +120,14 @@ func TestAccepted(t *testing.T) {
 }
 
 func TestNoNetworkImports(t *testing.T) {
-	files, _ := filepath.Glob("*.go")
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			if _, err := os.Stat(f); err != nil {
-				continue
-			}
-		}
-		af, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, im := range af.Imports {
-			p := strings.Trim(im.Path.Value, `"`)
-			if p == "net" || strings.HasPrefix(p, "net/") || strings.Contains(p, "grpc") {
-				t.Errorf("%s imports %s", f, p)
-			}
+	// go list -deps covers the transitive imports of the non-test package.
+	out, err := exec.Command("go", "list", "-deps", ".").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range strings.Fields(string(out)) {
+		if p == "net" || strings.HasPrefix(p, "net/") || strings.Contains(p, "grpc") {
+			t.Errorf("package depends on %s", p)
 		}
 	}
 }
