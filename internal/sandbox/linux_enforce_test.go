@@ -34,8 +34,8 @@ func TestLinuxNamespacesEnforcement(t *testing.T) {
 	if ok, missing := sandbox.Supported(enforced, false); !ok {
 		t.Fatalf("backend unsupported (missing %s): %s", missing, reason)
 	}
-	if enforced != sandbox.Caps(sandbox.F, sandbox.N1, sandbox.P, sandbox.D) {
-		t.Errorf("enforced %s, want D,F,N1,P", enforced)
+	if enforced != sandbox.Caps(sandbox.F, sandbox.N1, sandbox.N2, sandbox.P, sandbox.D) {
+		t.Errorf("enforced %s, want D,F,N1,N2,P", enforced)
 	}
 	t.Logf("backend %s, configuration %v", b.Name(), b.Config())
 
@@ -47,6 +47,7 @@ func TestLinuxNamespacesEnforcement(t *testing.T) {
 	helper := contracttest.BuildHelper(t)
 	t.Run("proc_own_only", func(t *testing.T) { testProcOwnOnly(t, b, helper) })
 	t.Run("setuid_no_privilege", func(t *testing.T) { testSetuidNoPrivilege(t, b, helper) })
+	t.Run("listener_only", func(t *testing.T) { testListenerOnly(t, b, helper) })
 	t.Run("old_root_unreachable", func(t *testing.T) { testOldRootUnreachable(t, b, helper) })
 }
 
@@ -104,6 +105,12 @@ func newNSCall(t *testing.T, helperBin string) nsCall {
 // empty, and returns its lines after "ready".
 func (c nsCall) run(t *testing.T, b sandbox.Backend, args ...string) []string {
 	t.Helper()
+	return c.runProxy(t, b, nil, args...)
+}
+
+// runProxy is run with the call's proxy listener, or none.
+func (c nsCall) runProxy(t *testing.T, b sandbox.Backend, proxy *sandbox.Listener, args ...string) []string {
+	t.Helper()
 	proc, err := b.Start(context.Background(), sandbox.Spec{
 		Argv:       append([]string{c.helper}, args...),
 		ScratchDir: c.scratch,
@@ -111,6 +118,7 @@ func (c nsCall) run(t *testing.T, b sandbox.Backend, args ...string) []string {
 		Env:        sandbox.Env(sandbox.EnvConfig{Path: contracttest.DefaultPath, TempDir: c.tmp}),
 		System:     defaultSystem(),
 		Timeout:    time.Minute,
+		Proxy:      proxy,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
