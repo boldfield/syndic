@@ -392,9 +392,10 @@ const toolLimitStatement = "No further tool calls are available in this turn: th
 
 // fileGroups are the tool groups whose tools work on the conversation's
 // workspace; they are offered only when the turn has one. The web group's
-// web_search is offered when a configured, supported provider exists and the
-// caller's referee is usable (websearch.go); web_fetch has no effect in the
-// engine yet and is never offered, so a call naming it is answered
+// web_search is offered to any role holding the group, author or required
+// reviewer, when a configured, supported provider exists and the referee of
+// the caller's endpoint is usable (websearch.go); web_fetch has no effect in
+// the engine yet and is never offered, so a call naming it is answered
 // not_offered.
 var fileGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
 
@@ -420,16 +421,17 @@ func (e *Engine) reviewerToolDefs(t *openTurn, id string) (defs []transport.Tool
 // roleToolDefs is the definitions of the executable groups among groups that
 // caller may be offered, or none with limited set when remaining is spent.
 // The file groups need a workspace. The web group needs a configured,
-// supported provider and is executable for the author alone: the search
-// effect asks the author's referee, and a reviewer's lookups are not wired
-// to it, so a reviewer preset naming the web group is offered nothing of it.
+// supported provider and a usable referee for the caller's endpoint, whoever
+// the caller is: the design gives the group to the author through tools and
+// to every required reviewer through reviewer_tools, and the search effect
+// asks the caller's own referee (webSearchEffect).
 func (e *Engine) roleToolDefs(t *openTurn, groups []string, caller string, remaining int) (defs []transport.Tool, limited bool, err error) {
 	var offered []string
 	for _, g := range groups {
 		switch {
 		case fileGroups[g] && t.workspace != "" && e.groupOffered(g, caller):
 			offered = append(offered, g)
-		case g == tools.GroupWeb && caller == t.author && e.searchOffered() && e.groupOffered(g, caller):
+		case g == tools.GroupWeb && e.searchOffered() && e.groupOffered(g, caller):
 			offered = append(offered, g)
 		}
 	}
@@ -495,15 +497,17 @@ func (e *Engine) toolStepRefusal(t *openTurn, req transport.CompleteRequest) str
 	}
 }
 
-// toolEffects returns an effect for each tool the author may be offered, for
-// the attempt whose step is executing: the file tools over the confined
-// workspace when the turn has one (fs is nil otherwise), and web_search when
-// a provider is configured and supported. The tools journal their own
-// results against the accepted call. Each effect re-checks the step after
-// the hook, which stands in for a wait inside it. The file-derived bytes an
-// executed file call carries to the model are added to the turn's web
-// screener, so a later query carrying them is refused.
-func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
+// toolEffects returns an effect for each tool the caller, the author or a
+// required reviewer, may be offered, for the attempt whose step is
+// executing: the file tools over the confined workspace when the turn has
+// one (fs is nil otherwise), and web_search when a provider is configured
+// and supported, deciding each query with the referee of the caller's
+// endpoint. The tools journal their own results against the accepted call.
+// Each effect re-checks the step after the hook, which stands in for a wait
+// inside it. The file-derived bytes an executed file call carries to the
+// model are added to the turn's web screener, so a later query carrying them
+// is refused.
+func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, caller, attemptID string, hook func(turnID, attemptID, name string)) map[string]toolEffect {
 	effects := map[string]toolEffect{}
 	if fs != nil {
 		read := tools.NewReadTools(e.store, fs, t.id, attemptID, e.maxResultBytes())
@@ -531,7 +535,7 @@ func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID stri
 		effects[tools.NameUnstage] = wrap(write.Unstage)
 	}
 	if e.searchOffered() {
-		effects[tools.NameWebSearch] = e.webSearchEffect(t, attemptID, hook)
+		effects[tools.NameWebSearch] = e.webSearchEffect(t, caller, attemptID, hook)
 	}
 	return effects
 }

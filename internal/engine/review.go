@@ -482,7 +482,7 @@ func (e *Engine) executeReviewerStep(t *openTurn, d reviewerDispatch, res transp
 	}
 	e.mu.Unlock()
 
-	out, err := e.performToolStep(t, d.req, d.attemptID, res, remaining, patterns, hook)
+	out, err := e.performToolStep(t, d.participant, d.req, d.attemptID, res, remaining, patterns, hook)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -19,7 +19,9 @@ import (
 // was injected through Options.SearchProviders, and the provider's host
 // passes the pre-send checks and the allowlist. The query route is the
 // fetch route: the turn's screener (canary, shape, allowlist, counts), the
-// endpoint referee through the engine's accounting, the step's re-checks,
+// referee of the caller's endpoint through the engine's accounting, with the
+// decision accounted to the caller and its payload listing only the caller's
+// own earlier web calls this turn, the step's re-checks,
 // then resolution of the provider host under the address rule and a pinned
 // connection. The credential is resolved at send time, for that request
 // only, and never journaled; the bounded raw result is journaled against the
@@ -230,13 +232,15 @@ func (r callReferee) Allow(_ context.Context, target string) (bool, string, erro
 	return out.allow, out.reason, nil
 }
 
-// webSearchEffect is the effect of web_search for the attempt's step: it
-// builds the searcher over the turn's screener, the call's referee, the
-// configured provider and the credential source, bounds the request by the
-// turn's remaining time on the engine's clock, and runs the tool, which
-// journals the result. The hook stands in for a wait inside the effect, as
-// for the file tools.
-func (e *Engine) webSearchEffect(t *openTurn, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
+// webSearchEffect is the effect of web_search for the attempt's step of
+// caller, the author or a required reviewer: it builds the searcher over the
+// turn's screener, the referee of the caller's endpoint (the call is put,
+// accounted and journaled as the caller's, with the caller's own earlier
+// web calls as its prior calls), the configured provider and the credential
+// source, bounds the request by the turn's remaining time on the engine's
+// clock, and runs the tool, which journals the result. The hook stands in
+// for a wait inside the effect, as for the file tools.
+func (e *Engine) webSearchEffect(t *openTurn, caller, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
 	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
 		if hook != nil {
 			hook(t.id, attemptID, call.Name)
@@ -251,7 +255,7 @@ func (e *Engine) webSearchEffect(t *openTurn, attemptID string, hook func(turnID
 		provider := e.searchProviders[sc.Provider]
 		auth := *sc.Auth
 		cred := func() (string, error) { return e.secrets.Resolve(auth) }
-		ref := callReferee{e: e, c: refereeCall{turnID: t.id, caller: t.author, callID: call.ID, name: tools.NameWebSearch}}
+		ref := callReferee{e: e, c: refereeCall{turnID: t.id, caller: caller, callID: call.ID, name: tools.NameWebSearch}}
 		searcher, err := tools.NewPinnedSearcher(t.screener, ref, provider, sc.Host, cred, e.searchNet)
 		if err != nil {
 			return tools.Result{}, err

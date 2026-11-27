@@ -845,3 +845,251 @@ func TestWebSearchStagedPathBecomesCanaryMaterialWithTheDiff(t *testing.T) {
 	// nothing.
 	sh.wantRefereeOnly(t, reply.TurnID)
 }
+
+// reviewerSearchRoster is the search roster with the reviewer moved to an
+// endpoint of its own, "lan", naming its own referee, so the referee a
+// reviewer's query is put to is distinguishable from the author's: each
+// endpoint's referee runs through the adapter of a participant on that
+// endpoint. Presets: revweb gives the author read and write and the reviewer
+// web; bothweb gives both roles web alone; revread gives the author read and
+// web and the reviewer read alone.
+func reviewerSearchRoster(t *testing.T) string {
+	t.Helper()
+	r := searchRoster(searchTable)
+	edit := func(old, new string) {
+		t.Helper()
+		if !strings.Contains(r, old) {
+			t.Fatalf("roster has no %q", old)
+		}
+		r = strings.Replace(r, old, new, 1)
+	}
+	edit("id = \"reviewer\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"", "id = \"reviewer\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"lan\"")
+	edit("local_only = true", "local_only = false")
+	edit("[presets.review]", `[[endpoints]]
+name = "lan"
+base_url = "http://192.168.1.20:11434/v1"
+declared_location = "lan"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama3", "refmodel"]
+referee_model = "refmodel"
+tokens_per_byte_max = 1.0
+
+[presets.revweb]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read", "write"]
+reviewer_tools = ["web"]
+
+[presets.bothweb]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["web"]
+reviewer_tools = ["web"]
+
+[presets.revread]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read", "web"]
+reviewer_tools = ["read"]
+
+[presets.review]`)
+	// The reviewer's diffs and reads cross to the lan endpoint, which the
+	// roster must name as a file-egress destination.
+	return r + "\n[tools]\nfile_egress_destinations = [\"lan\"]\n"
+}
+
+// newReviewerSearchHarness is newSearchHarness over reviewerSearchRoster, with
+// the lan endpoint's referee able to run.
+func newReviewerSearchHarness(t *testing.T, scripts map[string][]fake.Step) *searchHarness {
+	t.Helper()
+	return newSearchHarness(t, reviewerSearchRoster(t), scripts, enginetest.WithModelToolCalls("lan", "refmodel", transport.TriYes))
+}
+
+// refereeRequestsOf is the referee-phase requests the participant's adapter
+// saw: those of the referee of its endpoint.
+func refereeRequestsOf(h *enginetest.Harness, participant string) []transport.CompleteRequest {
+	var out []transport.CompleteRequest
+	for _, req := range requestsOf(h, participant) {
+		if req.Envelope.Phase == "referee" {
+			out = append(out, req)
+		}
+	}
+	return out
+}
+
+// A required reviewer whose preset gives it the web group is offered
+// web_search, as the design gives the group to every role. Its query is
+// decided by the referee of the reviewer's own endpoint, put and accounted
+// as the reviewer's attempt; the provider is then dispatched, and the bounded
+// raw result is journaled against the reviewer's call and carried into that
+// reviewer's next request alone: the author never sees it.
+func TestWebSearchReviewerQueryDecidedByItsOwnReferee(t *testing.T) {
+	sh := newReviewerSearchHarness(t, map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText)},
+		"reviewer": {toolStepWith(searchCall("r1", "go testing")), allowReply(), approveStep()},
+	})
+	if got := searchOffOf(t, sh.Harness, "reviewer"); got != "" {
+		t.Fatalf("reviewer search_off = %q, want offered", got)
+	}
+	reply, err := sh.Engine.Submit(toolReq("s1", "revweb", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+
+	reqs := requestsOf(sh.Harness, "reviewer")
+	if len(reqs) != 3 {
+		t.Fatalf("%d reviewer requests, want the review, its referee and the continuation", len(reqs))
+	}
+	if names := toolNames(reqs[0].Tools); strings.Join(names, ",") != "web_search" {
+		t.Fatalf("reviewer offered %v, want web_search alone", names)
+	}
+	if reqs[1].Envelope.Phase != "referee" || reqs[1].Envelope.Participant != "reviewer" || !strings.Contains(reqs[1].Messages[len(reqs[1].Messages)-1].Content, `"web_search" "go testing"`) {
+		t.Fatalf("referee request %+v, want the reviewer's query put to the lan referee as the reviewer's attempt", reqs[1].Envelope)
+	}
+	if m := toolMessage(reqs[2], "r1"); m == nil || !strings.Contains(m.Content, searchBody) {
+		t.Fatalf("the reviewer's continuation does not carry the result: %+v", reqs[2].Messages)
+	}
+	if n := len(refereeRequestsOf(sh.Harness, "author")); n != 0 {
+		t.Fatalf("%d referee requests through the author's endpoint, want none: the reviewer's referee decides", n)
+	}
+	if requestsContain(requestsOf(sh.Harness, "author"), searchBody) {
+		t.Fatal("the reviewer's result reached the author")
+	}
+
+	attempts := refereeAttempts(t, sh.Harness, reply.TurnID)
+	if len(attempts) != 1 || attempts[0].Participant != "reviewer" {
+		t.Fatalf("referee attempts %+v, want one accounted to the reviewer", attempts)
+	}
+	calls := reviewerCallsOf(t, sh.Harness, reply.TurnID, "reviewer")
+	wantCalls(t, calls, [2]string{journal.ToolCallExecuted, ""})
+	body, err := sh.Store.Content(calls[0].Result.ResultSHA256)
+	if err != nil || string(body) != searchBody {
+		t.Fatalf("journaled result %q err %v, want the provider's raw body against the reviewer's call", body, err)
+	}
+	if author := toolCalls(t, sh.Harness, reply.TurnID); len(author) != 0 {
+		t.Fatalf("author calls %+v, want none", author)
+	}
+	evs := refereeEvents(t, sh.Harness)
+	if len(evs) != 1 || evs[0]["verdict"] != "allow" || evs[0]["call_id"] != calls[0].ID {
+		t.Fatalf("decision events %+v, want one allow of the reviewer's call", evs)
+	}
+
+	lookups, dials := sh.net.counts()
+	if lookups != 1 || dials != 1 || sh.secrets.reads.Load() != 1 {
+		t.Fatalf("lookups %d dials %d credential reads %d, want one of each", lookups, dials, sh.secrets.reads.Load())
+	}
+	seen := sh.server.requests()
+	if len(seen) != 1 || seen[0].Host != searchHost || seen[0].URL.Query().Get("q") != "go testing" || seen[0].Header.Get("X-Search-Key") != searchCred {
+		t.Fatalf("provider saw %+v", seen)
+	}
+	if journalContains(t, sh.Harness, searchCred) {
+		t.Fatal("the credential is in the journal")
+	}
+}
+
+// A reviewer's query carrying sixteen bytes of the diff it was given is
+// refused by the canary before the referee: no referee attempt, no lookup,
+// no connection and no credential read. The refusal is journaled against the
+// reviewer's call with the rule named.
+func TestWebSearchReviewerQueryCarryingDiffBytesRefused(t *testing.T) {
+	const content = "line one\nsecond line two\n"
+	const query = "line one\n+second" // 16 bytes found in the rendered diff alone
+	if len(query) != 16 || strings.Contains(content, query) {
+		t.Fatalf("query %q must be sixteen bytes found in the diff and not in the content", query)
+	}
+	sh := newReviewerSearchHarness(t, map[string][]fake.Step{
+		"author":   {toolStepWith(writeCall("c1", "n.txt", content)), enginetest.Reply(authorText)},
+		"reviewer": {toolStepWith(searchCall("r1", query)), approveStep()},
+	})
+	reply, err := sh.Engine.Submit(toolReq("s1", "revweb", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+	if names := toolNames(requestsOf(sh.Harness, "reviewer")[0].Tools); strings.Join(names, ",") != "web_search" {
+		t.Fatalf("reviewer offered %v, want web_search", names)
+	}
+	calls := reviewerCallsOf(t, sh.Harness, reply.TurnID, "reviewer")
+	wantCalls(t, calls, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
+	text, err := sh.Store.Content(calls[0].Result.ResultSHA256)
+	if err != nil || !strings.Contains(string(text), tools.RuleCanary) {
+		t.Fatalf("refusal text %q err %v, want the canary rule named", text, err)
+	}
+	sh.wantNothingSent(t, reply.TurnID)
+}
+
+// A preset whose reviewer_tools lack the web group gives the reviewer no
+// web_search definition while the author, holding the group, is offered it;
+// a reviewer call naming it is answered not_offered, with nothing put to any
+// referee and nothing sent.
+func TestWebSearchReviewerWithoutWebGroupIsNotOffered(t *testing.T) {
+	sh := newReviewerSearchHarness(t, map[string][]fake.Step{
+		"author":   {enginetest.Reply(authorText)},
+		"reviewer": {toolStepWith(searchCall("r1", "go testing")), approveStep()},
+	})
+	reply, err := sh.Engine.Submit(toolReq("s1", "revread", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+	if names := toolNames(requestsOf(sh.Harness, "author")[0].Tools); strings.Join(names, ",") != "read_file,list_dir,search_files,web_search" {
+		t.Fatalf("author offered %v, want the read tools and web_search", names)
+	}
+	if names := toolNames(requestsOf(sh.Harness, "reviewer")[0].Tools); strings.Join(names, ",") != "read_file,list_dir,search_files" {
+		t.Fatalf("reviewer offered %v, want the read tools only", names)
+	}
+	wantCalls(t, reviewerCallsOf(t, sh.Harness, reply.TurnID, "reviewer"), [2]string{journal.ToolCallError, "not_offered"})
+	sh.wantNothingSent(t, reply.TurnID)
+}
+
+// The referee payload of a reviewer's call lists the reviewer's own earlier
+// web calls and none of the author's: with both roles holding web, the
+// author's allowed search this turn is absent from the reviewer's referee
+// request, whose prior calls are none, and each decision is put to the
+// caller's own endpoint referee.
+func TestWebSearchReviewerRefereePayloadOmitsAuthorCalls(t *testing.T) {
+	const authorQuery = "author topic query"
+	const reviewerQuery = "reviewer topic query"
+	sh := newReviewerSearchHarness(t, map[string][]fake.Step{
+		"author":   {toolStepWith(searchCall("c1", authorQuery)), allowReply(), enginetest.Reply(authorText)},
+		"reviewer": {toolStepWith(searchCall("r1", reviewerQuery)), allowReply(), approveStep()},
+	})
+	reply, err := sh.Engine.Submit(toolReq("s1", "bothweb", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+	wantCalls(t, toolCalls(t, sh.Harness, reply.TurnID), [2]string{journal.ToolCallExecuted, ""})
+	wantCalls(t, reviewerCallsOf(t, sh.Harness, reply.TurnID, "reviewer"), [2]string{journal.ToolCallExecuted, ""})
+
+	authorRef := refereeRequestsOf(sh.Harness, "author")
+	reviewerRef := refereeRequestsOf(sh.Harness, "reviewer")
+	if len(authorRef) != 1 || len(reviewerRef) != 1 {
+		t.Fatalf("%d referee requests through the author's endpoint and %d through the reviewer's, want one each", len(authorRef), len(reviewerRef))
+	}
+	payload := reviewerRef[0].Messages[len(reviewerRef[0].Messages)-1].Content
+	if reviewerRef[0].Envelope.Participant != "reviewer" || !strings.Contains(payload, `"web_search" "`+reviewerQuery+`"`) {
+		t.Fatalf("reviewer's referee request %+v %q, want the reviewer's query as the reviewer's attempt", reviewerRef[0].Envelope, payload)
+	}
+	if strings.Contains(payload, authorQuery) || !strings.Contains(payload, "prior calls this turn:\nnone\n") {
+		t.Fatalf("reviewer's referee payload %q, want no prior calls: the author's search is not the reviewer's", payload)
+	}
+	attempts := refereeAttempts(t, sh.Harness, reply.TurnID)
+	var callers []string
+	for _, a := range attempts {
+		callers = append(callers, a.Participant)
+	}
+	if strings.Join(callers, ",") != "author,reviewer" {
+		t.Fatalf("referee attempts accounted to %v, want the author's then the reviewer's", callers)
+	}
+	if lookups, dials := sh.net.counts(); lookups != 2 || dials != 2 || len(sh.server.requests()) != 2 {
+		t.Fatalf("lookups %d dials %d provider requests %d, want two of each", lookups, dials, len(sh.server.requests()))
+	}
+}
