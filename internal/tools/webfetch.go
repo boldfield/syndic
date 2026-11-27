@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,40 +15,32 @@ type WebFetcher interface {
 	Fetch(ctx context.Context, rawURL string) (*http.Response, error)
 }
 
-// WebFetchTools executes web_fetch calls for one attempt of one turn. Each fetch
-// is screened, refereed, and pinned to a validated address. Redirects to the
-// same host are followed with repeated screening and refereeing; redirects to a
-// different host are returned as data. After three hops, the fourth is refused.
+// WebFetchTools executes web_fetch calls for one attempt of one turn. The fetch
+// request is sent through a WebFetcher (e.g., PinnedFetcher), which applies
+// pre-send checks, refereeing, and address validation. WebFetchTools handles
+// redirects: same-host redirects are followed with the fetch retried; cross-host
+// redirects are returned as data. After three hops, the fourth is refused.
 type WebFetchTools struct {
-	screener *URLScreener
-	referee  Referee
-	fetcher  WebFetcher
-	turnID   string
-	caller   string
-	callID   string
-	// recordRefereeDecision is called by Fetch to record each referee decision.
-	recordRefereeDecision func(ctx context.Context, url string, verdict bool, reason string) error
+	fetcher        WebFetcher
+	maxResultBytes int
 }
 
-// NewWebFetchTools returns a fetcher for one attempt. All components are required.
-func NewWebFetchTools(screener *URLScreener, referee Referee, fetcher WebFetcher,
-	turnID, caller, callID string,
-	recordRefereeDecision func(ctx context.Context, url string, verdict bool, reason string) error) *WebFetchTools {
+// NewWebFetchTools returns a fetcher for one attempt. maxResultBytes <= 0 selects
+// DefaultMaxResultBytes. The fetcher parameter is required.
+func NewWebFetchTools(fetcher WebFetcher, maxResultBytes int) *WebFetchTools {
+	if maxResultBytes <= 0 {
+		maxResultBytes = DefaultMaxResultBytes
+	}
 	return &WebFetchTools{
-		screener:              screener,
-		referee:               referee,
-		fetcher:               fetcher,
-		turnID:                turnID,
-		caller:                caller,
-		callID:                callID,
-		recordRefereeDecision: recordRefereeDecision,
+		fetcher:        fetcher,
+		maxResultBytes: maxResultBytes,
 	}
 }
 
-// Fetch executes a web_fetch call with the given arguments. It applies pre-send
-// checks, consults the referee, and handles redirects. Same-host redirects are
-// followed with repeated checks and refereeing; cross-host redirects are returned
-// as data. After three hops, the fourth is refused.
+// Fetch executes a web_fetch call with the given arguments. It delegates screening,
+// refereeing and address validation to the WebFetcher. Same-host redirects are
+// followed with the fetch retried; cross-host redirects are returned as data.
+// After three hops the fourth is refused.
 func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawMessage) (Result, error) {
 	var parsed struct {
 		URL string `json:"url"`
@@ -59,33 +52,14 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 		return Result{ErrorCode: ErrCodeBadArguments}, nil
 	}
 
-	// Follow redirects up to 3 hops (fourth is refused).
-	for hop := 0; hop < 3; hop++ {
-		// Apply pre-send checks.
-		verdict := w.screener.Screen(parsed.URL)
-		if !verdict.Allowed {
-			return Result{ErrorCode: verdict.Rule}, nil
+	// Follow redirects up to 3 hops; refuse the 4th.
+	for hop := 0; hop < 4; hop++ {
+		if hop == 3 {
+			return Result{ErrorCode: "redirect_limit"}, nil
 		}
 
-		// Consult the referee.
-		if w.recordRefereeDecision != nil {
-			allow, reason, err := w.referee.Allow(ctx, parsed.URL)
-			if err != nil {
-				_ = w.recordRefereeDecision(ctx, parsed.URL, false, err.Error())
-				return Result{ErrorCode: "referee_error"}, nil
-			}
-			_ = w.recordRefereeDecision(ctx, parsed.URL, allow, reason)
-			if !allow {
-				return Result{ErrorCode: RuleReferee}, nil
-			}
-		} else {
-			allow, _, err := w.referee.Allow(ctx, parsed.URL)
-			if err != nil || !allow {
-				return Result{ErrorCode: RuleReferee}, nil
-			}
-		}
-
-		// Fetch the URL with pinned connection.
+		// Fetch through the WebFetcher, which applies screening, refereeing and
+		// address validation.
 		resp, err := w.fetcher.Fetch(ctx, parsed.URL)
 		if err != nil {
 			if refErr, ok := err.(*RefusalError); ok {
@@ -93,11 +67,11 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 			}
 			return Result{ErrorCode: "fetch_error"}, nil
 		}
-		defer func() { _ = resp.Body.Close() }()
 
-		// Handle redirects (3xx status).
+		// Handle redirects (3xx status). Close body before continuing the loop.
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			location := resp.Header.Get("Location")
+			_ = resp.Body.Close()
 			if location == "" {
 				return Result{ErrorCode: "invalid_redirect"}, nil
 			}
@@ -127,22 +101,23 @@ func (w *WebFetchTools) Fetch(ctx context.Context, callID string, args json.RawM
 			continue
 		}
 
-		// Not a redirect: read and return the response body.
-		body, err := io.ReadAll(resp.Body)
+		// Not a redirect: read and return the response body, bounded by maxResultBytes.
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(w.maxResultBytes)+1))
+		_ = resp.Body.Close()
 		if err != nil {
 			return Result{ErrorCode: "read_error"}, nil
 		}
 
 		// Check result size.
-		maxBytes := DefaultMaxResultBytes
-		if len(body) > maxBytes {
-			return Result{ErrorCode: ErrCodeTooLarge}, nil
+		if len(body) > w.maxResultBytes {
+			msg := fmt.Sprintf("result too large (%d > %d bytes)", len(body)-1, w.maxResultBytes)
+			return Result{ErrorCode: ErrCodeTooLarge, Content: []byte(msg)}, nil
 		}
 
 		return Result{Content: body}, nil
 	}
 
-	// Fourth hop: refused.
+	// Should not reach here.
 	return Result{ErrorCode: "redirect_limit"}, nil
 }
 
