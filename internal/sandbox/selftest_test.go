@@ -3,6 +3,7 @@ package sandbox_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,5 +97,33 @@ func TestSelfTestHelperProbes(t *testing.T) {
 	}
 	if code := sandbox.SelfTestHelper([]string{"bogus"}, &out); code != 2 {
 		t.Errorf("unknown mode: code %d, want 2", code)
+	}
+}
+
+// buildSyndicd builds the engine binary, which carries the hidden helper.
+func buildSyndicd(t *testing.T) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "syndicd")
+	cmd := exec.Command("go", "build", "-o", out, "github.com/boldfield/syndic/cmd/syndicd")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building syndicd: %v\n%s", err, b)
+	}
+	return out
+}
+
+// runSelfTestOn runs the start-of-run self-test against a real backend with
+// the built engine as the helper.
+func runSelfTestOn(t *testing.T, b sandbox.Backend, sys sandbox.SystemLocations) {
+	t.Helper()
+	cfg := sandbox.SelfTestConfig{
+		Argv:   func(c string) []string { return []string{"/bin/sh", "-c", c} },
+		Path:   strings.Join(sys.Path, ":"),
+		System: sys,
+		Dir:    t.TempDir(),
+		Helper: buildSyndicd(t),
+	}
+	if err := sandbox.RunAtStart(context.Background(), b, cfg).Err(); err != nil {
+		t.Fatal(err)
 	}
 }

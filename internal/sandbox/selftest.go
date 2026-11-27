@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,6 +102,9 @@ type SelfTestConfig struct {
 	Path string
 	// System is the closed list of read-only locations a command gets.
 	System SystemLocations
+	// StateDir is the engine's state directory, where check 2 creates the
+	// file the command must not read. Empty means a stand-in under Dir.
+	StateDir string
 	// Dir is where the self-test creates its directories, files and
 	// listener: the state-directory stand-in, the directory outside every
 	// allowed location, and each call's scratch and temporary directories.
@@ -286,6 +288,18 @@ func (st *selfTest) call(ctx context.Context, name string, build func(helper str
 			return callResult{}, err
 		}
 	}
+	if proxy == nil && st.cfg.NetworkList && st.cfg.Network != nil {
+		// A network list is in force, so every command gets what a real one
+		// would: its own listener and credential.
+		fx, err := st.cfg.Network()
+		if err != nil {
+			return callResult{}, fmt.Errorf("opening proxy fixture: %w", err)
+		}
+		if fx.Close != nil {
+			defer fx.Close()
+		}
+		proxy = &fx
+	}
 	helper := filepath.Join(tmp, "selftest-helper")
 	if err := st.placeHelper(helper); err != nil {
 		return callResult{}, fmt.Errorf("placing helper: %w", err)
@@ -450,13 +464,22 @@ func (st *selfTest) checkTrue(ctx context.Context) error {
 }
 
 func (st *selfTest) checkReadState(ctx context.Context) error {
-	state := filepath.Join(st.root, "state")
+	state := st.cfg.StateDir
+	if state == "" {
+		state = filepath.Join(st.root, "state")
+	}
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		return err
 	}
-	file := filepath.Join(state, "engine-state")
-	if err := os.WriteFile(file, []byte("engine state"), 0o600); err != nil {
+	f, err := os.CreateTemp(state, "selftest-")
+	if err != nil {
 		return err
+	}
+	file := f.Name()
+	defer func() { _ = os.Remove(file) }()
+	_, werr := f.WriteString("engine state")
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		return errors.Join(werr, cerr)
 	}
 	r, err := st.call(ctx, "read", func(h string) string { return helperCmd(h, "read-denied", file) }, nil)
 	if err != nil {
@@ -538,44 +561,52 @@ func (st *selfTest) checkLoopback(ctx context.Context) error {
 	return observed(r, "connection to a loopback listener was not denied")
 }
 
+// checkDetach has the helper start a sleeper in a new session that holds a
+// lock on a file in the call's temporary directory. The lock is the
+// sleeper's identity: it is observable from the engine whatever process
+// namespace the backend gives the command, and it is released only when
+// the sleeper is gone.
 func (st *selfTest) checkDetach(ctx context.Context) error {
-	r, err := st.call(ctx, "detach", func(h string) string { return helperCmd(h, "detach") }, nil)
+	var lock string
+	r, err := st.call(ctx, "detach", func(helper string) string {
+		lock = filepath.Join(filepath.Dir(helper), "detach.lock")
+		_ = os.WriteFile(lock, nil, 0o600)
+		return helperCmd(helper, "detach", lock)
+	}, nil)
 	if err != nil {
 		return err
 	}
 	if err := observed(r, "detaching helper"); err != nil {
 		return err
 	}
-	fields := strings.Fields(r.output)
-	pid, perr := strconv.Atoi(fields[len(fields)-1])
-	if perr != nil || pid <= 0 {
-		return fmt.Errorf("detaching helper reported no process id: %q", truncate(r.output))
-	}
 	deadline := time.Now().Add(2 * time.Second)
-	for !processGone(pid) {
+	for !lockFree(lock) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("detached process %d survived the call", pid)
+			return errors.New("the detached process survived the call")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return nil
 }
 
-// processGone reports whether pid no longer exists; a zombie awaiting its
-// reaper counts as gone, since it runs nothing.
-func processGone(pid int) bool {
-	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-		return true
-	}
-	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+// lockHeld reports whether a process holds the lock on path.
+func lockHeld(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return false
 	}
-	// The state follows the parenthesised command name.
-	if i := bytes.LastIndexByte(stat, ')'); i >= 0 && i+2 < len(stat) {
-		return stat[i+2] == 'Z'
+	defer func() { _ = f.Close() }()
+	return errors.Is(syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB), syscall.EWOULDBLOCK)
+}
+
+// lockFree reports whether no process holds the lock on path.
+func lockFree(path string) bool {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return false
 	}
-	return false
+	defer func() { _ = f.Close() }()
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
 }
 
 func (st *selfTest) checkProxy(ctx context.Context) error {
@@ -649,9 +680,15 @@ func SelfTestHelper(args []string, stdout io.Writer) int {
 		}
 		return helperProxyRequest(args[1], stdout)
 	case "detach":
-		return helperDetach(stdout)
-	case "sleep":
-		time.Sleep(helperSleepLimit)
+		if len(args) != 2 {
+			return 2
+		}
+		return helperDetach(args[1], stdout)
+	case "sleep-locked":
+		if len(args) != 2 {
+			return 2
+		}
+		return helperSleepLocked(args[1])
 	default:
 		return 2
 	}
@@ -686,20 +723,44 @@ func helperProxyRequest(host string, stdout io.Writer) int {
 
 // helperDetach starts one sleeper in a new session and exits, leaving it for
 // the backend's containment to end. The sleeper's own time limit bounds it
-// should the backend fail to.
-func helperDetach(stdout io.Writer) int {
+// should the backend fail to. The helper reports success only once the
+// sleeper holds the lock on lock, so that a lock the engine later finds free
+// means the sleeper is gone.
+func helperDetach(lock string, stdout io.Writer) int {
 	exe, err := os.Executable()
 	if err != nil {
 		say(stdout, "no executable:", err)
 		return 1
 	}
-	cmd := exec.Command(exe, SelfTestHelperArg, "sleep")
+	cmd := exec.Command(exe, SelfTestHelperArg, "sleep-locked", lock)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		say(stdout, "start failed:", err)
 		return 1
 	}
-	say(stdout, selfTestOK, cmd.Process.Pid)
+	deadline := time.Now().Add(helperDialLimit)
+	for time.Now().Before(deadline) {
+		if lockHeld(lock) {
+			say(stdout, selfTestOK)
+			return 0
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	say(stdout, "the sleeper never took its lock")
+	return 1
+}
+
+// helperSleepLocked holds a lock on path, creating it, until the time limit.
+func helperSleepLocked(path string) int {
+	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return 1
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return 1
+	}
+	time.Sleep(helperSleepLimit)
 	return 0
 }
 
