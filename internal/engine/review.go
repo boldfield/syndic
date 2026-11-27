@@ -30,6 +30,23 @@ type reviewerDispatch struct {
 	participant string
 	attemptID   string
 	req         transport.CompleteRequest
+	// limited marks a reviewer attempt sent without definitions because the
+	// reviewer reached its bound; toolsInPlay marks any attempt of a review
+	// the preset gives lookups, whatever that attempt itself carries.
+	limited     bool
+	toolsInPlay bool
+	// delimiter is the one fencing the candidate in the review's first
+	// attempt, which a later attempt and a repair rebuild the prompt with.
+	delimiter string
+}
+
+// reviewerStep is the executed lookup step a reviewer's next attempt carries:
+// the request and result it answered and the outcome of its calls.
+type reviewerStep struct {
+	prior     transport.CompleteRequest
+	res       transport.CompleteResult
+	out       toolStepOutcome
+	delimiter string
 }
 
 func (e *Engine) participantConfig(id string) config.Participant {
@@ -240,7 +257,11 @@ func (e *Engine) startReviewer(t *openTurn, id string) {
 // through the scheduler, so it queues behind work already waiting in its pool.
 func (e *Engine) runReviewer(t *openTurn, d reviewerDispatch) {
 	res, fail := e.complete(t, d.participant, d.req)
-	repair := e.completeReviewer(t, d, res, fail)
+	repair, step := e.completeReviewer(t, d, res, fail)
+	if step {
+		e.executeReviewerStep(t, d, res)
+		return
+	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -281,24 +302,43 @@ func (e *Engine) startRepair(t *openTurn, orig reviewerDispatch, original string
 // beginReviewer records the request message and the attempt for one
 // reviewer in one transaction. e.mu is held.
 func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispatch, error) {
+	return e.dispatchReviewer(t, id, nil, last)
+}
+
+// dispatchReviewer records one reviewer attempt in one transaction: the first
+// of its review of the candidate when step is nil, otherwise the one carrying
+// an executed lookup step and its results. The attempt carries the lookup
+// definitions the preset gives reviewers, or none and the statement that no
+// further lookups are available once the reviewer's bound is reached. A
+// continuation is checked by reservation alone. e.mu is held.
+func (e *Engine) dispatchReviewer(t *openTurn, id string, step *reviewerStep, last bool) (reviewerDispatch, error) {
 	p := e.participantConfig(id)
 	maxOut := budget.ClampOutput(*t.eff.Budgets.ReviewerMaxOutputTokens, e.built.Participants[id].OutputBound)
 	deadline := e.attemptDeadline(t)
 
+	defs, limited, err := e.reviewerToolDefs(t, id)
+	if err != nil {
+		return reviewerDispatch{}, err
+	}
+
 	var d reviewerDispatch
-	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
+	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		turn, err := tx.GetTurn(t.id)
 		if err != nil {
 			return err
 		}
-		// The packet is regenerated from the journal at every dispatch, never
-		// from the live workspace.
-		if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
-			return err
-		}
-		delimiter, err := e.newDelimiter(t)
-		if err != nil {
-			return err
+		var delimiter string
+		if step != nil {
+			delimiter = step.delimiter
+		} else {
+			// The packet is regenerated from the journal at every dispatch,
+			// never from the live workspace.
+			if t.pkt, err = packetFor(tx, t.id, t.author); err != nil {
+				return err
+			}
+			if delimiter, err = e.newDelimiter(t); err != nil {
+				return err
+			}
 		}
 		attemptID, err := tx.BeginAttemptWith(journal.AttemptParams{
 			TurnID:          t.id,
@@ -312,16 +352,35 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err != nil {
 			return err
 		}
-		blocks, err := tx.ReviewerOpenBlocks(t.id, id)
-		if err != nil {
-			return err
+		var msgs []transport.Message
+		var request string
+		if step == nil {
+			blocks, err := tx.ReviewerOpenBlocks(t.id, id)
+			if err != nil {
+				return err
+			}
+			if msgs, err = t.reviewerMessages(attemptID, delimiter, blocks); err != nil {
+				return err
+			}
+			if limited {
+				msgs = append(msgs, transport.Message{Role: "user", Content: reviewerLimitStatement})
+			}
+			// The journaled request is the user message: the request and the
+			// candidate, fenced.
+			request = msgs[len(msgs)-1].Content
+		} else {
+			if msgs, request, err = e.toolStepMessages(step.prior, step.res, step.out, false); err != nil {
+				return err
+			}
+			// The attempt id the verdict must echo is this attempt's, not
+			// the first attempt's the earlier messages name.
+			note := reviewerAttemptNote(attemptID)
+			if limited {
+				note = reviewerLimitStatement + "\n" + note
+			}
+			msgs = append(msgs, transport.Message{Role: "user", Content: note})
+			request += note
 		}
-		msgs, err := t.reviewerMessages(attemptID, delimiter, blocks)
-		if err != nil {
-			return err
-		}
-		// The tool definitions the request carries; no dispatch sends any yet.
-		var defs []transport.Tool
 		estimated, err := e.reserve(tx, t, id, msgs, defs, maxOut)
 		if err != nil {
 			return err
@@ -329,10 +388,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		if err := tx.SetAttemptEstimate(attemptID, estimated); err != nil {
 			return err
 		}
-		// The journaled request is the user message: the request and the
-		// candidate, fenced.
-		content := []byte(msgs[len(msgs)-1].Content)
-		msgID, sum, size, err := tx.AppendMessage(t.id, phaseReview, senderEngine, []string{id}, content, nil)
+		msgID, sum, size, err := tx.AppendMessage(t.id, phaseReview, senderEngine, []string{id}, []byte(request), nil)
 		if err != nil {
 			return err
 		}
@@ -363,7 +419,7 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		}); err != nil {
 			return err
 		}
-		if last {
+		if step == nil && last {
 			if err := emit(t.id, wire.EventKindTurnState, wire.EvTurnState{TurnID: t.id, State: StateReviewersDispatched}); err != nil {
 				return err
 			}
@@ -371,6 +427,9 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		d = reviewerDispatch{
 			participant: id,
 			attemptID:   attemptID,
+			limited:     limited,
+			delimiter:   delimiter,
+			toolsInPlay: limited || len(defs) > 0,
 			req: transport.CompleteRequest{
 				Envelope: transport.AttemptEnvelope{
 					Participant:   id,
@@ -395,6 +454,75 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 	e.markRunning(id)
 	e.armAttempt(t, d.attemptID, d.req.Deadline)
 	return d, nil
+}
+
+// executeReviewerStep runs a reviewer's accepted lookup step with the
+// reviewer's pool slot still taken and e.mu not held, as executeToolStep does
+// for the author, and hands the reviewer's next attempt, carrying the
+// results, to the scheduler. The reviewer's calls count against its own bound
+// for this round, and no other participant sees them.
+func (e *Engine) executeReviewerStep(t *openTurn, d reviewerDispatch, res transport.CompleteResult) {
+	e.mu.Lock()
+	remaining := e.reviewerCallsRemaining(t, d.participant)
+	hook := e.beforeEffect
+	var patterns []string
+	if e.roster != nil && e.roster.Tools != nil {
+		patterns = e.roster.Tools.ProtectedPaths
+	}
+	e.mu.Unlock()
+
+	out, err := e.performToolStep(t, d.req, d.attemptID, res, remaining, patterns, hook)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id := d.participant
+	if e.open != t {
+		e.releaseLocked(id)
+		return
+	}
+	switch {
+	case errors.Is(err, errToolStepIDs):
+		e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":tool_call_ids")
+	case err != nil:
+		e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+	case out.ended != "":
+		e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":tool_step:"+out.ended)
+	default:
+		if t.reviewerCalls == nil {
+			t.reviewerCalls = map[string]int{}
+		}
+		t.reviewerCalls[id] += out.used
+		e.releaseLocked(id)
+		step := &reviewerStep{prior: d.req, res: res, out: out, delimiter: d.delimiter}
+		if err := e.schedule(t, id, func() { e.startReviewerStep(t, id, step) }); err != nil {
+			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+		}
+		return
+	}
+	e.releaseLocked(id)
+}
+
+// startReviewerStep begins the reviewer attempt that follows an executed
+// lookup step and calls the adapter on its own goroutine. It runs with e.mu
+// held and the pool slot taken. A continuation the context admission
+// refuses fails that reviewer: its lookups cannot be answered, and the turn
+// does not go on without it.
+func (e *Engine) startReviewerStep(t *openTurn, id string, step *reviewerStep) {
+	d, err := e.dispatchReviewer(t, id, step, false)
+	if err != nil {
+		if r, ok := asRefusal(err); ok && r.kind == budgetContext {
+			e.launchCancels(e.endLocked(t, StateIncomplete, reasonReviewerFailed+id+":context_admission", func(tx *journal.Tx, emit hub.Emit) error {
+				return emit(t.id, wire.EventKindBudget, r.event(t.id))
+			}))
+		} else if ok {
+			e.finishBudget(t, r)
+		} else {
+			e.finishLocked(t, StateIncomplete, reasonReviewerFailed+id+":error")
+		}
+		e.releaseLocked(id)
+		return
+	}
+	go e.runReviewer(t, d)
 }
 
 // newDelimiter returns a delimiter that appears in neither the request nor
@@ -458,6 +586,10 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 	if err != nil {
 		return nil, err
 	}
+	// The repair carries the reviewer's own earlier lookups: whatever its
+	// original request held after the prompt, and so none of another
+	// participant's.
+	msgs = withReviewerExchange(msgs, originalDispatch.req.Messages)
 	// A repair carries no tool definitions.
 	estimated, err := e.reserve(tx, t, originalDispatch.participant, msgs, nil, maxOut)
 	if err != nil {
@@ -517,12 +649,14 @@ func (e *Engine) beginRepair(tx *journal.Tx, emit hub.Emit, t *openTurn, origina
 			MaxOutputTokens: maxOut,
 			Deadline:        deadline,
 		},
+		toolsInPlay: originalDispatch.toolsInPlay,
+		delimiter:   delimiter,
 	}, nil
 }
 
 // completeReviewer runs accept, gate, parse and the decision for one
 // reviewer's result in one transaction.
-func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult, fail *failure) *string {
+func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport.CompleteResult, fail *failure) (repairText *string, step bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -542,7 +676,7 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	// transaction leaves the turn's memory as it found it.
 	err := e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		quarantined, approvedNow, revise, endState, endReason, kind = false, false, false, "", "", ""
-		repair, exceeded, term, held = false, false, nil, nil
+		repair, step, exceeded, term, held = false, false, false, nil, nil
 		evidenceResults, acceptedEvidence = nil, ""
 		accepted, err := tx.AcceptResult(d.attemptID, d.req.Envelope.Epoch, "", outputOf(res))
 		if err != nil {
@@ -569,14 +703,24 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 			return err
 		}
 		if isToolStep {
-			// Reviewer tool step accepted but not parsed as a verdict; text is
-			// journaled. No reviewer dispatch offers tool definitions yet, so
-			// a reviewer's tool step calls tools it was not offered and ends
-			// the turn; nothing of it is executed.
-			if err = tx.SetAttemptText(d.attemptID, res.Text); err != nil {
-				return err
+			// A lookup step is accepted but not parsed as a verdict; its text
+			// is journaled and nothing of it is delivered. Its calls run once
+			// this transaction commits, when the attempt offered definitions.
+			// A reply that carries calls to an attempt sent without them
+			// fails the reviewer when lookups were in play for it, and
+			// otherwise ends the turn as a step nothing was offered for.
+			switch {
+			case len(d.req.Tools) > 0:
+				step = true
+				return nil
+			case d.limited:
+				endReason = reasonReviewerFailed + d.participant + ":tool_calls_when_limited"
+			case d.toolsInPlay:
+				endReason = reasonReviewerFailed + d.participant + ":tool_calls_in_repair"
+			default:
+				endReason = reasonToolStepNotOffered
 			}
-			endState, endReason = StateIncomplete, reasonToolStepNotOffered
+			endState = StateIncomplete
 			term, err = e.endIn(tx, emit, t, endState, endReason)
 			return err
 		}
@@ -705,22 +849,27 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 	}
 	if err != nil {
 		e.finishLocked(t, StateIncomplete, fmt.Sprintf("%s%s:error", reasonReviewerFailed, d.participant))
-		return nil
+		return nil, false
 	}
 	if quarantined {
 		e.lateCommitted(d.attemptID, res)
-		return nil
+		return nil, false
 	}
 	e.failedCommitted(d.participant, fail, held)
 	if e.lastInflight(d.participant) {
 		delete(e.running, d.participant)
+	}
+	if step {
+		// Only a verdict's text is delivered at the terminal; a lookup
+		// step's text stays in the journal.
+		return nil, true
 	}
 	if t.outputs == nil {
 		t.outputs = map[string]string{}
 	}
 	t.outputs[d.attemptID] = res.Text
 	if repair {
-		return &res.Text
+		return &res.Text, false
 	}
 	if approvedNow {
 		t.approved[d.participant] = true
@@ -735,12 +884,12 @@ func (e *Engine) completeReviewer(t *openTurn, d reviewerDispatch, res transport
 		e.commitTerminal(t, term)
 		e.launchCancels(term)
 		e.deliverTerminal(t, endState, endReason)
-		return nil
+		return nil, false
 	}
 	if revise {
 		e.startRevision(t)
 	}
-	return nil
+	return nil, false
 }
 
 // recordAcceptedReview journals the reviews-drawer record of an accepted

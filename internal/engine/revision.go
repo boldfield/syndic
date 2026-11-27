@@ -66,6 +66,7 @@ func (t *openTurn) resetRound() {
 	t.approved = map[string]bool{}
 	t.outputs = nil
 	t.reviewersBegun = 0
+	t.reviewerCalls = nil
 }
 
 func historyOf(t *openTurn) *history.Document {
@@ -170,7 +171,7 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 // output bound and each required reviewer's review of a candidate as long as
 // a candidate as long as the author's output bound allows, plus the one repair
 // each may be given. authorDefs are the tool definitions the author's revision
-// carries; no review or repair dispatch sends any yet.
+// carries; each review carries the reviewer definitions the preset gives, a repair none.
 func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorDefs []transport.Tool, authorMaxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, t.author)
 	if missing != "" {
@@ -195,7 +196,11 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 			return 0, fmt.Errorf("engine: participant %q lacks %s", id, missing)
 		}
 		maxOut := rb.maxOutput(*t.eff.Budgets.ReviewerMaxOutputTokens)
-		total = satAdd(total, satAdd(rb.estimate(msgs, nil), maxOut))
+		defs, _, err := e.roleToolDefs(t, t.eff.Preset.ReviewerTools, id, 1)
+		if err != nil {
+			return 0, err
+		}
+		total = satAdd(total, satAdd(rb.estimate(msgs, defs), maxOut))
 		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
 		if err != nil {
 			return 0, err
