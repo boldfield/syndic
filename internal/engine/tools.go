@@ -507,9 +507,14 @@ func (e *Engine) fileEffects(effects map[string]toolEffect, fs *workspace.Confin
 					return tools.Result{}, err
 				}
 			}
-			// What the call exposes or stages is canary material for the
-			// turn's searches, whatever the call's outcome.
-			e.exposeToSearch(t, route, args)
+			// What the call stages is canary material for the turn's
+			// searches, whatever the call's outcome: a write's content and
+			// an edit's arguments carry workspace bytes. A read's arguments
+			// are the model's own paths and patterns; only what it returns
+			// is snapshot content.
+			if route == tools.RouteStagedWrite {
+				e.exposeToSearch(t, route, args)
+			}
 			res, err := run(call.ID, args)
 			if err == nil {
 				e.exposeToSearch(t, route, res.Content)

@@ -467,6 +467,8 @@ type HistoryTurn struct {
 	// Answer is the frozen candidate, or for a solo turn the author's reply.
 	// It is empty for a turn that ended without one.
 	Answer string
+	// FileTainted is the turn's file_tainted flag.
+	FileTainted bool
 }
 
 // ConversationHistory returns the conversation's finished turns, oldest
@@ -480,7 +482,8 @@ func (tx *Tx) ConversationHistory(conversationID string) ([]HistoryTurn, error) 
 			COALESCE((SELECT c.content FROM candidates c WHERE c.id = t.candidate_id),
 				(SELECT a.text FROM attempts a
 					WHERE a.turn_id = t.id AND a.phase = 'author' AND a.text IS NOT NULL
-					ORDER BY a.rowid DESC LIMIT 1), '')
+					ORDER BY a.rowid DESC LIMIT 1), ''),
+			t.file_tainted
 		FROM turns t
 		WHERE t.conversation_id = ? AND t.terminal_state IS NOT NULL
 		ORDER BY t.rowid ASC
@@ -492,7 +495,7 @@ func (tx *Tx) ConversationHistory(conversationID string) ([]HistoryTurn, error) 
 	var turns []HistoryTurn
 	for rows.Next() {
 		var h HistoryTurn
-		if err := rows.Scan(&h.ID, &h.State, &h.Mode, &h.Input, &h.Answer); err != nil {
+		if err := rows.Scan(&h.ID, &h.State, &h.Mode, &h.Input, &h.Answer, &h.FileTainted); err != nil {
 			return nil, fmt.Errorf("scan history turn: %w", err)
 		}
 		turns = append(turns, h)

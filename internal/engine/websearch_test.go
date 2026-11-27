@@ -414,3 +414,76 @@ func TestWebSearchQueryCarryingReviewerDiffBytesRefused(t *testing.T) {
 	wantCalls(t, toolCalls(t, h, reply.TurnID), [2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
 	wantCanaryRefused(t, h, reply.TurnID, res, secrets)
 }
+
+// An answer written in a conversation that never carried file content is
+// not file-derived: a later turn's query carrying it is not refused by the
+// canary and goes to the referee.
+func TestWebSearchQueryCarryingUntaintedHistoryReachesReferee(t *testing.T) {
+	const phrase = "ordinary assistant phrase with enough bytes"
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		enginetest.Reply(phrase),
+		searchCall("s1", phrase),
+		enginetest.Reply("deny the query is not about the task"),
+		enginetest.Reply("final answer"),
+	}
+	roster := refereeRoster(searchTOML) + `
+[presets.webonly]
+mode = "solo"
+author = "author"
+required_reviewers = []
+tools = ["web"]
+`
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, roster, map[string][]fake.Step{"author": script}, opts...)
+	dir := workspaceDir(t)
+	first, err := h.Engine.Submit(toolReq("s1", "webonly", dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, first.TurnID, engine.StateSoloComplete, "solo_ok")
+	req := toolReq("s2", "webonly", dir)
+	req.ConversationID = &first.ConversationID
+	second, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, second.TurnID, engine.StateSoloComplete, "solo_ok")
+	if n := len(refereeAttempts(t, h, second.TurnID)); n != 1 {
+		t.Fatalf("%d referee attempts, want the untainted query refereed once", n)
+	}
+	if res.lookups() != 0 || secrets.reads() != 0 {
+		t.Fatalf("denied query: %d lookups, %d secret reads", res.lookups(), secrets.reads())
+	}
+}
+
+// A read's arguments are the model's own path, not snapshot content: a query
+// carrying a path the turn read (whose content is unrelated) is not refused
+// by the canary and goes to the referee.
+func TestWebSearchQueryCarryingReadPathReachesReferee(t *testing.T) {
+	const name = "ordinary-search-topic-123.txt"
+	dir := workspaceDir(t)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, secrets := &recordingResolver{addrs: []netip.Addr{netip.MustParseAddr("93.184.216.34")}}, &recordingSecrets{}
+	script := []fake.Step{
+		toolStepWith(call("r1", tools.NameReadFile, `{"path":"`+name+`"}`)),
+		searchCall("s1", name),
+		enginetest.Reply("deny the query is not about the task"),
+		enginetest.Reply("final answer"),
+	}
+	opts := append(refereeOpts(), enginetest.WithSearch(fakeSearchProvider{}, res, secrets))
+	h := enginetest.New(t, refereeRoster(searchTOML), map[string][]fake.Step{"author": script}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "web", dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
+	if n := len(refereeAttempts(t, h, reply.TurnID)); n != 1 {
+		t.Fatalf("%d referee attempts, want the query refereed once", n)
+	}
+	if res.lookups() != 0 || secrets.reads() != 0 {
+		t.Fatalf("denied query: %d lookups, %d secret reads", res.lookups(), secrets.reads())
+	}
+}

@@ -108,9 +108,11 @@ func (e *Engine) searchScreenerOf(t *openTurn) *tools.URLScreener {
 }
 
 // searchScreenerLocked is searchScreenerOf with e.mu held. The screener is
-// created seeded with the answer and change fields of the turn's history
-// document, which is frozen at submit; its input fields are the user's own
-// words and are not canary material.
+// created seeded with the answer and change fields of the file-tainted turns
+// of the turn's history document, which is frozen at submit (v5 delta
+// section 6, egress of file-derived content). An untainted turn's answer
+// never carried workspace bytes, and the input fields are the user's own
+// words; neither is canary material.
 func (e *Engine) searchScreenerLocked(t *openTurn) *tools.URLScreener {
 	if t.searchScreener == nil {
 		max := 0
@@ -125,6 +127,9 @@ func (e *Engine) searchScreenerLocked(t *openTurn) *tools.URLScreener {
 		}
 		if t.history != nil {
 			for _, h := range t.history.Included() {
+				if !t.historyTainted[h.ID] {
+					continue
+				}
 				s.AddBytes(tools.RouteHistory, h.Answer)
 				for _, c := range h.Changes {
 					s.AddBytes(tools.RouteHistory, []byte(c.Outcome+" "+c.Path))

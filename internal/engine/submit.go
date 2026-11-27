@@ -77,6 +77,9 @@ type openTurn struct {
 	// searchBases are the staged bases already given to searchScreener, by
 	// content hash.
 	searchBases map[string]bool
+	// historyTainted holds the ids of the file-tainted turns of history:
+	// only their answer and change fields are file-derived.
+	historyTainted map[string]bool
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
@@ -305,6 +308,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	var (
 		turnID, convID, contextHash, workspace string
 		doc                                    *history.Document
+		historyTainted                         map[string]bool
 		rec                                    budgetRecord
 	)
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
@@ -336,7 +340,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		// The history is rendered once, here, and admission, the stored
 		// document and the context hash are all taken from these bytes.
-		if doc, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
+		if doc, historyTainted, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
 			return err
 		}
 		// The taint comes from every turn the journal records for the
@@ -417,6 +421,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		author:          eff.Preset.Author,
 		input:           req.Input,
 		history:         doc,
+		historyTainted:  historyTainted,
 		contextHash:     contextHash,
 		eff:             eff,
 		attemptDeadline: attempt,
