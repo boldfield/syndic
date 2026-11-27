@@ -48,6 +48,9 @@ type Sandbox struct {
 // list and whether the proxy is in use, and under the none backend the
 // opt-out line.
 func sandboxRecord(sb *Sandbox) (map[string]interface{}, error) {
+	if sb.Backend == nil {
+		return nil, fmt.Errorf("sandbox record: no backend")
+	}
 	hash, err := sb.Policy.Hash()
 	if err != nil {
 		return nil, fmt.Errorf("hash sandbox policy: %w", err)
