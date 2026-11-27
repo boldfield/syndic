@@ -357,8 +357,11 @@ func TestV6CoverageMaintainedBlockShownInChatWithDrawerClosed(t *testing.T) {
 		t.Fatalf("the drawer is showing:\n%s", v)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	covWaitView(t, r, "Reviews · Turn 1 · [*1* 2]") // the drawer opens at its last row
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	covWaitView(t, r, "Reviews · Turn 1 · [*1* 2]", "b1: opened", ":b1", ":b2")
 	send(r, tea.KeyMsg{Type: tea.KeyRight})
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	covWaitView(t, r, "Reviews · Turn 1 · [1 *2*]", "b1: maintained", "b2: opened", ":b1", ":b2")
 }
 

@@ -300,6 +300,7 @@ func TestV6AdversarialContentInDrawer(t *testing.T) {
 		Commentary: &wire.ContentReference{Ref: "c-hostile"},
 	}}})
 	openDrawerSettled(t, a)
+	keys(a, tea.KeyHome)
 	v := a.View()
 	onlyControlFree(t, "drawer", v)
 	for _, want := range []string{`\x1b`, `\u202e`, `\u2067`, "END"} {

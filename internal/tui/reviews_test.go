@@ -139,23 +139,25 @@ func TestReviewsDrawerUpdateReviews(t *testing.T) {
 }
 
 func TestReviewsDrawerScroll(t *testing.T) {
-	d := NewReviewsDrawer()
-	d.SetTurns([]string{"turn1"})
-	d.Open(0, false)
-
-	d.ScrollDown(2, 20)
-	if d.scrollOffset != 2 {
-		t.Errorf("after ScrollDown(2), scrollOffset = %d, want 2", d.scrollOffset)
+	d := reviewsDrawerOf(40, 7)
+	cc := NewContentCache()
+	_, _, first, bottom, _ := d.layout(80, cc)
+	last := first
+	if !bottom {
+		t.Fatal("the drawer does not open at the bottom")
 	}
 
-	d.ScrollUp(1)
-	if d.scrollOffset != 1 {
-		t.Errorf("after ScrollUp(1), scrollOffset = %d, want 1", d.scrollOffset)
+	d.Scroll(-2, 80, cc)
+	if _, _, first, bottom, _ = d.layout(80, cc); first != last-2 || bottom {
+		t.Errorf("after Scroll(-2), first = %d bottom = %v, want %d away", first, bottom, last-2)
 	}
-
-	d.ScrollUp(5)
-	if d.scrollOffset != 0 {
-		t.Errorf("after ScrollUp(5), scrollOffset = %d, want 0", d.scrollOffset)
+	d.Scroll(1, 80, cc)
+	if _, _, first, _, _ = d.layout(80, cc); first != last-1 {
+		t.Errorf("after Scroll(1), first = %d, want %d", first, last-1)
+	}
+	d.Scroll(-500, 80, cc)
+	if _, _, first, _, _ = d.layout(80, cc); first != 0 {
+		t.Errorf("after Scroll(-500), first = %d, want 0", first)
 	}
 }
 
@@ -299,18 +301,15 @@ func TestReviewsDrawerPaging(t *testing.T) {
 	if contentLines <= 10 {
 		t.Fatalf("fixture too small to page: %d lines", contentLines)
 	}
-	{
-		initialOffset := d.scrollOffset
-		drawerHeight := 7
-		d.ScrollDown(drawerHeight, contentLines)
-		if d.scrollOffset <= initialOffset {
-			t.Error("scroll down should increase offset when content > viewport")
-		}
-
-		d.ScrollUp(drawerHeight)
-		if d.scrollOffset >= drawerHeight {
-			t.Error("scroll up should decrease offset")
-		}
+	d.SetDrawerHeight(7)
+	_, _, bottomFirst, _, _ := d.layout(80, cc)
+	d.Scroll(-6, 80, cc)
+	if _, _, first, _, _ := d.layout(80, cc); first != bottomFirst-6 {
+		t.Errorf("a page up moved the first row to %d, want %d", first, bottomFirst-6)
+	}
+	d.Scroll(6, 80, cc)
+	if _, _, first, bottom, _ := d.layout(80, cc); first != bottomFirst || !bottom {
+		t.Errorf("a page down did not return to the bottom: first %d bottom %v", first, bottom)
 	}
 }
 
@@ -722,6 +721,8 @@ func TestReviewsDrawerRoundsAndScrollEndToEnd(t *testing.T) {
 	})
 
 	send(r, tea.KeyMsg{Type: tea.KeyCtrlO})
+	untilView(t, r, "Reviews · Turn 1 · [*1* 2]") // the drawer opens at its last row
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	v := untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "b1: opened", "e00")
 	if strings.Contains(v, "b1: withdrawn") || strings.Contains(v, "remedy-tail") {
 		t.Fatalf("round 1 shows round 2's state, or content past the drawer:\n%s", v)
@@ -730,8 +731,8 @@ func TestReviewsDrawerRoundsAndScrollEndToEnd(t *testing.T) {
 	// PgDn reaches the remedy below the evidence; PgUp returns to the top.
 	send(r, tea.KeyMsg{Type: tea.KeyPgDown})
 	v = untilView(t, r, "remedy-tail")
-	if strings.Contains(v, "Reviews · Turn 1") {
-		t.Fatalf("PgDn did not scroll the header away:\n%s", v)
+	if strings.Contains(v, "e00") {
+		t.Fatalf("PgDn did not scroll the first rows away:\n%s", v)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyPgUp})
 	v = untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "e00")
@@ -740,11 +741,13 @@ func TestReviewsDrawerRoundsAndScrollEndToEnd(t *testing.T) {
 	}
 
 	send(r, tea.KeyMsg{Type: tea.KeyRight})
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	v = untilView(t, r, "Reviews · Turn 1 · [1 *2*]", "b1: withdrawn")
 	if strings.Contains(v, "b1: opened") {
 		t.Fatalf("round 2 still shows round 1's state:\n%s", v)
 	}
 	send(r, tea.KeyMsg{Type: tea.KeyLeft})
+	send(r, tea.KeyMsg{Type: tea.KeyHome})
 	untilView(t, r, "Reviews · Turn 1 · [*1* 2]", "b1: opened")
 }
 
@@ -850,8 +853,8 @@ func TestDrawerAnimationRender(t *testing.T) {
 	partial := rows(false)
 	slide(t, d)
 	full := rows(false)
-	if partial >= full || full != 11 {
-		t.Errorf("partial = %d rows, full = %d, want fewer than the 11 of a whole drawer", partial, full)
+	if partial >= full || full != 10 {
+		t.Errorf("partial = %d rows, full = %d, want fewer than the 10 of a whole drawer", partial, full)
 	}
 	// Plain mode shows every row whatever the slide.
 	d.Close(false)
@@ -914,4 +917,18 @@ func TestDrawerNoRenderWhenFullyClosed(t *testing.T) {
 	if output != "" {
 		t.Errorf("fully closed drawer should not render, got %q", output)
 	}
+}
+
+// reviewsDrawerOf is an open drawer on one turn with n reviewers in one round, as tall as height.
+func reviewsDrawerOf(n, height int) *ReviewsDrawer {
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.SetDrawerHeight(height)
+	d.Open(0, true)
+	var items []wire.ReviewItem
+	for i := 0; i < n; i++ {
+		items = append(items, wire.ReviewItem{Participant: fmt.Sprintf("p%02d", i), Kind: "approve"})
+	}
+	d.UpdateReviews("turn1", items)
+	return d
 }
