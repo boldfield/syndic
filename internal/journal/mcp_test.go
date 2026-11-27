@@ -115,6 +115,9 @@ func TestMCPPinFileAndProviderNames(t *testing.T) {
 		if err := tx.RecordMCPProviderNames(f.turn, "r1", names[:1]); err != nil {
 			return err
 		}
+		if err := tx.RecordMCPProviderNames(f.turn, "r2", nil); err == nil {
+			t.Error("empty mapping accepted")
+		}
 		got, err := tx.MCPProviderNames(f.turn, "author")
 		if err != nil || len(got) != 2 || got[1].Index != 1 || got[1].Tool != "get.page" {
 			t.Errorf("names = %+v, %v", got, err)

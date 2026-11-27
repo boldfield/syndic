@@ -235,11 +235,17 @@ func (tx *Tx) TurnMCPPinFile(turnID string) (string, error) {
 
 // RecordMCPProviderNames records the names one participant was offered for
 // the turn, in index order: names[i] is the provider name for index i. The
+// mapping must be non-empty. The
 // mapping is written once per participant; a second write is an error. It
 // emits mcp_provider_names.
 func (tx *Tx) RecordMCPProviderNames(turnID, participant string, names []MCPProviderName) error {
 	if participant == "" {
 		return fmt.Errorf("provider names need a participant")
+	}
+	if len(names) == 0 {
+		// An empty mapping leaves no row, so it could not be told from an
+		// unrecorded one and could be journaled repeatedly.
+		return fmt.Errorf("provider names for %q on turn %q are empty", participant, turnID)
 	}
 	var n int
 	if err := tx.tx.QueryRow(`SELECT COUNT(*) FROM turns WHERE id = ?`, turnID).Scan(&n); err != nil {
