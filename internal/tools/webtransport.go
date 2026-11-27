@@ -28,6 +28,7 @@ type Referee interface {
 // of those are forbidden. Returns nil if the address is allowed, or a
 // RefusalError if forbidden.
 func ValidateAddress(addr netip.Addr) *RefusalError {
+	addr = addr.Unmap()
 	if addr.IsLoopback() {
 		return refusal("address", "address is loopback")
 	}
@@ -43,8 +44,6 @@ func ValidateAddress(addr netip.Addr) *RefusalError {
 	if addr.IsUnspecified() {
 		return refusal("address", "address is unspecified")
 	}
-	// netip's Is* methods already handle IPv4-mapped forms correctly
-	// (they unmap internally), so explicit unmapping is not needed.
 	return nil
 }
 
@@ -55,21 +54,21 @@ func ValidateAddress(addr netip.Addr) *RefusalError {
 // redirects. Redirect chains are limited to 3 hops per initial request, and cross-host
 // redirects are returned as results and not followed.
 type PinnedTransport struct {
-	Screener         *URLScreener
-	Resolver         Resolver
-	Referee          Referee
-	Transport        http.RoundTripper
-	HostValidator    *HostPolicy
-	AddressValidator func(addr netip.Addr) *RefusalError // Optional, overrides ValidateAddress
+	Screener      *URLScreener
+	Resolver      Resolver
+	Referee       Referee
+	Transport     http.RoundTripper
+	HostValidator *HostPolicy
 
-	mu            sync.Mutex
-	resolvedAddrs map[string][]netip.Addr
+	mu               sync.Mutex
+	resolvedAddrs    map[string][]netip.Addr
+	addressValidator func(addr netip.Addr) *RefusalError
 }
 
 // NewPinnedTransport returns a transport that validates addresses and pins
-// connections. All parameters are required except referee and hostValidator.
-// If transport is nil, http.DefaultTransport is used. If referee is nil,
-// no referee decision is requested (only pre-send checks apply).
+// connections. All parameters are required except hostValidator.
+// If transport is nil, http.DefaultTransport is used.
+// Referee must not be nil; if it is, RoundTrip will refuse.
 func NewPinnedTransport(screener *URLScreener, resolver Resolver,
 	transport http.RoundTripper, hostValidator *HostPolicy) *PinnedTransport {
 	if transport == nil {
@@ -84,13 +83,22 @@ func NewPinnedTransport(screener *URLScreener, resolver Resolver,
 	}
 }
 
-// RoundTrip implements http.RoundTripper. It screens the URL, optionally consults
-// the referee, resolves the target hostname, validates all resolved addresses against
-// the address rules, and pins the connection to those addresses. Each request including
-// redirects uses the same pinned addresses for the same hostname. The referee is
-// consulted for each URL and each redirect target before name resolution occurs.
+// setAddressValidator sets a custom address validator for testing.
+// This is unexported to keep test seams private.
+func (pt *PinnedTransport) setAddressValidator(f func(addr netip.Addr) *RefusalError) {
+	pt.addressValidator = f
+}
+
+// RoundTrip implements http.RoundTripper. It screens the URL, requires the
+// referee to allow it, resolves the target hostname, validates all resolved
+// addresses against the address rules, and pins the connection to those addresses.
+// Each request including redirects uses the same pinned addresses for the same hostname.
 // Redirect chains are limited to 3 hops per initial request (4 requests total).
 func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if pt.Referee == nil {
+		return nil, fmt.Errorf("referee is required but was not set")
+	}
+
 	// Track redirect depth in this request chain using context.
 	// Initial requests have depth 0; each redirect increments it.
 	depth := 0
@@ -114,11 +122,9 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		}
 	}
 
-	// Consult the referee if present (before resolution).
-	if pt.Referee != nil {
-		if err := pt.Referee.Decide(req.Context(), req.URL.String()); err != nil {
-			return nil, err
-		}
+	// Consult the referee (required before resolution).
+	if err := pt.Referee.Decide(req.Context(), req.URL.String()); err != nil {
+		return nil, err
 	}
 
 	// Resolve and validate addresses once per hostname.
@@ -141,8 +147,8 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		for _, addr := range addrs {
 			// Use custom validator if provided, otherwise use the standard one.
 			var validateErr *RefusalError
-			if pt.AddressValidator != nil {
-				validateErr = pt.AddressValidator(addr)
+			if pt.addressValidator != nil {
+				validateErr = pt.addressValidator(addr)
 			} else {
 				validateErr = ValidateAddress(addr)
 			}
@@ -216,7 +222,7 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, err
 	}
 
-	// Handle redirects: validate before returning.
+	// Handle redirects: same-host redirects are rechecked by recursive RoundTrip call.
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		locStr := resp.Header.Get("Location")
 		if locStr != "" {
@@ -232,25 +238,8 @@ func (pt *PinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 				return resp, nil
 			}
 
-			// Same-host redirect: validate target through screener and referee,
-			// then follow it.
-			if pt.Screener != nil {
-				if v := pt.Screener.Screen(targetURL.String()); !v.Allowed {
-					_ = resp.Body.Close()
-					return nil, fmt.Errorf("redirect target refused: %s: %s",
-						v.Rule, v.Reason)
-				}
-			}
-
-			// Consult referee for the redirect target too.
-			if pt.Referee != nil {
-				if err := pt.Referee.Decide(req.Context(), targetURL.String()); err != nil {
-					_ = resp.Body.Close()
-					return nil, err
-				}
-			}
-
-			// Close the response body before following the redirect.
+			// Same-host redirect: close response and follow with recursive call.
+			// The recursive RoundTrip will screen and referee the target before resolving.
 			_ = resp.Body.Close()
 
 			// Create a new request for the redirect target with incremented depth.
@@ -305,9 +294,10 @@ func (t *Transport) SetReferee(r Referee) {
 // The same validation and pinning applies to any redirects. Cross-host
 // redirects are returned as results and not followed. Automatic redirects
 // are disabled. No resolution occurs for a URL the screener or referee refuses.
+// Referee is required; if not set, Fetch returns an error.
 func (t *Transport) Fetch(ctx context.Context, rawURL string) (*http.Response, error) {
-	if t.Screener == nil || t.Resolver == nil {
-		return nil, fmt.Errorf("transport needs a screener and resolver")
+	if t.Screener == nil || t.Resolver == nil || t.Referee == nil {
+		return nil, fmt.Errorf("transport needs a screener, resolver, and referee")
 	}
 
 	// Screen the URL (before any resolution).

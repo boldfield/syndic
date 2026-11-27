@@ -144,6 +144,36 @@ func TestValidateAddress(t *testing.T) {
 			wantError: true,
 			reason:    "unspecified",
 		},
+		{
+			name:      "IPv4-mapped loopback",
+			addr:      netip.MustParseAddr("::ffff:127.0.0.1"),
+			wantError: true,
+			reason:    "loopback",
+		},
+		{
+			name:      "IPv4-mapped private 10.x.x.x",
+			addr:      netip.MustParseAddr("::ffff:10.0.0.1"),
+			wantError: true,
+			reason:    "private",
+		},
+		{
+			name:      "IPv4-mapped link-local",
+			addr:      netip.MustParseAddr("::ffff:169.254.0.1"),
+			wantError: true,
+			reason:    "link-local",
+		},
+		{
+			name:      "IPv4-mapped multicast",
+			addr:      netip.MustParseAddr("::ffff:224.0.0.1"),
+			wantError: true,
+			reason:    "multicast",
+		},
+		{
+			name:      "IPv4-mapped unspecified",
+			addr:      netip.MustParseAddr("::ffff:0.0.0.0"),
+			wantError: true,
+			reason:    "unspecified",
+		},
 	}
 
 	for _, tt := range tests {
@@ -179,6 +209,7 @@ func TestResolverStubSeesNoDeniedURL(t *testing.T) {
 	transport := &PinnedTransport{
 		Screener:      screener,
 		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
 		Transport:     http.DefaultTransport,
 		resolvedAddrs: make(map[string][]netip.Addr),
 	}
@@ -219,13 +250,16 @@ func TestInitialRequestPinnedWithoutSecondDNS(t *testing.T) {
 	transport1 := &PinnedTransport{
 		Screener:      screener,
 		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
 		Transport:     http.DefaultTransport,
 		resolvedAddrs: make(map[string][]netip.Addr),
 	}
+	// Allow loopback for this test so we can test pinning with httptest.
+	transport1.setAddressValidator(permitLoopback)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), "GET", url1, nil)
 	_, err1 := transport1.RoundTrip(req1)
-	// Error expected (can't dial 127.0.0.1) but resolution must have occurred.
+	// Error expected (can't dial 127.0.0.1 with DefaultTransport) but resolution must have occurred.
 	if err1 == nil {
 		t.Fatalf("RoundTrip unexpectedly succeeded")
 	}
@@ -251,7 +285,7 @@ func TestInitialRequestPinnedWithoutSecondDNS(t *testing.T) {
 
 func TestForbiddenAddressesRejected(t *testing.T) {
 	// Acceptance: "Loopback/private/link-local/multicast/unspecified/mapped forbidden"
-	// All these address classes must be rejected.
+	// All these address classes must be rejected, including IPv4-mapped forms.
 
 	testCases := []struct {
 		name  string
@@ -318,6 +352,31 @@ func TestForbiddenAddressesRejected(t *testing.T) {
 			host:  "ul.local",
 			addrs: []netip.Addr{netip.MustParseAddr("fc00::1")},
 		},
+		{
+			name:  "IPv4-mapped loopback",
+			host:  "mapped-loopback.local",
+			addrs: []netip.Addr{netip.MustParseAddr("::ffff:127.0.0.1")},
+		},
+		{
+			name:  "IPv4-mapped private",
+			host:  "mapped-private.local",
+			addrs: []netip.Addr{netip.MustParseAddr("::ffff:10.0.0.1")},
+		},
+		{
+			name:  "IPv4-mapped link-local",
+			host:  "mapped-link-local.local",
+			addrs: []netip.Addr{netip.MustParseAddr("::ffff:169.254.0.1")},
+		},
+		{
+			name:  "IPv4-mapped multicast",
+			host:  "mapped-multicast.local",
+			addrs: []netip.Addr{netip.MustParseAddr("::ffff:224.0.0.1")},
+		},
+		{
+			name:  "IPv4-mapped unspecified",
+			host:  "mapped-unspec.local",
+			addrs: []netip.Addr{netip.MustParseAddr("::ffff:0.0.0.0")},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -327,6 +386,7 @@ func TestForbiddenAddressesRejected(t *testing.T) {
 			transport := &PinnedTransport{
 				Screener:      screener,
 				Resolver:      resolver,
+				Referee:       &testAllowReferee{},
 				Transport:     http.DefaultTransport,
 				resolvedAddrs: make(map[string][]netip.Addr),
 			}
@@ -358,6 +418,7 @@ func TestMixedResolution(t *testing.T) {
 	transport := &PinnedTransport{
 		Screener:      screener,
 		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
 		Transport:     http.DefaultTransport,
 		resolvedAddrs: make(map[string][]netip.Addr),
 	}
@@ -405,12 +466,13 @@ func TestMaxRedirectHops(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:         screener,
-		Resolver:         resolver,
-		Transport:        innerTransport,
-		AddressValidator: permitLoopback,
-		resolvedAddrs:    make(map[string][]netip.Addr),
+		Screener:      screener,
+		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
+	transport.setAddressValidator(permitLoopback)
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
 	_, err := transport.RoundTrip(req)
@@ -453,12 +515,13 @@ func TestSameHostRedirectAllowed(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:         screener,
-		Resolver:         resolver,
-		Transport:        innerTransport,
-		AddressValidator: permitLoopback,
-		resolvedAddrs:    make(map[string][]netip.Addr),
+		Screener:      screener,
+		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
+	transport.setAddressValidator(permitLoopback)
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/start", nil)
 	resp, err := transport.RoundTrip(req)
@@ -498,12 +561,13 @@ func TestCrossHostRedirectNotFollowed(t *testing.T) {
 	}
 
 	transport := &PinnedTransport{
-		Screener:         screener,
-		Resolver:         resolver,
-		Transport:        innerTransport,
-		AddressValidator: permitLoopback,
-		resolvedAddrs:    make(map[string][]netip.Addr),
+		Screener:      screener,
+		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
+		Transport:     innerTransport,
+		resolvedAddrs: make(map[string][]netip.Addr),
 	}
+	transport.setAddressValidator(permitLoopback)
 
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", ts1.URL+"/start", nil)
 	resp, err := transport.RoundTrip(req)
@@ -552,6 +616,7 @@ func TestFetchRefusesScreenerDenied(t *testing.T) {
 	transport := &Transport{
 		Screener:      screener,
 		Resolver:      resolver,
+		Referee:       &testAllowReferee{},
 		HostValidator: nil,
 		Transport:     fakeTransport,
 	}
@@ -567,6 +632,19 @@ func TestFetchRefusesScreenerDenied(t *testing.T) {
 	if len(resolver.Lookups()) != 0 {
 		t.Errorf("resolver was called for screener-refused URL; lookups: %v", resolver.Lookups())
 	}
+}
+
+// testAllowReferee is a test referee that always allows.
+type testAllowReferee struct {
+	decisionCalls []string
+	mu            sync.Mutex
+}
+
+func (ar *testAllowReferee) Decide(ctx context.Context, url string) *RefusalError {
+	ar.mu.Lock()
+	ar.decisionCalls = append(ar.decisionCalls, url)
+	ar.mu.Unlock()
+	return nil
 }
 
 // testDenyReferee is a test referee that always denies.
