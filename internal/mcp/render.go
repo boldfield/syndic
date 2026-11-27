@@ -77,7 +77,10 @@ func Render(result []byte) (Rendered, error) {
 		lines = append(lines, ErrorLine)
 	}
 
-	if raw, ok := obj["structuredContent"]; ok && !isNull(raw) {
+	if raw, ok := obj["structuredContent"]; ok {
+		if isNull(raw) {
+			return Rendered{}, fmt.Errorf("%w: structuredContent is null", ErrMalformedReply)
+		}
 		canon, err := jcs.Canonicalize(raw)
 		if err != nil {
 			return Rendered{}, fmt.Errorf("%w: structuredContent: %v", ErrMalformedReply, err)
