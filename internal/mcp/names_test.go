@@ -111,3 +111,14 @@ func TestSerializeRoundTrip(t *testing.T) {
 		t.Error("accepted wrong index")
 	}
 }
+
+func TestParseMappingRejectsMalformed(t *testing.T) {
+	for _, in := range []string{`[]]`, `[]}`, `[] x`, `[][]`, `null`, ``} {
+		if _, err := ParseMapping([]byte(in)); err == nil {
+			t.Errorf("accepted %q", in)
+		}
+	}
+	if _, err := ParseMapping([]byte(`[]`)); err != nil {
+		t.Errorf("rejected empty mapping: %v", err)
+	}
+}

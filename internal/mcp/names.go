@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -124,7 +125,10 @@ func ParseMapping(data []byte) (*Mapping, error) {
 	if err := dec.Decode(&entries); err != nil {
 		return nil, fmt.Errorf("mcp: parse mapping: %w", err)
 	}
-	if dec.More() {
+	if entries == nil {
+		return nil, fmt.Errorf("mcp: parse mapping: not an array")
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("mcp: parse mapping: trailing data")
 	}
 	tools := make([]Tool, len(entries))
