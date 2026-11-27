@@ -18,3 +18,9 @@ func isSupervise(args []string) bool {
 func supervise(stderr io.Writer) int {
 	return sandbox.Supervise(stderr)
 }
+
+// isSelfTestHelper reports whether args invoke the hidden self-test helper
+// subcommand, which the sandbox self-test runs from a copy of this binary.
+func isSelfTestHelper(args []string) bool {
+	return len(args) > 0 && args[0] == sandbox.SelfTestHelperArg
+}

@@ -58,6 +58,7 @@ func TestMacOSSandboxExecEnforcement(t *testing.T) {
 	t.Run("nested_sandbox", func(t *testing.T) { testNestedSandbox(t, b) })
 	t.Run("allow_token_fixed", func(t *testing.T) { testAllowTokenFixed(t, b) })
 	t.Run("token_dirs_fixed", func(t *testing.T) { testTokenDirsFixed(t, b) })
+	t.Run("self_test", func(t *testing.T) { runSelfTestOn(t, b, macDefaultSystem()) })
 	t.Run("listener_only", func(t *testing.T) { testListenerOnly(t, b, helper) })
 	t.Run("fork_storm", func(t *testing.T) { testForkStorm(t, b) })
 	t.Run("no_member_after", func(t *testing.T) { testNoMemberIdle(t) })

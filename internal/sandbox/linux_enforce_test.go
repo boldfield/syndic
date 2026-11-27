@@ -49,6 +49,7 @@ func TestLinuxNamespacesEnforcement(t *testing.T) {
 	t.Run("setuid_no_privilege", func(t *testing.T) { testSetuidNoPrivilege(t, b, helper) })
 	t.Run("listener_only", func(t *testing.T) { testListenerOnly(t, b, helper) })
 	t.Run("old_root_unreachable", func(t *testing.T) { testOldRootUnreachable(t, b, helper) })
+	t.Run("self_test", func(t *testing.T) { runSelfTestOn(t, b, defaultSystem()) })
 }
 
 func namespaceBackend(t *testing.T) *sandbox.LinuxNamespaces {
