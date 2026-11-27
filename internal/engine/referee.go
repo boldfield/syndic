@@ -30,7 +30,7 @@ const (
 	phaseReferee = "referee"
 
 	// eventRefereeDecision is the journaled decision of a web call.
-	eventRefereeDecision = "referee_decision"
+	eventRefereeDecision = "web_referee_decision"
 
 	// defaultRefereeMaxOutputTokens is tools.referee.max_output_tokens when
 	// the roster sets none.
@@ -199,7 +199,7 @@ type refereeOutcome struct {
 	attemptID string
 }
 
-// refereeDecisionEvent is the payload of the journaled referee_decision of a
+// refereeDecisionEvent is the payload of the journaled web_referee_decision of a
 // web call. The reason text is in the content store under reason_sha256.
 type refereeDecisionEvent struct {
 	CallID       string `json:"call_id"`
@@ -554,7 +554,7 @@ func refereeParseCause(res transport.CompleteResult) string {
 }
 
 // recordRefereeDecision journals the decision of a web call inside the caller's
-// transaction: the reason text in the content store and referee_decision with
+// transaction: the reason text in the content store and web_referee_decision with
 // the call, the attempt and the verdict. e.mu is held.
 func (e *Engine) recordRefereeDecision(tx *journal.Tx, emit hub.Emit, turnID string, c refereeCall, out refereeOutcome) error {
 	sum, err := tx.StoreContent([]byte(out.reason))

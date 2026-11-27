@@ -122,7 +122,7 @@ func (r *refereeRun) done(n int) bool {
 
 func allowReply() fake.Step { return enginetest.Reply("allow the page serves the question") }
 
-// refereeEvents are the referee_decision events of the journal. They are
+// refereeEvents are the web_referee_decision events of the journal. They are
 // read from the store, not the subscription, which a turn ended mid-step can
 // leave short of the journal's last sequence number.
 func refereeEvents(t *testing.T, h *enginetest.Harness) []map[string]string {
@@ -133,7 +133,7 @@ func refereeEvents(t *testing.T, h *enginetest.Harness) []map[string]string {
 	}
 	var out []map[string]string
 	for _, ev := range events {
-		if ev.Kind != "referee_decision" {
+		if ev.Kind != "web_referee_decision" {
 			continue
 		}
 		var m map[string]string
