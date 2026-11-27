@@ -992,3 +992,22 @@ func TestProbeSubjectRendering(t *testing.T) {
 		t.Errorf("stale subject remained:\n%s", out)
 	}
 }
+
+func TestParticipantDetailShowsWebNotOffered(t *testing.T) {
+	reason := "referee_unprobed:no_record"
+	reply := wire.StatusReply{Participants: []wire.Participant{
+		{ID: "author", State: "idle", WebOff: &reason},
+		{ID: "other", State: "idle"},
+	}}
+	s := MergeStatus(NewState(), &reply)
+	now := time.Now()
+
+	got := strings.Join(participantDetail(s, s.Participants["author"], now), "\n")
+	if !strings.Contains(got, "web: not offered, referee_unprobed:no_record") {
+		t.Fatalf("detail missing the web-off reason:\n%s", got)
+	}
+	other := strings.Join(participantDetail(s, s.Participants["other"], now), "\n")
+	if strings.Contains(other, "web: not offered") {
+		t.Fatalf("participant with web offered shows a reason:\n%s", other)
+	}
+}

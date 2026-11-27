@@ -1766,3 +1766,54 @@ func TestBuild_DeliberatePresetAffectsRosterHash(t *testing.T) {
 		t.Error("different proposers should produce different roster hash")
 	}
 }
+
+// A referee is read from its probe record as a participant on its endpoint
+// would be: the one an endpoint names runs on the endpoint or on its
+// referee_endpoint, its record and the template hash are in the manifest, and
+// a referee with no record is built unusable with the reason.
+func TestBuild_Referees(t *testing.T) {
+	db, cleanup := openTestDB(t)
+	defer cleanup()
+	store := journal.NewStore(db)
+
+	roster := &config.Roster{
+		Participants: []config.Participant{{ID: "p1", Endpoint: "cloud", Model: "m1"}, {ID: "p2", Endpoint: "plain", Model: "m2"}},
+		Endpoints: []config.EndpointProfile{
+			{Name: "cloud", BaseURL: "http://cloud", RefereeModel: "ref", RefereeEndpoint: "lan"},
+			{Name: "lan", BaseURL: "http://test"},
+			{Name: "plain", BaseURL: "http://plain", RefereeModel: "unprobed"},
+		},
+		DefaultPreset: "default",
+		Presets:       map[string]config.Preset{"default": {Mode: "solo", Author: "p1"}},
+		Pools:         map[string]config.Pool{},
+	}
+	createTestProbeRun(t, store, "lan", "ref", 4.0)
+
+	built, err := Build(Input{
+		Store: store, Roster: roster, RosterPath: "/r.toml", RosterFile: []byte("x"), EngineVersion: "1.0", StartedAt: time.Now(),
+		AdapterVersion: func(p config.Participant) string { return "1.0" },
+	})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if len(built.Referees) != 2 {
+		t.Fatalf("referees %+v, want one per endpoint naming a referee model", built.Referees)
+	}
+	cloud := built.Referees["cloud"]
+	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.BytesPerToken == nil {
+		t.Fatalf("cloud referee %+v", cloud)
+	}
+	plain := built.Referees["plain"]
+	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" {
+		t.Fatalf("plain referee %+v", plain)
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(built.JSON, &m); err != nil {
+		t.Fatal(err)
+	}
+	var records map[string]json.RawMessage
+	if err := json.Unmarshal(m["referee_probe_records"], &records); err != nil || len(records) != 1 || records["cloud"] == nil {
+		t.Fatalf("referee_probe_records = %s, err %v; want the usable record by endpoint", m["referee_probe_records"], err)
+	}
+}

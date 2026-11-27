@@ -53,6 +53,8 @@ type ParticipantInfo struct {
 	ProbeAtStart             bool
 	AcceptUnknownTruncation  bool
 	InDefaultPreset          bool
+	// WebOff is why the web tools are not offered to the participant.
+	WebOff string
 }
 
 // ProbeSubjectInfo holds information about a probe target that isn't a participant.
@@ -667,6 +669,10 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 		if p.RetryCommand != nil {
 			retryCommand = *p.RetryCommand
 		}
+		webOff := ""
+		if p.WebOff != nil {
+			webOff = *p.WebOff
+		}
 		participants[p.ID] = ParticipantInfo{
 			ID:                       p.ID,
 			Model:                    p.Model,
@@ -692,6 +698,7 @@ func MergeStatus(s State, status *wire.StatusReply) State {
 			ProbeAtStart:             p.ProbeAtStart,
 			AcceptUnknownTruncation:  p.AcceptUnknownTruncation,
 			InDefaultPreset:          p.InDefaultPreset,
+			WebOff:                   webOff,
 		}
 	}
 	s.Participants = participants
