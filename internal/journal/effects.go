@@ -108,7 +108,7 @@ func EffectSetFinal(state string) bool {
 // every effect before it is done or acknowledged, and the set is neither in
 // flight nor final.
 func DeriveEffectSetState(effects []Effect, discarded bool) (state string, eligible int) {
-	var dispatching, allDone, stopping, pending, anyAck, anyDoneOrAck bool
+	var dispatching, allDone, stopping, pending, anyDoneOrAck bool
 	allDone = true
 	for _, e := range effects {
 		if e.State != EffectDone {
@@ -123,9 +123,6 @@ func DeriveEffectSetState(effects []Effect, discarded bool) (state string, eligi
 			if !e.Acknowledged() {
 				stopping = true
 			}
-		}
-		if e.Acknowledged() {
-			anyAck = true
 		}
 		if e.State == EffectDone || e.Acknowledged() {
 			anyDoneOrAck = true
@@ -145,7 +142,7 @@ func DeriveEffectSetState(effects []Effect, discarded bool) (state string, eligi
 		return EffectSetStopped, eligible
 	case !pending:
 		return EffectSetClosed, -1
-	case !anyAck && !anyDoneOrAck:
+	case !anyDoneOrAck:
 		return EffectSetAppliable, eligible
 	default:
 		return EffectSetResumable, eligible
