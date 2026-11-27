@@ -117,8 +117,6 @@ func Render(result []byte) (Rendered, error) {
 	return out, nil
 }
 
-func isNull(raw json.RawMessage) bool { return string(bytes.TrimSpace(raw)) == "null" }
-
 // stringMember decodes raw as a JSON string; absent and null are not strings.
 func stringMember(raw json.RawMessage) (string, bool) {
 	var s *string
