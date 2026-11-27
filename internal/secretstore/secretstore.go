@@ -41,8 +41,8 @@ type staticEntry struct {
 }
 
 type recordEntry struct {
-	Generation string          `json:"generation"`
-	Record     json.RawMessage `json:"record"`
+	Generation string `json:"generation"`
+	Record     []byte `json:"record"`
 }
 
 type fileData struct {
@@ -99,9 +99,6 @@ func (s *Store) Static(ref string, value []byte) (string, error) {
 // key has no entry yet, the entry gets a new generation; otherwise it keeps its
 // existing one. It returns the generation.
 func (s *Store) Put(key []string, record []byte, renew bool) (string, error) {
-	if !json.Valid(record) {
-		return "", errors.New("secretstore: record is not valid JSON")
-	}
 	k := encodeKey(key)
 	var gen string
 	err := s.update(func(d *fileData) (bool, error) {
@@ -114,7 +111,7 @@ func (s *Store) Put(key []string, record []byte, renew bool) (string, error) {
 			}
 			gen = g
 		}
-		d.Records[k] = recordEntry{Generation: gen, Record: append(json.RawMessage(nil), record...)}
+		d.Records[k] = recordEntry{Generation: gen, Record: append([]byte(nil), record...)}
 		return true, nil
 	})
 	if err != nil {
@@ -215,8 +212,8 @@ func (s *Store) read() (*fileData, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("secretstore: stat: %w", err)
 	}
-	if fi.Mode().Perm()&0077 != 0 {
-		return nil, false, fmt.Errorf("secretstore: %s has mode %04o; refusing a file readable or writable by others (want 0600)", s.path, fi.Mode().Perm())
+	if fi.Mode().Perm()&^0600 != 0 {
+		return nil, false, fmt.Errorf("secretstore: %s has mode %04o; refusing a file wider than 0600", s.path, fi.Mode().Perm())
 	}
 	raw, err := os.ReadFile(s.path)
 	if err != nil {

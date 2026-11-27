@@ -129,10 +129,72 @@ func TestFileModeAndRefusal(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0600 {
 		t.Fatalf("mode %v err %v", fi.Mode(), err)
 	}
+	for _, mode := range []os.FileMode{0644, 0700, 0640, 0601} {
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(dir); err == nil {
+			t.Fatalf("mode %04o accepted", mode)
+		}
+	}
+}
+
+func TestRecordRoundTripsExactBytes(t *testing.T) {
+	s, _ := open(t)
+	for i, rec := range []string{"{ \"u\": \"a&b<>\" }", "not json at all\n", ""} {
+		key := []string{"k", string(rune('a' + i))}
+		if _, err := s.Put(key, []byte(rec), true); err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := s.Get(key)
+		if err != nil || string(got) != rec {
+			t.Fatalf("got %q want %q (%v)", got, rec, err)
+		}
+	}
+}
+
+func TestErrorsAndPutDoNotLeak(t *testing.T) {
+	s, dir := open(t)
+	value := "leaky-secret-value-4242"
+	g, err := s.Static("ref", []byte(value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg, err := s.Put([]string{"a"}, []byte("rec"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _, _ := s.read()
+	needles := []string{value, d.Statics["ref"].Digest, d.Key}
+	check := func(what, got string) {
+		for _, n := range needles {
+			if strings.Contains(got, n) {
+				t.Fatalf("%s contains %q", what, n)
+			}
+		}
+	}
+	check("static generation", g)
+	check("put generation", pg)
+	p := filepath.Join(dir, FileName)
 	if err := os.Chmod(p, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(dir); err == nil {
+	_, err = Open(dir)
+	if err == nil {
 		t.Fatal("wide file accepted")
 	}
+	check("Open error (wide)", err.Error())
+	if err := os.Chmod(p, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{corrupt "+value), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(dir); err != nil {
+		check("Open error (corrupt)", err.Error())
+	}
+	if _, err = s.Static("ref", []byte(value)); err == nil {
+		t.Fatal("corrupt file accepted")
+	}
+	check("Static error (corrupt)", err.Error())
 }
