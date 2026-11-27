@@ -316,10 +316,31 @@ func (r Request) meta() map[string]json.RawMessage {
 
 // handle computes the answer to req. ctx ends when the client cancels.
 func (s *Server) handle(ctx context.Context, req Request) outcome {
+	return s.handleWith(ctx, req, s.pick(req))
+}
+
+// planned is the reply chosen for a request, and its default HTTP status.
+type planned struct {
+	rep    Reply
+	status int
+}
+
+// pick chooses the reply for req. Over stdio it runs in the read loop, so
+// scripted replies go to requests in the order they arrived, however the
+// handlers are scheduled.
+func (s *Server) pick(req Request) planned {
+	if req.Method == "" || req.ID == nil {
+		return planned{}
+	}
+	rep, status := s.script(req)
+	return planned{rep, status}
+}
+
+func (s *Server) handleWith(ctx context.Context, req Request, p planned) outcome {
 	if req.Method == "" || req.ID == nil {
 		return outcome{status: http.StatusAccepted, silent: true}
 	}
-	rep, status := s.script(req)
+	rep, status := p.rep, p.status
 	if rep.Delay > 0 {
 		select {
 		case <-time.After(rep.Delay):
@@ -674,12 +695,13 @@ func (s *Server) Stdio(t testing.TB) *Conn {
 					s.cancels[string(req.ID)] = entry
 					s.mu.Unlock()
 				}
+				plan := s.pick(req)
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					defer cancel()
 					defer s.forget(req.ID, entry)
-					out := s.handle(ctx, req)
+					out := s.handleWith(ctx, req, plan)
 					if !out.silent {
 						for _, m := range out.msgs {
 							write(m)
