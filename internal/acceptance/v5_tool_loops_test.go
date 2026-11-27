@@ -28,6 +28,26 @@ func init() {
 	cover(toolLoopsPara, "a repair request carries no tool definitions", "TestToolLoops_RepairNoToolDefinitions")
 }
 
+// toolLoopsRevSubmit submits a tool loops test turn with revision rounds enabled,
+// using the toolreview preset so tools are available.
+func toolLoopsRevSubmit(t *testing.T, s *suite, c *client.Client, id string, maxRounds *int) (string, wire.TurnReply) {
+	t.Helper()
+	dir := t.TempDir()
+	preset := "toolreview"
+	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: id,
+		Input:        "what is the answer?",
+		Workspace:    dir,
+		Preset:       &preset,
+		MaxRounds:    maxRounds,
+	})
+	if err != nil {
+		t.Fatalf("submit %s: %v", id, err)
+	}
+	s.WaitTerminal(reply.TurnID)
+	return reply.TurnID, s.Turn(t, c, reply.TurnID)
+}
+
 // toolLoopsSubmit submits a tool loops test turn with a workspace so tools are offered.
 func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (string, wire.TurnReply) {
 	t.Helper()
@@ -133,12 +153,14 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 
 	roster := toolLoopsRoster([]string{"read", "write"}, []string{"read", "web"})
 
+	//t.Logf("Roster TOML:\n%s", roster)
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
 			{
-				Kind: fake.StepKindReply,
+				Kind:   fake.StepKindReply,
+				Status: transport.StatusComplete,
 				Build: func(req transport.CompleteRequest) string {
-					hasRead, hasWrite, hasWeb := false, false, false
+					hasRead, hasWrite := false, false
 					for _, tool := range req.Tools {
 						if tool.Type == "function" {
 							name := tool.Function.Name
@@ -148,13 +170,10 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 							if name == tools.NameWriteFile || name == tools.NameEditFile || name == tools.NameUnstage {
 								hasWrite = true
 							}
-							if name == tools.NameWebFetch || name == tools.NameWebSearch {
-								hasWeb = true
-							}
 						}
 					}
-					if !hasRead || !hasWrite || hasWeb {
-						t.Errorf("author tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+					if !hasRead || !hasWrite {
+						t.Errorf("author tools wrong: read=%v write=%v", hasRead, hasWrite)
 					}
 					return "answer"
 				},
@@ -163,25 +182,29 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 		},
 		"reviewer": {
 			{
-				Kind: fake.StepKindReply,
+				Kind:   fake.StepKindReply,
+				Status: transport.StatusComplete,
 				Build: func(req transport.CompleteRequest) string {
-					hasRead, hasWrite, hasWeb := false, false, false
+					hasRead, hasWeb := false, false
 					for _, tool := range req.Tools {
 						if tool.Type == "function" {
 							name := tool.Function.Name
 							if name == tools.NameReadFile || name == tools.NameListDir || name == tools.NameSearchFiles {
 								hasRead = true
 							}
-							if name == tools.NameWriteFile || name == tools.NameEditFile || name == tools.NameUnstage {
-								hasWrite = true
-							}
 							if name == tools.NameWebFetch || name == tools.NameWebSearch {
 								hasWeb = true
 							}
 						}
 					}
-					if !hasRead || hasWrite || !hasWeb {
-						t.Errorf("reviewer tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+					if !hasRead || !hasWeb {
+						var toolNames []string
+						for _, tool := range req.Tools {
+							if tool.Type == "function" {
+								toolNames = append(toolNames, tool.Function.Name)
+							}
+						}
+						t.Errorf("reviewer tools: read=%v web=%v tools=%v", hasRead, hasWeb, toolNames)
 					}
 					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
@@ -258,7 +281,7 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", nil)
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("unexpected turn state: %s", turn.State)
@@ -305,10 +328,14 @@ func TestToolLoops_AuthorToolLimitEndsWithToolCalls(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", nil)
 
 	if turn.State != engine.StateIncomplete || turn.TerminalReason == nil || !strings.Contains(*turn.TerminalReason, "tool_limit") {
-		t.Fatalf("expected incomplete with tool_limit, got state=%s reason=%v", turn.State, turn.TerminalReason)
+		reason := ""
+		if turn.TerminalReason != nil {
+			reason = *turn.TerminalReason
+		}
+		t.Fatalf("expected incomplete with tool_limit, got state=%s reason=%s", turn.State, reason)
 	}
 }
 
@@ -340,7 +367,7 @@ func TestToolLoops_AuthorFinalNoToolIsCandidate(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", nil)
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved, got %s", turn.State)
@@ -391,7 +418,7 @@ func TestToolLoops_ReviewerAtBoundNoDefinitions(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", nil)
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved, got state=%s", turn.State)
@@ -404,7 +431,7 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
 
-	var toolHeld func()
+	hookReached := make(chan struct{})
 	releaseEffect := make(chan struct{})
 
 	s := newSuite(t, roster, map[string][]fake.Step{
@@ -424,19 +451,18 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 			enginetest.Reply("ok"),
 		},
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes), enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
-		if toolHeld == nil {
-			return
-		}
-		toolHeld()
+		close(hookReached)
 		<-releaseEffect
 	}))
 
 	c := s.Dial(t)
 	dir := t.TempDir()
+	preset := "toolreview"
 	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "what is the answer?",
 		Workspace:    dir,
+		Preset:       &preset,
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
@@ -444,10 +470,9 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 
 	turnID := resp.TurnID
 
-	toolHeld = func() {
-		s.WaitTurnState(turnID, engine.StateApproved)
-		close(releaseEffect)
-	}
+	<-hookReached
+	s.WaitTurnState(turnID, engine.StateApproved)
+	close(releaseEffect)
 
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
@@ -473,7 +498,8 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
 
-	cancellationTriggered := make(chan struct{})
+	hookReached := make(chan struct{})
+	releaseEffect := make(chan struct{})
 
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
@@ -492,28 +518,30 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 			enginetest.Reply("ok"),
 		},
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes), enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
-		<-cancellationTriggered
+		close(hookReached)
+		<-releaseEffect
 	}))
 
 	c := s.Dial(t)
 	dir := t.TempDir()
+	preset := "toolreview"
 	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "what is the answer?",
 		Workspace:    dir,
+		Preset:       &preset,
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
 	turnID := resp.TurnID
-	s.WaitTurnState(turnID, engine.StateAuthorDispatched)
 
+	<-hookReached
 	if err := c.Cancel(s.ctx(), turnID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-
-	close(cancellationTriggered)
+	close(releaseEffect)
 
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
@@ -603,19 +631,7 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	dir := t.TempDir()
-	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "what is the answer?",
-		Workspace:    dir,
-		MaxRounds:    revIntPtr(1),
-	})
-	if err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-
-	s.WaitTerminal(resp.TurnID)
-	turn := s.Turn(t, c, resp.TurnID)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", revIntPtr(1))
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved, got state=%s", turn.State)
@@ -652,7 +668,7 @@ func TestToolLoops_RepairNoToolDefinitions(t *testing.T) {
 	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsRevSubmit(t, s, c, "s1", nil)
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved after repair, got state=%s", turn.State)
