@@ -49,36 +49,18 @@ func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (strin
 func toolLoopsRoster(authorTools, reviewerTools []string) string {
 	toml := enginetest.RosterTOML
 
-	// Build the full [presets.review] section with tools, reviewer_tools, and revision settings
-	var presetLines []string
-	presetLines = append(presetLines, `[presets.review]
-mode = "review"
-author = "author"
-required_reviewers = ["reviewer"]`)
-
-	if len(authorTools) > 0 {
-		presetLines = append(presetLines, `tools = ["`+strings.Join(authorTools, `", "`)+`"]`)
-	}
-	if len(reviewerTools) > 0 {
-		presetLines = append(presetLines, `reviewer_tools = ["`+strings.Join(reviewerTools, `", "`)+`"]`)
-	}
-
-	presetLines = append(presetLines, `
-[presets.review.revision]
-max_rounds = 2`)
-
-	newPreset := strings.Join(presetLines, "\n")
+	toml = strings.Replace(toml, "[revision]\nmax_rounds = 0", "[revision]\nmax_rounds = 2", 1)
 
 	toml = strings.Replace(toml, `[presets.review]
 mode = "review"
 author = "author"
+required_reviewers = ["reviewer"]`, `[presets.review]
+mode = "review"
+author = "author"
 required_reviewers = ["reviewer"]
+tools = ["`+strings.Join(authorTools, `", "`)+`"]
+reviewer_tools = ["`+strings.Join(reviewerTools, `", "`)+`"]`, 1)
 
-[presets.solo]`, newPreset+`
-
-[presets.solo]`, 1)
-
-	// If web tools are needed, add referee_model to the endpoint
 	hasWeb := false
 	for _, t := range reviewerTools {
 		if t == "web" {
@@ -193,7 +175,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 				},
 			},
 		},
-	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
+	})
 
 	c := s.Dial(t)
 	_, turn := toolLoopsSubmit(t, s, c, "s1")
@@ -231,7 +213,6 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
@@ -245,7 +226,6 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 					{ID: "c2", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"b"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
@@ -255,7 +235,6 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 					return "FINAL_ANSWER"
 				},
 			},
-			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
 		"reviewer": {
@@ -291,7 +270,6 @@ func TestToolLoops_AuthorToolLimitEndsWithToolCalls(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
@@ -305,8 +283,6 @@ func TestToolLoops_AuthorToolLimitEndsWithToolCalls(t *testing.T) {
 					{ID: "c2", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"b"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
-			enginetest.Reply("ok"),
 		},
 		"reviewer": {
 			enginetest.Reply("ok"),
@@ -341,10 +317,7 @@ func TestToolLoops_AuthorFinalNoToolIsCandidate(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			enginetest.Reply("the final answer"),
-			enginetest.Reply("ok"),
-			enginetest.Reply("ok"),
 		},
 		"reviewer": {
 			verdict(fake.VerdictApprove),
@@ -390,7 +363,6 @@ func TestToolLoops_ReviewerAtBoundNoDefinitions(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
@@ -419,6 +391,9 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
 
+	var toolHeld func()
+	releaseEffect := make(chan struct{})
+
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
 			{
@@ -428,38 +403,53 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
-			enginetest.Reply("ok"),
-			{
-				Kind:  fake.StepKindHang,
-				Delay: 0,
-			},
+			enginetest.Reply("the final answer"),
 		},
 		"reviewer": {
-			enginetest.Reply("ok"),
+			verdict(fake.VerdictApprove),
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
+		if toolHeld == nil {
+			return
+		}
+		toolHeld()
+		<-releaseEffect
+	}))
 
 	c := s.Dial(t)
-	turnID, _ := revSubmit(t, s, c, "s1", nil)
+	dir := t.TempDir()
+	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "what is the answer?",
+		Workspace:    dir,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	turnID := resp.TurnID
+
+	toolHeld = func() {
+		s.WaitTurnState(turnID, engine.StateApproved)
+		close(releaseEffect)
+	}
+
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
 
-	if turn.State == "" {
-		t.Fatal("turn has no state")
+	if turn.State != engine.StateApproved {
+		t.Fatalf("expected approved, got %s", turn.State)
 	}
 
-	// Verify the late tool step was quarantined by checking journal for tool calls
-	calls, err := s.Store.ToolCallsByTurn(turnID, "")
+	calls, err := s.Store.ToolCallsByTurn(turnID, "author")
 	if err != nil {
 		t.Fatalf("listing tool calls: %v", err)
 	}
 
-	// Should have one tool call (the initial one), no late ones executed
-	if len(calls) > 1 {
-		t.Fatalf("expected at most 1 tool call, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
 	}
 }
 
@@ -470,35 +460,47 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 
 	roster := toolLoopsRoster([]string{"read"}, nil)
 
+	cancellationTriggered := make(chan struct{})
+
 	s := newSuite(t, roster, map[string][]fake.Step{
 		"author": {
 			{
-				Kind:  fake.StepKindHang,
-				Delay: 0,
+				Kind:   fake.StepKindReply,
+				Status: transport.StatusToolCalls,
+				ToolCalls: []transport.ToolCall{
+					{ID: "c1", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
+				},
 			},
+			enginetest.Reply("the answer"),
 		},
 		"reviewer": {
-			{
-				Kind:  fake.StepKindHang,
-				Delay: 0,
-			},
+			verdict(fake.VerdictApprove),
+			enginetest.Reply("ok"),
+			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
+		<-cancellationTriggered
+	}))
 
 	c := s.Dial(t)
+	dir := t.TempDir()
 	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
-		Input:        "test",
+		Input:        "what is the answer?",
+		Workspace:    dir,
 	})
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
 	turnID := resp.TurnID
+	s.WaitTurnState(turnID, engine.StateAuthorDispatched)
 
 	if err := c.Cancel(s.ctx(), turnID); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
+
+	close(cancellationTriggered)
 
 	s.WaitTerminal(turnID)
 	turn := s.Turn(t, c, turnID)
@@ -507,8 +509,7 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 		t.Fatalf("expected cancelled, got %s", turn.State)
 	}
 
-	// Verify no tool calls were executed during cancellation
-	calls, err := s.Store.ToolCallsByTurn(turnID, "")
+	calls, err := s.Store.ToolCallsByTurn(turnID, "author")
 	if err != nil {
 		t.Fatalf("listing tool calls: %v", err)
 	}
@@ -534,10 +535,22 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 					{ID: "call_a", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"a"}`}},
 				},
 			},
-			enginetest.Reply("ok"),
 			enginetest.Reply("the answer"),
-			enginetest.Reply("revised answer"),
-			enginetest.Reply("ok"),
+			{
+				Kind: fake.StepKindReply,
+				Build: func(req transport.CompleteRequest) string {
+					found := false
+					for _, m := range req.Messages {
+						if m.Role == "tool" && m.ToolCallID == "call_a" && strings.Contains(m.Content, "hello from a") {
+							found = true
+						}
+					}
+					if !found {
+						t.Errorf("revision request does not contain cited result for call_a")
+					}
+					return "revised answer"
+				},
+			},
 		},
 		"reviewer": {
 			{
@@ -559,7 +572,19 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 	})
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", revIntPtr(1))
+	dir := t.TempDir()
+	resp, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "what is the answer?",
+		Workspace:    dir,
+		MaxRounds:    revIntPtr(1),
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	s.WaitTerminal(resp.TurnID)
+	turn := s.Turn(t, c, resp.TurnID)
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved, got state=%s", turn.State)
