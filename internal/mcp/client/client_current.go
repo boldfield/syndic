@@ -90,6 +90,34 @@ func SendCurrentStdio(w io.Writer, s *wire.Stream, id int64, method string, para
 	return s.Await(id)
 }
 
+// SendCurrentStdioContext is SendCurrentStdio that stops writing and reading
+// when ctx ends and returns ctx's error. A message read after that is kept
+// for the next request on s (wire.Stream.AwaitContext). w must keep
+// concurrent writes whole (wire.WriteLineContext).
+func SendCurrentStdioContext(ctx context.Context, w io.Writer, s *wire.Stream, id int64, method string, params json.RawMessage, info ClientInfo) (wire.Response, error) {
+	req, err := CurrentRequest(id, method, params, info)
+	if err != nil {
+		return wire.Response{}, err
+	}
+	if err := wire.WriteLineContext(ctx, w, req); err != nil {
+		if ctx.Err() != nil {
+			return wire.Response{}, err
+		}
+		return wire.Response{}, fmt.Errorf("mcp: writing request: %w", err)
+	}
+	return s.AwaitContext(ctx, id)
+}
+
+// CancelCurrentStdio sends notifications/cancelled for the request sent under
+// id, which is how the current revision cancels a request over stdio. It
+// returns ctx's error when ctx ends before the write does.
+func CancelCurrentStdio(ctx context.Context, w io.Writer, id int64, reason string) error {
+	if err := wire.WriteLineContext(ctx, w, wire.NewNotification("notifications/cancelled", cancelParams(id, reason))); err != nil {
+		return fmt.Errorf("mcp: writing notification: %w", err)
+	}
+	return nil
+}
+
 // CurrentHTTP sends current-revision requests to one endpoint, one POST each.
 type CurrentHTTP struct {
 	// URL is the one endpoint.
