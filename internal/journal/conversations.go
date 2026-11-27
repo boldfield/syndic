@@ -467,13 +467,16 @@ type HistoryTurn struct {
 	// Answer is the frozen candidate, or for a solo turn the author's reply.
 	// It is empty for a turn that ended without one.
 	Answer string
+	// FileTainted is the turn's own file_tainted flag: its answer may carry
+	// workspace bytes (v5 delta section 6, "Egress of file-derived content").
+	FileTainted bool
 }
 
 // ConversationHistory returns the conversation's finished turns, oldest
 // first. A turn that is not terminal is not history yet.
 func (tx *Tx) ConversationHistory(conversationID string) ([]HistoryTurn, error) {
 	rows, err := tx.tx.Query(`
-		SELECT t.id, t.terminal_state, t.mode,
+		SELECT t.id, t.terminal_state, t.mode, t.file_tainted,
 			COALESCE((SELECT m.content FROM messages m
 				WHERE m.turn_id = t.id AND m.phase = 'author' AND m.sender = 'user'
 				ORDER BY m.sequence LIMIT 1), ''),
@@ -492,7 +495,7 @@ func (tx *Tx) ConversationHistory(conversationID string) ([]HistoryTurn, error) 
 	var turns []HistoryTurn
 	for rows.Next() {
 		var h HistoryTurn
-		if err := rows.Scan(&h.ID, &h.State, &h.Mode, &h.Input, &h.Answer); err != nil {
+		if err := rows.Scan(&h.ID, &h.State, &h.Mode, &h.FileTainted, &h.Input, &h.Answer); err != nil {
 			return nil, fmt.Errorf("scan history turn: %w", err)
 		}
 		turns = append(turns, h)
