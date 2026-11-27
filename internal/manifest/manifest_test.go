@@ -1599,6 +1599,9 @@ func TestBuild_ToolsAndRefereeDefinitionsFrozen(t *testing.T) {
 	endpointsObj := rosterObj["endpoints"].([]interface{})
 	endpointDefault := endpointsObj[0].(map[string]interface{})
 
+	if endpointDefault["referee_command_template_hash"] != referee.CommandTemplateHash() {
+		t.Errorf("referee_command_template_hash should be frozen in manifest, got %v", endpointDefault["referee_command_template_hash"])
+	}
 	if endpointDefault["referee_template_hash"] != referee.TemplateHash() {
 		t.Errorf("referee_template_hash should be frozen in manifest, got %v", endpointDefault["referee_template_hash"])
 	}
@@ -1800,11 +1803,11 @@ func TestBuild_Referees(t *testing.T) {
 		t.Fatalf("referees %+v, want one per endpoint naming a referee model", built.Referees)
 	}
 	cloud := built.Referees["cloud"]
-	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.BytesPerToken == nil {
+	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.CommandTemplateHash != referee.CommandTemplateHash() || cloud.BytesPerToken == nil {
 		t.Fatalf("cloud referee %+v", cloud)
 	}
 	plain := built.Referees["plain"]
-	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" {
+	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" || plain.CommandTemplateHash != referee.CommandTemplateHash() {
 		t.Fatalf("plain referee %+v", plain)
 	}
 

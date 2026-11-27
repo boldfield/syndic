@@ -15,12 +15,13 @@ import (
 // pinnedHash is the definitions hash: SHA-256 of testdata/definitions.json.
 // Any change to a name, description, schema or to the encoding changes it.
 // Update it only after verifying that the change is intentional.
-const pinnedHash = "5dab091d469d2927875f90601c9f0dc2bdae633935589f701abf885614bfbd58"
+const pinnedHash = "145768635332f92604df7a9005b6ee6c4acf0b833ccdb6f94b91e3b3cabe0c4d"
 
 var fixedOrder = []string{
 	NameReadFile, NameListDir, NameSearchFiles,
 	NameWebFetch, NameWebSearch,
 	NameWriteFile, NameEditFile, NameUnstage,
+	NameBash,
 }
 
 // designArguments are the argument names the design fixes for each tool.
@@ -33,6 +34,7 @@ var designArguments = map[string][]string{
 	NameWriteFile:   {"path", "content"},
 	NameEditFile:    {"path", "old", "new"},
 	NameUnstage:     {"path"},
+	NameBash:        {"command", "timeout_s"},
 }
 
 var designGroups = map[string]string{
@@ -44,6 +46,7 @@ var designGroups = map[string]string{
 	NameWriteFile:   GroupWrite,
 	NameEditFile:    GroupWrite,
 	NameUnstage:     GroupWrite,
+	NameBash:        GroupExec,
 }
 
 func names(t *testing.T, defs []transportTool) []string {
@@ -70,7 +73,7 @@ func TestCanonicalJSONMatchesGolden(t *testing.T) {
 	if bytes.HasSuffix(got, []byte("\n")) {
 		t.Error("canonical JSON must not end with a newline")
 	}
-	// The encoding is the eight definitions in the fixed order, HTML escaping off.
+	// The encoding is the nine definitions in the fixed order, HTML escaping off.
 	var decoded []struct {
 		Type     string `json:"type"`
 		Function struct {
@@ -142,9 +145,13 @@ func TestForGroups(t *testing.T) {
 		{"web without provider", []string{GroupWeb}, false, []string{NameWebFetch}},
 		{"web with provider", []string{GroupWeb}, true, []string{NameWebFetch, NameWebSearch}},
 		{"write", []string{GroupWrite}, true, []string{NameWriteFile, NameEditFile, NameUnstage}},
-		{"all with provider", []string{GroupRead, GroupWeb, GroupWrite}, true, fixedOrder},
-		{"all without provider", []string{GroupWrite, GroupWeb, GroupRead}, false, []string{
-			NameReadFile, NameListDir, NameSearchFiles, NameWebFetch, NameWriteFile, NameEditFile, NameUnstage,
+		{"exec", []string{GroupExec}, true, []string{NameBash}},
+		{"all with provider", []string{GroupExec, GroupRead, GroupWeb, GroupWrite}, true, fixedOrder},
+		{"all without provider", []string{GroupWrite, GroupExec, GroupWeb, GroupRead}, false, []string{
+			NameReadFile, NameListDir, NameSearchFiles, NameWebFetch, NameWriteFile, NameEditFile, NameUnstage, NameBash,
+		}},
+		{"read and exec", []string{GroupExec, GroupRead}, true, []string{
+			NameReadFile, NameListDir, NameSearchFiles, NameBash,
 		}},
 		{"order and repetition ignored", []string{GroupWrite, GroupRead, GroupRead}, true, []string{
 			NameReadFile, NameListDir, NameSearchFiles, NameWriteFile, NameEditFile, NameUnstage,
@@ -301,6 +308,40 @@ func TestSchemasAreWellFormed(t *testing.T) {
 	}
 	if props["limit"].(map[string]interface{})["minimum"] != 1 {
 		t.Errorf("read_file.limit minimum = %v, want 1", props["limit"].(map[string]interface{})["minimum"])
+	}
+}
+
+// The bash definition's text, as fixed by the task specification. A model
+// receives these bytes, so they are compared exactly.
+const (
+	bashDescription        = "Run a shell command and return its output. The command runs with `bash -c` in a private copy of the workspace that includes the changes you have staged in this turn. Standard input is empty and there is no terminal, so the command must not wait for input. Standard output and standard error are returned together, in the order written. Anything the command writes to files is discarded when it ends and does not change the workspace or your staged changes: to propose a change, use `write_file` or `edit_file`. Each command starts from a fresh copy, so nothing carries over from one command to the next; do related steps in one command. The command is checked before it runs and may be refused; a refusal is returned as an error that gives the reason. A command that exits with a non-zero status is returned as a result with its exit code, not as an error. Output beyond the size limit is cut off and the result says so. There is no network access unless the operator has allowed specific hosts."
+	bashCommandDescription = "The command line to run with bash -c."
+	bashTimeoutDescription = "Seconds to allow before the command is stopped. Default 120. A value above the maximum is reduced to the maximum."
+)
+
+func TestBashDefinition(t *testing.T) {
+	tool, group, ok := Lookup(NameBash)
+	if !ok {
+		t.Fatal("Lookup(bash) not found")
+	}
+	if NameBash != "bash" || GroupExec != "exec" || group != GroupExec {
+		t.Errorf("bash name/group = %q/%q, want bash/exec", NameBash, group)
+	}
+	if tool.Function.Description != bashDescription {
+		t.Errorf("bash description = %q, want %q", tool.Function.Description, bashDescription)
+	}
+	params := tool.Function.Parameters
+	props := params["properties"].(map[string]interface{})
+	command := props["command"].(map[string]interface{})
+	if command["type"] != "string" || command["description"] != bashCommandDescription || len(command) != 2 {
+		t.Errorf("bash.command = %v", command)
+	}
+	timeout := props["timeout_s"].(map[string]interface{})
+	if timeout["type"] != "integer" || timeout["description"] != bashTimeoutDescription || timeout["minimum"] != 1 || len(timeout) != 3 {
+		t.Errorf("bash.timeout_s = %v", timeout)
+	}
+	if req := params["required"].([]string); !reflect.DeepEqual(req, []string{"command"}) {
+		t.Errorf("bash required = %v, want [command]", req)
 	}
 }
 

@@ -62,6 +62,8 @@ type Referee struct {
 	Model       string
 	// TemplateHash is the hash of the fixed referee prompt template.
 	TemplateHash string
+	// CommandTemplateHash is the hash of the fixed command referee template.
+	CommandTemplateHash string
 	// Participant carries the probe record state: usability, detail, the
 	// expected identity and the bounds, as for a participant.
 	Participant
@@ -142,7 +144,7 @@ func buildReferee(in Input, ep config.EndpointProfile) (Referee, *evidence.Probe
 	if findEndpoint(in.Roster, run) == nil {
 		// Roster validation refuses this; a referee that cannot be read has
 		// no usable record.
-		return Referee{Endpoint: ep.Name, RunEndpoint: run, Model: ep.RefereeModel, TemplateHash: referee.TemplateHash(),
+		return Referee{Endpoint: ep.Name, RunEndpoint: run, Model: ep.RefereeModel, TemplateHash: referee.TemplateHash(), CommandTemplateHash: referee.CommandTemplateHash(),
 			Participant: Participant{ID: identity.ID, Detail: "endpoint_not_found"}}, nil, nil
 	}
 	p, probeManifest, err := buildParticipant(in, identity)
@@ -150,11 +152,12 @@ func buildReferee(in Input, ep config.EndpointProfile) (Referee, *evidence.Probe
 		return Referee{}, nil, err
 	}
 	return Referee{
-		Endpoint:     ep.Name,
-		RunEndpoint:  run,
-		Model:        ep.RefereeModel,
-		TemplateHash: referee.TemplateHash(),
-		Participant:  p,
+		Endpoint:            ep.Name,
+		RunEndpoint:         run,
+		Model:               ep.RefereeModel,
+		TemplateHash:        referee.TemplateHash(),
+		CommandTemplateHash: referee.CommandTemplateHash(),
+		Participant:         p,
 	}, probeManifest, nil
 }
 
@@ -385,6 +388,7 @@ func rosterToMap(roster *config.Roster) (map[string]interface{}, error) {
 		if e.RefereeModel != "" {
 			eMap["referee_model"] = e.RefereeModel
 			eMap["referee_template_hash"] = referee.TemplateHash()
+			eMap["referee_command_template_hash"] = referee.CommandTemplateHash()
 		}
 		if e.RefereeEndpoint != "" {
 			eMap["referee_endpoint"] = e.RefereeEndpoint
