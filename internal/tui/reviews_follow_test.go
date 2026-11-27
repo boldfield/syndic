@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/boldfield/syndic/internal/tui/followtest"
+	"github.com/boldfield/syndic/internal/wire"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -125,5 +126,42 @@ func TestDrawerCountIsOnItsHeaderLine(t *testing.T) {
 	d.End()
 	if head := strings.Split(ansi.Strip(d.render(80, cc, true)), "\n")[0]; strings.Contains(head, "new lines") || !strings.HasSuffix(head, "100%") {
 		t.Fatalf("header line at the bottom %q", head)
+	}
+}
+
+// A held place in a long review comment stays on the same words when the drawer is
+// rewrapped: the indentation every wrapped row repeats is not content.
+func TestDrawerHoldsItsPlaceInLongCommentaryOnResize(t *testing.T) {
+	var words []string
+	for i := range 500 {
+		words = append(words, fmt.Sprintf("w%04d", i))
+	}
+	text := strings.Join(words, " ")
+	cc := NewContentCache()
+	cc.Store("ref:long", text, nil)
+	d := NewReviewsDrawer()
+	d.SetTurns([]string{"turn1"})
+	d.Open(0, true)
+	d.SetDrawerHeight(8)
+	d.UpdateReviews("turn1", []wire.ReviewItem{{
+		Round: 0, Participant: "reviewer1", Kind: "approve",
+		Commentary: &wire.ContentReference{Ref: "ref:long", SHA256: "x", ByteLen: int64(len(text))},
+	}})
+	lines := func(w int) []string {
+		return strings.Split(ansi.Strip(d.render(w, cc, true)), "\n")
+	}
+	lines(80)
+	d.Scroll(-20, 80, cc)
+	before := lines(80)
+	token := strings.Fields(before[1])[0]
+	if !strings.HasPrefix(token, "w") {
+		t.Fatalf("first row is not commentary text: %q", before[1])
+	}
+	after := lines(40)
+	if !strings.Contains(after[1], token) {
+		t.Fatalf("after narrowing, the first row %q lost %s", after[1], token)
+	}
+	if got := lines(80); !strings.Contains(got[1], token) {
+		t.Fatalf("after widening, the first row %q lost %s", got[1], token)
 	}
 }

@@ -406,14 +406,21 @@ func (d *ReviewsDrawer) content(w int, cc *ContentCache) (string, []string, []Fo
 	var lines []string
 	var rows []FollowRow
 	chars := map[string]int{}
-	add := func(item, line string) {
+	// addText adds a row whose characters are those after the first skip bytes of it: the
+	// indentation a wrapped row repeats is not content, so it does not count.
+	addText := func(item, line string, skip int) {
 		line = ansi.Truncate(line, w, "")
 		lines = append(lines, line)
-		n := max(utf8.RuneCountInString(ansi.Strip(line)), 1)
+		text := ansi.Strip(line)
+		if len(text) >= skip {
+			text = text[skip:]
+		}
+		n := max(utf8.RuneCountInString(text), 1)
 		c := chars[item]
 		rows = append(rows, FollowRow{Item: item, Char: c, End: c + n})
 		chars[item] = c + n
 	}
+	add := func(item, line string) { addText(item, line, 0) }
 	turnID := d.selectedTurnID()
 	if turnID == "" {
 		return strings.Repeat("─", w), nil, nil
@@ -488,7 +495,7 @@ func (d *ReviewsDrawer) content(w int, cc *ContentCache) (string, []string, []Fo
 			}
 			add(id, strings.Repeat(" ", indent)+label+":")
 			for _, line := range SafeTextWithPrefix(ci.Data, w-indent-2) {
-				add(id, line)
+				addText(id, line, len(contentPrefix))
 			}
 		}
 		add(id, fmt.Sprintf("  %s (%s)", safeLine(participant), safeLine(item.Kind)))
