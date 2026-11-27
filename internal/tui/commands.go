@@ -134,7 +134,7 @@ func cmdHelp(a *App, _ []string) tea.Cmd {
 
 func cmdParticipants(a *App, _ []string) tea.Cmd {
 	a.tab = tabParticipants
-	a.answerScrollRow, a.answerFollow = 0, true
+	a.chatFollow.End()
 	a.panel = nil
 	return nil
 }
