@@ -49,13 +49,23 @@ func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (strin
 // toolLoopsRoster returns a roster with the given tools enabled for author and reviewers,
 // with revision rounds enabled (max_rounds = 2), and with both participants having tool capability.
 func toolLoopsRoster(authorTools, reviewerTools []string) string {
+	authorToolsStr := "[]"
+	if len(authorTools) > 0 {
+		authorToolsStr = `["` + strings.Join(authorTools, `", "`) + `"]`
+	}
+	reviewerToolsStr := "[]"
+	if len(reviewerTools) > 0 {
+		reviewerToolsStr = `["` + strings.Join(reviewerTools, `", "`) + `"]`
+	}
+
 	toml := enginetest.RosterTOML + `
+
 [presets.toolreview]
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
-` + `tools = ["` + strings.Join(authorTools, `", "`) + `"]` + `
-` + `reviewer_tools = ["` + strings.Join(reviewerTools, `", "`) + `"]` + `
+tools = ` + authorToolsStr + `
+reviewer_tools = ` + reviewerToolsStr + `
 
 [presets.toolreview.revision]
 max_rounds = 2
@@ -178,7 +188,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 			},
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := toolLoopsSubmit(t, s, c, "s1")
@@ -245,7 +255,7 @@ func TestToolLoops_AuthorAtBoundNoDefinitions(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := revSubmit(t, s, c, "s1", nil)
@@ -292,7 +302,7 @@ func TestToolLoops_AuthorToolLimitEndsWithToolCalls(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := revSubmit(t, s, c, "s1", nil)
@@ -327,7 +337,7 @@ func TestToolLoops_AuthorFinalNoToolIsCandidate(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := revSubmit(t, s, c, "s1", nil)
@@ -378,7 +388,7 @@ func TestToolLoops_ReviewerAtBoundNoDefinitions(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := revSubmit(t, s, c, "s1", nil)
@@ -413,7 +423,7 @@ func TestToolLoops_LateToolStepQuarantined(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	}, enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes), enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
 		if toolHeld == nil {
 			return
 		}
@@ -481,7 +491,7 @@ func TestToolLoops_ToolStepDuringCancellationAbandoned(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	}, enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes), enginetest.WithBeforeToolEffect(func(turnID, attemptID, name string) {
 		<-cancellationTriggered
 	}))
 
@@ -543,13 +553,20 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
 					found := false
+					uncited := false
 					for _, m := range req.Messages {
 						if m.Role == "tool" && m.ToolCallID == "call_a" && strings.Contains(m.Content, "hello from a") {
 							found = true
 						}
+						if m.Role == "tool" && m.ToolCallID == "call_b" {
+							uncited = true
+						}
 					}
 					if !found {
 						t.Errorf("revision request does not contain cited result for call_a")
+					}
+					if uncited {
+						t.Errorf("revision request should not contain uncited result for call_b")
 					}
 					return "revised answer"
 				},
@@ -565,6 +582,17 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 			{
 				Kind: fake.StepKindReply,
 				Build: func(req transport.CompleteRequest) string {
+					// Make a tool call that won't be cited
+					return "TOOL_CALL_RESPONSE"
+				},
+				Status: transport.StatusToolCalls,
+				ToolCalls: []transport.ToolCall{
+					{ID: "call_b", Type: "function", Function: transport.ToolCallFunction{Name: tools.NameReadFile, Arguments: `{"path":"b"}`}},
+				},
+			},
+			{
+				Kind: fake.StepKindReply,
+				Build: func(req transport.CompleteRequest) string {
 					return fmt.Sprintf("VERDICT v2\ncandidate: %s\nattempt: %s\nround: 1\nblock-state: b1 withdrawn\nverdict: approve\nreason: OK\nEND VERDICT",
 						req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
@@ -572,7 +600,7 @@ func TestToolLoops_RevisionCarriesCitedResultsOnly(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	dir := t.TempDir()
@@ -621,7 +649,7 @@ func TestToolLoops_RepairNoToolDefinitions(t *testing.T) {
 			enginetest.Reply("ok"),
 			enginetest.Reply("ok"),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
 	_, turn := revSubmit(t, s, c, "s1", nil)
