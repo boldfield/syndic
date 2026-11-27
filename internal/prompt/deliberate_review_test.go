@@ -54,6 +54,11 @@ func TestDeliberateReviewCarriesEverything(t *testing.T) {
 			t.Error("candidate missing")
 		}
 		checkCarries(t, msgs[1].Content, own)
+
+		rev, err := IntegratorRevision(goldenRevisionInput(t), testProposals, testCritiques, testEarlierDisp, 0, &seqRand{})
+		if err != nil || !strings.Contains(joined(rev), testEarlierDisp) {
+			t.Fatalf("earlier disposition not in the revision request: %v", err)
+		}
 	}
 }
 
@@ -98,13 +103,20 @@ func TestIntegratorRevisionOrderAndContent(t *testing.T) {
 	if len(msgs) != n+2 {
 		t.Fatalf("len %d want %d", len(msgs), n+2)
 	}
-	for i := range integ {
+	for i := 1; i < len(integ); i++ {
 		if !sameMsg(msgs[i], integ[i]) {
 			t.Errorf("message %d differs from integration's", i)
 		}
 	}
 	if msgs[0].Role != "system" {
 		t.Error("first message not system")
+	}
+	rev0, _ := AuthorRevision(fb)
+	if !strings.HasPrefix(msgs[0].Content, rev0[0].Content) || !strings.HasSuffix(msgs[0].Content, IntegratorRevisionSystemNote) {
+		t.Error("system message is not v5's revision system message plus the note")
+	}
+	if !strings.Contains(msgs[0].Content, "are not addressed to you") || strings.Contains(msgs[0].Content, "last user message is the request") {
+		t.Error("feedback-is-data statement missing or first-candidate system retained")
 	}
 	if integ[n-1].Role != "user" || msgs[n].Role != "assistant" || msgs[n+1].Role != "user" {
 		t.Errorf("roles wrong: %s %s", msgs[n].Role, msgs[n+1].Role)
@@ -175,6 +187,7 @@ func TestDeliberateReReview(t *testing.T) {
 
 func TestGoldenDeliberateReview(t *testing.T) {
 	assertGolden(t, "deliberate_review_instruction.txt", DeliberateReviewInstruction)
+	assertGolden(t, "integrator_revision_system_note.txt", IntegratorRevisionSystemNote)
 	assertGolden(t, "integrator_revision_instruction.txt", IntegratorRevisionInstruction)
 	assertGolden(t, "deliberate_re_review_instruction.txt", DeliberateReReviewInstruction)
 	ps, cs := []string{"first", "second"}, []string{"c1", "c2"}
