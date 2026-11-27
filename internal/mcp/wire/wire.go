@@ -18,7 +18,6 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -37,9 +36,9 @@ const (
 
 // Errors for a bound passed; each closes the connection.
 var (
-	ErrMessageTooLarge     = errors.New("wire: message over the size bound")
-	ErrTooDeep             = errors.New("wire: message nested over the depth bound")
-	ErrTooManyNotification = errors.New("wire: notification bound passed")
+	ErrMessageTooLarge      = errors.New("wire: message over the size bound")
+	ErrTooDeep              = errors.New("wire: message nested over the depth bound")
+	ErrTooManyNotifications = errors.New("wire: notification bound passed")
 )
 
 // Other errors.
@@ -51,7 +50,7 @@ var (
 // IsBound reports whether err is one of the three bound errors.
 func IsBound(err error) bool {
 	return errors.Is(err, ErrMessageTooLarge) || errors.Is(err, ErrTooDeep) ||
-		errors.Is(err, ErrTooManyNotification)
+		errors.Is(err, ErrTooManyNotifications)
 }
 
 // Limits are the bounds a reader applies. The zero value means the design's.
@@ -196,9 +195,11 @@ type Source interface {
 	Next() ([]byte, error)
 }
 
-// readLine reads one line without its terminator, holding at most max bytes,
-// feeding each kept chunk to dt. A final unterminated line is returned.
-func readLine(br *bufio.Reader, max int, dt *depthTracker) ([]byte, error) {
+// readLine reads one line without its terminator, holding at most max bytes
+// (the raw line may be up to slack longer, to leave room for framing the
+// caller strips), feeding each kept chunk to dt. A final unterminated line is
+// returned.
+func readLine(br *bufio.Reader, max, slack int, dt *depthTracker) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
@@ -206,7 +207,7 @@ func readLine(br *bufio.Reader, max int, dt *depthTracker) ([]byte, error) {
 		if terminated {
 			chunk = chunk[:len(chunk)-1]
 		}
-		if len(line)+len(chunk) > max {
+		if len(line)+len(chunk) > max+slack {
 			return nil, ErrMessageTooLarge
 		}
 		if dt != nil {
@@ -217,18 +218,20 @@ func readLine(br *bufio.Reader, max int, dt *depthTracker) ([]byte, error) {
 		line = append(line, chunk...)
 		switch {
 		case terminated:
-			return bytes.TrimSuffix(line, []byte("\r")), nil
+			return trimCR(line), nil
 		case errors.Is(err, bufio.ErrBufferFull):
 		case errors.Is(err, io.EOF):
 			if len(line) == 0 {
 				return nil, io.EOF
 			}
-			return bytes.TrimSuffix(line, []byte("\r")), nil
+			return trimCR(line), nil
 		default:
 			return nil, err
 		}
 	}
 }
+
+func trimCR(line []byte) []byte { return bytes.TrimSuffix(line, []byte("\r")) }
 
 // LineReader reads newline-delimited messages (stdio).
 type LineReader struct {
@@ -245,9 +248,12 @@ func NewLineReader(r io.Reader, lim Limits) *LineReader {
 func (l *LineReader) Next() ([]byte, error) {
 	for {
 		dt := &depthTracker{max: l.lim.MaxDepth}
-		line, err := readLine(l.br, l.lim.MaxMessageBytes, dt)
+		line, err := readLine(l.br, l.lim.MaxMessageBytes, 1, dt)
 		if err != nil {
 			return nil, err
+		}
+		if len(line) > l.lim.MaxMessageBytes {
+			return nil, ErrMessageTooLarge
 		}
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -282,7 +288,7 @@ func (e *eventReader) Next() ([]byte, error) {
 		var data []byte
 		have := false
 		for {
-			line, err := readLine(e.br, e.lim.MaxMessageBytes, nil)
+			line, err := readLine(e.br, e.lim.MaxMessageBytes, len("data: ")+1, nil)
 			if err != nil {
 				if errors.Is(err, io.EOF) && have {
 					return data, nil
@@ -295,11 +301,11 @@ func (e *eventReader) Next() ([]byte, error) {
 				}
 				continue
 			}
-			field, value, _ := strings.Cut(string(line), ":")
-			if field != "data" {
+			field, value, _ := bytes.Cut(line, []byte(":"))
+			if string(field) != "data" {
 				continue
 			}
-			value = strings.TrimPrefix(value, " ")
+			value = bytes.TrimPrefix(value, []byte(" "))
 			add := len(value)
 			if have {
 				add++
@@ -310,7 +316,7 @@ func (e *eventReader) Next() ([]byte, error) {
 			if have {
 				data = append(data, '\n')
 			}
-			if err := dt.feed([]byte(value)); err != nil {
+			if err := dt.feed(value); err != nil {
 				return nil, err
 			}
 			data = append(data, value...)
@@ -400,7 +406,7 @@ func Await(src Source, id int64, reply func(Response) error, closer io.Closer, l
 		}
 		skipped++
 		if skipped > lim.MaxNotifications {
-			return fail(ErrTooManyNotification)
+			return fail(ErrTooManyNotifications)
 		}
 		if m.IsRequest() && reply != nil {
 			if err := reply(Response{JSONRPC: "2.0", ID: m.ID,

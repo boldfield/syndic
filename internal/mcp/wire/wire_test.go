@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -87,7 +88,7 @@ func TestNotificationBound(t *testing.T) {
 		t.Fatalf("256: err=%v closed=%v", err, spy.closed)
 	}
 	_, spy, err := awaitLines(t, notes(257)+final, Limits{}, nil)
-	if !errors.Is(err, ErrTooManyNotification) || !spy.closed {
+	if !errors.Is(err, ErrTooManyNotifications) || !spy.closed {
 		t.Fatalf("257: err=%v closed=%v", err, spy.closed)
 	}
 }
@@ -176,7 +177,7 @@ func TestHTTPEventStream(t *testing.T) {
 	}
 	src, _ = NewHTTPReader(get(t, stream(257)), Limits{})
 	spy := &closeSpy{}
-	if _, err := Await(src, 1, nil, spy, Limits{}); !errors.Is(err, ErrTooManyNotification) || !spy.closed {
+	if _, err := Await(src, 1, nil, spy, Limits{}); !errors.Is(err, ErrTooManyNotifications) || !spy.closed {
 		t.Fatalf("err=%v closed=%v", err, spy.closed)
 	}
 }
@@ -211,5 +212,40 @@ func TestStderrSink(t *testing.T) {
 	}
 	if string(s.Bytes()) != "abcdefghij" || s.Dropped() != 6 {
 		t.Fatalf("%q dropped %d", s.Bytes(), s.Dropped())
+	}
+}
+
+func TestMessageAtBoundAcceptedOverFraming(t *testing.T) {
+	msg := `{"jsonrpc":"2.0","id":1,"result":{}}`
+	lim := Limits{MaxMessageBytes: len(msg)}.norm()
+	over := msg[:len(msg)-1] + ` }`
+	cases := []struct {
+		name string
+		src  func(string) Source
+		in   func(string) string
+	}{
+		{"crlf", func(s string) Source { return NewLineReader(strings.NewReader(s), lim) }, func(m string) string { return m + "\r\n" }},
+		{"sse", func(s string) Source { return &eventReader{br: bufio.NewReader(strings.NewReader(s)), lim: lim} }, func(m string) string { return "data: " + m + "\n\n" }},
+	}
+	for _, c := range cases {
+		got, err := c.src(c.in(msg)).Next()
+		if err != nil || string(got) != msg {
+			t.Errorf("%s at bound: %q %v", c.name, got, err)
+		}
+		if _, err := c.src(c.in(over)).Next(); !errors.Is(err, ErrMessageTooLarge) {
+			t.Errorf("%s over bound: %v", c.name, err)
+		}
+	}
+}
+
+func TestSSEMultiLineDataBound(t *testing.T) {
+	lim := Limits{MaxMessageBytes: 7}.norm()
+	r := &eventReader{br: bufio.NewReader(strings.NewReader("data: abc\ndata: def\n\n")), lim: lim}
+	if got, err := r.Next(); err != nil || string(got) != "abc\ndef" {
+		t.Fatalf("at bound: %q %v", got, err)
+	}
+	r = &eventReader{br: bufio.NewReader(strings.NewReader("data: abc\ndata: defg\n\n")), lim: lim}
+	if _, err := r.Next(); !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("over bound: %v", err)
 	}
 }
