@@ -224,6 +224,10 @@ func (s *PinnedSearcher) checkRequest(req *http.Request, cred string) *RefusalEr
 	if got, _ := canonicalHost(req.URL); got != want {
 		return refusal(RuleProvider, "provider request is not addressed to the configured host")
 	}
+	// req.Host overrides the URL's host on the wire; empty means the URL's.
+	if got, _ := canonicalHost(&url.URL{Host: req.Host}); req.Host != "" && got != want {
+		return refusal(RuleProvider, "provider request's Host header is not the configured host")
+	}
 	if port := req.URL.Port(); port != "" && port != "443" {
 		return refusal(RuleProvider, "provider request is not to port 443")
 	}

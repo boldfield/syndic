@@ -772,3 +772,76 @@ func TestWebSearchResultOverBoundIsError(t *testing.T) {
 		t.Fatalf("error text %q, want the bound stated", text)
 	}
 }
+
+// reviewRoundsRoster is the search roster with revision rounds allowed, so a
+// blocked candidate sends the author a revision round with its tools.
+func reviewRoundsRoster() string {
+	return strings.Replace(searchRoster(searchTable), "max_rounds = 0", "max_rounds = 2", 1)
+}
+
+// The diffs given to the reviewers are canary material: once a candidate has
+// been reviewed, the revision-round author's query carrying sixteen bytes
+// found only in the rendered diff is refused before the referee, with no
+// lookup, connection or credential read. The run crosses a diff line
+// boundary, so it is in the diff's rendering alone: not in the staged
+// content, nor in a base, nor in any history.
+func TestWebSearchQueryCarryingReviewerDiffBytesRefused(t *testing.T) {
+	const content = "line one\nsecond line two\n"
+	const query = "line one\n+second" // 16 bytes: the diff's "+line one\n+second line two"
+	if len(query) != 16 || strings.Contains(content, query) {
+		t.Fatalf("query %q must be sixteen bytes found in the diff and not in the content", query)
+	}
+	sh := newSearchHarness(t, reviewRoundsRoster(), map[string][]fake.Step{
+		"author": {
+			toolStepWith(writeCall("c1", "n.txt", content)), enginetest.Reply(authorText),
+			toolStepWith(searchCall("c2", query)), enginetest.Reply(revisedText),
+		},
+		"reviewer": {blockStep("b1"), v2Verdict("1", "approve", "", "b1 withdrawn")},
+	})
+	reply, err := sh.Engine.Submit(toolReq("s1", "webreview", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+	if info, err := sh.Store.GetRoundInfo(reply.TurnID); err != nil || info.CurrentRound != 1 {
+		t.Fatalf("round info %+v err %v, want the query put in revision round 1", info, err)
+	}
+	calls := toolCalls(t, sh.Harness, reply.TurnID)
+	wantCalls(t, calls, [2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
+	text, err := sh.Store.Content(calls[1].Result.ResultSHA256)
+	if err != nil || !strings.Contains(string(text), tools.RuleCanary) {
+		t.Fatalf("refusal text %q err %v, want the canary rule named", text, err)
+	}
+	sh.wantNothingSent(t, reply.TurnID)
+}
+
+// The whole rendered diff is material, its headers included: a staged path's
+// name is searchable in the round that staged it (the write's path is
+// model-authored) and reaches the referee, but once the diff naming it has
+// been given to a reviewer, the revision-round author's query for it is
+// refused by the canary before the referee.
+func TestWebSearchStagedPathBecomesCanaryMaterialWithTheDiff(t *testing.T) {
+	const path = "ordinary-write-topic-123.txt"
+	sh := newSearchHarness(t, reviewRoundsRoster(), map[string][]fake.Step{
+		"author": {
+			toolStepWith(writeCall("c1", path, "x")), toolStepWith(searchCall("c2", path)), denyReply(), enginetest.Reply(authorText),
+			toolStepWith(searchCall("c3", path)), enginetest.Reply(revisedText),
+		},
+		"reviewer": {blockStep("b1"), v2Verdict("1", "approve", "", "b1 withdrawn")},
+	})
+	reply, err := sh.Engine.Submit(toolReq("s1", "webreview", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, sh.Harness, reply.TurnID, engine.StateApproved, "all_approved")
+	calls := toolCalls(t, sh.Harness, reply.TurnID)
+	wantCalls(t, calls, [2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallError, tools.ErrCodeRefused}, [2]string{journal.ToolCallError, tools.ErrCodeRefused})
+	first, _ := sh.Store.Content(calls[1].Result.ResultSHA256)
+	second, _ := sh.Store.Content(calls[2].Result.ResultSHA256)
+	if !strings.Contains(string(first), tools.RuleReferee) || !strings.Contains(string(second), tools.RuleCanary) {
+		t.Fatalf("refusals %q then %q, want the referee's in round 0 and the canary's in the revision round", first, second)
+	}
+	// The one referee attempt is round 0's; the revision round's query sent
+	// nothing.
+	sh.wantRefereeOnly(t, reply.TurnID)
+}

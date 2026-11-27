@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/history"
@@ -155,15 +156,17 @@ func historyOutcome(journaled string) string {
 // the content a write_file staged, the old and new text of an edit_file, and
 // the base content of every staged path. Model-authored arguments that are
 // not file content (paths, patterns, unstage) are not canary material. It
-// runs after the call's effect, with e.mu not held.
-func (e *Engine) exposeFileBytes(t *openTurn, name string, args json.RawMessage, res tools.Result) {
+// runs after the call's effect, with e.mu not held. An error reading the
+// staged bases is returned as the step's error: the canary must not fail
+// open by leaving bytes out of the corpus.
+func (e *Engine) exposeFileBytes(t *openTurn, name string, args json.RawMessage, res tools.Result) error {
 	if t.screener == nil || res.ErrorCode != "" {
-		return
+		return nil
 	}
 	switch name {
 	case tools.NameReadFile, tools.NameListDir, tools.NameSearchFiles:
 		t.screener.AddBytes(tools.RouteSnapshotRead, res.Content)
-		return
+		return nil
 	case tools.NameWriteFile:
 		var a struct {
 			Content string `json:"content"`
@@ -181,11 +184,11 @@ func (e *Engine) exposeFileBytes(t *openTurn, name string, args json.RawMessage,
 			t.screener.AddBytes(tools.RouteStagedWrite, []byte(a.New))
 		}
 	default:
-		return
+		return nil
 	}
 	// A staged path's base: the diff a reviewer is given shows it, and the
 	// design lists it as corpus material whether or not the author read it.
-	_ = e.store.Tx(func(tx *journal.Tx) error {
+	err := e.store.Tx(func(tx *journal.Tx) error {
 		staged, err := tx.Staging(t.id)
 		if err != nil {
 			return err
@@ -202,6 +205,10 @@ func (e *Engine) exposeFileBytes(t *openTurn, name string, args json.RawMessage,
 		}
 		return nil
 	})
+	if err != nil {
+		return fmt.Errorf("engine: canary corpus of staged bases after %s: %w", name, err)
+	}
+	return nil
 }
 
 // callReferee is the tools.Referee of one web call: it puts the call to the

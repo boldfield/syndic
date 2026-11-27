@@ -488,7 +488,7 @@ func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, attemptID stri
 				}
 				res, err := run(call.ID, args)
 				if err == nil {
-					e.exposeFileBytes(t, call.Name, args, res)
+					err = e.exposeFileBytes(t, call.Name, args, res)
 				}
 				return res, err
 			}

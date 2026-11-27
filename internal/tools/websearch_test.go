@@ -324,7 +324,8 @@ func TestSearchAllowedQueryIsPinnedAndCarriesCredential(t *testing.T) {
 }
 
 // A provider request that breaks the rules is refused before any connection:
-// another host, http, POST, a body, or the credential in the URL.
+// another host, in the URL or the Host header, http, POST, a body, or the
+// credential in the URL.
 func TestSearchProviderRequestHeldToRules(t *testing.T) {
 	build := func(method, rawURL string, withBody bool) func(context.Context, string, string, string) (*http.Request, error) {
 		return func(ctx context.Context, _, _, cred string) (*http.Request, error) {
@@ -343,6 +344,14 @@ func TestSearchProviderRequestHeldToRules(t *testing.T) {
 		"credential in url": build(http.MethodGet, "https://"+searchHost+"/search?key=$CRED", false),
 		"userinfo":          build(http.MethodGet, "https://u:p@"+searchHost+"/search", false),
 		"other port":        build(http.MethodGet, "https://"+searchHost+":8443/search", false),
+		"host header": func(ctx context.Context, _, _, _ string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+searchHost+"/search", nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Host = "other.test"
+			return req, nil
+		},
 		"nil request": func(context.Context, string, string, string) (*http.Request, error) {
 			return nil, nil
 		},

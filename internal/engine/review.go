@@ -299,6 +299,10 @@ func (e *Engine) beginReviewer(t *openTurn, id string, last bool) (reviewerDispa
 		}
 		// The diffs are file-derived content given as evidence: canary
 		// material for the turn's web queries (v5 delta section 6, check 1).
+		// The whole rendered diff is material, exactly as the reviewer is
+		// given it: the body with its +/- prefixes and the ---/+++ headers.
+		// So from the first review on, a staged path's name is canary
+		// material too, though the write that staged it did not make it so.
 		if t.screener != nil {
 			t.screener.AddBytes(tools.RouteDiff, []byte(t.pkt.diffs))
 		}
