@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"time"
 )
@@ -138,6 +139,7 @@ type Preset struct {
 	Tools             []string   `toml:"tools"`               // subset of ["read", "web", "write"] for author
 	ReviewerTools     []string   `toml:"reviewer_tools"`      // subset of ["read", "web"] for reviewers
 	AllowWebWithRead  *bool      `toml:"allow_web_with_read"` // per-preset override for allow_web_with_read
+	NetworkAllow      []string   `toml:"network_allow"`       // replaces tools.exec.network_allow for this preset
 	Deadlines         *Deadlines `toml:"deadlines"`
 	Budgets           *Budgets   `toml:"budgets"`
 	Revision          *Revision  `toml:"revision"`
@@ -245,6 +247,8 @@ type Effective struct {
 	Deadlines    Deadlines
 	Budgets      Budgets
 	Revision     Revision
+	Exec         ExecSettings
+	NetworkAllow []string // the preset's effective exec network list
 }
 
 type RoutingPolicy struct {
@@ -290,6 +294,126 @@ type RefereeConfig struct {
 	MaxReads            *int `toml:"max_reads"`              // default 6, per command decision
 }
 
+// Exec sandbox modes (v7 section 3).
+const (
+	ExecSandboxRequired = "required"
+	ExecSandboxNone     = "none"
+)
+
+// MaxExecCommandBytes is the longest command the exec tool accepts (v7
+// section 2). It is a design constant, not a setting.
+const MaxExecCommandBytes = 4096
+
+// ExecConfig is [tools.exec] (v7 sections 2 to 5). Every absent value takes
+// its design default in ApplyDefaults.
+type ExecConfig struct {
+	Sandbox           string   `toml:"sandbox"`             // "required" (default) or "none"
+	TimeoutS          *int     `toml:"timeout_s"`           // default 120
+	MaxTimeoutS       *int     `toml:"max_timeout_s"`       // default 600
+	MaxOutputBytes    *int     `toml:"max_output_bytes"`    // default 61440
+	MaxCalls          *int     `toml:"max_calls"`           // default 20, author per turn
+	MaxReviewerCalls  *int     `toml:"max_reviewer_calls"`  // default 10, reviewer per round
+	Path              string   `toml:"path"`                // default /usr/local/bin:/usr/bin:/bin
+	ReadOnlyPaths     []string `toml:"read_only_paths"`     // default by platform
+	EnvPassthrough    []string `toml:"env_passthrough"`     // default empty
+	Exclude           []string `toml:"exclude"`             // default [".git/"]
+	MaxWorkspaceBytes *int64   `toml:"max_workspace_bytes"` // default 1073741824
+	MaxWorkspaceFiles *int     `toml:"max_workspace_files"` // default 100000
+	KillGraceS        *int     `toml:"kill_grace_s"`        // default 5
+	CleanupDeadlineS  *int     `toml:"cleanup_deadline_s"`  // default 10
+	NetworkAllow      []string `toml:"network_allow"`       // host patterns, default empty
+}
+
+// ExecSettings is the resolved [tools.exec]: every value present.
+type ExecSettings struct {
+	Sandbox           string
+	TimeoutS          int
+	MaxTimeoutS       int
+	MaxOutputBytes    int
+	MaxCalls          int
+	MaxReviewerCalls  int
+	Path              string
+	ReadOnlyPaths     []string
+	EnvPassthrough    []string
+	Exclude           []string
+	MaxWorkspaceBytes int64
+	MaxWorkspaceFiles int
+	KillGraceS        int
+	CleanupDeadlineS  int
+	NetworkAllow      []string
+}
+
+// DefaultExecReadOnlyPaths returns the default tools.exec.read_only_paths for
+// the platform (v7 section 3).
+func DefaultExecReadOnlyPaths() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"/usr", "/System/Library", "/Library/Developer/CommandLineTools", "/private/etc/ssl"}
+	}
+	return []string{"/usr", "/lib", "/lib64", "/etc/ssl", "/etc/pki", "/etc/alternatives"}
+}
+
+// Settings returns the exec settings with every default applied, without
+// modifying the receiver. A nil receiver yields the defaults.
+func (e *ExecConfig) Settings() ExecSettings {
+	var c ExecConfig
+	if e != nil {
+		c = *e
+	}
+	c.applyDefaults()
+	return ExecSettings{
+		Sandbox:           c.Sandbox,
+		TimeoutS:          *c.TimeoutS,
+		MaxTimeoutS:       *c.MaxTimeoutS,
+		MaxOutputBytes:    *c.MaxOutputBytes,
+		MaxCalls:          *c.MaxCalls,
+		MaxReviewerCalls:  *c.MaxReviewerCalls,
+		Path:              c.Path,
+		ReadOnlyPaths:     slices.Clone(c.ReadOnlyPaths),
+		EnvPassthrough:    slices.Clone(c.EnvPassthrough),
+		Exclude:           slices.Clone(c.Exclude),
+		MaxWorkspaceBytes: *c.MaxWorkspaceBytes,
+		MaxWorkspaceFiles: *c.MaxWorkspaceFiles,
+		KillGraceS:        *c.KillGraceS,
+		CleanupDeadlineS:  *c.CleanupDeadlineS,
+		NetworkAllow:      slices.Clone(c.NetworkAllow),
+	}
+}
+
+func (e *ExecConfig) applyDefaults() {
+	setInt := func(p **int, v int) {
+		if *p == nil {
+			*p = &v
+		}
+	}
+	if e.Sandbox == "" {
+		e.Sandbox = ExecSandboxRequired
+	}
+	setInt(&e.TimeoutS, 120)
+	setInt(&e.MaxTimeoutS, 600)
+	setInt(&e.MaxOutputBytes, defaultExecMaxOutputBytes)
+	setInt(&e.MaxCalls, 20)
+	setInt(&e.MaxReviewerCalls, 10)
+	if e.Path == "" {
+		e.Path = "/usr/local/bin:/usr/bin:/bin"
+	}
+	if e.ReadOnlyPaths == nil {
+		e.ReadOnlyPaths = DefaultExecReadOnlyPaths()
+	}
+	if e.EnvPassthrough == nil {
+		e.EnvPassthrough = []string{}
+	}
+	if e.Exclude == nil {
+		e.Exclude = []string{".git/"}
+	}
+	if e.MaxWorkspaceBytes == nil {
+		v := int64(1073741824)
+		e.MaxWorkspaceBytes = &v
+	}
+	setInt(&e.MaxWorkspaceFiles, 100000)
+	setInt(&e.KillGraceS, 5)
+	setInt(&e.CleanupDeadlineS, 10)
+}
+
 type ToolsConfig struct {
 	AllowWebWithRead       *bool          `toml:"allow_web_with_read"`      // default true
 	ProtectedPaths         []string       `toml:"protected_paths"`          // patterns to protect
@@ -300,6 +424,7 @@ type ToolsConfig struct {
 	MaxResultBytes         *int           `toml:"max_result_bytes"`         // default 65536
 	Web                    *WebConfig     `toml:"web"`
 	Referee                *RefereeConfig `toml:"referee"`
+	Exec                   *ExecConfig    `toml:"exec"`
 }
 
 type Roster struct {
@@ -463,6 +588,10 @@ func (r *Roster) ApplyDefaults() {
 		mr := 6
 		r.Tools.Referee.MaxReads = &mr
 	}
+	if r.Tools.Exec == nil {
+		r.Tools.Exec = &ExecConfig{}
+	}
+	r.Tools.Exec.applyDefaults()
 }
 
 // Resolve resolves deadlines and budgets for a given preset and quick profile.
@@ -510,6 +639,9 @@ func (r *Roster) Resolve(presetName, quickProfile string) (Effective, error) {
 		Preset:     preset,
 		Drafts:     false,
 	}
+
+	result.Exec = r.ExecSettings()
+	result.NetworkAllow = r.EffectiveNetworkAllow(preset)
 
 	if hasQuickProf {
 		result.QuickProfile = quickProfile
