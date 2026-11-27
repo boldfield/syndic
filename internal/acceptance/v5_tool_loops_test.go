@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/tools"
@@ -25,6 +26,22 @@ func init() {
 	cover(toolLoopsPara, "a tool step during cancellation is abandoned and executes nothing", "TestToolLoops_ToolStepDuringCancellationAbandoned")
 	cover(toolLoopsPara, "a revision request carries the tool results a block cites and no other reviewer result", "TestToolLoops_RevisionCarriesCitedResultsOnly")
 	cover(toolLoopsPara, "a repair request carries no tool definitions", "TestToolLoops_RepairNoToolDefinitions")
+}
+
+// toolLoopsSubmit submits a tool loops test turn with a workspace so tools are offered.
+func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (string, wire.TurnReply) {
+	t.Helper()
+	dir := t.TempDir()
+	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: id,
+		Input:        "what is the answer?",
+		Workspace:    dir,
+	})
+	if err != nil {
+		t.Fatalf("submit %s: %v", id, err)
+	}
+	s.WaitTerminal(reply.TurnID)
+	return reply.TurnID, s.Turn(t, c, reply.TurnID)
 }
 
 // toolLoopsRoster returns a roster with the given tools enabled for author and reviewers.
@@ -145,7 +162,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 						}
 					}
 					if !hasRead || !hasWrite || hasWeb {
-						t.Errorf("ERROR: author tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
+						t.Errorf("author tools wrong: read=%v write=%v web=%v", hasRead, hasWrite, hasWeb)
 					}
 					return "answer"
 				},
@@ -177,10 +194,10 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithToolCalls("reviewer", transport.TriYes))
 
 	c := s.Dial(t)
-	_, turn := revSubmit(t, s, c, "s1", nil)
+	_, turn := toolLoopsSubmit(t, s, c, "s1")
 
 	if turn.State != engine.StateApproved {
 		t.Fatalf("expected approved, got state=%s", turn.State)
