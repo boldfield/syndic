@@ -447,3 +447,39 @@ func (s *Store) RecoverApply(workspace, changeSetID string) (ApplyResult, error)
 	}
 	return s.applyResult(cs.ID)
 }
+
+// UnfinishedApply names a change set whose latest apply began and neither
+// finished nor was recovered, with its conversation's workspace, empty when
+// the conversation has none.
+type UnfinishedApply struct {
+	ChangeSetID string
+	TurnID      string
+	Workspace   string
+}
+
+// UnfinishedApplies lists, in one query, the change sets with an unfinished
+// apply: those whose latest control op is started.
+func (s *Store) UnfinishedApplies() ([]UnfinishedApply, error) {
+	var out []UnfinishedApply
+	err := s.Tx(func(tx *Tx) error {
+		rows, err := tx.tx.Query(`SELECT cs.id, cs.turn_id, COALESCE(c.workspace, '')
+			FROM change_sets cs
+			JOIN turns t ON t.id = cs.turn_id
+			LEFT JOIN conversations c ON c.id = t.conversation_id
+			WHERE (SELECT op_type FROM apply_ops WHERE change_set_id = cs.id AND op_type != 'file' ORDER BY id DESC LIMIT 1) = 'started'
+			ORDER BY cs.id`)
+		if err != nil {
+			return fmt.Errorf("query unfinished applies: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var u UnfinishedApply
+			if err := rows.Scan(&u.ChangeSetID, &u.TurnID, &u.Workspace); err != nil {
+				return fmt.Errorf("scan unfinished apply: %w", err)
+			}
+			out = append(out, u)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
