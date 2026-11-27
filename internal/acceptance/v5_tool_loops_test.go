@@ -32,10 +32,12 @@ func init() {
 func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (string, wire.TurnReply) {
 	t.Helper()
 	dir := t.TempDir()
+	preset := "toolreview"
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: id,
 		Input:        "what is the answer?",
 		Workspace:    dir,
+		Preset:       &preset,
 	})
 	if err != nil {
 		t.Fatalf("submit %s: %v", id, err)
@@ -47,20 +49,19 @@ func toolLoopsSubmit(t *testing.T, s *suite, c *client.Client, id string) (strin
 // toolLoopsRoster returns a roster with the given tools enabled for author and reviewers,
 // with revision rounds enabled (max_rounds = 2), and with both participants having tool capability.
 func toolLoopsRoster(authorTools, reviewerTools []string) string {
-	toml := enginetest.RosterTOML
-
-	toml = strings.Replace(toml, "[revision]\nmax_rounds = 0", "[revision]\nmax_rounds = 2", 1)
-
-	toml = strings.Replace(toml, `[presets.review]
-mode = "review"
-author = "author"
-required_reviewers = ["reviewer"]`, `[presets.review]
+	toml := enginetest.RosterTOML + `
+[presets.toolreview]
 mode = "review"
 author = "author"
 required_reviewers = ["reviewer"]
-tools = ["`+strings.Join(authorTools, `", "`)+`"]
-reviewer_tools = ["`+strings.Join(reviewerTools, `", "`)+`"]`, 1)
+` + `tools = ["` + strings.Join(authorTools, `", "`) + `"]` + `
+` + `reviewer_tools = ["` + strings.Join(reviewerTools, `", "`) + `"]` + `
 
+[presets.toolreview.revision]
+max_rounds = 2
+
+[tools]
+`
 	hasWeb := false
 	for _, t := range reviewerTools {
 		if t == "web" {
@@ -148,6 +149,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 					return "answer"
 				},
 			},
+			enginetest.Reply("ok"),
 		},
 		"reviewer": {
 			{
@@ -174,6 +176,7 @@ func TestToolLoops_ToolDefinitionsForRoles(t *testing.T) {
 					return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
 				},
 			},
+			enginetest.Reply("ok"),
 		},
 	})
 
