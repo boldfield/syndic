@@ -97,7 +97,8 @@ func TestNotOffered(t *testing.T) {
 		{"dynamicRef", `{"name":"t","inputSchema":{"$dynamicRef":"https://e.com/x#m"}}`, 0, ReasonExternalRef},
 		{"recursiveRef", `{"name":"t","inputSchema":{"$recursiveRef":"other.json"}}`, 0, ReasonExternalRef},
 		{"ref not string", `{"name":"t","inputSchema":{"$ref":{"type":"string"}}}`, 0, ReasonExternalRef},
-		{"both, header first", `{"name":"t","inputSchema":{"$ref":"x.json","x-mcp-header":"X"}}`, 0, ReasonExternalRef},
+		{"header in dependentRequired", `{"name":"t","inputSchema":{"dependentRequired":{"x-mcp-header":["a"]}}}`, 0, ReasonXMCPHeader},
+		{"both, ref sorts first", `{"name":"t","inputSchema":{"$ref":"x.json","x-mcp-header":"X"}}`, 0, ReasonExternalRef},
 		{"header defs", `{"name":"t","inputSchema":{"$defs":{"x":{"x-mcp-header":"X"}}}}`, 0, ReasonXMCPHeader},
 	}
 	for _, c := range cases {
@@ -112,6 +113,7 @@ func TestAccepted(t *testing.T) {
 	build(t, `{"name":"t","inputSchema":{"type":"object"}}`)
 	// A property named $ref is a name, not a reference.
 	build(t, `{"name":"t","inputSchema":{"properties":{"$ref":{"type":"string"}},"default":{"$ref":"x.json"}}}`)
+	build(t, `{"name":"t","inputSchema":{"dependentRequired":{"$ref":["other"]}}}`)
 	// Exactly at the bound is offered.
 	d := build(t, tool("d", ""))
 	if _, err := BuildDefinition([]byte(tool("d", "")), len(d.Bytes)); err != nil {

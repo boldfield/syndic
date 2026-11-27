@@ -161,6 +161,7 @@ var nameMaps = map[string]bool{
 // dataKeywords hold instance data, not schemas.
 var dataKeywords = map[string]bool{
 	"enum": true, "const": true, "default": true, "examples": true,
+	"dependentRequired": true,
 }
 
 // refKeywords are the reference keywords; each may point only inside the
