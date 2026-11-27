@@ -513,7 +513,7 @@ func (p *Proxy) tunnel(w http.ResponseWriter, up *countConn) {
 	go func() {
 		// Bytes the client sent behind the CONNECT are already buffered.
 		if n := buf.Reader.Buffered(); n > 0 {
-			b, _ := buf.Reader.Peek(n)
+			b, _ := buf.Peek(n)
 			_, _ = up.Write(b)
 		}
 		_, _ = io.Copy(up, client)
@@ -549,7 +549,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, up *countConn) {
 		http.Error(w, "upstream failed", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)

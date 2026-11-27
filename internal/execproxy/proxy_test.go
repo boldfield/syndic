@@ -109,7 +109,7 @@ func newEnv(t *testing.T, patterns ...string) *env {
 		t.Fatal(err)
 	}
 	e.stub = stub
-	t.Cleanup(func() { stub.Close() })
+	t.Cleanup(func() { _ = stub.Close() })
 	go func() {
 		for {
 			c, err := stub.Accept()
@@ -117,7 +117,7 @@ func newEnv(t *testing.T, patterns ...string) *env {
 				return
 			}
 			go func() {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				if line, _ := br.Peek(4); string(line) == "GET " {
 					req, err := http.ReadRequest(br)
@@ -125,10 +125,10 @@ func newEnv(t *testing.T, patterns ...string) *env {
 						return
 					}
 					_ = req
-					fmt.Fprint(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+					_, _ = fmt.Fprint(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 					return
 				}
-				io.Copy(c, br)
+				_, _ = io.Copy(c, br)
 			}()
 		}
 	}()
@@ -171,8 +171,8 @@ func connectReq(t *testing.T, addr, target, authHdr string) (int, net.Conn, *buf
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.Close() })
-	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authHdr)
+	t.Cleanup(func() { _ = c.Close() })
+	_, _ = fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", target, target, authHdr)
 	br := bufio.NewReader(c)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
@@ -194,7 +194,7 @@ func TestConnectAllowedJournaledBeforeOpen(t *testing.T) {
 	if st != 200 {
 		t.Fatalf("status %d", st)
 	}
-	fmt.Fprint(c, "hello")
+	_, _ = fmt.Fprint(c, "hello")
 	buf := make([]byte, 5)
 	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "hello" {
 		t.Fatalf("echo %q %v", buf, err)
@@ -202,7 +202,7 @@ func TestConnectAllowedJournaledBeforeOpen(t *testing.T) {
 	if len(order) < 2 || order[0] != "journal api.example.com" || !strings.HasPrefix(order[1], "dial 93.184.216.34:443") {
 		t.Fatalf("order %v", order)
 	}
-	c.Close()
+	_ = c.Close()
 	waitFor(t, func() bool { r := e.j.snapshot(); return len(r) == 1 && r[0].closed })
 	r := e.j.snapshot()[0]
 	if !r.allow || r.host != "api.example.com" || r.port != 443 || r.up != 5 || r.down != 5 {
@@ -227,8 +227,8 @@ func TestPlainHTTPAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	fmt.Fprintf(c, "GET http://api.example.com/x HTTP/1.1\r\nHost: api.example.com\r\n%s\r\n", auth(e.p.Credential()))
+	defer func() { _ = c.Close() }()
+	_, _ = fmt.Fprintf(c, "GET http://api.example.com/x HTTP/1.1\r\nHost: api.example.com\r\n%s\r\n", auth(e.p.Credential()))
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +300,7 @@ func TestWildcardNotApexAndPorts(t *testing.T) {
 		"api.other.test:443":  403,
 	} {
 		st, c, _ := connectReq(t, e.p.Addr(), tgt, cred)
-		c.Close()
+		_ = c.Close()
 		if st != want {
 			t.Errorf("%s: %d want %d", tgt, st, want)
 		}
@@ -315,7 +315,7 @@ func TestRevokeClosesTunnelAndRefusesNew(t *testing.T) {
 	}
 	before := e.dials_()
 	e.p.Revoke()
-	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := br.ReadByte(); err == nil {
 		t.Fatal("tunnel still open")
 	}
@@ -349,10 +349,10 @@ func TestRevokeRacingRequests(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer c.Close()
-			fmt.Fprintf(c, "CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n%s\r\n", cred)
-			c.SetReadDeadline(time.Now().Add(2 * time.Second))
-			io.Copy(io.Discard, c)
+			defer func() { _ = c.Close() }()
+			_, _ = fmt.Fprintf(c, "CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n%s\r\n", cred)
+			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, _ = io.Copy(io.Discard, c)
 		}()
 	}
 	e.p.Revoke()
@@ -391,8 +391,8 @@ func TestEnvAndUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-	fmt.Fprintf(c, "CONNECT x.test:443 HTTP/1.1\r\nHost: x.test:443\r\n\r\n")
+	defer func() { _ = c.Close() }()
+	_, _ = fmt.Fprintf(c, "CONNECT x.test:443 HTTP/1.1\r\nHost: x.test:443\r\n\r\n")
 	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 	if err != nil || resp.StatusCode != 407 {
 		t.Fatalf("%v %v", resp, err)
