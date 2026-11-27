@@ -18,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -165,23 +166,24 @@ type Options struct {
 
 // Engine is the review engine.
 type Engine struct {
-	store           *journal.Store
-	hub             *hub.Hub
-	rosterPath      string
-	version         string
-	clock           Clock
-	rand            io.Reader
-	retryDelay      time.Duration // the package-level retryDelay when the engine was built
-	noDelivery      bool          // the package-level deliveryOff when the engine was built
-	probeMissing    bool
-	probeTimeout    time.Duration
-	probeRawDir     string
-	onRunOpened     func() error
-	probeExportDir  string
-	noStartupProbes bool
-	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
-	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
-	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	store              *journal.Store
+	hub                *hub.Hub
+	rosterPath         string
+	version            string
+	clock              Clock
+	rand               io.Reader
+	retryDelay         time.Duration // the package-level retryDelay when the engine was built
+	noDelivery         bool          // the package-level deliveryOff when the engine was built
+	probeMissing       bool
+	probeTimeout       time.Duration
+	probeRawDir        string
+	onRunOpened        func() error
+	probeExportDir     string
+	noStartupProbes    bool
+	newAdapter         func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
+	changeLines        func(transport.CompleteResult) []string // nil means authorChangeLines
+	beforeEffect       func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	searchProviderInst tools.SearchProvider                    // injection seam: configured search provider, or nil
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row

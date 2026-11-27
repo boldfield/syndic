@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -395,7 +394,7 @@ const toolLimitStatement = "No further tool calls are available in this turn: th
 // offered when the roster configures a search provider. web_fetch is not yet
 // wired and so is not offered. The actual network transport (fetching, searching,
 // address validation, refusal) is provided by the roster's configured endpoints.
-var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true}
+var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: true, tools.GroupWeb: true}
 
 // authorToolDefs returns the definitions a dispatch of the turn's author
 // offers: the tools of the preset's executable groups. File groups need a
@@ -411,17 +410,22 @@ func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited boo
 		}
 		switch g {
 		case tools.GroupWeb:
-			if !e.searchProvider() {
+			if !e.searchProvider() || !e.groupOffered(g, t.author) {
 				continue
 			}
 		case tools.GroupRead, tools.GroupWrite:
 			if t.workspace == "" {
 				continue
 			}
+			if !e.groupOffered(g, t.author) {
+				continue
+			}
+		default:
+			if !e.groupOffered(g, t.author) {
+				continue
+			}
 		}
-		if e.groupOffered(g, t.author) {
-			groups = append(groups, g)
-		}
+		groups = append(groups, g)
 	}
 	if len(groups) == 0 {
 		return nil, false, nil
@@ -509,9 +513,11 @@ func (e *Engine) toolEffects(fs *workspace.Confined, turnID, attemptID string, h
 }
 
 // webSearchEffect returns the tool effect for web_search. The search provider
-// is built from the roster's configured web search settings.
+// is obtained from the engine's injected provider. With no provider, the effect
+// returns search_refused. The provider must handle all screening, refereeing,
+// address validation and credential scoping, so the effect adds none of them:
+// each query is passed to Search exactly once and counted exactly once.
 func (e *Engine) webSearchEffect(turnID, attemptID string, hook func(turnID, attemptID, name string)) toolEffect {
-	searchTools := e.webSearchTools()
 	return func(call journal.ToolCall, args json.RawMessage, recheck func() error) (tools.Result, error) {
 		if hook != nil {
 			hook(turnID, attemptID, call.Name)
@@ -519,48 +525,25 @@ func (e *Engine) webSearchEffect(turnID, attemptID string, hook func(turnID, att
 				return tools.Result{}, err
 			}
 		}
-		if searchTools == nil {
-			return tools.Result{Content: []byte("search not configured"), ErrorCode: tools.ErrCodeSearchRefused}, nil
+		e.mu.Lock()
+		provider := e.searchProviderInst
+		e.mu.Unlock()
+		if provider == nil {
+			return tools.Result{Content: []byte("search provider not configured"), ErrorCode: tools.ErrCodeSearchRefused}, nil
 		}
-		// Extract the query from arguments
 		var searchArgs struct {
 			Query string `json:"query"`
 		}
 		if err := json.Unmarshal(args, &searchArgs); err != nil {
 			return tools.Result{Content: []byte("invalid arguments"), ErrorCode: tools.ErrCodeBadArguments}, nil
 		}
+		searchTools := tools.NewWebSearchTools(provider, e.maxResultBytes())
 		result, err := searchTools.Search(context.Background(), searchArgs.Query)
 		if err != nil {
 			return tools.Result{}, err
 		}
 		return result, nil
 	}
-}
-
-// webSearchTools returns a WebSearchTools initialized with a fake provider, or
-// nil if no search provider is configured.
-func (e *Engine) webSearchTools() *tools.WebSearchTools {
-	if !e.searchProvider() {
-		return nil
-	}
-	provider := &fakeSearchProvider{}
-	return tools.NewWebSearchTools(provider, e.maxResultBytes())
-}
-
-// fakeSearchProvider is a fake SearchProvider for testing that returns
-// canned results. In production this would be replaced with a real search
-// provider like a SearchAPI or similar service.
-type fakeSearchProvider struct{}
-
-func (p *fakeSearchProvider) Search(ctx context.Context, query string) (*http.Response, error) {
-	// Fake implementation that returns canned results.
-	// In a real implementation, this would query a real search provider.
-	body := fmt.Sprintf("Title 1\nhttps://example.com/1\nSnippet about %s\n---\nTitle 2\nhttps://example.com/2\nAnother result", query)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
-	return resp, nil
 }
 
 // toolStepMessages renders the next author attempt's messages from the
