@@ -323,6 +323,9 @@ func (r *Roster) String() string {
 		r.DefaultPreset, len(r.Participants), len(r.Endpoints), len(r.Presets))
 }
 
+// DefaultMaxReviewerCalls is tools.max_reviewer_calls when the roster sets none.
+const DefaultMaxReviewerCalls = 10
+
 // ApplyDefaults fills every absent value in Deadlines, Budgets and Engine with defaults.
 func (r *Roster) ApplyDefaults() {
 	// Deadlines defaults
@@ -438,7 +441,7 @@ func (r *Roster) ApplyDefaults() {
 		r.Tools.MaxCallsPerTurn = &mcpt
 	}
 	if r.Tools.MaxReviewerCalls == nil {
-		mrc := 10
+		mrc := DefaultMaxReviewerCalls
 		r.Tools.MaxReviewerCalls = &mrc
 	}
 	if r.Tools.MaxResultBytes == nil {

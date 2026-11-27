@@ -76,6 +76,9 @@ type openTurn struct {
 	// carried to the model, seeded from the history at submit and fed by
 	// each file-tool effect. It is safe for concurrent use.
 	screener *tools.URLScreener
+	// reviewerCalls counts each reviewer's calls in the current round against
+	// tools.max_reviewer_calls.
+	reviewerCalls map[string]int
 
 	// delivering is set once the turn has ended and its terminal deliveries
 	// are handed to the scheduler. They run after e.open has moved on.
