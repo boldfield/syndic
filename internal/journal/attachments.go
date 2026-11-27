@@ -60,6 +60,19 @@ func (tx *Tx) StoreAttachmentsWithBases(turnID string, attachments []Attachment)
 		if att.ByteLen < 0 {
 			return "", fmt.Errorf("attachment byte_len must be non-negative")
 		}
+		// Validate BaseSHA matches SHA256 (attached base is the content itself at submit time)
+		if att.BaseSHA != att.SHA256 {
+			return "", fmt.Errorf("attachment base_sha256 must equal content_sha256 at admission")
+		}
+		// Verify ByteLen matches the actual content in tool_content
+		var actualLen int
+		err := tx.tx.QueryRow(`SELECT byte_len FROM tool_content WHERE sha256 = ?`, att.SHA256).Scan(&actualLen)
+		if err != nil {
+			return "", fmt.Errorf("verify attachment content: %w", err)
+		}
+		if actualLen != att.ByteLen {
+			return "", fmt.Errorf("attachment byte_len %d does not match stored content length %d", att.ByteLen, actualLen)
+		}
 
 		if _, err := tx.tx.Exec(`
 			INSERT INTO attachments (id, turn_id, path, sha256, byte_len, recorded_at)
