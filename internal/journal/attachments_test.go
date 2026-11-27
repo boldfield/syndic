@@ -196,6 +196,10 @@ func TestAttachmentValidationWritesNothing(t *testing.T) {
 		"duplicate": {{Path: "a", Content: []byte("1")}, {Path: "a", Content: []byte("2")}},
 		"empty":     {{Path: "", Content: []byte("1")}},
 		"newline":   {{Path: "a\nb", Content: []byte("1")}},
+		"dot":       {{Path: "./f.txt", Content: []byte("1")}},
+		"double":    {{Path: "a//b", Content: []byte("1")}},
+		"parent":    {{Path: "../x", Content: []byte("1")}},
+		"absolute":  {{Path: "/x", Content: []byte("1")}},
 	} {
 		if _, err := admit(store, run, "s-"+name, atts); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -318,5 +322,37 @@ func TestAttachedBaseUnderStagingAndUnstage(t *testing.T) {
 	})
 	if !errors.Is(err, journal.ErrAlreadyObserved) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAttachmentModeAndHashAccessor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "j.db")
+	db, store := openAttachStore(t, path)
+	defer func() { _ = db.Close() }()
+	run := newAttachRun(t, store)
+	turn, err := admit(store, run, "s1", []journal.AttachmentContent{
+		{Path: "build.sh", Content: []byte("#!/bin/sh\n"), OwnerExec: true},
+		{Path: "notes.txt", Content: []byte("n")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := observation.NewStore(store)
+	for p, want := range map[string]bool{"build.sh": true, "notes.txt": false} {
+		got, err := obs.OwnerExec(turn, p)
+		if err != nil || got != want {
+			t.Errorf("OwnerExec(%s) = %v, %v; want %v", p, got, err, want)
+		}
+	}
+	row, err := store.GetTurn(turn)
+	if err != nil || row.AttachmentsHash == "" || row.AttachmentsHash == "none" {
+		t.Fatalf("turn = %+v, %v", row, err)
+	}
+	solo, err := admit(store, run, "s2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, err := store.GetTurn(solo); err != nil || row.AttachmentsHash != "none" {
+		t.Fatalf("solo = %+v, %v", row, err)
 	}
 }

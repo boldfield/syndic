@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/boldfield/syndic/internal/candidate"
 )
@@ -14,6 +15,9 @@ import (
 type AttachmentContent struct {
 	Path    string
 	Content []byte
+	// OwnerExec is the file's owner-execute bit at admission; it is recorded
+	// with the base observation as the v7 mode record.
+	OwnerExec bool
 }
 
 // Attachment is a stored attachment record.
@@ -34,6 +38,9 @@ func preparedAttachments(atts []AttachmentContent) ([]AttachmentContent, string,
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
 	manifest := make([]candidate.Attachment, len(sorted))
 	for i, a := range sorted {
+		if err := checkAttachmentPath(a.Path); err != nil {
+			return nil, "", err
+		}
 		if i > 0 && sorted[i-1].Path == a.Path {
 			return nil, "", fmt.Errorf("duplicate attachment path %q", a.Path)
 		}
@@ -44,6 +51,20 @@ func preparedAttachments(atts []AttachmentContent) ([]AttachmentContent, string,
 		return nil, "", err
 	}
 	return sorted, hash, nil
+}
+
+// checkAttachmentPath refuses paths the read tools' path cleaning would map
+// elsewhere, so a stored base is always reachable under its own name.
+func checkAttachmentPath(p string) error {
+	if p == "" || strings.HasPrefix(p, "/") || strings.IndexByte(p, 0) >= 0 {
+		return fmt.Errorf("attachment path %q must be a non-empty relative path", p)
+	}
+	for _, c := range strings.Split(p, "/") {
+		if c == "" || c == "." || c == ".." {
+			return fmt.Errorf("attachment path %q is not in clean form", p)
+		}
+	}
+	return nil
 }
 
 // recordAttachments stores each attachment's bytes, its base observation
@@ -78,6 +99,9 @@ func (tx *Tx) recordAttachments(turnID string, sorted []AttachmentContent) error
 			INSERT INTO turn_attachments (turn_id, path, sha256, byte_len, observation_id) VALUES (?, ?, ?, ?, ?)
 		`, turnID, []byte(a.Path), sum, len(a.Content), id); err != nil {
 			return fmt.Errorf("insert attachment record: %w", err)
+		}
+		if err := tx.RecordObservationMode(turnID, a.Path, a.OwnerExec); err != nil {
+			return err
 		}
 		payload := map[string]any{"observation_id": id, "source": "attachment",
 			"snapshot_version": version, "kind": ObservationFile, "journal_seq": seq, "sha256": sum}
