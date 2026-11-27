@@ -29,6 +29,9 @@ const (
 // toolCallType is the only call type under which a call may have an effect.
 const toolCallType = "function"
 
+// defaultMaxReviewerCalls is the default per-round limit for reviewer tool calls.
+const defaultMaxReviewerCalls = 10
+
 // errToolAbandoned is what a step's re-check returns, and so what an effect
 // returns after a wait inside it found the step may have no further effect.
 // An effect returning it has journaled nothing; the executor journals the
@@ -567,7 +570,7 @@ func (e *Engine) reviewerToolDefs(t *openTurn, reviewerID string) (defs []transp
 // reviewerCallsRemaining is how many calls the reviewer has left under
 // tools.max_reviewer_calls for the current round. e.mu is held.
 func (e *Engine) reviewerCallsRemaining(t *openTurn, reviewerID string) int {
-	limit := 10
+	limit := defaultMaxReviewerCalls
 	if e.roster != nil && e.roster.Tools != nil && e.roster.Tools.MaxReviewerCalls != nil {
 		limit = *e.roster.Tools.MaxReviewerCalls
 	}
