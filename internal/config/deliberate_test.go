@@ -109,3 +109,131 @@ func TestDeliberateAccessors(t *testing.T) {
 		t.Fatalf("without vote = %v", got)
 	}
 }
+
+func routeSet(p Preset) map[TextRoute]bool {
+	set := map[TextRoute]bool{}
+	for _, tr := range p.DeliberateTextRoutes() {
+		set[tr] = true
+	}
+	return set
+}
+
+func TestDeliberateTextRoutes(t *testing.T) {
+	p := Preset{Mode: ModeDeliberate, Proposers: []string{"a", "b"}, Integrator: "a", RequiredReviewers: []string{"b", "d"}}
+	got := routeSet(p)
+	want := []TextRoute{
+		{"a", "b", TextProposal}, {"b", "a", TextProposal}, {"a", "d", TextProposal}, {"b", "d", TextProposal},
+		{"b", "a", TextCritique}, {"a", "b", TextCritique}, {"a", "d", TextCritique}, {"b", "d", TextCritique},
+		{"a", "b", TextDisposition}, {"a", "d", TextDisposition},
+		{"a", "b", TextCandidate}, {"a", "d", TextCandidate},
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing route %+v", w)
+		}
+	}
+	if len(got) != len(want) || len(p.DeliberateTextRoutes()) != len(want) {
+		t.Errorf("got %d routes, want %d: %v", len(p.DeliberateTextRoutes()), len(want), p.DeliberateTextRoutes())
+	}
+}
+
+func cloudEndpoint(r *Roster, participant string) {
+	r.Endpoints = append(r.Endpoints, EndpointProfile{Name: "cloud", Dialect: "chat_completions_v1", DeclaredLocation: "cloud", DeclaredExecution: "remote", DeclaredBilling: "metered", NetworkDependency: "other"})
+	for i := range r.Participants {
+		if r.Participants[i].ID == participant {
+			r.Participants[i].Endpoint = "cloud"
+		}
+	}
+}
+
+func TestDeliberateRoutingPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Preset)
+		to     string
+		want   string
+	}{
+		{"proposal to a proposer", nil, "b", `proposal from "a" to "b"`},
+		{"critique to the integrator", nil, "a", `critique from "b" to "a"`},
+		{"disposition to a reviewer", func(p *Preset) { p.RequiredReviewers = []string{"d"} }, "d", `disposition from "a" to "d"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := deliberateRoster(tt.mutate)
+			r.Policy.LocalOnly = true
+			cloudEndpoint(r, tt.to)
+			err := r.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeliberateRoutingPolicyPasses(t *testing.T) {
+	r := deliberateRoster(func(p *Preset) { p.RequiredReviewers = []string{"b", "d"} })
+	r.Policy.LocalOnly = true
+	if err := r.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+}
+
+func TestDeliberateRoutingIncludesOutsideReviewer(t *testing.T) {
+	r := deliberateRoster(func(p *Preset) { p.RequiredReviewers = []string{"d"} })
+	r.Policy.LocalOnly = true
+	cloudEndpoint(r, "d")
+	err := r.Validate()
+	if err == nil || !strings.Contains(err.Error(), `proposal from "b" to "d"`) {
+		t.Fatalf("Validate() = %v", err)
+	}
+}
+
+func TestDeliberateFileEgress(t *testing.T) {
+	for _, tools := range []struct {
+		name          string
+		tools, rtools []string
+	}{{"reviewer_tools", nil, []string{"read"}}, {"tools", []string{"read"}, nil}} {
+		t.Run(tools.name, func(t *testing.T) {
+			r := deliberateRoster(func(p *Preset) {
+				p.Tools, p.ReviewerTools = tools.tools, tools.rtools
+				p.RequiredReviewers = []string{"b", "d"}
+			})
+			if err := r.Validate(); err != nil {
+				t.Fatalf("local participants: Validate() = %v", err)
+			}
+			cloudEndpoint(r, "d")
+			r.Policy.AllowedDestinations = []string{"cloud"}
+			err := r.Validate()
+			if err == nil || !strings.Contains(err.Error(), `participant "d"`) || !strings.Contains(err.Error(), "requires file egress") {
+				t.Fatalf("Validate() = %v", err)
+			}
+			r.Tools = &ToolsConfig{FileEgressDestinations: []string{"cloud"}}
+			if err := r.Validate(); err != nil {
+				t.Fatalf("destination listed: Validate() = %v", err)
+			}
+		})
+	}
+}
+
+func TestDeliberateWebParticipantsIncludeIntegrator(t *testing.T) {
+	p := deliberateRoster(func(p *Preset) {
+		p.ReviewerTools = []string{"web"}
+		p.RequiredReviewers = []string{"b", "d"}
+	}).Presets["deliberate"]
+	if got := p.WebParticipants(); !slices.Contains(got, "a") || !slices.Contains(got, "b") || !slices.Contains(got, "d") {
+		t.Fatalf("WebParticipants() = %v, want the integrator, b and d", got)
+	}
+}
+
+func TestDeliberateWebWithFile(t *testing.T) {
+	off := false
+	r := deliberateRoster(func(p *Preset) {
+		p.Tools = []string{"read"}
+		p.ReviewerTools = []string{"web"}
+		p.AllowWebWithRead = &off
+	})
+	got := r.WebWithFileViolation(r.Presets["deliberate"], false)
+	if !slices.Contains(got, "a") {
+		t.Fatalf("WebWithFileViolation() = %v, want the integrator among them", got)
+	}
+}

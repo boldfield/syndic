@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"slices"
@@ -456,36 +457,39 @@ func (r *Roster) Validate() error {
 		}
 	}
 
-	// Validate LocalOnly policy
-	if r.Policy.LocalOnly {
-		for _, p := range r.Participants {
-			if p.Route == "api" && p.Endpoint != "" {
-				ep := endpointMap[p.Endpoint]
-				if ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud" {
-					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_location %q on participant %q",
-						p.Endpoint, ep.DeclaredLocation, p.ID))
-				}
-				if ep.DeclaredExecution != "local" {
-					errs = append(errs, fmt.Errorf("local_only policy rejects endpoint %q with declared_execution %q on participant %q",
-						p.Endpoint, ep.DeclaredExecution, p.ID))
-				}
-			}
+	// The routing policy, one rule per participant. A deliberate preset is
+	// held to it for every pair of participants between which it sends text.
+	// Nothing is omitted to make a preset fit.
+	refused := make(map[string][]string)
+	for _, p := range r.Participants {
+		reasons := r.routingRefusals(p, endpointMap, seenAllowedDests)
+		if len(reasons) == 0 {
+			continue
+		}
+		refused[p.ID] = reasons
+		for _, why := range reasons {
+			errs = append(errs, fmt.Errorf("%s on participant %q", why, p.ID))
 		}
 	}
-
-	// Validate mixed policy (not LocalOnly)
-	if !r.Policy.LocalOnly {
-		// Check that every participant's endpoint that is corporate/cloud is in allowed destinations
-		for _, p := range r.Participants {
-			if p.Route == "api" && p.Endpoint != "" {
-				ep := endpointMap[p.Endpoint]
-				if ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud" {
-					if !seenAllowedDests[p.Endpoint] {
-						errs = append(errs, fmt.Errorf("endpoint %q (declared_location %q) on participant %q must be in allowed_destinations",
-							p.Endpoint, ep.DeclaredLocation, p.ID))
-					}
-				}
+	for _, name := range slices.Sorted(maps.Keys(r.Presets)) {
+		preset := r.Presets[name]
+		if preset.Mode != ModeDeliberate {
+			continue
+		}
+		var order []string
+		pairs := make(map[string][]string)
+		for _, tr := range preset.DeliberateTextRoutes() {
+			if len(refused[tr.To]) == 0 {
+				continue
 			}
+			if _, ok := pairs[tr.To]; !ok {
+				order = append(order, tr.To)
+			}
+			pairs[tr.To] = append(pairs[tr.To], fmt.Sprintf("%s from %q to %q", tr.Content, tr.From, tr.To))
+		}
+		for _, to := range order {
+			errs = append(errs, fmt.Errorf("preset %q: the routing policy refuses %s: %s",
+				name, strings.Join(pairs[to], "; "), strings.Join(refused[to], "; ")))
 		}
 	}
 
@@ -1031,4 +1035,26 @@ func (r *Roster) validateDeliberatePreset(name string, preset Preset, known map[
 		}
 	}
 	return errs
+}
+
+// routingRefusals returns every reason the routing policy refuses to send
+// text to the participant; none means it may receive it.
+func (r *Roster) routingRefusals(p Participant, endpoints map[string]EndpointProfile, allowed map[string]bool) []string {
+	if p.Route != "api" || p.Endpoint == "" {
+		return nil
+	}
+	ep := endpoints[p.Endpoint]
+	offsite := ep.DeclaredLocation == "corporate" || ep.DeclaredLocation == "cloud"
+	var reasons []string
+	if r.Policy.LocalOnly {
+		if offsite {
+			reasons = append(reasons, fmt.Sprintf("local_only policy rejects endpoint %q with declared_location %q", p.Endpoint, ep.DeclaredLocation))
+		}
+		if ep.DeclaredExecution != "local" {
+			reasons = append(reasons, fmt.Sprintf("local_only policy rejects endpoint %q with declared_execution %q", p.Endpoint, ep.DeclaredExecution))
+		}
+	} else if offsite && !allowed[p.Endpoint] {
+		reasons = append(reasons, fmt.Sprintf("endpoint %q (declared_location %q) must be in allowed_destinations", p.Endpoint, ep.DeclaredLocation))
+	}
+	return reasons
 }
