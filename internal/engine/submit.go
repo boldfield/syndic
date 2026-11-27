@@ -140,6 +140,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, errors.New("engine: not started")
 	}
 
+	// Check if an apply is running
+	if e.applyOpen != nil {
+		busy := refusal(wire.ErrorCodeBusy)
+		busy.TurnID = strPtr(e.applyOpen.id)
+		return wire.SubmitReply{}, busy
+	}
+
 	if req.SubmissionID == "" {
 		bad := refusal(wire.ErrorCodeBadRequest)
 		bad.Detail = strPtr("submission_id_required")

@@ -45,6 +45,8 @@ type Engine interface {
 	Cancel(turnID string) error
 	Override(turnID, reason string) error
 	Release(wire.ReleaseRequest) (wire.ReleaseReply, error)
+	Apply(turnID string) (wire.ApplyReply, error)
+	Discard(turnID string) (wire.DiscardReply, error)
 	Stopping() <-chan struct{}
 }
 
@@ -810,6 +812,20 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		}
 		reply, err := buildReviews(c.server.store, frame.ID, req.TurnID, req.Cursor, req.Limit)
 		c.respond(frame.ID, "reviews", reply, err)
+	case wire.RequestApply:
+		var req wire.ApplyRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		reply, err := c.server.engine.Apply(req.TurnID)
+		c.respond(frame.ID, "apply", reply, err)
+	case wire.RequestDiscard:
+		var req wire.DiscardRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		reply, err := c.server.engine.Discard(req.TurnID)
+		c.respond(frame.ID, "discard", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}

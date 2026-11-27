@@ -210,6 +210,7 @@ type Engine struct {
 	runFirstSeq   int64
 	startedAt     time.Time
 	open          *openTurn
+	applyOpen     *openTurn // apply-in-progress marker; holds turn ID of apply and change set ID
 	running       map[string]bool
 	inflight      map[string]int // dispatches holding a pool slot, per participant
 	queued        map[string]bool
@@ -453,6 +454,11 @@ func (e *Engine) Start() error {
 	if err != nil {
 		return fmt.Errorf("engine: recovery: %w", err)
 	}
+
+	// Recovery: classify unfinished applies without writing to the workspace.
+	// RecoverApply is called for change sets during the apply flow.
+	// This is a placeholder for future implementation that would enumerate
+	// all change sets and call RecoverApply for any with in-progress applies.
 
 	// Now read and validate the new roster
 	path, err := filepath.Abs(e.rosterPath)

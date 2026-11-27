@@ -156,6 +156,7 @@ type Error struct {
 	LastSeq      *int64          `json:"last_seq,omitempty"`
 	Ceiling      *int            `json:"ceiling,omitempty"`
 	Route        *string         `json:"route,omitempty"`
+	Paths        []*string       `json:"paths,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -776,6 +777,8 @@ const (
 	RequestConversations = "conversations"
 	RequestConversation  = "conversation"
 	RequestReviews       = "reviews"
+	RequestApply         = "apply"
+	RequestDiscard       = "discard"
 )
 
 // String constants for error codes
@@ -806,6 +809,8 @@ const (
 	ErrorCodeWorkspaceMismatch   = "workspace_mismatch"
 	ErrorCodeMaxRounds           = "max_rounds"
 	ErrorCodeEgress              = "egress"
+	ErrorCodeWorkspaceMissing    = "workspace_missing"
+	ErrorCodeBaseChanged         = "base_changed"
 )
 
 // String constants for event kinds
