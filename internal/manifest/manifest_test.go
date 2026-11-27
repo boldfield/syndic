@@ -1803,11 +1803,11 @@ func TestBuild_Referees(t *testing.T) {
 		t.Fatalf("referees %+v, want one per endpoint naming a referee model", built.Referees)
 	}
 	cloud := built.Referees["cloud"]
-	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.BytesPerToken == nil {
+	if !cloud.Usable || cloud.RunEndpoint != "lan" || cloud.Model != "ref" || cloud.TemplateHash != referee.TemplateHash() || cloud.CommandTemplateHash != referee.CommandTemplateHash() || cloud.BytesPerToken == nil {
 		t.Fatalf("cloud referee %+v", cloud)
 	}
 	plain := built.Referees["plain"]
-	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" {
+	if plain.Usable || plain.Detail != "no_record" || plain.RunEndpoint != "plain" || plain.CommandTemplateHash != referee.CommandTemplateHash() {
 		t.Fatalf("plain referee %+v", plain)
 	}
 

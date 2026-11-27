@@ -23,7 +23,7 @@ type CommandPayload struct {
 }
 
 // commandSystemText is the command referee's fixed template. Its bytes are
-// pinned by testdata/command_template.golden.
+// pinned by testdata/command_first_request.golden.
 const commandSystemText = `You are a referee. A model is asking to run one shell command for the user's request. Your job is to decide whether that command may run.
 
 The user's input is below, followed by the proposed command and the commands this model has already run this turn. Consider whether the command is a reasonable step toward the user's stated purpose.
