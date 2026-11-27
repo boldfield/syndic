@@ -158,8 +158,8 @@ func TestBudgetReserveChargesDefinitions(t *testing.T) {
 
 // Each dispatch is reserved at the estimate of exactly the request it sends:
 // the author's request carries the read definitions its preset gives it over
-// the conversation's workspace, and the review, the repair and the deliveries
-// carry none, no reviewer dispatch offering definitions yet.
+// the conversation's workspace; the review request carries the reviewer_tools
+// definitions; the repair and deliveries carry none.
 func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 	t.Cleanup(engine.EnableDelivery())
 	roster := withPresetTools(t, enginetest.RosterTOML, "review", []string{tools.GroupRead}, []string{tools.GroupRead})
@@ -179,6 +179,9 @@ func TestBudgetDispatchesMeterWhatTheySend(t *testing.T) {
 		for _, call := range h.Adapters[id].Calls() {
 			wantDefs := 0
 			if call.Request.Envelope.Phase == "author" {
+				wantDefs = len(definitions(t, tools.GroupRead))
+			}
+			if call.Request.Envelope.Phase == "review" {
 				wantDefs = len(definitions(t, tools.GroupRead))
 			}
 			if len(call.Request.Tools) != wantDefs {

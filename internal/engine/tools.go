@@ -542,10 +542,6 @@ func (e *Engine) toolStepMessages(req transport.CompleteRequest, res transport.C
 	return msgs, request.String(), nil
 }
 
-// toolLimitStatementReviewer is sent, with no tool definitions, to a reviewer that
-// has reached its call bound.
-const toolLimitStatementReviewer = "No further tool calls are available in this round: the bound on lookups has been reached. Give your verdict based on what you have checked."
-
 // reviewerToolDefs returns the definitions a dispatch of a reviewer offers:
 // the tools of the preset's reviewer_tools executable groups, which for the file
 // groups need the conversation to have a workspace. None are offered once the

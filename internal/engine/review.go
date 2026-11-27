@@ -28,7 +28,7 @@ const (
 // reviewerAttemptOutcome holds the result of a reviewer attempt, including
 // any tool step that was accepted for execution.
 type reviewerAttemptOutcome struct {
-	repairText string // non-empty if a repair is needed for malformed verdict
+	repairText string                    // non-empty if a repair is needed for malformed verdict
 	toolStep   *transport.CompleteResult // non-nil if a tool step was accepted for execution
 	req        transport.CompleteRequest // the request the tool step answers
 }
