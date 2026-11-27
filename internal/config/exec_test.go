@@ -28,7 +28,22 @@ func ensureExec(r *Roster) *ExecConfig {
 	return r.Tools.Exec
 }
 
+// pinExecEnv points HOME, TMPDIR and the XDG directories at a fresh layout so
+// the location checks do not depend on the host. It returns the layout's root.
+func pinExecEnv(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	t.Setenv("TMPDIR", filepath.Join(base, "tmp"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "state"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
+	return base
+}
+
 func TestExecRules(t *testing.T) {
+	pinExecEnv(t)
 	solo := func(tools ...string) func(*Roster) {
 		return func(r *Roster) {
 			r.Presets["x"] = Preset{Mode: "solo", Author: "author", Tools: tools}
@@ -244,13 +259,14 @@ env_passthrough = ["GOFLAGS"]
 }
 
 func TestCheckExecWorkspaceRoot(t *testing.T) {
+	base := pinExecEnv(t)
 	r := execRoster(nil)
 	for _, root := range []string{"/usr", "/usr/src/project", "/"} {
 		if err := r.CheckExecWorkspaceRoot(root); err == nil {
 			t.Errorf("root %q accepted, want refusal", root)
 		}
 	}
-	for _, root := range []string{"/home/someone/project", t.TempDir()} {
+	for _, root := range []string{"/home/someone/project", filepath.Join(base, "work")} {
 		if err := r.CheckExecWorkspaceRoot(root); err != nil {
 			t.Errorf("root %q refused: %v", root, err)
 		}
@@ -258,13 +274,7 @@ func TestCheckExecWorkspaceRoot(t *testing.T) {
 }
 
 func TestExecSyndicAreasOutsideHome(t *testing.T) {
-	base := t.TempDir()
-	t.Setenv("HOME", filepath.Join(base, "home"))
-	t.Setenv("TMPDIR", filepath.Join(base, "tmp"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(base, "state"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
+	base := pinExecEnv(t)
 	for _, area := range []string{"config", "state", "data", "run"} {
 		refused := filepath.Join(base, area, "syndic", "x")
 		neighbour := filepath.Join(base, area, "other")
