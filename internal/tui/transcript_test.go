@@ -720,3 +720,29 @@ func TestTranscriptLoadingTextInABodyIsNotLoading(t *testing.T) {
 		t.Fatalf("a body mentioning loading stopped the view following:\n%s", v)
 	}
 }
+
+func TestTranscriptMouseWheelScrolls(t *testing.T) {
+	a := transcriptApp(80, 24)
+	a.mouseEnabled = true
+	a.terminalCapabilities.Color = true
+	a.Update(transcriptMsg{turn: "t1", items: seedItems(a, 0, 40)})
+	_, bottom, _ := a.layoutTranscript()
+	if !bottom {
+		t.Fatal("setup: not at the bottom")
+	}
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	first, bottom, _ := a.layoutTranscript()
+	if bottom {
+		t.Fatal("wheel up left the view at the bottom")
+	}
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	up, _, _ := a.layoutTranscript()
+	if up >= first {
+		t.Fatalf("wheel up did not move the view: %d then %d", first, up)
+	}
+	a.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	down, _, _ := a.layoutTranscript()
+	if down <= up {
+		t.Fatalf("wheel down did not move the view: %d then %d", up, down)
+	}
+}

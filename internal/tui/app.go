@@ -491,6 +491,12 @@ func (a *App) scrollTranscript(key string) {
 	}
 }
 
+// scrollTranscriptRows moves the transcript by n rows; up is negative.
+func (a *App) scrollTranscriptRows(n int) {
+	a.layoutTranscript()
+	a.tFollow.Scroll(n)
+}
+
 // Init starts the first connection, from the beginning of the journal.
 func (a *App) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, connectCmd(a.ctx, a.gen, a.socket, 0))
