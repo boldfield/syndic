@@ -236,7 +236,7 @@ func TestStatusLineEscapesRecordValues(t *testing.T) {
 			}
 		}
 	}
-	if line := renderStrip(a.state, 4000, chatNow, false); !strings.Contains(line, `[quick:h\x1b]8;;http://x\x1b\L\x1b[2J\x0d\xc2\x9b\u202e\u2066\xff\x0a2]`) {
+	if line := renderStrip(a.state, 4000, chatNow, false); !strings.Contains(line, `quick:h\x1b]8;;http://x\x1b\L\x1b[2J\x0d\xc2\x9b\u202e\u2066\xff\x0a2`) {
 		t.Errorf("quick profile not shown with visible escapes: %q", line)
 	}
 	a.state.CurrentTurn = ""

@@ -278,7 +278,7 @@ func openTurnState(reviewers ...string) State {
 func TestRenderStripFull(t *testing.T) {
 	s := openTurnState("r1", "r2")
 	now := s.Turns["t1"].SubmittedAt.Add(75 * time.Second)
-	want := "[review] [author_dispatched] [1m15s / 15m0s] [░░░░░░░░ est. 1234 / 250000]"
+	want := "review · author_dispatched · 1m15s / 15m0s · [░░░░░░░░] est. 1234 / 250000"
 	if got := renderStrip(s, 200, now, false); got != want {
 		t.Fatalf("strip =\n%q\nwant\n%q", got, want)
 	}
@@ -289,14 +289,14 @@ func TestRenderStripQuickAndIdle(t *testing.T) {
 	ti := s.Turns["t1"]
 	ti.QuickProfile = ptr("fast")
 	s.Turns["t1"] = ti
-	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.HasPrefix(got, "[review] [quick:fast] [author_dispatched] ") {
+	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.HasPrefix(got, "review · quick:fast · author_dispatched · ") {
 		t.Fatalf("strip = %q", got)
 	}
 
 	idle := NewState()
 	idle.ConnState = ConnStateConnected
 	idle.Status = &wire.StatusReply{DefaultPreset: "solo"}
-	if got := renderStrip(idle, 80, time.Time{}, false); got != "[solo] [idle]" {
+	if got := renderStrip(idle, 80, time.Time{}, false); got != "solo · idle" {
 		t.Fatalf("idle strip = %q", got)
 	}
 }
@@ -306,7 +306,7 @@ func TestRenderStripEstimateIsLabelled(t *testing.T) {
 	ti := s.Turns["t1"]
 	ti.LimitTokens = 0
 	s.Turns["t1"] = ti
-	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.Contains(got, "[est. 1234]") {
+	if got := renderStrip(s, 200, ti.SubmittedAt, false); !strings.Contains(got, "est. 1234") {
 		t.Fatalf("strip = %q", got)
 	}
 }
@@ -366,12 +366,12 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 	d := startRig(t, h)
 	d.send(resizeMsg(200, 24))
 
-	if !strings.HasPrefix(d.strip(), "[review] [idle]") {
+	if !strings.HasPrefix(d.strip(), "review · idle") {
 		t.Fatalf("idle strip = %q", d.strip())
 	}
 	d.typeLine("question")
 	d.until("author running with limit and deadline", func(string) bool {
-		return d.sawStrip("[review] [author_dispatched] [", "/ 15m0s] [", "est. ", " / 250000]")
+		return d.sawStrip("review · author_dispatched · ", "/ 15m0s · ", "est. ", " / 250000")
 	})
 	spinning := func(v, id string) bool {
 		for _, f := range spinnerFrames {
@@ -395,7 +395,7 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 		return d.app.state.CurrentTurn == "" && d.app.state.Turns[turn].TerminalReason != nil
 	})
 
-	for _, want := range []string{"[submitted]", "[author_dispatched]", "[candidate_frozen]", "[reviewers_dispatched]"} {
+	for _, want := range []string{" · submitted · ", " · author_dispatched · ", " · candidate_frozen · ", " · reviewers_dispatched · "} {
 		if !d.sawStrip(want) {
 			t.Errorf("no strip showed %q; strips:\n%s", want, strings.Join(d.seen, "\n"))
 		}
@@ -410,7 +410,7 @@ func TestLiveStripDuringReviewTurn(t *testing.T) {
 	if got := d.app.state.Turns[turn]; got.State != reply.State || *got.TerminalReason != *reply.TerminalReason {
 		t.Fatalf("state holds %q/%q, the turn reply says %q/%q", got.State, *got.TerminalReason, reply.State, *reply.TerminalReason)
 	}
-	if !strings.HasPrefix(d.strip(), "[review] [idle]") {
+	if !strings.HasPrefix(d.strip(), "review · idle") {
 		t.Fatalf("strip after the turn = %q", d.strip())
 	}
 }
@@ -423,7 +423,7 @@ func TestTickAdvancesElapsed(t *testing.T) {
 	d.until("author running", func(v string) bool { return strings.Contains(v, "turn in progress: author_dispatched") })
 	// Nothing else happens while the author is held; only the tick can move
 	// the elapsed time.
-	d.until("elapsed to reach 2s", func(string) bool { return d.sawStrip("[2s / ") })
+	d.until("elapsed to reach 2s", func(string) bool { return d.sawStrip(" · 2s / ") })
 }
 
 func TestProvisionalBanner(t *testing.T) {

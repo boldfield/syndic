@@ -154,12 +154,12 @@ func TestChatViewShowsProgressMarks(t *testing.T) {
 	spin := spinnerAt(chatNow)
 	lineOf(t, chatView(a), spin+" turn in progress: reviewers_dispatched, round 1/2 ●○, ✓ w, ✓ r1, "+spin+" r2, 5s")
 	// At 80 columns round n/m outranks the reviews hint.
-	fields := "[review] [reviewers_dispatched] [5s] [round 1/2]"
-	if last, want := chatView(a)[23], fields+strings.Repeat(" ", 80-len(fields)-len(keyHint))+keyHint; last != want {
+	fields := "review · reviewers_dispatched · 5s · round 1/2"
+	if last, want := chatView(a)[23], fields+strings.Repeat(" ", 80-len([]rune(fields))-len(keyHint))+keyHint; last != want {
 		t.Errorf("status line = %q, want %q", last, want)
 	}
 	a.width = 90
-	if last, want := chatView(a)[23], fields+strings.Repeat(" ", 90-len(fields)-len(keyHint)-len(reviewsHint)-2)+reviewsHint+"  "+keyHint; last != want {
+	if last, want := chatView(a)[23], fields+strings.Repeat(" ", 90-len([]rune(fields))-len(keyHint)-len(reviewsHint)-2)+reviewsHint+"  "+keyHint; last != want {
 		t.Errorf("status line at 90 = %q, want %q", last, want)
 	}
 }
