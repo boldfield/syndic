@@ -214,16 +214,23 @@ func OpenLegacyHTTP(ctx context.Context, cfg LegacyHTTPConfig) (*LegacyHTTP, err
 	}
 	id := l.ids.Next()
 	resp, hdr, _, err := l.post(ctx, wire.NewRequest(id, "initialize", params), id, false)
-	if err != nil {
-		return nil, err
-	}
-	// A usable identifier is kept before the result is judged, so that every
-	// failure after it ends the session.
+	// A usable identifier is kept before the reply is judged, so that every
+	// failure after it ends the session, a reply that cannot be read included.
 	if sid := hdr.Get(SessionHeader); sid != "" {
 		if !validSessionID(sid) {
 			return nil, fmt.Errorf("%w: unusable session identifier", ErrLegacyInitialize)
 		}
 		l.session = sid
+	}
+	if err != nil {
+		if l.session != "" {
+			l.end(ctx)
+		}
+		if hdr != nil {
+			// A reply arrived but could not be read as a result.
+			return nil, fmt.Errorf("%w: %v", ErrLegacyInitialize, err)
+		}
+		return nil, err
 	}
 	if err := CheckInitializeResult(resp); err != nil {
 		l.end(ctx)
@@ -380,14 +387,16 @@ func (l *LegacyHTTP) post(ctx context.Context, req wire.Request, id int64, later
 		}
 		return wire.Response{}, nil, 0, &StatusError{Status: resp.StatusCode, Err: err}
 	}
+	// The header comes back with a body error too, so that a session the
+	// server issued can still be ended.
 	mr, err := wire.NewResponseReader(resp, l.cfg.Limits)
 	if err != nil {
-		return wire.Response{}, nil, 0, err
+		return wire.Response{}, resp.Header, 0, err
 	}
 	s := &wire.Stream{Messages: mr, Closer: resp.Body, Limits: l.cfg.Limits}
 	r, err := s.Await(id)
 	if err != nil {
-		return wire.Response{}, nil, 0, err
+		return wire.Response{}, resp.Header, 0, err
 	}
 	return r, resp.Header, resp.StatusCode, nil
 }

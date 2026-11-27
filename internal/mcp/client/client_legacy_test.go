@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/mcp/mcptest"
@@ -271,5 +272,27 @@ func TestLegacyStdioHandshakeAndCall(t *testing.T) {
 	resp, err := l.Call("tools/list", nil)
 	if err != nil || resp.Error != nil {
 		t.Fatalf("%+v %v", resp, err)
+	}
+}
+
+func TestLegacyMalformedInitializeBodyEndsIssuedSession(t *testing.T) {
+	var methods, sids []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		sids = append(sids, r.Header.Get("Mcp-Session-Id"))
+		if r.Method != http.MethodPost {
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "s1")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":`))
+	}))
+	defer ts.Close()
+	_, err := OpenLegacyHTTP(context.Background(), legacyCfg(ts.URL))
+	if !errors.Is(err, ErrLegacyInitialize) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(methods) != 2 || methods[1] != http.MethodDelete || sids[1] != "s1" {
+		t.Errorf("methods = %v, sessions = %v", methods, sids)
 	}
 }
