@@ -29,6 +29,16 @@ var ErrLegacyVersion = errors.New("mcp: initialize result names another revision
 // is not well formed, or for a session identifier that is not usable.
 var ErrLegacyInitialize = errors.New("mcp: malformed initialize result")
 
+// cancelParams returns the params of notifications/cancelled.
+func cancelParams(id int64, reason string) json.RawMessage {
+	m := map[string]any{"requestId": id}
+	if reason != "" {
+		m["reason"] = reason
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
 // noCopy makes go vet reject a copy of the struct holding it.
 type noCopy struct{}
 
@@ -47,7 +57,7 @@ func InitializeParams(info ClientInfo) (json.RawMessage, error) {
 
 // CheckInitializeResult checks the result of initialize before anything else
 // is sent: it must be a JSON object with a protocolVersion string, a
-// capabilities object and a serverInfo object with a name, and it must name
+// capabilities object and a serverInfo object with a name and a version, and it must name
 // LegacyRevision. Size and depth are bounded by the wire layer that read it.
 func CheckInitializeResult(resp wire.Response) error {
 	if resp.Error != nil {
@@ -57,7 +67,8 @@ func CheckInitializeResult(resp wire.Response) error {
 		ProtocolVersion *string         `json:"protocolVersion"`
 		Capabilities    json.RawMessage `json:"capabilities"`
 		ServerInfo      *struct {
-			Name *string `json:"name"`
+			Name    *string `json:"name"`
+			Version *string `json:"version"`
 		} `json:"serverInfo"`
 	}
 	if err := json.Unmarshal(resp.Result, &r); err != nil {
@@ -70,8 +81,8 @@ func CheckInitializeResult(resp wire.Response) error {
 	if json.Unmarshal(r.Capabilities, &caps) != nil || caps == nil {
 		return fmt.Errorf("%w: capabilities is not an object", ErrLegacyInitialize)
 	}
-	if r.ServerInfo == nil || r.ServerInfo.Name == nil {
-		return fmt.Errorf("%w: no serverInfo name", ErrLegacyInitialize)
+	if r.ServerInfo == nil || r.ServerInfo.Name == nil || r.ServerInfo.Version == nil {
+		return fmt.Errorf("%w: no serverInfo name and version", ErrLegacyInitialize)
 	}
 	if *r.ProtocolVersion != LegacyRevision {
 		return fmt.Errorf("%w: %q", ErrLegacyVersion, *r.ProtocolVersion)
@@ -113,20 +124,35 @@ func OpenLegacyStdio(w io.Writer, s *wire.Stream, info ClientInfo) (*LegacyStdio
 	return l, nil
 }
 
-// Call sends one request and reads until its response. A JSON-RPC error
-// response is returned as it is. Nothing is retried.
+// NextID returns a request id not used before in this session, so the owner
+// knows the id to name in Cancel.
+func (l *LegacyStdio) NextID() int64 { return l.ids.Next() }
+
+// Call sends one request under a fresh id and reads until its response.
 func (l *LegacyStdio) Call(method string, params json.RawMessage) (wire.Response, error) {
+	return l.Send(l.NextID(), method, params)
+}
+
+// Send sends one request under id, which came from NextID, and reads until
+// its response. A JSON-RPC error response is returned as it is. Nothing is
+// retried.
+func (l *LegacyStdio) Send(id int64, method string, params json.RawMessage) (wire.Response, error) {
 	if l.closed {
 		return wire.Response{}, errors.New("mcp: session ended")
 	}
-	id := l.ids.Next()
 	if err := wire.WriteLine(l.w, wire.NewRequest(id, method, params)); err != nil {
 		return wire.Response{}, fmt.Errorf("mcp: writing request: %w", err)
 	}
 	return l.s.Await(id)
 }
 
-// Notify sends one notification, such as notifications/cancelled.
+// Cancel sends notifications/cancelled for the request sent under id. Under
+// this revision that notification is how a request is cancelled.
+func (l *LegacyStdio) Cancel(id int64, reason string) error {
+	return l.Notify("notifications/cancelled", cancelParams(id, reason))
+}
+
+// Notify sends one notification.
 func (l *LegacyStdio) Notify(method string, params json.RawMessage) error {
 	if l.closed {
 		return errors.New("mcp: session ended")
@@ -187,18 +213,21 @@ func OpenLegacyHTTP(ctx context.Context, cfg LegacyHTTPConfig) (*LegacyHTTP, err
 		return nil, err
 	}
 	id := l.ids.Next()
-	resp, hdr, err := l.post(ctx, wire.NewRequest(id, "initialize", params), id, false)
+	resp, hdr, _, err := l.post(ctx, wire.NewRequest(id, "initialize", params), id, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckInitializeResult(resp); err != nil {
-		return nil, err
-	}
+	// A usable identifier is kept before the result is judged, so that every
+	// failure after it ends the session.
 	if sid := hdr.Get(SessionHeader); sid != "" {
 		if !validSessionID(sid) {
 			return nil, fmt.Errorf("%w: unusable session identifier", ErrLegacyInitialize)
 		}
 		l.session = sid
+	}
+	if err := CheckInitializeResult(resp); err != nil {
+		l.end(ctx)
+		return nil, err
 	}
 	if err := l.Notify(ctx, "notifications/initialized", nil); err != nil {
 		l.end(ctx)
@@ -218,20 +247,35 @@ func validSessionID(s string) bool {
 	return true
 }
 
-// Call sends one request and reads its response, which is a JSON body or an
-// event stream. A JSON-RPC error response is returned as it is. Nothing is
-// retried. Cancelling ctx closes the connection; the owner may also send
-// notifications/cancelled with Notify.
+// NextID returns a request id not used before in this session, so the owner
+// knows the id to name in Cancel.
+func (l *LegacyHTTP) NextID() int64 { return l.ids.Next() }
+
+// Call sends one request under a fresh id; see Send.
 func (l *LegacyHTTP) Call(ctx context.Context, method string, params json.RawMessage) (HTTPReply, error) {
+	return l.Send(ctx, l.NextID(), method, params)
+}
+
+// Send sends one request under id, which came from NextID, and reads its
+// response, which is a JSON body or an event stream. A JSON-RPC error
+// response is returned as it is. Nothing is retried. Cancelling ctx stops
+// this client waiting, but under this revision it does not cancel the
+// request: the owner sends Cancel with id, from another context.
+func (l *LegacyHTTP) Send(ctx context.Context, id int64, method string, params json.RawMessage) (HTTPReply, error) {
 	if l.closed {
 		return HTTPReply{}, errors.New("mcp: session ended")
 	}
-	id := l.ids.Next()
-	resp, _, err := l.post(ctx, wire.NewRequest(id, method, params), id, true)
+	resp, _, status, err := l.post(ctx, wire.NewRequest(id, method, params), id, true)
 	if err != nil {
 		return HTTPReply{}, err
 	}
-	return HTTPReply{Status: http.StatusOK, Response: resp}, nil
+	return HTTPReply{Status: status, Response: resp}, nil
+}
+
+// Cancel sends notifications/cancelled for the request sent under id. Under
+// this revision that notification is how a request is cancelled.
+func (l *LegacyHTTP) Cancel(ctx context.Context, id int64, reason string) error {
+	return l.Notify(ctx, "notifications/cancelled", cancelParams(id, reason))
 }
 
 // Notify sends one notification and expects an acknowledgement without a
@@ -313,14 +357,14 @@ func (l *LegacyHTTP) newRequest(ctx context.Context, method string, msg any, lat
 }
 
 // post sends one request and reads the response to id.
-func (l *LegacyHTTP) post(ctx context.Context, req wire.Request, id int64, later bool) (wire.Response, http.Header, error) {
+func (l *LegacyHTTP) post(ctx context.Context, req wire.Request, id int64, later bool) (wire.Response, http.Header, int, error) {
 	hr, err := l.newRequest(ctx, http.MethodPost, req, later)
 	if err != nil {
-		return wire.Response{}, nil, err
+		return wire.Response{}, nil, 0, err
 	}
 	resp, err := l.client.Do(hr)
 	if err != nil {
-		return wire.Response{}, nil, fmt.Errorf("mcp: %w", err)
+		return wire.Response{}, nil, 0, fmt.Errorf("mcp: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -331,19 +375,19 @@ func (l *LegacyHTTP) post(ctx context.Context, req wire.Request, id int64, later
 			s := &wire.Stream{Messages: mr, Closer: resp.Body, Limits: l.cfg.Limits}
 			r, err = s.Await(id)
 			if err == nil && r.Error != nil {
-				return r, resp.Header, nil
+				return r, resp.Header, resp.StatusCode, nil
 			}
 		}
-		return wire.Response{}, nil, &StatusError{Status: resp.StatusCode, Err: err}
+		return wire.Response{}, nil, 0, &StatusError{Status: resp.StatusCode, Err: err}
 	}
 	mr, err := wire.NewResponseReader(resp, l.cfg.Limits)
 	if err != nil {
-		return wire.Response{}, nil, err
+		return wire.Response{}, nil, 0, err
 	}
 	s := &wire.Stream{Messages: mr, Closer: resp.Body, Limits: l.cfg.Limits}
 	r, err := s.Await(id)
 	if err != nil {
-		return wire.Response{}, nil, err
+		return wire.Response{}, nil, 0, err
 	}
-	return r, resp.Header, nil
+	return r, resp.Header, resp.StatusCode, nil
 }

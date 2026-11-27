@@ -156,6 +156,107 @@ func TestLegacyDeleteMethodNotAllowedTolerated(t *testing.T) {
 		t.Fatal(err)
 	}
 	l.Close(context.Background())
+	reqs := srv.Requests()
+	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete {
+		t.Errorf("last = %s %s", last.HTTPMethod, last.Method)
+	}
+}
+
+func TestLegacyFailedHandshakeEndsIssuedSession(t *testing.T) {
+	other := mcptest.Reply{Result: map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{},
+		"serverInfo":      map[string]any{"name": "x", "version": "1"},
+	}}
+	srv := legacyServer(mcptest.Config{SessionID: "s1", Initialize: &other})
+	ts := srv.HTTP(t)
+	if _, err := OpenLegacyHTTP(context.Background(), legacyCfg(ts.URL)); !errors.Is(err, ErrLegacyVersion) {
+		t.Fatalf("err = %v", err)
+	}
+	reqs := srv.Requests()
+	if len(reqs) != 2 || reqs[1].HTTPMethod != http.MethodDelete || reqs[1].Header.Get("Mcp-Session-Id") != "s1" {
+		t.Errorf("requests = %v", srv.Methods())
+	}
+	if srv.Called("notifications/initialized") {
+		t.Error("initialized sent")
+	}
+}
+
+func TestLegacyServerInfoWithoutVersionNotFollowedByInitialized(t *testing.T) {
+	bad := mcptest.Reply{Result: map[string]any{
+		"protocolVersion": "2025-11-25",
+		"capabilities":    map[string]any{},
+		"serverInfo":      map[string]any{"name": "x"},
+	}}
+	srv := legacyServer(mcptest.Config{Initialize: &bad})
+	ts := srv.HTTP(t)
+	if _, err := OpenLegacyHTTP(context.Background(), legacyCfg(ts.URL)); !errors.Is(err, ErrLegacyInitialize) {
+		t.Fatalf("err = %v", err)
+	}
+	if srv.Called("notifications/initialized") {
+		t.Error("initialized sent")
+	}
+}
+
+func TestLegacyCancelNamesRequestID(t *testing.T) {
+	srv := legacyServer(mcptest.Config{})
+	ts := srv.HTTP(t)
+	ctx := context.Background()
+	l, err := OpenLegacyHTTP(ctx, legacyCfg(ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close(ctx)
+	id := l.NextID()
+	if _, err := l.Send(ctx, id, "tools/list", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Cancel(ctx, id, "stop"); err != nil {
+		t.Fatal(err)
+	}
+	reqs := srv.Requests()
+	last := reqs[len(reqs)-1]
+	var p struct {
+		RequestID int64  `json:"requestId"`
+		Reason    string `json:"reason"`
+	}
+	if last.Method != "notifications/cancelled" || json.Unmarshal(last.Params, &p) != nil || p.RequestID != id || p.Reason != "stop" {
+		t.Errorf("last = %s %s", last.Method, last.Params)
+	}
+}
+
+func TestLegacyStdioCancelNamesRequestID(t *testing.T) {
+	srv := legacyServer(mcptest.Config{})
+	c := srv.Stdio(t)
+	s := &wire.Stream{Messages: wire.NewLineReader(c.R, wire.Limits{})}
+	l, err := OpenLegacyStdio(c.W, s, DefaultClientInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	id := l.NextID()
+	if _, err := l.Send(id, "tools/list", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Cancel(id, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The server reads asynchronously; a later round trip orders the two.
+	if _, err := l.Call("tools/list", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range srv.Requests() {
+		if r.Method == "notifications/cancelled" {
+			var p struct {
+				RequestID int64 `json:"requestId"`
+			}
+			if json.Unmarshal(r.Params, &p) != nil || p.RequestID != id {
+				t.Errorf("params = %s", r.Params)
+			}
+			return
+		}
+	}
+	t.Error("no notifications/cancelled")
 }
 
 func TestLegacyStdioHandshakeAndCall(t *testing.T) {
