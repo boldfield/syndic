@@ -135,7 +135,7 @@ func (f *Follow) Layout(rows []FollowRow, height int) (first int, atBottom bool,
 	moved := false
 	if span, ok := idx[f.anchor.item]; ok {
 		first = rowAt(rows, span, f.anchor.char)
-		if first == span[1] {
+		if first == span[1] && rows[first].End <= f.anchor.char {
 			f.anchor.char = rows[first].Char // an item that shrank moves it to its last row
 		}
 	} else {

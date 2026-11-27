@@ -261,6 +261,18 @@ var Cases = []Case{
 		a.SetRows(Join(Item("a", 10), Item("b", 9)))
 		want(t, a, 0, false, 4)
 	}},
+	{"successive re-wraps keep the anchor when it lands in the last row", func(t *testing.T, a Adaptor) {
+		a.SetHeight(4)
+		a.SetRows(Join(Wrapped("a", 20, 5), Item("b", 10)))
+		for i := 0; i < 7; i++ {
+			a.Press("up")
+		}
+		want(t, a, 19, false, 0)
+		a.SetRows(Join(Wrapped("a", 10, 10), Item("b", 10)))
+		want(t, a, 9, false, 0)
+		a.SetRows(Join(Wrapped("a", 20, 5), Item("b", 10)))
+		want(t, a, 19, false, 0)
+	}},
 	{"resize that fits all content is at the bottom", func(t *testing.T, a Adaptor) {
 		a.SetHeight(5)
 		a.SetRows(Item("a", 20))
