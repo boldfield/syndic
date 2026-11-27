@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -259,28 +260,48 @@ func TestCallCancelCurrentHTTPClosesConnection(t *testing.T) {
 	}
 }
 
-func TestCallCancelLegacySendsNotification(t *testing.T) {
-	srv := mcptest.New(mcptest.Config{
-		Revisions: []string{mcptest.Legacy},
-		Tools:     []json.RawMessage{mcptest.NewTool("echo", "d")},
-		Calls:     map[string][]mcptest.Reply{"echo": {{Delay: 30 * time.Second}}},
-	})
+func waitCount(srv *mcptest.Server, method string, n int) {
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.Count(method) < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func cancelWhenCalled(srv *mcptest.Server, n int, cancel context.CancelFunc) {
+	go func() {
+		waitCount(srv, "tools/call", n)
+		cancel()
+	}()
+}
+
+type stdioFixture struct {
+	srv *mcptest.Server
+	r   *mcp.StdioReader
+	s   *wire.Stream
+	w   io.Writer
+}
+
+func newStdio(t *testing.T, revs []string, calls map[string][]mcptest.Reply) stdioFixture {
+	srv := mcptest.New(mcptest.Config{Revisions: revs, Tools: []json.RawMessage{mcptest.NewTool("echo", "d")}, Calls: calls})
 	conn := srv.Stdio(t)
-	s := &wire.Stream{Messages: wire.NewLineReader(conn.R, wire.Limits{})}
-	l, err := client.OpenLegacyStdio(conn.W, s, client.DefaultClientInfo())
+	r := mcp.NewStdioReader(wire.NewLineReader(conn.R, wire.Limits{}).Next)
+	return stdioFixture{srv, r, &wire.Stream{Messages: r}, conn.W}
+}
+
+func TestCallCancelLegacyStdioStopsReadAndNextCallWorks(t *testing.T) {
+	f := newStdio(t, []string{mcptest.Legacy}, map[string][]mcptest.Reply{"echo": {{Delay: 30 * time.Second}, mcptest.TextResult("second")}})
+	l, err := client.OpenLegacyStdio(f.w, f.s, client.DefaultClientInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
 	id := l.NextID()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		for srv.Count("tools/call") == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		cancel()
-	}()
+	cancelWhenCalled(f.srv, 1, cancel)
+	ended := make(chan struct{})
 	out := mcp.Call(ctx, mcp.CallOptions{
-		Send: func(context.Context) (mcp.CallReply, error) {
+		Send: func(sctx context.Context) (mcp.CallReply, error) {
+			defer close(ended)
+			f.r.Bind(sctx)
 			r, err := l.Send(id, "tools/call", json.RawMessage(callParams))
 			return fromWire(0, r), err
 		},
@@ -289,9 +310,86 @@ func TestCallCancelLegacySendsNotification(t *testing.T) {
 	if out.Kind != mcp.CallCancelled || out.Err == nil || strings.Contains(out.Err.Error(), "cancelling") {
 		t.Fatalf("outcome = %+v", out)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for srv.Count("notifications/cancelled") == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-ended:
+	default:
+		t.Fatal("the read was still running after the call returned")
+	}
+	waitCount(f.srv, "notifications/cancelled", 1)
+	if f.srv.Count("notifications/cancelled") != 1 || f.srv.Count("tools/call") != 1 {
+		t.Fatalf("methods = %v", f.srv.Methods())
+	}
+	// A later call on the same connection gets its own reply.
+	id2 := l.NextID()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	out2 := mcp.Call(ctx2, mcp.CallOptions{Send: func(sctx context.Context) (mcp.CallReply, error) {
+		f.r.Bind(sctx)
+		r, err := l.Send(id2, "tools/call", json.RawMessage(callParams))
+		return fromWire(0, r), err
+	}})
+	if out2.Kind != mcp.CallResult || out2.Rendered.Text != "second" {
+		t.Fatalf("second outcome = %+v", out2)
+	}
+}
+
+func TestCallCancelCurrentStdioSendsNotification(t *testing.T) {
+	f := newStdio(t, nil, map[string][]mcptest.Reply{"echo": {{Delay: 30 * time.Second}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelWhenCalled(f.srv, 1, cancel)
+	out := mcp.Call(ctx, mcp.CallOptions{
+		Send: func(sctx context.Context) (mcp.CallReply, error) {
+			f.r.Bind(sctx)
+			r, err := client.SendCurrentStdio(f.w, f.s, 7, "tools/call", json.RawMessage(callParams), client.DefaultClientInfo())
+			return fromWire(0, r), err
+		},
+		Cancel: func() error { return client.CancelCurrentStdio(f.w, 7, "stop") },
+	})
+	if out.Kind != mcp.CallCancelled {
+		t.Fatalf("outcome = %+v", out)
+	}
+	waitCount(f.srv, "notifications/cancelled", 1)
+	if f.srv.Count("notifications/cancelled") != 1 || f.srv.Count("tools/call") != 1 {
+		t.Fatalf("methods = %v", f.srv.Methods())
+	}
+	var id json.RawMessage
+	for _, r := range f.srv.Requests() {
+		if r.Method == "notifications/cancelled" {
+			var p struct {
+				RequestID json.RawMessage `json:"requestId"`
+			}
+			_ = json.Unmarshal(r.Params, &p)
+			id = p.RequestID
+		}
+	}
+	if string(id) != "7" {
+		t.Fatalf("requestId = %s", id)
+	}
+}
+
+func TestCallCancelLegacyHTTPSendsNotification(t *testing.T) {
+	srv := mcptest.New(mcptest.Config{
+		Revisions: []string{mcptest.Legacy},
+		Tools:     []json.RawMessage{mcptest.NewTool("echo", "d")},
+		Calls:     map[string][]mcptest.Reply{"echo": {{Delay: 30 * time.Second}}},
+	})
+	ts := srv.HTTP(t)
+	l, err := client.OpenLegacyHTTP(context.Background(), client.LegacyHTTPConfig{URL: ts.URL, Transport: http.DefaultTransport, Info: client.DefaultClientInfo()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := l.NextID()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelWhenCalled(srv, 1, cancel)
+	out := mcp.Call(ctx, mcp.CallOptions{
+		Send: func(sctx context.Context) (mcp.CallReply, error) {
+			return asReply(l.Send(sctx, id, "tools/call", json.RawMessage(callParams)))
+		},
+		Cancel:   func() error { return l.Cancel(context.Background(), id, "stop") },
+		Classify: classifyWire,
+	})
+	if out.Kind != mcp.CallCancelled || out.Err == nil || strings.Contains(out.Err.Error(), "cancelling") {
+		t.Fatalf("outcome = %+v", out)
 	}
 	if srv.Count("notifications/cancelled") != 1 || srv.Count("tools/call") != 1 {
 		t.Fatalf("methods = %v", srv.Methods())

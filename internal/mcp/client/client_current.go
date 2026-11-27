@@ -90,6 +90,15 @@ func SendCurrentStdio(w io.Writer, s *wire.Stream, id int64, method string, para
 	return s.Await(id)
 }
 
+// CancelCurrentStdio writes notifications/cancelled for the request sent
+// under id, which is how the current revision cancels over stdio.
+func CancelCurrentStdio(w io.Writer, id int64, reason string) error {
+	if err := wire.WriteLine(w, wire.NewNotification("notifications/cancelled", cancelParams(id, reason))); err != nil {
+		return fmt.Errorf("mcp: writing notification: %w", err)
+	}
+	return nil
+}
+
 // CurrentHTTP sends current-revision requests to one endpoint, one POST each.
 type CurrentHTTP struct {
 	// URL is the one endpoint.

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // statusUnauthorized is the HTTP status that asks for a fresh token.
@@ -132,6 +133,11 @@ type CallOutcome struct {
 	Sends int
 }
 
+type sent struct {
+	rep CallReply
+	err error
+}
+
 // Call sends the call once and classifies the reply. When ctx ends before
 // the reply, it cancels as the revision and transport define, stops reading
 // whatever the server then does, and returns CallCancelled.
@@ -141,10 +147,6 @@ func Call(ctx context.Context, opts CallOptions) CallOutcome {
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
-	type sent struct {
-		rep CallReply
-		err error
-	}
 	ch := make(chan sent, 1)
 	go func() {
 		rep, err := opts.Send(sctx)
@@ -155,10 +157,10 @@ func Call(ctx context.Context, opts CallOptions) CallOutcome {
 	select {
 	case s = <-ch:
 		if ctx.Err() != nil && s.err != nil {
-			return cancelled(ctx, opts, stop)
+			return cancelled(ctx, opts, stop, nil)
 		}
 	case <-ctx.Done():
-		return cancelled(ctx, opts, stop)
+		return cancelled(ctx, opts, stop, ch)
 	}
 	out := classifyCall(s.rep, s.err, opts.Classify)
 	out.Sends = 1
@@ -169,7 +171,7 @@ func Call(ctx context.Context, opts CallOptions) CallOutcome {
 	return out
 }
 
-func cancelled(ctx context.Context, opts CallOptions, stop context.CancelFunc) CallOutcome {
+func cancelled(ctx context.Context, opts CallOptions, stop context.CancelFunc, done <-chan sent) CallOutcome {
 	out := CallOutcome{Kind: CallCancelled, Sends: 1, Err: ctx.Err()}
 	if opts.Cancel != nil {
 		if err := opts.Cancel(); err != nil {
@@ -177,8 +179,12 @@ func cancelled(ctx context.Context, opts CallOptions, stop context.CancelFunc) C
 		}
 	}
 	// Closing the send's context stops its read; a reply that follows is
-	// never looked at.
+	// never looked at. The send has ended before this returns, so no reader
+	// is left to take the next call's reply.
 	stop()
+	if done != nil {
+		<-done
+	}
 	return out
 }
 
@@ -243,4 +249,70 @@ func classifyCall(rep CallReply, err error, classify func(error) (bool, bool)) C
 		out.Kind = CallServerError
 	}
 	return out
+}
+
+// ErrReadCancelled is what a StdioReader returns when the context it is bound
+// to has ended.
+var ErrReadCancelled = errors.New("mcp: read cancelled")
+
+// StdioReader makes a stdio server's output readable under a context. A
+// blocked read of a pipe cannot be interrupted, so one goroutine owns the
+// underlying reader for the life of the connection and hands messages over;
+// Next gives up when the bound context ends. A message read after that is
+// held for the next Next, which the stream discards if it answers an earlier
+// id. Use it as wire.Stream.Messages, and bind the send's context with Bind.
+type StdioReader struct {
+	msgs chan stdioMsg
+	mu   sync.Mutex
+	ctx  context.Context
+}
+
+type stdioMsg struct {
+	b   []byte
+	err error
+}
+
+// NewStdioReader starts the reader's goroutine, which ends with the first
+// error of next (the end of the output included).
+func NewStdioReader(next func() ([]byte, error)) *StdioReader {
+	r := &StdioReader{msgs: make(chan stdioMsg), ctx: context.Background()}
+	go func() {
+		defer close(r.msgs)
+		for {
+			b, err := next()
+			r.msgs <- stdioMsg{b, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return r
+}
+
+// Bind makes Next stop when ctx ends. It is for the call's send to call
+// before it reads.
+func (r *StdioReader) Bind(ctx context.Context) {
+	r.mu.Lock()
+	r.ctx = ctx
+	r.mu.Unlock()
+}
+
+// Next returns the next message, or ErrReadCancelled once the bound context
+// has ended.
+func (r *StdioReader) Next() ([]byte, error) {
+	r.mu.Lock()
+	ctx := r.ctx
+	r.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, ErrReadCancelled
+	}
+	select {
+	case m, ok := <-r.msgs:
+		if !ok {
+			return nil, errors.New("mcp: the server's output has ended")
+		}
+		return m.b, m.err
+	case <-ctx.Done():
+		return nil, ErrReadCancelled
+	}
 }
