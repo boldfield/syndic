@@ -1251,27 +1251,11 @@ func TestCanonicalV3WithAttachmentsExact(t *testing.T) {
 		t.Fatalf("Canonical failed: %v", err)
 	}
 
-	// Verify manifest header and key fields
+	// Golden v3 canonical bytes with attachments
+	expectedCanonical := "syndic-candidate/v3\nmanifest:manifest123\nturn:turn456\nauthor_attempt:attempt789\ncontent_sha256:f5dd18618fbb0859a06bcce9918bb38e86605d80294da1c535a4dede83eea5a2\ncontent_len:12\nevidence:call1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ncontext:none\nround:0\nchanges:none\nattachments:db31b5b45f36a2c2c87a7bdb9b0fd5dab4ab772d1454055713aab617a9a014cb\n"
 	canonStr := string(canonical)
-	if !strings.Contains(canonStr, "syndic-candidate/v3\n") {
-		t.Error("Should start with v3 header")
-	}
-	if !strings.Contains(canonStr, "manifest:manifest123\n") {
-		t.Error("Should contain manifest field")
-	}
-	if !strings.Contains(canonStr, "round:0\n") {
-		t.Error("Should contain round:0")
-	}
-
-	// Get attachment manifest hash
-	attachHash, err := AttachmentManifestHash(id.Attachments)
-	if err != nil {
-		t.Fatalf("AttachmentManifestHash failed: %v", err)
-	}
-
-	expectedAttachLine := "attachments:" + attachHash + "\n"
-	if !strings.Contains(canonStr, expectedAttachLine) {
-		t.Errorf("Should contain attachments line: %s", expectedAttachLine)
+	if canonStr != expectedCanonical {
+		t.Errorf("Canonical v3 with attachments mismatch.\nExpected:\n%q\nGot:\n%q", expectedCanonical, canonStr)
 	}
 }
 
@@ -1302,18 +1286,10 @@ func TestHashV3WithAttachmentsExact(t *testing.T) {
 		t.Fatalf("Hash failed: %v", err)
 	}
 
-	if hash == "" {
-		t.Error("Hash should not be empty")
-	}
-
-	// Hash should be lowercase hex and 64 chars
-	if len(hash) != 64 {
-		t.Errorf("Hash should be 64 hex characters, got %d", len(hash))
-	}
-	for _, c := range hash {
-		if (c < 'a' || c > 'f') && (c < '0' || c > '9') {
-			t.Errorf("Hash contains invalid character: %c", c)
-		}
+	// Golden v3 candidate hash with attachments
+	expectedHash := "5863c7dddd8db93f049dbdc6bc29c9852f8da37a729784832d54deacea12933c"
+	if hash != expectedHash {
+		t.Errorf("Hash v3 with attachments mismatch.\nExpected: %s\nGot: %s", expectedHash, hash)
 	}
 }
 

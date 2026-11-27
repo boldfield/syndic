@@ -116,15 +116,10 @@ func TestAttachmentManifestHashConsistency(t *testing.T) {
 		t.Errorf("Hash not consistent: %s vs %s", hash1, hash2)
 	}
 
-	// Should be valid hex
-	for _, c := range hash1 {
-		if (c < 'a' || c > 'f') && (c < '0' || c > '9') {
-			t.Errorf("Hash contains invalid character: %c", c)
-		}
-	}
-
-	if len(hash1) != 64 {
-		t.Errorf("Hash should be 64 characters, got %d", len(hash1))
+	// Golden attachment manifest hash value
+	expectedHash := "90eb16b034c08328e6a38ae0434217ac9a1748cb6117d2415501f1980d704387"
+	if hash1 != expectedHash {
+		t.Errorf("Attachment manifest hash mismatch.\nExpected: %s\nGot: %s", expectedHash, hash1)
 	}
 }
 
