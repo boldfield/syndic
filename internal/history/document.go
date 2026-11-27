@@ -11,7 +11,14 @@ import (
 	"strings"
 )
 
-const preamble = "syndic-history/v1\n"
+const (
+	preambleV1 = "syndic-history/v1\n"
+	preambleV2 = "syndic-history/v2\n"
+)
+
+// MaxHistoryResultBytes is the default mcp.max_history_result_bytes: a
+// rendered effect reply over it is carried as its size and hash.
+const MaxHistoryResultBytes = 4096
 
 // ErrDelimiterCollision is returned when a delimiter appears in a document.
 var ErrDelimiterCollision = errors.New("delimiter appears in content")
@@ -45,6 +52,55 @@ type Turn struct {
 	// ChangesState is the change set's state; empty when the turn has none.
 	ChangesState string
 	Changes      []Change
+	// EffectsState is the effect set's state; empty when the turn has none.
+	// Only a v2 document carries it.
+	EffectsState string
+	Effects      []Effect
+}
+
+// Effect states as written in history. A sent effect keeps its own state
+// whatever later happened to its set; only an effect that was never sent is
+// NotRun.
+const (
+	EffectDone      = "done"
+	EffectFailed    = "failed"
+	EffectUncertain = "uncertain"
+	EffectNotRun    = "not run"
+)
+
+// Effect is one effect of a turn's effect set as history carries it.
+type Effect struct {
+	ID        string
+	Server    string
+	Tool      string
+	Arguments []byte // canonical JSON
+	State     string // done, failed, uncertain or not run
+	// Result is the rendered reply of a done or failed effect. ResultRef is
+	// set instead, as "<size> <sha256 hex>", when the reply is over
+	// MaxHistoryResultBytes; Parse fills it from a result-ref sub-field and the
+	// writer derives it from Result, so callers set Result only.
+	Result    []byte
+	ResultRef string
+}
+
+// HistoryEffectState maps a journaled effect state to the state history
+// writes: pending and skipped are "not run" and nothing else is.
+// dispatching never appears in a history document and is refused.
+func HistoryEffectState(journaled string) (string, error) {
+	switch journaled {
+	case "pending", "skipped":
+		return EffectNotRun, nil
+	case "done", "failed", "uncertain":
+		return journaled, nil
+	}
+	return "", fmt.Errorf("effect state %q has no history form", journaled)
+}
+
+// ResultRef returns the result-ref value for a reply: its size in decimal, a
+// space, and its SHA-256 in hex.
+func ResultRef(result []byte) string {
+	h := sha256.Sum256(result)
+	return strconv.Itoa(len(result)) + " " + hex.EncodeToString(h[:])
 }
 
 // Change is one path's own outcome within a change set.
@@ -53,14 +109,28 @@ type Change struct {
 	Outcome string
 }
 
-// Document is a canonical syndic-history/v1 document under construction.
+// Document is a canonical syndic-history document under construction. New
+// builds v1 and NewV2 builds v2, the only version that carries effects; Parse
+// keeps the version of the document it reads, so a v1 document and its stored
+// hash still verify.
 type Document struct {
+	v2              bool
 	turns           []Turn
 	contextFromTurn string
 }
 
-// New returns an empty Document.
+// New returns an empty syndic-history/v1 Document, which carries no effects.
 func New() *Document { return &Document{} }
+
+// NewV2 returns an empty syndic-history/v2 Document.
+func NewV2() *Document { return &Document{v2: true} }
+
+func (d *Document) preamble() string {
+	if d.v2 {
+		return preambleV2
+	}
+	return preambleV1
+}
 
 func isMissing(state string) bool { return state == "incomplete" || state == "cancelled" }
 
@@ -109,6 +179,60 @@ func ValidateChange(c Change) error {
 	return nil
 }
 
+// ValidateEffectsState checks an effect-set state.
+func ValidateEffectsState(state string) error {
+	switch state {
+	case "discarded", "applied", "stopped", "closed", "appliable", "resumable":
+		return nil
+	}
+	return fmt.Errorf("invalid effects state: %q", state)
+}
+
+// ValidateEffect checks one effect.
+func ValidateEffect(e Effect) error {
+	if e.ID == "" || e.Server == "" || e.Tool == "" {
+		return errors.New("invalid effect: empty id, server or tool")
+	}
+	switch e.State {
+	case EffectDone, EffectFailed:
+		if e.ResultRef != "" {
+			if len(e.Result) > 0 {
+				return errors.New("invalid effect: result and result-ref")
+			}
+			return validateResultRef(e.ResultRef)
+		}
+	case EffectUncertain, EffectNotRun:
+		if len(e.Result) > 0 || e.ResultRef != "" {
+			return fmt.Errorf("invalid effect: %s carries no result", e.State)
+		}
+	default:
+		return fmt.Errorf("invalid effect state: %q", e.State)
+	}
+	return nil
+}
+
+func validateResultRef(ref string) error {
+	size, sum, ok := strings.Cut(ref, " ")
+	if !ok || size == "" || (len(size) > 1 && size[0] == '0') || len(sum) != 64 {
+		return fmt.Errorf("invalid result-ref %q", ref)
+	}
+	for _, c := range size {
+		if c < '0' || c > '9' {
+			return fmt.Errorf("invalid result-ref %q", ref)
+		}
+	}
+	for _, c := range sum {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return fmt.Errorf("invalid result-ref %q", ref)
+		}
+	}
+	n, err := strconv.Atoi(size)
+	if err != nil || n <= MaxHistoryResultBytes {
+		return fmt.Errorf("invalid result-ref %q: size not over the bound", ref)
+	}
+	return nil
+}
+
 func validateTurn(t Turn) error {
 	if t.ID == "" {
 		return errors.New("invalid turn: empty id")
@@ -131,6 +255,18 @@ func validateTurn(t Turn) error {
 			return err
 		}
 	}
+	if t.EffectsState != "" {
+		if err := ValidateEffectsState(t.EffectsState); err != nil {
+			return err
+		}
+	} else if len(t.Effects) > 0 {
+		return errors.New("invalid turn: effect fields require an effects state")
+	}
+	for _, e := range t.Effects {
+		if err := ValidateEffect(e); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -139,6 +275,10 @@ func (d *Document) AddTurn(t Turn) error {
 	if err := validateTurn(t); err != nil {
 		return err
 	}
+	if !d.v2 && t.EffectsState != "" {
+		return errors.New("invalid turn: a v1 document carries no effects")
+	}
+	t.Effects = normalizeEffects(t.Effects)
 	for _, e := range d.turns {
 		if e.ID == t.ID {
 			return fmt.Errorf("duplicate turn id: %q", t.ID)
@@ -189,6 +329,50 @@ func answerBytes(t Turn) []byte {
 	return t.Answer
 }
 
+// normalizeEffects derives the result-ref of an over-bound result, so the
+// stored form is the one the writer emits and Parse returns.
+func normalizeEffects(in []Effect) []Effect {
+	if in == nil {
+		return nil
+	}
+	out := make([]Effect, len(in))
+	for i, e := range in {
+		if len(e.Result) > MaxHistoryResultBytes {
+			e.ResultRef = ResultRef(e.Result)
+			e.Result = nil
+		}
+		out[i] = e
+	}
+	return out
+}
+
+func effectPayload(e Effect) []byte {
+	var buf bytes.Buffer
+	writeField(&buf, "id", []byte(e.ID))
+	writeField(&buf, "server", []byte(e.Server))
+	writeField(&buf, "tool", []byte(e.Tool))
+	writeField(&buf, "arguments", e.Arguments)
+	writeField(&buf, "state", []byte(e.State))
+	if e.State == EffectDone || e.State == EffectFailed {
+		if e.ResultRef != "" {
+			writeField(&buf, "result-ref", []byte(e.ResultRef))
+		} else {
+			writeField(&buf, "result", e.Result)
+		}
+	}
+	return buf.Bytes()
+}
+
+func writeEffects(buf *bytes.Buffer, t Turn) {
+	if t.EffectsState == "" {
+		return
+	}
+	writeField(buf, "effects", []byte(t.EffectsState))
+	for _, e := range t.Effects {
+		writeField(buf, "effect", effectPayload(e))
+	}
+}
+
 // writeTurn is the one serializer.
 func writeTurn(buf *bytes.Buffer, t Turn) {
 	writeField(buf, "turn", []byte(t.ID))
@@ -202,12 +386,13 @@ func writeTurn(buf *bytes.Buffer, t Turn) {
 	for _, c := range t.Changes {
 		writeField(buf, "change", changePayload(c))
 	}
+	writeEffects(buf, t)
 }
 
 // Bytes returns the canonical document.
 func (d *Document) Bytes() []byte {
 	var buf bytes.Buffer
-	buf.WriteString(preamble)
+	buf.WriteString(d.preamble())
 	for _, t := range d.Included() {
 		writeTurn(&buf, t)
 	}
@@ -226,17 +411,27 @@ func (d *Document) String() string { return string(d.Bytes()) }
 var fieldNames = map[string]bool{
 	"turn": true, "state": true, "input": true, "answer": true,
 	"label": true, "changes": true, "change": true,
+	"effects": true, "effect": true,
+}
+
+var effectFieldNames = map[string]bool{
+	"id": true, "server": true, "tool": true, "arguments": true,
+	"state": true, "result": true, "result-ref": true,
 }
 
 // readField parses one `<name> <length>\n<bytes>\n` field strictly: a known
 // name, one space, a canonical decimal length (no sign, no leading zero).
 func readField(b []byte, off int) (name string, content []byte, next int, err error) {
+	return readFieldIn(b, off, fieldNames)
+}
+
+func readFieldIn(b []byte, off int, names map[string]bool) (name string, content []byte, next int, err error) {
 	nl := bytes.IndexByte(b[off:], '\n')
 	if nl < 0 {
 		return "", nil, 0, errors.New("unexpected EOF in field header")
 	}
 	name, lenStr, ok := strings.Cut(string(b[off:off+nl]), " ")
-	if !ok || !fieldNames[name] {
+	if !ok || !names[name] {
 		return "", nil, 0, fmt.Errorf("invalid field header %q", b[off:off+nl])
 	}
 	if lenStr == "" || (len(lenStr) > 1 && lenStr[0] == '0') {
@@ -286,14 +481,83 @@ func parseChange(s string) (Change, error) {
 	return Change{}, fmt.Errorf("invalid change %q", s)
 }
 
+// parseEffect reverses effectPayload, strictly: id, server, tool, arguments
+// and state in order, then for done and failed exactly one of result and
+// result-ref, which must be the form the writer would choose.
+func parseEffect(b []byte) (Effect, error) {
+	var e Effect
+	off := 0
+	next := func(want string) ([]byte, error) {
+		if off >= len(b) {
+			return nil, fmt.Errorf("effect: unexpected end, expected %s", want)
+		}
+		name, content, n, err := readFieldIn(b, off, effectFieldNames)
+		if err != nil {
+			return nil, fmt.Errorf("effect: %w", err)
+		}
+		if name != want {
+			return nil, fmt.Errorf("effect: expected field %s, got %s", want, name)
+		}
+		off = n
+		return content, nil
+	}
+	for _, want := range []string{"id", "server", "tool", "arguments", "state"} {
+		c, err := next(want)
+		if err != nil {
+			return Effect{}, err
+		}
+		switch want {
+		case "id":
+			e.ID = string(c)
+		case "server":
+			e.Server = string(c)
+		case "tool":
+			e.Tool = string(c)
+		case "arguments":
+			e.Arguments = c
+		case "state":
+			e.State = string(c)
+		}
+	}
+	if e.State == EffectDone || e.State == EffectFailed {
+		if off >= len(b) {
+			return Effect{}, errors.New("effect: missing result")
+		}
+		name, c, n, err := readFieldIn(b, off, effectFieldNames)
+		if err != nil {
+			return Effect{}, fmt.Errorf("effect: %w", err)
+		}
+		switch name {
+		case "result":
+			if len(c) > MaxHistoryResultBytes {
+				return Effect{}, errors.New("effect: result over the history bound")
+			}
+			e.Result = c
+		case "result-ref":
+			e.ResultRef = string(c)
+		default:
+			return Effect{}, fmt.Errorf("effect: expected result or result-ref, got %s", name)
+		}
+		off = n
+	}
+	if off != len(b) {
+		return Effect{}, errors.New("effect: trailing bytes")
+	}
+	return e, ValidateEffect(e)
+}
+
 // Parse reads a canonical document strictly. Anything but exactly what
 // Bytes produces is rejected.
 func Parse(b []byte) (*Document, error) {
-	if !bytes.HasPrefix(b, []byte(preamble)) {
-		return nil, errors.New("missing syndic-history/v1 preamble")
-	}
 	d := New()
-	off := len(preamble)
+	switch {
+	case bytes.HasPrefix(b, []byte(preambleV2)):
+		d.v2 = true
+	case bytes.HasPrefix(b, []byte(preambleV1)):
+	default:
+		return nil, errors.New("missing syndic-history/v1 or v2 preamble")
+	}
+	off := len(d.preamble())
 	for off < len(b) {
 		var t Turn
 		for _, want := range []string{"turn", "state", "input", "answer", "label"} {
@@ -347,6 +611,26 @@ func Parse(b []byte) (*Document, error) {
 			t.Changes = append(t.Changes, c)
 			off = next
 		}
+		if off < len(b) && peekName(b, off) == "effects" {
+			_, content, next, err := readField(b, off)
+			if err != nil {
+				return nil, err
+			}
+			t.EffectsState = string(content)
+			off = next
+		}
+		for off < len(b) && peekName(b, off) == "effect" {
+			_, content, next, err := readField(b, off)
+			if err != nil {
+				return nil, err
+			}
+			e, err := parseEffect(content)
+			if err != nil {
+				return nil, err
+			}
+			t.Effects = append(t.Effects, e)
+			off = next
+		}
 		if err := d.AddTurn(t); err != nil {
 			return nil, err
 		}
@@ -363,7 +647,9 @@ type Message struct {
 // RenderForAuthor renders each included turn as a user message and an
 // assistant message. The user message carries every field except the answer,
 // framed as in the document (turn, state, input, label, changes, change), so
-// the id, state, label and annotations all reach the author unambiguously. The
+// the id, state, label and annotations all reach the author unambiguously.
+// Effects are left out: a result is untrusted server output that must be fenced
+// and labelled when rendered to a model, which belongs to the task wiring it. The
 // assistant message is the approved answer verbatim, or for a missing answer
 // only the missing-answer line. Distinct documents render distinctly.
 func (d *Document) RenderForAuthor() []Message {
