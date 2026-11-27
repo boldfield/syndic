@@ -7,6 +7,18 @@ import (
 	"github.com/boldfield/syndic/internal/journal"
 )
 
+// insertToolContent inserts content into tool_content table for testing.
+func insertToolContent(t *testing.T, db *journal.DB, sha256 string, body []byte) {
+	t.Helper()
+	_, err := db.Conn().Exec(`
+		INSERT INTO tool_content (sha256, byte_len, body)
+		VALUES (?, ?, ?)
+	`, sha256, len(body), body)
+	if err != nil {
+		t.Fatalf("failed to insert tool_content: %v", err)
+	}
+}
+
 func TestStoreAttachments_Empty(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
@@ -35,6 +47,9 @@ func TestStoreAttachments_Single(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
 
+	hash1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	insertToolContent(t, db, hash1, []byte("content1"))
+
 	store := journal.NewStore(db)
 	runID, _, err := store.CreateRun([]byte(`{}`))
 	if err != nil {
@@ -50,9 +65,9 @@ func TestStoreAttachments_Single(t *testing.T) {
 		ID:      "att1",
 		TurnID:  turnID,
 		Path:    "file.txt",
-		SHA256:  "hash1",
+		SHA256:  hash1,
 		ByteLen: 5,
-		BaseSHA: "hash1",
+		BaseSHA: hash1,
 	}
 
 	hash, err := store.StoreAttachments(turnID, []journal.Attachment{att})
@@ -74,14 +89,21 @@ func TestStoreAttachments_Single(t *testing.T) {
 	if retrieved[0].Path != "file.txt" {
 		t.Errorf("path = %q, want %q", retrieved[0].Path, "file.txt")
 	}
-	if retrieved[0].BaseSHA != "hash1" {
-		t.Errorf("base_sha256 = %q, want %q", retrieved[0].BaseSHA, "hash1")
+	if retrieved[0].BaseSHA != hash1 {
+		t.Errorf("base_sha256 = %q, want %q", retrieved[0].BaseSHA, hash1)
 	}
 }
 
 func TestStoreAttachments_Multiple_Sorted(t *testing.T) {
 	db, cleanup := openTestDB(t)
 	defer cleanup()
+
+	hash1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	hash2 := "2222222222222222222222222222222222222222222222222222222222222222"
+	hash3 := "3333333333333333333333333333333333333333333333333333333333333333"
+	insertToolContent(t, db, hash1, []byte("content1"))
+	insertToolContent(t, db, hash2, []byte("content2"))
+	insertToolContent(t, db, hash3, []byte("content3"))
 
 	store := journal.NewStore(db)
 	runID, _, err := store.CreateRun([]byte(`{}`))
@@ -95,9 +117,9 @@ func TestStoreAttachments_Multiple_Sorted(t *testing.T) {
 	}
 
 	attachments := []journal.Attachment{
-		{ID: "att3", TurnID: turnID, Path: "z.txt", SHA256: "hash3", ByteLen: 8, BaseSHA: "hash3"},
-		{ID: "att1", TurnID: turnID, Path: "a.txt", SHA256: "hash1", ByteLen: 8, BaseSHA: "hash1"},
-		{ID: "att2", TurnID: turnID, Path: "m.txt", SHA256: "hash2", ByteLen: 8, BaseSHA: "hash2"},
+		{ID: "att3", TurnID: turnID, Path: "z.txt", SHA256: hash3, ByteLen: 8, BaseSHA: hash3},
+		{ID: "att1", TurnID: turnID, Path: "a.txt", SHA256: hash1, ByteLen: 8, BaseSHA: hash1},
+		{ID: "att2", TurnID: turnID, Path: "m.txt", SHA256: hash2, ByteLen: 8, BaseSHA: hash2},
 	}
 
 	hash, err := store.StoreAttachments(turnID, attachments)
@@ -211,6 +233,9 @@ func TestAttachmentsImmutable(t *testing.T) {
 
 	conn := db.Conn()
 
+	hash1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	insertToolContent(t, db, hash1, []byte("content1"))
+
 	runID := "run-1"
 	turnID := "turn-1"
 	setupTestData(t, conn, runID, turnID)
@@ -218,7 +243,7 @@ func TestAttachmentsImmutable(t *testing.T) {
 	_, err := conn.Exec(`
 		INSERT INTO attachments (id, turn_id, path, sha256, byte_len, recorded_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, "att1", turnID, "file.txt", "hash1", 7)
+	`, "att1", turnID, "file.txt", hash1, 7)
 	if err != nil {
 		t.Fatalf("insert attachment: %v", err)
 	}
