@@ -17,7 +17,8 @@ import (
 // Every click is mapped from the lines View draws, using the same layout, so
 // a click lands on what is on screen; nothing here is a second keyboard.
 
-// wheelRows is how many rows one notch of the mouse wheel scrolls the chat.
+// wheelRows is how many rows one notch of the mouse wheel scrolls the chat
+// or the transcript.
 const wheelRows = 3
 
 // drawerFrameMsg is one frame of the reviews drawer sliding open or shut.
@@ -41,6 +42,16 @@ func (a *App) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case tea.MouseButtonWheelDown:
 			a.scrollAnswer(wheelRows)
+			return a, nil
+		}
+	}
+	if a.tab == tabTranscript && len(a.panel) == 0 && msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			a.scrollTranscriptRows(-wheelRows)
+			return a, nil
+		case tea.MouseButtonWheelDown:
+			a.scrollTranscriptRows(wheelRows)
 			return a, nil
 		}
 	}
@@ -143,6 +154,7 @@ func (a *App) setTab(t tab) tea.Cmd {
 	a.panel = nil
 	a.tab = t
 	a.chatFollow.End()
+	a.tFollow.End()
 	if a.tab != tabChat {
 		a.reviewsDrawer.ForceClose()
 		a.syncDrawerWant()
