@@ -49,16 +49,24 @@ func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *strin
 
 		// Populate change set state and per-path outcomes from the journal
 		cs, err := tx.ChangeSetForTurn(t.ID)
-		if err == nil {
+		if err == journal.ErrNoChangeSet {
+			// If there's no change set for this turn, leave ChangesState and Changes empty
+		} else if err != nil {
+			return nil, nil, fmt.Errorf("engine: history turn %s change set: %w", t.ID, err)
+		} else {
 			turn.ChangesState = cs.State
 			for _, p := range cs.Paths {
+				// Map journal outcomes to history outcomes
+				historyOutcome := p.Outcome
+				if p.Outcome == journal.PathPending {
+					historyOutcome = history.OutcomeNotApplied
+				}
 				turn.Changes = append(turn.Changes, history.Change{
 					Path:    p.Path,
-					Outcome: p.Outcome,
+					Outcome: historyOutcome,
 				})
 			}
 		}
-		// If there's no change set for this turn, leave ChangesState and Changes empty
 
 		if err := doc.AddTurn(turn); err != nil {
 			return nil, nil, fmt.Errorf("engine: history turn %s: %w", t.ID, err)
