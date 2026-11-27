@@ -17,6 +17,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/lockfile"
+	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/server"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/openai"
@@ -27,6 +28,9 @@ const version = "dev"
 func main() {
 	if isSupervise(os.Args[1:]) {
 		os.Exit(supervise(os.Stderr))
+	}
+	if isSelfTestHelper(os.Args[1:]) {
+		os.Exit(sandbox.SelfTestHelper(os.Args[2:], os.Stdout))
 	}
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
