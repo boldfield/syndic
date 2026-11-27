@@ -64,7 +64,7 @@ func wireCalls(t *testing.T, calls []transport.ToolCall) int {
 	return len(b)
 }
 
-// toolRequest is a request with all eight definitions, one assistant message
+// toolRequest is a request with all nine definitions, one assistant message
 // with two tool calls and two tool messages answering them.
 func toolRequest() ([]transport.Message, []transport.Tool) {
 	msgs := []transport.Message{
@@ -82,8 +82,8 @@ func toolRequest() ([]transport.Message, []transport.Tool) {
 
 func TestPromptBytesCountsEachPartOnce(t *testing.T) {
 	msgs, defs := toolRequest()
-	if len(defs) != 8 {
-		t.Fatalf("definitions = %d, want 8", len(defs))
+	if len(defs) != 9 {
+		t.Fatalf("definitions = %d, want 9", len(defs))
 	}
 	want := wireTools(t, defs)
 	for _, m := range msgs {
