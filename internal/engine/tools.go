@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/prompt"
 	"github.com/boldfield/syndic/internal/tools"
@@ -400,19 +401,34 @@ var executableGroups = map[string]bool{tools.GroupRead: true, tools.GroupWrite: 
 // the author has no calls remaining under its bound; limited reports that
 // case, and the caller then sends the statement in their place. e.mu is held.
 func (e *Engine) authorToolDefs(t *openTurn) (defs []transport.Tool, limited bool, err error) {
-	var groups []string
-	for _, g := range t.eff.Preset.Tools {
-		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, t.author) {
-			groups = append(groups, g)
+	return e.roleToolDefs(t, t.eff.Preset.Tools, t.author, e.authorCallsRemaining(t))
+}
+
+// reviewerToolDefs returns the definitions a dispatch of reviewer id offers:
+// the tools of the preset's executable reviewer groups, over the same
+// workspace. None are offered once the reviewer has no calls remaining in
+// this round; limited reports that case, and the caller then sends the
+// statement in their place. e.mu is held.
+func (e *Engine) reviewerToolDefs(t *openTurn, id string) (defs []transport.Tool, limited bool, err error) {
+	return e.roleToolDefs(t, t.eff.Preset.ReviewerTools, id, e.reviewerCallsRemaining(t, id))
+}
+
+// roleToolDefs is the definitions of the executable groups among groups that
+// caller may be offered, or none with limited set when remaining is spent.
+func (e *Engine) roleToolDefs(t *openTurn, groups []string, caller string, remaining int) (defs []transport.Tool, limited bool, err error) {
+	var offered []string
+	for _, g := range groups {
+		if executableGroups[g] && t.workspace != "" && e.groupOffered(g, caller) {
+			offered = append(offered, g)
 		}
 	}
-	if len(groups) == 0 {
+	if len(offered) == 0 {
 		return nil, false, nil
 	}
-	if e.authorCallsRemaining(t) <= 0 {
+	if remaining <= 0 {
 		return nil, true, nil
 	}
-	defs, err = tools.ForGroups(groups, e.searchProvider())
+	defs, err = tools.ForGroups(offered, e.searchProvider())
 	return defs, false, err
 }
 
@@ -432,6 +448,16 @@ func (e *Engine) authorCallsRemaining(t *openTurn) int {
 		limit = *e.roster.Tools.MaxCallsPerTurn
 	}
 	return limit - t.toolCallsUsed
+}
+
+// reviewerCallsRemaining is how many calls reviewer id has left in the
+// current round under tools.max_reviewer_calls. e.mu is held.
+func (e *Engine) reviewerCallsRemaining(t *openTurn, id string) int {
+	limit := config.DefaultMaxReviewerCalls
+	if e.roster != nil && e.roster.Tools != nil && e.roster.Tools.MaxReviewerCalls != nil {
+		limit = *e.roster.Tools.MaxReviewerCalls
+	}
+	return limit - t.reviewerCalls[id]
 }
 
 // maxResultBytes is tools.max_result_bytes, zero for the tools' default.
@@ -540,4 +566,29 @@ func (e *Engine) toolStepMessages(req transport.CompleteRequest, res transport.C
 		request.WriteByte('\n')
 	}
 	return msgs, request.String(), nil
+}
+
+// reviewerLimitStatement is sent, with no tool definitions, to a reviewer that
+// has reached its lookup bound for the round. It asks for no verdict in
+// particular: a claim the reviewer could not verify can be blocked on.
+const reviewerLimitStatement = "No further lookups are available for this review: the bound on your lookups has been reached. Give your verdict from what you have."
+
+// reviewerAttemptNote tells a reviewer which attempt id its next reply must
+// carry in a verdict, when earlier messages name another.
+func reviewerAttemptNote(attemptID string) string {
+	return fmt.Sprintf("The attempt ID for your reply to this message is now: %s. It replaces any attempt ID given earlier.", attemptID)
+}
+
+// withReviewerExchange inserts into a rebuilt review request (system message,
+// prompt, then anything after) the messages the reviewer's own earlier
+// attempt carried beyond the system message and the prompt: its calls and
+// their results. Only that reviewer's messages are ever among them.
+func withReviewerExchange(msgs, earlier []transport.Message) []transport.Message {
+	if len(earlier) <= 2 || len(msgs) < 2 {
+		return msgs
+	}
+	out := make([]transport.Message, 0, len(msgs)+len(earlier)-2)
+	out = append(out, msgs[:2]...)
+	out = append(out, earlier[2:]...)
+	return append(out, msgs[2:]...)
 }
