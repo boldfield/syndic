@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/sandbox"
 )
@@ -125,5 +126,58 @@ func runSelfTestOn(t *testing.T, b sandbox.Backend, sys sandbox.SystemLocations)
 	}
 	if err := sandbox.RunAtStart(context.Background(), b, cfg).Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSelfTestUnverifiedContainmentClosesGate(t *testing.T) {
+	fake := sandbox.NewFake(sandbox.Caps(sandbox.F, sandbox.N1, sandbox.N2, sandbox.P, sandbox.D),
+		sandbox.FakeScript{HoldPipe: true, NeverConfirm: true, Runtime: time.Hour})
+	cfg := selfTestConfig(t, false)
+	cfg.Gate = &sandbox.Gate{}
+	cfg.Sequence = sandbox.Sequence{KillGrace: 10 * time.Millisecond, CleanupDeadline: 10 * time.Millisecond}
+	res := sandbox.RunAtStart(context.Background(), fake, cfg)
+	if res.Passed() {
+		t.Fatal("self-test passed with unconfirmed containment")
+	}
+	if _, closed := cfg.Gate.Closed(); !closed {
+		t.Error("run gate still open")
+	}
+	if n := len(fake.Starts()); n != 1 {
+		t.Errorf("%d commands started, want 1", n)
+	}
+	if len(res.Checks) != 1 {
+		t.Errorf("%d checks recorded, want the loop to stop after 1", len(res.Checks))
+	}
+	dirs, _ := filepath.Glob(filepath.Join(cfg.Dir, "selftest-*", "call1-*"))
+	if len(dirs) != 1 {
+		t.Errorf("unverified call directory not preserved: %v", dirs)
+	}
+}
+
+func TestSelfTestRevokesWhenTerminationBegins(t *testing.T) {
+	fake := sandbox.NewFake(sandbox.Caps(sandbox.F, sandbox.N1, sandbox.N2, sandbox.P, sandbox.D),
+		sandbox.FakeSelfTestScripts("", true)...)
+	cfg := selfTestConfig(t, true)
+	base := cfg.Network
+	var closes, late int
+	cfg.Network = func() (sandbox.NetworkFixture, error) {
+		fx, err := base()
+		fx.Close = func() {
+			closes++
+			if len(fake.Starts()) != closes {
+				late++
+			}
+		}
+		return fx, err
+	}
+	res := sandbox.RunAtStart(context.Background(), fake, cfg)
+	if err := res.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if closes == 0 || late != 0 {
+		t.Errorf("closes=%d, of which %d came after a later command started; want revocation when each call's termination begins", closes, late)
+	}
+	if want := len(fake.Starts()); closes != want {
+		t.Errorf("%d fixtures closed for %d commands", closes, want)
 	}
 }

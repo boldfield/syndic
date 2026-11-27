@@ -213,15 +213,25 @@ func runSelfTest(ctx context.Context, b Backend, cfg SelfTestConfig) SelfTestRes
 		}
 		return res
 	}
-	defer cleanup()
+	keep := false
+	defer func() {
+		if !keep {
+			cleanup()
+		}
+	}()
 	st.root = root
 	for _, c := range AllSelfTestChecks() {
 		if c == CheckProxy && !cfg.NetworkList {
 			res.Checks = append(res.Checks, CheckResult{Check: c})
 			continue
 		}
-		detail := st.run(ctx, c)
+		detail, err := st.run(ctx, c)
 		res.Checks = append(res.Checks, CheckResult{Check: c, Ran: true, Passed: detail == "", Detail: detail})
+		if errors.Is(err, errContainmentUnverified) {
+			// Nothing after this runs, and the directories stay as they are.
+			keep = true
+			break
+		}
 	}
 	return res
 }
@@ -249,7 +259,7 @@ func (st *selfTest) setup() (string, func(), error) {
 }
 
 // run runs one check and returns "" when it passed, else what went wrong.
-func (st *selfTest) run(ctx context.Context, c SelfTestCheck) string {
+func (st *selfTest) run(ctx context.Context, c SelfTestCheck) (string, error) {
 	var err error
 	switch c {
 	case CheckTrue:
@@ -266,10 +276,15 @@ func (st *selfTest) run(ctx context.Context, c SelfTestCheck) string {
 		err = st.checkProxy(ctx)
 	}
 	if err != nil {
-		return err.Error()
+		return err.Error(), err
 	}
-	return ""
+	return "", nil
 }
+
+// errContainmentUnverified is a call whose containment could not be
+// confirmed empty: the run gate is closed, no later command starts, and the
+// directories are kept.
+var errContainmentUnverified = errors.New("containment not confirmed empty")
 
 type callResult struct {
 	exit   int
@@ -279,7 +294,7 @@ type callResult struct {
 // call runs one command under the backend with a fresh scratch and temporary
 // directory holding the helper, and returns once the containment is
 // confirmed empty.
-func (st *selfTest) call(ctx context.Context, name string, build func(helper string) string, proxy *NetworkFixture) (callResult, error) {
+func (st *selfTest) call(ctx context.Context, name string, build func(helper string, fx *NetworkFixture) string) (callResult, error) {
 	st.n++
 	dir := filepath.Join(st.root, fmt.Sprintf("call%d-%s", st.n, name))
 	scratch, tmp := filepath.Join(dir, "scratch"), filepath.Join(dir, "tmp")
@@ -288,25 +303,30 @@ func (st *selfTest) call(ctx context.Context, name string, build func(helper str
 			return callResult{}, err
 		}
 	}
-	if proxy == nil && st.cfg.NetworkList && st.cfg.Network != nil {
+	var proxy *NetworkFixture
+	revoke := func() {}
+	if st.cfg.NetworkList && st.cfg.Network != nil {
 		// A network list is in force, so every command gets what a real one
-		// would: its own listener and credential.
+		// would: its own listener and credential, revoked when its
+		// termination begins.
 		fx, err := st.cfg.Network()
 		if err != nil {
 			return callResult{}, fmt.Errorf("opening proxy fixture: %w", err)
 		}
 		if fx.Close != nil {
-			defer fx.Close()
+			var once sync.Once
+			revoke = func() { once.Do(fx.Close) }
 		}
 		proxy = &fx
 	}
+	defer revoke()
 	helper := filepath.Join(tmp, "selftest-helper")
 	if err := st.placeHelper(helper); err != nil {
 		return callResult{}, fmt.Errorf("placing helper: %w", err)
 	}
 	env := EnvConfig{Path: st.cfg.Path, TempDir: tmp}
 	spec := Spec{
-		Argv:       st.cfg.Argv(build(helper)),
+		Argv:       st.cfg.Argv(build(helper, proxy)),
 		ScratchDir: scratch,
 		TempDir:    tmp,
 		System:     st.cfg.System,
@@ -368,10 +388,13 @@ func (st *selfTest) call(ctx context.Context, name string, build func(helper str
 	if seq == (Sequence{}) {
 		seq = Sequence{KillGrace: DefaultKillGrace, CleanupDeadline: DefaultCleanupDeadline}
 	}
-	confirmed := seq.Run(proc, exited && w.err == nil, nil)
+	confirmed := seq.Run(proc, exited && w.err == nil, revoke)
 	if !confirmed {
 		_ = out.Close()
-		return callResult{}, errors.New("containment not confirmed empty")
+		if g := st.cfg.Gate; g != nil {
+			g.Close("self-test: containment not confirmed empty")
+		}
+		return callResult{}, errContainmentUnverified
 	}
 	if !exited {
 		w = <-waitc
@@ -453,7 +476,7 @@ func truncate(s string) string {
 }
 
 func (st *selfTest) checkTrue(ctx context.Context) error {
-	r, err := st.call(ctx, "true", func(string) string { return "true" }, nil)
+	r, err := st.call(ctx, "true", func(string, *NetworkFixture) string { return "true" })
 	if err != nil {
 		return err
 	}
@@ -481,7 +504,7 @@ func (st *selfTest) checkReadState(ctx context.Context) error {
 	if cerr := f.Close(); werr != nil || cerr != nil {
 		return errors.Join(werr, cerr)
 	}
-	r, err := st.call(ctx, "read", func(h string) string { return helperCmd(h, "read-denied", file) }, nil)
+	r, err := st.call(ctx, "read", func(h string, _ *NetworkFixture) string { return helperCmd(h, "read-denied", file) })
 	if err != nil {
 		return err
 	}
@@ -494,7 +517,7 @@ func (st *selfTest) checkWriteOutside(ctx context.Context) error {
 		return err
 	}
 	file := filepath.Join(outside, "probe")
-	r, err := st.call(ctx, "write", func(h string) string { return helperCmd(h, "write-denied", file) }, nil)
+	r, err := st.call(ctx, "write", func(h string, _ *NetworkFixture) string { return helperCmd(h, "write-denied", file) })
 	if err != nil {
 		return err
 	}
@@ -551,7 +574,7 @@ func (st *selfTest) checkLoopback(ctx context.Context) error {
 		return err
 	}
 	defer l.close()
-	r, err := st.call(ctx, "loopback", func(h string) string { return helperCmd(h, "connect-denied", l.addr()) }, nil)
+	r, err := st.call(ctx, "loopback", func(h string, _ *NetworkFixture) string { return helperCmd(h, "connect-denied", l.addr()) })
 	if err != nil {
 		return err
 	}
@@ -568,11 +591,11 @@ func (st *selfTest) checkLoopback(ctx context.Context) error {
 // the sleeper is gone.
 func (st *selfTest) checkDetach(ctx context.Context) error {
 	var lock string
-	r, err := st.call(ctx, "detach", func(helper string) string {
+	r, err := st.call(ctx, "detach", func(helper string, _ *NetworkFixture) string {
 		lock = filepath.Join(filepath.Dir(helper), "detach.lock")
 		_ = os.WriteFile(lock, nil, 0o600)
 		return helperCmd(helper, "detach", lock)
-	}, nil)
+	})
 	if err != nil {
 		return err
 	}
@@ -613,21 +636,14 @@ func (st *selfTest) checkProxy(ctx context.Context) error {
 	if st.cfg.Network == nil {
 		return errors.New("no proxy fixture configured")
 	}
-	fx, err := st.cfg.Network()
-	if err != nil {
-		return fmt.Errorf("opening proxy fixture: %w", err)
-	}
-	if fx.Close != nil {
-		defer fx.Close()
-	}
-	r, err := st.call(ctx, "proxy", func(h string) string { return helperCmd(h, "proxy-request", SelfTestHost) }, &fx)
+	r, err := st.call(ctx, "proxy", func(h string, _ *NetworkFixture) string { return helperCmd(h, "proxy-request", SelfTestHost) })
 	if err != nil {
 		return err
 	}
 	if err := observed(r, "request through the call's proxy listener failed"); err != nil {
 		return err
 	}
-	r, err = st.call(ctx, "other", func(h string) string { return helperCmd(h, "connect-denied", fx.OtherAddr) }, &fx)
+	r, err = st.call(ctx, "other", func(h string, fx *NetworkFixture) string { return helperCmd(h, "connect-denied", fx.OtherAddr) })
 	if err != nil {
 		return err
 	}
