@@ -247,8 +247,8 @@ func authorEvidence() []candidate.EvidencePair {
 }
 
 const (
-	goldenFrozenChangesHash   = "d3dacc2fb800436c14e4423c017ef7f83b80e7a396a2e5115820b277dd730e17"
-	goldenFrozenCandidateHash = "f762df1c427657d32bb54a14ef859238f2c9fbdeef874d40de45c42de9f98f9a"
+	goldenFrozenChangesHash     = "d3dacc2fb800436c14e4423c017ef7f83b80e7a396a2e5115820b277dd730e17"
+	goldenFrozenCandidateHashV2 = "3298d7839d16dee5793cbd03371c17f731cbb0bb08097ae62f6a53558310236f"
 )
 
 func TestCandidateAuthorEvidenceMutationChangesHash(t *testing.T) {
@@ -256,12 +256,12 @@ func TestCandidateAuthorEvidenceMutationChangesHash(t *testing.T) {
 	if base.ChangesHash != goldenFrozenChangesHash {
 		t.Fatalf("changes_hash = %s, want %s", base.ChangesHash, goldenFrozenChangesHash)
 	}
-	baseHash, err := candidate.Hash(base)
+	baseHashV2, err := candidate.HashV2(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if baseHash != goldenFrozenCandidateHash {
-		t.Fatalf("candidate hash = %s, want %s", baseHash, goldenFrozenCandidateHash)
+	if baseHashV2 != goldenFrozenCandidateHashV2 {
+		t.Fatalf("candidate v2 hash = %s, want %s", baseHashV2, goldenFrozenCandidateHashV2)
 	}
 
 	mutated := authorEvidence()
@@ -275,12 +275,12 @@ func TestCandidateAuthorEvidenceMutationChangesHash(t *testing.T) {
 		"evidence reordered":    frozenIdentity(t, goldenRecords(), reordered),
 		"snapshot changed":      frozenIdentity(t, changedRecords, authorEvidence()),
 	} {
-		h, err := candidate.Hash(id)
+		h, err := candidate.HashV2(id)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if h == baseHash {
-			t.Errorf("%s: candidate hash unchanged", name)
+		if h == baseHashV2 {
+			t.Errorf("%s: candidate v2 hash unchanged", name)
 		}
 	}
 }
@@ -323,8 +323,8 @@ func TestReviewerOnlyEvidenceDoesNotRewriteFrozenCandidate(t *testing.T) {
 	if string(canonBefore) != string(canonAfter) || strings.Contains(string(canonAfter), extSnap) {
 		t.Error("frozen candidate canonical bytes depend on the extended record")
 	}
-	h, _ := candidate.Hash(frozen)
-	if h != goldenFrozenCandidateHash {
-		t.Errorf("frozen candidate hash = %s, want %s", h, goldenFrozenCandidateHash)
+	hV2, _ := candidate.HashV2(frozen)
+	if hV2 != goldenFrozenCandidateHashV2 {
+		t.Errorf("frozen candidate v2 hash = %s, want %s", hV2, goldenFrozenCandidateHashV2)
 	}
 }

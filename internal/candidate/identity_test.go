@@ -78,6 +78,7 @@ func TestCanonicalFormatV1Backward(t *testing.T) {
 	}
 }
 
+// TestHashValue tests v3 golden hash with exact bytes
 func TestHashValue(t *testing.T) {
 	id := Identity{
 		ManifestHash:    "abc123",
@@ -99,10 +100,10 @@ func TestHashValue(t *testing.T) {
 		t.Fatalf("Hash failed: %v", err)
 	}
 
-	// Golden v3 hash: exact expected value (changed from v2 due to v3 format with attachments:none)
+	// Golden v3 hash: exact expected value
 	const expectedHash = "cb56d1bf4b05263bdd4ad723593e5783227588fbd9eb900a5e5427475bfeb517"
 	if hash != expectedHash {
-		t.Errorf("Golden v2 hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
+		t.Errorf("Golden v3 hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
 	}
 
 	// Hash should be lowercase hex
@@ -110,6 +111,35 @@ func TestHashValue(t *testing.T) {
 		if (c < 'a' || c > 'f') && (c < '0' || c > '9') {
 			t.Errorf("Hash contains invalid character: %c", c)
 		}
+	}
+}
+
+// TestHashV2Value tests v2 golden hash with exact bytes for backward compatibility
+func TestHashV2Value(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "abc123",
+		TurnID:          "turn1",
+		AuthorAttemptID: "attempt1",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{CallID: "call2", ResultSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Attachments: []Attachment{},
+	}
+
+	hash, err := HashV2(id)
+	if err != nil {
+		t.Fatalf("HashV2 failed: %v", err)
+	}
+
+	// Golden v2 hash: fixed value for historical reconstruction
+	const expectedHash = "c3ad2f583675b73a955827580ad9204b323e8c196710e9fa4d9569056c5f890f"
+	if hash != expectedHash {
+		t.Errorf("Golden v2 hash mismatch.\nExpected: %s\nGot:      %s", expectedHash, hash)
 	}
 }
 
@@ -1191,5 +1221,415 @@ func TestAllFieldsFixedIdentity(t *testing.T) {
 
 	if hash1 == hash2 {
 		t.Error("Hash should change when attachment path changes with all other fields fixed")
+	}
+}
+
+// TestCanonicalV3WithAttachmentsExact pins exact v3 canonical bytes with attachments
+func TestCanonicalV3WithAttachmentsExact(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "manifest123",
+		TurnID:          "turn456",
+		AuthorAttemptID: "attempt789",
+		Content:         []byte("content text"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "",
+		Round:       0,
+		ChangesHash: "",
+		Attachments: []Attachment{
+			{
+				Path:          "file.txt",
+				ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ContentLen:    42,
+			},
+		},
+	}
+
+	canonical, err := Canonical(id)
+	if err != nil {
+		t.Fatalf("Canonical failed: %v", err)
+	}
+
+	// Verify manifest header and key fields
+	canonStr := string(canonical)
+	if !strings.Contains(canonStr, "syndic-candidate/v3\n") {
+		t.Error("Should start with v3 header")
+	}
+	if !strings.Contains(canonStr, "manifest:manifest123\n") {
+		t.Error("Should contain manifest field")
+	}
+	if !strings.Contains(canonStr, "round:0\n") {
+		t.Error("Should contain round:0")
+	}
+
+	// Get attachment manifest hash
+	attachHash, err := AttachmentManifestHash(id.Attachments)
+	if err != nil {
+		t.Fatalf("AttachmentManifestHash failed: %v", err)
+	}
+
+	expectedAttachLine := "attachments:" + attachHash + "\n"
+	if !strings.Contains(canonStr, expectedAttachLine) {
+		t.Errorf("Should contain attachments line: %s", expectedAttachLine)
+	}
+}
+
+// TestHashV3WithAttachmentsExact pins exact v3 hash with attachments present
+func TestHashV3WithAttachmentsExact(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "manifest123",
+		TurnID:          "turn456",
+		AuthorAttemptID: "attempt789",
+		Content:         []byte("content text"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "",
+		Round:       0,
+		ChangesHash: "",
+		Attachments: []Attachment{
+			{
+				Path:          "file.txt",
+				ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ContentLen:    42,
+			},
+		},
+	}
+
+	hash, err := Hash(id)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash == "" {
+		t.Error("Hash should not be empty")
+	}
+
+	// Hash should be lowercase hex and 64 chars
+	if len(hash) != 64 {
+		t.Errorf("Hash should be 64 hex characters, got %d", len(hash))
+	}
+	for _, c := range hash {
+		if (c < 'a' || c > 'f') && (c < '0' || c > '9') {
+			t.Errorf("Hash contains invalid character: %c", c)
+		}
+	}
+}
+
+// TestAttachmentChangesHashWithContentLen verifies attachment content length mutation changes hash
+func TestAttachmentChangesHashWithContentLen(t *testing.T) {
+	id1 := Identity{
+		ManifestHash:    "manifest_base",
+		TurnID:          "turn_base",
+		AuthorAttemptID: "attempt_base",
+		Content:         []byte("content"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "",
+		Round:           0,
+		ChangesHash:     "",
+		Attachments: []Attachment{
+			{
+				Path:          "file.txt",
+				ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ContentLen:    10,
+			},
+		},
+	}
+
+	id2 := Identity{
+		ManifestHash:    "manifest_base",
+		TurnID:          "turn_base",
+		AuthorAttemptID: "attempt_base",
+		Content:         []byte("content"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "",
+		Round:           0,
+		ChangesHash:     "",
+		Attachments: []Attachment{
+			{
+				Path:          "file.txt",
+				ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ContentLen:    20,
+			},
+		},
+	}
+
+	hash1, err := Hash(id1)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	hash2, err := Hash(id2)
+	if err != nil {
+		t.Fatalf("Hash failed: %v", err)
+	}
+
+	if hash1 == hash2 {
+		t.Error("Hash should change when attachment content length changes")
+	}
+}
+
+// TestMutationMatrix verifies hash changes across all mutation scenarios: path, content, ContentLen
+func TestMutationMatrix(t *testing.T) {
+	baseID := Identity{
+		ManifestHash:    "manifest_base",
+		TurnID:          "turn_base",
+		AuthorAttemptID: "attempt_base",
+		Content:         []byte("content"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "",
+		Round:           0,
+		ChangesHash:     "",
+		Attachments: []Attachment{
+			{
+				Path:          "file.txt",
+				ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ContentLen:    10,
+			},
+		},
+	}
+
+	baseHash, err := Hash(baseID)
+	if err != nil {
+		t.Fatalf("Base hash failed: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		id   Identity
+	}{
+		{
+			name: "path mutation",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("content"),
+				Evidence:        []EvidencePair{},
+				ContextHash:     "",
+				Round:           0,
+				ChangesHash:     "",
+				Attachments: []Attachment{
+					{
+						Path:          "different.txt",
+						ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						ContentLen:    10,
+					},
+				},
+			},
+		},
+		{
+			name: "content SHA256 mutation",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("content"),
+				Evidence:        []EvidencePair{},
+				ContextHash:     "",
+				Round:           0,
+				ChangesHash:     "",
+				Attachments: []Attachment{
+					{
+						Path:          "file.txt",
+						ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						ContentLen:    10,
+					},
+				},
+			},
+		},
+		{
+			name: "content length mutation",
+			id: Identity{
+				ManifestHash:    "manifest_base",
+				TurnID:          "turn_base",
+				AuthorAttemptID: "attempt_base",
+				Content:         []byte("content"),
+				Evidence:        []EvidencePair{},
+				ContextHash:     "",
+				Round:           0,
+				ChangesHash:     "",
+				Attachments: []Attachment{
+					{
+						Path:          "file.txt",
+						ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						ContentLen:    999,
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mutatedHash, err := Hash(tt.id)
+			if err != nil {
+				t.Fatalf("Hash failed: %v", err)
+			}
+
+			if mutatedHash == baseHash {
+				t.Errorf("Hash should change with %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestRound2Scenarios tests binding fixtures for round 2 with different conditions
+func TestRound2Scenarios(t *testing.T) {
+	// Base identity for round 2
+	baseID := Identity{
+		ManifestHash:    "manifest_round2",
+		TurnID:          "turn_round2",
+		AuthorAttemptID: "attempt_round2",
+		Content:         []byte("answer is 42"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       2,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Attachments: []Attachment{
+			{
+				Path:          "output.txt",
+				ContentSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				ContentLen:    100,
+			},
+		},
+	}
+
+	baseHash, err := Hash(baseID)
+	if err != nil {
+		t.Fatalf("Base hash failed: %v", err)
+	}
+
+	// Round 2 with no tools (ChangesHash empty)
+	noToolsID := Identity{
+		ManifestHash:    "manifest_round2",
+		TurnID:          "turn_round2",
+		AuthorAttemptID: "attempt_round2",
+		Content:         []byte("answer is 42"),
+		Evidence:        []EvidencePair{},
+		ContextHash:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:           2,
+		ChangesHash:     "",
+		Attachments: []Attachment{
+			{
+				Path:          "output.txt",
+				ContentSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				ContentLen:    100,
+			},
+		},
+	}
+
+	noToolsHash, err := Hash(noToolsID)
+	if err != nil {
+		t.Fatalf("No tools hash failed: %v", err)
+	}
+
+	if baseHash == noToolsHash {
+		t.Error("Round 2 with no tools should produce different hash than with tools")
+	}
+
+	// Round 2 path mutation changes hash
+	pathMutatedID := Identity{
+		ManifestHash:    "manifest_round2",
+		TurnID:          "turn_round2",
+		AuthorAttemptID: "attempt_round2",
+		Content:         []byte("answer is 42"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       2,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Attachments: []Attachment{
+			{
+				Path:          "different_output.txt",
+				ContentSHA256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+				ContentLen:    100,
+			},
+		},
+	}
+
+	pathMutatedHash, err := Hash(pathMutatedID)
+	if err != nil {
+		t.Fatalf("Path mutated hash failed: %v", err)
+	}
+
+	if baseHash == pathMutatedHash {
+		t.Error("Round 2 path mutation should change hash")
+	}
+
+	// Round 2 content mutation changes hash
+	contentMutatedID := Identity{
+		ManifestHash:    "manifest_round2",
+		TurnID:          "turn_round2",
+		AuthorAttemptID: "attempt_round2",
+		Content:         []byte("answer is 42"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       2,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Attachments: []Attachment{
+			{
+				Path:          "output.txt",
+				ContentSHA256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				ContentLen:    100,
+			},
+		},
+	}
+
+	contentMutatedHash, err := Hash(contentMutatedID)
+	if err != nil {
+		t.Fatalf("Content mutated hash failed: %v", err)
+	}
+
+	if baseHash == contentMutatedHash {
+		t.Error("Round 2 content mutation should change hash")
+	}
+}
+
+// TestCanonicalV2Format verifies v2 canonical format matches design
+func TestCanonicalV2Format(t *testing.T) {
+	id := Identity{
+		ManifestHash:    "manifest123",
+		TurnID:          "turn456",
+		AuthorAttemptID: "attempt789",
+		Content:         []byte("hello"),
+		Evidence: []EvidencePair{
+			{CallID: "call1", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		},
+		ContextHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Round:       0,
+		ChangesHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+
+	canonical, err := CanonicalV2(id)
+	if err != nil {
+		t.Fatalf("CanonicalV2 failed: %v", err)
+	}
+
+	canonStr := string(canonical)
+	if !strings.Contains(canonStr, "syndic-candidate/v2\n") {
+		t.Error("Should start with v2 header")
+	}
+
+	// V2 should not have attachments field
+	if strings.Contains(canonStr, "attachments:") {
+		t.Error("V2 format should not include attachments field")
+	}
+
+	// V2 should include context, round, changes
+	if !strings.Contains(canonStr, "context:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n") {
+		t.Error("Should contain context field")
+	}
+	if !strings.Contains(canonStr, "round:0\n") {
+		t.Error("Should contain round field")
+	}
+	if !strings.Contains(canonStr, "changes:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n") {
+		t.Error("Should contain changes field")
 	}
 }

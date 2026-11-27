@@ -121,9 +121,70 @@ func CanonicalV1(id IdentityV1) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Hash computes the lowercase hex SHA-256 hash of the canonical v2 form.
+// CanonicalV2 computes the canonical form of an identity in v2 format.
+// This is provided for backward compatibility with historical records.
+// V2 format includes context, round, and changes fields but excludes attachments.
+func CanonicalV2(id Identity) ([]byte, error) {
+	if err := validateIdentity(id); err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+
+	buf.WriteString("syndic-candidate/v2\n")
+	fmt.Fprintf(&buf, "manifest:%s\n", id.ManifestHash)
+	fmt.Fprintf(&buf, "turn:%s\n", id.TurnID)
+	fmt.Fprintf(&buf, "author_attempt:%s\n", id.AuthorAttemptID)
+
+	contentHash := sha256.Sum256(id.Content)
+	fmt.Fprintf(&buf, "content_sha256:%x\n", contentHash)
+	fmt.Fprintf(&buf, "content_len:%d\n", len(id.Content))
+
+	// Format evidence as call_id:result_sha256 pairs
+	if len(id.Evidence) == 0 {
+		buf.WriteString("evidence:none\n")
+	} else {
+		var evidenceParts []string
+		for _, pair := range id.Evidence {
+			evidenceParts = append(evidenceParts, fmt.Sprintf("%s:%s", pair.CallID, pair.ResultSHA256))
+		}
+		fmt.Fprintf(&buf, "evidence:%s\n", strings.Join(evidenceParts, ","))
+	}
+
+	// v2 fields: context, round, changes
+	if id.ContextHash == "" {
+		buf.WriteString("context:none\n")
+	} else {
+		fmt.Fprintf(&buf, "context:%s\n", id.ContextHash)
+	}
+
+	fmt.Fprintf(&buf, "round:%d\n", id.Round)
+
+	if id.ChangesHash == "" {
+		buf.WriteString("changes:none\n")
+	} else {
+		fmt.Fprintf(&buf, "changes:%s\n", id.ChangesHash)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// Hash computes the lowercase hex SHA-256 hash of the canonical v3 form.
+// This includes attachments metadata and is the current standard format.
 func Hash(id Identity) (string, error) {
 	canonical, err := Canonical(id)
+	if err != nil {
+		return "", err
+	}
+
+	hash := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", hash), nil
+}
+
+// HashV2 computes the lowercase hex SHA-256 hash of the canonical v2 form.
+// Used for reconstructing historical v2 candidate hashes.
+func HashV2(id Identity) (string, error) {
+	canonical, err := CanonicalV2(id)
 	if err != nil {
 		return "", err
 	}
