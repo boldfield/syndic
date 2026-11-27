@@ -232,12 +232,12 @@ func TestChatHeaderCountsEarlierTurnsNotLines(t *testing.T) {
 	}
 	_, _, starts := chatLinesWithStarts(a.state, a.chatIn())
 	// Scroll until the view starts inside the third turn: two turns lie above.
-	a.answerFollow, a.answerScrollRow = false, starts[2]+2
+	chatScrollTo(a, starts[2]+2)
 	if got := earlier(); got != "2" {
 		t.Errorf("inside turn three: %s earlier, want 2", got)
 	}
 	// Inside the first turn, no turn lies wholly above, though many lines do.
-	a.answerScrollRow = 10
+	chatScrollTo(a, 10)
 	if got := earlier(); got != "0" {
 		t.Errorf("inside turn one: %s earlier, want 0", got)
 	}
@@ -337,4 +337,9 @@ func TestInputWidthOnlyResizeKeepsTheText(t *testing.T) {
 	if !strings.Contains(in, "xxxx") {
 		t.Fatalf("input blank after a width-only resize:\n%s", in)
 	}
+}
+
+// chatScrollTo moves the chat so that row first is the first one shown.
+func chatScrollTo(a *App, first int) {
+	a.scrollAnswer(first - a.layoutChat().first)
 }

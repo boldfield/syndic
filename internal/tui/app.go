@@ -66,13 +66,15 @@ type App struct {
 	allowProvisional     bool // the user accepted provisional deadlines for this process
 
 	content              *ContentCache
-	drafts               *bool           // the user's drafts toggle; nil until set, then it overrides the quick profile
-	quickSelection       *QuickSelection // quick profile state
-	workDir              string          // where the quick profile search starts; the process directory when empty
-	answerScrollRow      int             // first visible line of the answer tab
+	drafts               *bool                                 // the user's drafts toggle; nil until set, then it overrides the quick profile
+	quickSelection       *QuickSelection                       // quick profile state
+	workDir              string                                // where the quick profile search starts; the process directory when empty
+	chatRowsFn           func() ([]string, []FollowRow, []int) // tests only: stands in for the chat's rows
+	chatHeight           int                                   // tests only: when positive, the rows the chat shows
+	chatFollow           *Follow                               // where the chat tab stands: at the bottom, or holding a place by content
+	chatLaidOut          bool                                  // the chat follow holds the chat's rows as they are now: no message was handled since layoutChat
 	candidateIDByTurn    map[string]string
 	inputs               map[string]string           // what the user typed for each turn submitted by this process
-	answerFollow         bool                        // the chat shows its last lines until the user scrolls up
 	openBlocksByTurn     map[string][]wire.OpenBlock // open blocks from turn replies
 	overrideReasons      map[string]string           // the reason of each override event
 	terminalCapabilities TerminalCapabilities        // terminal color, alt-screen, mouse support
@@ -188,7 +190,7 @@ func NewApp(ctx context.Context, socketPath string, opts ...Option) *App {
 		cancel:                 cancel,
 		socket:                 socketPath,
 		input:                  newInput(),
-		answerFollow:           true,
+		chatFollow:             NewFollow(),
 		width:                  80,
 		height:                 24,
 		state:                  NewState(),
@@ -531,7 +533,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // gives it: View only reads the model.
 func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := a.input.Width()
-	defer func() { fitInput(&a.input, a.inputRows(), a.input.Width() != w) }()
+	defer func() {
+		fitInput(&a.input, a.inputRows(), a.input.Width() != w)
+		// Any message can change what the chat draws.
+		a.chatLaidOut = false
+	}()
 
 	if a.reasonForm != nil && a.reasonForm.useHuh && a.reasonForm.huhForm != nil {
 		if keyMsg, isKey := msg.(tea.KeyMsg); isKey {
@@ -793,6 +799,17 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "pgdown":
 			a.scrollAnswer(page)
 			return a, nil
+		case "home", "end":
+			// With text in the input these keys still move its cursor.
+			if a.input.Value() != "" {
+				break
+			}
+			if msg.String() == "home" {
+				a.moveChat((*Follow).Home)
+			} else {
+				a.chatFollow.End()
+			}
+			return a, nil
 		}
 	}
 
@@ -1024,11 +1041,7 @@ func (a *App) onSubmit(msg submitMsg) tea.Cmd {
 	if isTerminalState(a.state.TurnState[msg.turnID]) {
 		return nil
 	}
-	oldTurn := a.state.CurrentTurn
 	a.state.CurrentTurn = msg.turnID
-	if oldTurn != msg.turnID {
-		a.answerScrollRow, a.answerFollow = 0, true
-	}
 	a.ensureTurnInfo()
 	return a.ensureTick()
 }
@@ -1067,11 +1080,7 @@ func (a *App) onConnected(msg connectedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if open != "" {
-		oldTurn := a.state.CurrentTurn
 		a.state.CurrentTurn = open
-		if oldTurn != a.state.CurrentTurn {
-			a.answerScrollRow, a.answerFollow = 0, true
-		}
 		a.ensureTurnInfo()
 		// The limit and deadline of a turn that is already open come from its record.
 		cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, a.state.CurrentTurn))
@@ -1458,30 +1467,51 @@ func (a *App) isTerminalTooSmall() bool {
 
 // answerHeight is the lines of the chat tab below its conversation header.
 func (a *App) answerHeight() int {
+	if a.chatHeight > 0 {
+		return a.chatHeight
+	}
 	return max(a.bodyHeight()-1, 0)
 }
 
-// chatStart is the first line of the chat the tab shows, given its line
-// count and where the newest turn starts. The tab follows the newest turn
-// until the user scrolls: its end when it fits, else its first line.
-func (a *App) chatStart(total, lastTurn int) int {
-	maxStart := max(total-a.answerHeight(), 0)
-	if a.answerFollow {
-		return min(lastTurn, maxStart)
+// chatLayout is the chat as drawn at the current width, with the first row the tab shows,
+// whether it is at the bottom and how many rows are new.
+type chatLayout struct {
+	lines  []string
+	starts []int
+	first  int
+	bottom bool
+	count  int
+}
+
+// layoutChat lays the chat out and places the view on it. Everything that reads or moves
+// the chat's position goes through it, so that all of them see the same rows.
+func (a *App) layoutChat() chatLayout {
+	var lines []string
+	var rows []FollowRow
+	var starts []int
+	if a.chatRowsFn != nil {
+		lines, rows, starts = a.chatRowsFn()
+	} else {
+		lines, rows, _, starts = chatRows(a.state, a.chatIn())
 	}
-	return min(a.answerScrollRow, maxStart)
+	first, bottom, count := a.chatFollow.Layout(rows, a.answerHeight())
+	a.chatLaidOut = true
+	return chatLayout{lines, starts, first, bottom, count}
+}
+
+// moveChat moves the chat on its rows as they are now. The View after the last message
+// laid them out, so a key draws the chat once, in the View that follows it, unless a
+// message was handled since.
+func (a *App) moveChat(m func(*Follow)) {
+	if !a.chatLaidOut {
+		a.layoutChat()
+	}
+	m(a.chatFollow)
 }
 
 // scrollAnswer moves the chat tab by delta lines, staying within the text.
 func (a *App) scrollAnswer(delta int) {
-	lines, lastTurn := chatLines(a.state, a.chatIn())
-	total := len(lines)
-	maxStart := max(total-a.answerHeight(), 0)
-	row := min(max(a.chatStart(total, lastTurn)+delta, 0), maxStart)
-	a.answerScrollRow = row
-	// Scrolling back to where following would stand resumes it, so that a
-	// newer turn comes into view; at the bottom of a long turn it would not.
-	a.answerFollow = row == min(lastTurn, maxStart)
+	a.moveChat(func(f *Follow) { f.Scroll(delta) })
 }
 
 // tabGap separates the tab names in the tab bar.
@@ -1534,13 +1564,11 @@ func (a *App) View() string {
 	bodyHeight := hs.Body
 
 	var tabView string
-	lastTurn := 0
-	var turnStarts []int
+	var chat chatLayout
 	switch a.tab {
 	case tabChat:
-		var chat []string
-		chat, lastTurn, turnStarts = chatLinesWithStarts(a.state, a.chatIn())
-		tabView = strings.Join(chat, "\n")
+		chat = a.layoutChat()
+		tabView = strings.Join(chat.lines, "\n")
 
 	case tabTranscript:
 		tabView = strings.Join(a.tLines[min(a.tRow, len(a.tLines)):], "\n")
@@ -1570,7 +1598,7 @@ func (a *App) View() string {
 
 	if a.tab == tabChat && len(a.panel) == 0 && a.conv == nil {
 		answerHeight := max(bodyHeight-1, 0)
-		start := a.chatStart(len(lines), lastTurn)
+		start := chat.first
 		total := len(lines)
 		lines = lines[start:]
 		for len(lines) < answerHeight {
@@ -1579,8 +1607,11 @@ func (a *App) View() string {
 		// The first line of the chat names the open conversation, and at its
 		// right how many turns are above the view and where the view stands.
 		header := a.conversationHeader()
-		lines = append([]string{withScrollInfo(header, w, fmt.Sprintf("%d earlier · %d%%",
-			turnsAbove(turnStarts, total, start), scrollPercent(total, answerHeight, start)))}, lines[:answerHeight]...)
+		info := fmt.Sprintf("%d earlier · %d%%", turnsAbove(chat.starts, total, start), scrollPercent(total, answerHeight, start))
+		if !chat.bottom && chat.count > 0 {
+			info = fmt.Sprintf("↓ %d new lines · %s", chat.count, info)
+		}
+		lines = append([]string{withScrollInfo(header, w, info)}, lines[:answerHeight]...)
 	}
 	for len(lines) < bodyHeight {
 		lines = append(lines, "")
