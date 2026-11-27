@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/boldfield/syndic/internal/mcp/jcs"
 )
@@ -52,14 +53,20 @@ func Render(result []byte) (Rendered, error) {
 	}
 
 	var out Rendered
-	if raw, ok := obj["isError"]; ok && !isNull(raw) {
+	if raw, ok := obj["isError"]; ok {
+		if isNull(raw) {
+			return Rendered{}, fmt.Errorf("%w: isError is not a boolean", ErrMalformedReply)
+		}
 		if err := json.Unmarshal(raw, &out.IsError); err != nil {
 			return Rendered{}, fmt.Errorf("%w: isError is not a boolean", ErrMalformedReply)
 		}
 	}
 
 	var blocks []json.RawMessage
-	if raw, ok := obj["content"]; ok && !isNull(raw) {
+	if raw, ok := obj["content"]; ok {
+		if isNull(raw) {
+			return Rendered{}, fmt.Errorf("%w: content is not an array", ErrMalformedReply)
+		}
 		if err := json.Unmarshal(raw, &blocks); err != nil {
 			return Rendered{}, fmt.Errorf("%w: content is not an array", ErrMalformedReply)
 		}
@@ -85,16 +92,19 @@ func Render(result []byte) (Rendered, error) {
 		if err := json.Unmarshal(b, &blk); err != nil || blk == nil {
 			return Rendered{}, fmt.Errorf("%w: content block %d is not an object", ErrMalformedReply, i)
 		}
-		var typ string
-		if err := json.Unmarshal(blk["type"], &typ); err != nil {
+		typ, ok := stringMember(blk["type"])
+		if !ok {
 			return Rendered{}, fmt.Errorf("%w: content block %d has no string type", ErrMalformedReply, i)
+		}
+		if strings.ContainsFunc(typ, unicode.IsControl) {
+			return Rendered{}, fmt.Errorf("%w: content block %d has a type with a control character", ErrMalformedReply, i)
 		}
 		if typ != "text" {
 			lines = append(lines, "["+typ+", "+strconv.Itoa(len(bytes.TrimSpace(b)))+" bytes]")
 			continue
 		}
-		var text string
-		if err := json.Unmarshal(blk["text"], &text); err != nil {
+		text, ok := stringMember(blk["text"])
+		if !ok {
 			return Rendered{}, fmt.Errorf("%w: content block %d has no string text", ErrMalformedReply, i)
 		}
 		out.RawText = append(out.RawText, []byte(text))
@@ -105,3 +115,12 @@ func Render(result []byte) (Rendered, error) {
 }
 
 func isNull(raw json.RawMessage) bool { return string(bytes.TrimSpace(raw)) == "null" }
+
+// stringMember decodes raw as a JSON string; absent and null are not strings.
+func stringMember(raw json.RawMessage) (string, bool) {
+	var s *string
+	if err := json.Unmarshal(raw, &s); err != nil || s == nil {
+		return "", false
+	}
+	return *s, true
+}

@@ -115,3 +115,17 @@ func TestRenderMalformed(t *testing.T) {
 		}
 	}
 }
+
+func TestRender_NullAndControlRejected(t *testing.T) {
+	for name, in := range map[string]string{
+		"null content": `{"content":null}`,
+		"null text":    `{"content":[{"type":"text","text":null}]}`,
+		"null type":    `{"content":[{"type":null}]}`,
+		"null isError": `{"isError":null}`,
+		"newline type": `{"content":[{"type":"a]\n[b"}]}`,
+	} {
+		if _, err := Render([]byte(in)); !errors.Is(err, ErrMalformedReply) {
+			t.Errorf("%s: err = %v, want ErrMalformedReply", name, err)
+		}
+	}
+}
