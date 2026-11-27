@@ -66,7 +66,8 @@ func TestV6DrawerKeysThroughUpdateAndView(t *testing.T) {
 
 	// ↑ selects turn 1; its three rounds are listed and round 1 shown, the
 	// reviewers in roster order with their verdict kinds and block states.
-	keys(a, tea.KeyUp)
+	// The drawer opens on the last row of what it shows, so Home reads the top.
+	keys(a, tea.KeyUp, tea.KeyHome)
 	v = a.View()
 	for _, want := range []string{"Reviews · Turn 1 · [*1* 2 3]", "codex (block)", "b1: opened", "muse (approve-with-changes)", "evidence:", "evidence-line-00"} {
 		if !strings.Contains(v, want) {
@@ -99,12 +100,12 @@ func TestV6DrawerKeysThroughUpdateAndView(t *testing.T) {
 	a.terminalCapabilities = TerminalCapabilities{Color: true, AltScreen: true}
 
 	// → shows round 2, then round 3; ← goes back.
-	keys(a, tea.KeyRight)
+	keys(a, tea.KeyRight, tea.KeyHome)
 	v = a.View()
 	if !strings.Contains(v, "Reviews · Turn 1 · [1 *2* 3]") || !strings.Contains(v, "b1: maintained") || strings.Contains(v, "b1: opened") || strings.Contains(v, "muse") {
 		t.Fatalf("round 2:\n%s", v)
 	}
-	keys(a, tea.KeyRight)
+	keys(a, tea.KeyRight, tea.KeyHome)
 	v = a.View()
 	if !strings.Contains(v, "Reviews · Turn 1 · [1 2 *3*]") || !strings.Contains(v, "codex (approve)") || !strings.Contains(v, "b1: withdrawn") {
 		t.Fatalf("round 3:\n%s", v)
@@ -113,7 +114,7 @@ func TestV6DrawerKeysThroughUpdateAndView(t *testing.T) {
 	if v = a.View(); !strings.Contains(v, "[1 2 *3*]") {
 		t.Fatalf("→ past the last round moved:\n%s", v)
 	}
-	keys(a, tea.KeyLeft, tea.KeyLeft)
+	keys(a, tea.KeyLeft, tea.KeyLeft, tea.KeyHome)
 	v = a.View()
 	if !strings.Contains(v, "[*1* 2 3]") || !strings.Contains(v, "b1: opened") {
 		t.Fatalf("← did not return to round 1:\n%s", v)
@@ -133,8 +134,8 @@ func TestV6DrawerKeysThroughUpdateAndView(t *testing.T) {
 	if !strings.Contains(seen, "evidence-line-39") || !strings.Contains(v, "tail-of-the-commentary") {
 		t.Fatalf("PgDn never reached the end:\n%s", v)
 	}
-	if strings.Contains(v, "Reviews · Turn 1") {
-		t.Errorf("the header stayed while scrolled to the end:\n%s", v)
+	if !strings.Contains(v, "Reviews · Turn 1 · [*1* 2 3]") || !strings.Contains(v, "100%") {
+		t.Errorf("the header line is gone, or does not say the view is at the end:\n%s", v)
 	}
 	for range 20 {
 		keys(a, tea.KeyPgUp)
@@ -189,20 +190,59 @@ func TestV6DrawerLongListPages(t *testing.T) {
 	a.Update(reviewsMsg{turnID: "t1", items: items})
 	openDrawerSettled(t, a)
 	v := a.View()
-	if !strings.Contains(v, "p00 (approve)") || strings.Contains(v, "p59") {
+	if !strings.Contains(v, "p59 (approve)") || strings.Contains(v, "p00") {
+		t.Fatalf("opening page is not the last:\n%s", v)
+	}
+	for range 30 {
+		keys(a, tea.KeyPgUp)
+	}
+	if v = a.View(); !strings.Contains(v, "p00 (approve)") || strings.Contains(v, "p59") {
 		t.Fatalf("first page:\n%s", v)
 	}
 	for range 30 {
 		keys(a, tea.KeyPgDown)
 	}
-	if v = a.View(); !strings.Contains(v, "p59 (approve)") || strings.Contains(v, "p00 (approve)") {
+	if v = a.View(); !strings.Contains(v, "p59 (approve)") || strings.Contains(v, "p00 (approve)") || strings.Contains(v, "new lines") {
 		t.Fatalf("last page:\n%s", v)
 	}
-	for range 30 {
+}
+
+// End, sent through the App, returns the drawer to its last row: the header
+// says 100% with no count, and rows that arrive afterwards are followed.
+func TestV6DrawerEndKeyThroughUpdateAndView(t *testing.T) {
+	asciiProfile(t)
+	a := chatApp(t)
+	addTurn(a, "t1", 1, "approved", "q", "a")
+	reviewers := func(n int) []wire.ReviewItem {
+		var items []wire.ReviewItem
+		for i := range n {
+			items = append(items, wire.ReviewItem{Round: 0, Participant: fmt.Sprintf("p%02d", i), Kind: "approve"})
+		}
+		return items
+	}
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(60)})
+	openDrawerSettled(t, a)
+	for range 3 {
 		keys(a, tea.KeyPgUp)
 	}
-	if v = a.View(); !strings.Contains(v, "p00 (approve)") {
-		t.Fatalf("back at the top:\n%s", v)
+	v := a.View()
+	if strings.Contains(v, "p59 (approve)") || strings.Contains(v, "100%") {
+		t.Fatalf("PgUp did not move away from the bottom:\n%s", v)
+	}
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(65)})
+	if v = a.View(); !strings.Contains(v, "new lines") || strings.Contains(v, "p64 (approve)") {
+		t.Fatalf("held away from the bottom, the drawer does not count the new rows:\n%s", v)
+	}
+
+	keys(a, tea.KeyEnd)
+	v = a.View()
+	if !strings.Contains(v, "p64 (approve)") || !strings.Contains(v, "100%") || strings.Contains(v, "new lines") {
+		t.Fatalf("End did not show the last row at 100%% with no count:\n%s", v)
+	}
+
+	a.Update(reviewsMsg{turnID: "t1", items: reviewers(70)})
+	if v = a.View(); !strings.Contains(v, "p69 (approve)") || !strings.Contains(v, "100%") || strings.Contains(v, "new lines") {
+		t.Fatalf("after End, the drawer does not follow new rows:\n%s", v)
 	}
 }
 
