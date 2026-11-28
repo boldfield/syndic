@@ -91,15 +91,16 @@ type openTurn struct {
 // sorted key order.
 func submissionHash(req wire.SubmitRequest) (string, error) {
 	body, err := json.Marshal(struct {
-		AllowProvisional *bool   `json:"allow_provisional"`
-		ContextFromTurn  *string `json:"context_from_turn"`
-		ConversationID   *string `json:"conversation_id"`
-		Input            string  `json:"input"`
-		MaxRounds        *int    `json:"max_rounds"`
-		Preset           *string `json:"preset"`
-		QuickProfile     *string `json:"quick_profile"`
-		Workspace        string  `json:"workspace"`
-	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
+		AllowProvisional *bool    `json:"allow_provisional"`
+		Attachments      []string `json:"attachments"`
+		ContextFromTurn  *string  `json:"context_from_turn"`
+		ConversationID   *string  `json:"conversation_id"`
+		Input            string   `json:"input"`
+		MaxRounds        *int     `json:"max_rounds"`
+		Preset           *string  `json:"preset"`
+		QuickProfile     *string  `json:"quick_profile"`
+		Workspace        string   `json:"workspace"`
+	}{req.AllowProvisional, req.Attachments, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
 	if err != nil {
 		return "", err
 	}
@@ -302,6 +303,19 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		maxRounds = *req.MaxRounds
 	}
 
+	// Check attachment path form and duplicates before policy check (v6 section 4, step 2).
+	if werr := ValidateAttachmentPaths(req.Attachments); werr != nil {
+		return wire.SubmitReply{}, werr
+	}
+
+	// Check attachment egress policy (v6 section 4, step 4) before reading files.
+	// This applies regardless of prior taint or file tools.
+	if len(req.Attachments) > 0 {
+		if werr := attachmentEgressRefusal(e.roster, eff); werr != nil {
+			return wire.SubmitReply{}, werr
+		}
+	}
+
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
 	turnDeadline := e.clock.Now().UTC().Add(turn)
@@ -312,6 +326,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		taintedTurns                           map[string]bool
 		screener                               *tools.URLScreener
 		rec                                    budgetRecord
+		attachments                            []journal.AttachmentContent
 	)
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
@@ -340,6 +355,26 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if conv.Workspace != nil {
 			workspace = *conv.Workspace
 		}
+		// Read attachments before the history (v6 section 4, step 5). This happens
+		// after policy checks but before seeding the canary, so attachment bytes are
+		// added to the screener's corpus before any web call.
+		if len(req.Attachments) > 0 {
+			if workspace == "" {
+				return refusal(wire.ErrorCodeNotFound)
+			}
+			// Open confined workspace with empty patterns for now; workspace config
+			// defines the protected-path patterns.
+			confined, err1 := e.openWorkspace(workspace)
+			if err1 != nil {
+				return err1
+			}
+			defer func() { _ = confined.Close() }()
+			var attErr *wire.Error
+			attachments, attErr = ReadAttachments(confined, req.Attachments)
+			if attErr != nil {
+				return attErr
+			}
+		}
 		// The history is rendered once, here, and admission, the stored
 		// document and the context hash are all taken from these bytes.
 		if doc, taintedTurns, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
@@ -350,6 +385,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		if err := seedHistoryCorpus(tx, screener, doc, taintedTurns); err != nil {
 			return err
+		}
+		// Seed canary with attachment bytes before any web call (v6 section 4, taint and egress).
+		for _, att := range attachments {
+			screener.AddBytes(tools.RouteSnapshotRead, att.Content)
 		}
 		// The taint comes from every turn the journal records for the
 		// conversation, not from the history in view, so a trim cannot
@@ -397,6 +436,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			BudgetJSON:        budgetJSON,
 			MaxRoundsInEffect: &maxRounds,
 			MaxRoundsCeiling:  &ceiling,
+			Attachments:       attachments,
 		})
 		if err != nil {
 			return err

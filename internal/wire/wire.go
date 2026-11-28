@@ -372,15 +372,16 @@ type StatusReply struct {
 }
 
 type SubmitRequest struct {
-	SubmissionID     string  `json:"submission_id"`
-	Input            string  `json:"input"`
-	Preset           *string `json:"preset,omitempty"`
-	QuickProfile     *string `json:"quick_profile,omitempty"`
-	AllowProvisional *bool   `json:"allow_provisional,omitempty"`
-	Workspace        string  `json:"workspace"`
-	ConversationID   *string `json:"conversation_id,omitempty"`
-	ContextFromTurn  *string `json:"context_from_turn,omitempty"`
-	MaxRounds        *int    `json:"max_rounds,omitempty"`
+	SubmissionID     string   `json:"submission_id"`
+	Input            string   `json:"input"`
+	Preset           *string  `json:"preset,omitempty"`
+	QuickProfile     *string  `json:"quick_profile,omitempty"`
+	AllowProvisional *bool    `json:"allow_provisional,omitempty"`
+	Workspace        string   `json:"workspace"`
+	ConversationID   *string  `json:"conversation_id,omitempty"`
+	ContextFromTurn  *string  `json:"context_from_turn,omitempty"`
+	MaxRounds        *int     `json:"max_rounds,omitempty"`
+	Attachments      []string `json:"attachments,omitempty"`
 }
 
 type SubmitReply struct {
