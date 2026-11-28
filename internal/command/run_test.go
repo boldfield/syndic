@@ -447,3 +447,55 @@ func TestContainmentUnverified(t *testing.T) {
 		})
 	}
 }
+
+// A call whose Enter fails, as when the run's gate has closed, starts
+// nothing; one whose Enter succeeds starts after it ran.
+func TestRunEnterBeforeStart(t *testing.T) {
+	r, fake := fakeRunner(t, Bounds{}, output(""))
+	r.Shell = Sh
+	gate := &sandbox.Gate{}
+	entered := 0
+	call := fakeCall("true")
+	call.Gate = func(start func() error) error { entered++; return gate.Start(start) }
+	if _, err := r.Run(context.Background(), call); err != nil {
+		t.Fatal(err)
+	}
+	gate.Close("unverified")
+	if _, err := r.Run(context.Background(), call); !errors.Is(err, sandbox.ErrGateClosed) {
+		t.Fatalf("err %v, want a closed gate", err)
+	}
+	if entered != 2 || len(fake.Starts()) != 1 {
+		t.Errorf("entered %d times, %d starts; want 2 and 1", entered, len(fake.Starts()))
+	}
+}
+
+// Close cannot return while a start is under way, so a Close that races a
+// start either follows it or leaves nothing started.
+func TestRunGateHeldThroughStart(t *testing.T) {
+	gate := &sandbox.Gate{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	closed := make(chan struct{})
+	go func() {
+		_ = gate.Start(func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	go func() {
+		gate.Close("unverified")
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a start was under way")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-closed
+	if err := gate.Start(func() error { t.Error("started after Close"); return nil }); !errors.Is(err, sandbox.ErrGateClosed) {
+		t.Fatalf("err %v, want a closed gate", err)
+	}
+}
