@@ -56,6 +56,11 @@ type openTurn struct {
 	proposalsDone    int
 	proposalAttempts map[string]string
 
+	// Critique-phase state, as the proposal phase's.
+	critiques        []string
+	critiquesDone    int
+	critiqueAttempts map[string]string
+
 	// Review state, owned by Engine.mu.
 	required      []string
 	candidate     string

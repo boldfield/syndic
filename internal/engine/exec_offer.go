@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/manifest"
 	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/transport"
 )
@@ -241,6 +242,18 @@ func (e *Engine) ExecOffReason() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.execRunOff()
+}
+
+// ExecSandboxNotice is the line the start log carries under
+// tools.exec.sandbox = "none", or empty under any other setting (v7 delta,
+// section 3, "The opt-out").
+func (e *Engine) ExecSandboxNotice() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.execState == nil || !e.execState.none {
+		return ""
+	}
+	return manifest.SandboxNoneNotice
 }
 
 // execRunOff is the run-wide reason exec is unoffered. e.mu is held.
