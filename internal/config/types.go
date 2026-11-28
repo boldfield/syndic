@@ -124,7 +124,12 @@ type EndpointProfile struct {
 	TokensPerByteMax  *float64             `toml:"tokens_per_byte_max"`
 	RefereeModel      string               `toml:"referee_model"`    // model for web tool referee
 	RefereeEndpoint   string               `toml:"referee_endpoint"` // optional local endpoint for referee
+	BadGateway        string               `toml:"bad_gateway"`      // "uncertain" (default) or "server_fault"
 }
+
+// BadGatewayServerFault is the bad_gateway value that classes a 502 as a
+// server fault.
+const BadGatewayServerFault = "server_fault"
 
 // ModeDeliberate is the preset mode in which proposers draft and an
 // integrator merges (v8 section 1).
