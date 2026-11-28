@@ -475,6 +475,9 @@ func TestErrorCodes(t *testing.T) {
 		"workspace_mismatch",
 		"max_rounds",
 		"egress",
+		"base_changed",
+		"workspace_missing",
+		"not_appliable",
 	}
 
 	errorCodes := []string{
@@ -504,6 +507,9 @@ func TestErrorCodes(t *testing.T) {
 		ErrorCodeWorkspaceMismatch,
 		ErrorCodeMaxRounds,
 		ErrorCodeEgress,
+		ErrorCodeBaseChanged,
+		ErrorCodeWorkspaceMissing,
+		ErrorCodeNotAppliable,
 	}
 
 	// Check lengths match
