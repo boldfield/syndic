@@ -13,14 +13,28 @@ import (
 
 func TestAttachmentProtectedPathEnforcement(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.solo]
-  author = "author"
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
 
 [tools]
 protected_paths = [".env*", "secret/"]
@@ -78,18 +92,46 @@ protected_paths = [".env*", "secret/"]
 
 func TestAttachmentUnauthorizedParticipantRefusal(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
-  [participants.reviewer]
-  kind = "participant"
-  endpoint = "metered"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.review]
-  author = "author"
-  required_reviewers = ["reviewer"]
+[[participants]]
+id = "reviewer"
+model = "test"
+route = "api"
+endpoint = "metered"
+eligible_roles = ["reviewer"]
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[[endpoints]]
+name = "metered"
+base_url = "http://metered/v1"
+declared_location = "unknown"
+declared_execution = "unknown"
+declared_billing = "metered"
+network_dependency = "unknown"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.review]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
 
 [tools]
 file_egress_destinations = []
@@ -121,24 +163,42 @@ file_egress_destinations = []
 
 func TestAttachmentWebOnlyRefusal(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
-  [participants.web_only]
-  kind = "participant"
-  endpoint = "none"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.solo]
-  author = "author"
+[[participants]]
+id = "web_only"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
+
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
 
 [tools]
 allow_web_with_read = false
 
 [[tools.roles]]
-  participant = "web_only"
-  tools = ["web"]
+participant = "web_only"
+tools = ["web"]
 `
 	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("answer")},
@@ -166,14 +226,28 @@ allow_web_with_read = false
 
 func TestAttachmentNoTaintAfterFailedSubmit(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.solo]
-  author = "author"
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
 
 [tools]
 protected_paths = [".env*"]
@@ -226,14 +300,28 @@ protected_paths = [".env*"]
 
 func TestAttachmentExtendsTaint(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.solo]
-  author = "author"
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
 `
 	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("answer one"), enginetest.Reply("answer two")},
@@ -282,14 +370,28 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 
 func TestAttachmentHashBackwardCompatibility(t *testing.T) {
 	rosterTOML := `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
+[[participants]]
+id = "author"
+model = "test"
+route = "api"
+endpoint = "local"
+eligible_roles = ["author"]
 
-[presets]
-  [presets.solo]
-  author = "author"
+[[endpoints]]
+name = "local"
+base_url = "http://localhost/v1"
+declared_location = "local"
+declared_execution = "local"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["test"]
+tokens_per_byte_max = 1.0
+
+[presets.solo]
+mode = "solo"
+author = "author"
+required_reviewers = []
 `
 	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
 		"author": {enginetest.Reply("answer one"), enginetest.Reply("answer two")},
