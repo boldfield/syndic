@@ -219,6 +219,9 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 
 	// Log external spending control settings at start
 	logExternalSpendingControl(stderr, eng)
+	if notice := eng.ExecSandboxNotice(); notice != "" {
+		_, _ = fmt.Fprintln(stderr, notice)
+	}
 
 	// Print startup info
 	hello := eng.Hello()
