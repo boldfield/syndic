@@ -123,7 +123,7 @@ func TestLoginRefusedStoresNothing(t *testing.T) {
 		play bool
 	}{
 		{"other resource", func(c *authtest.Config) { c.Resource = "http://127.0.0.1:1/other" }, nil, false},
-		{"other issuer", func(c *authtest.Config) { c.PRMIssuer = "http://127.0.0.1:1" }, nil, false},
+		{"other issuer", func(c *authtest.Config) { c.ASMetaIssuer = "http://127.0.0.1:1" }, nil, false},
 		{"no S256", func(c *authtest.Config) { c.NoS256 = true }, nil, false},
 		{"wrong iss", nil, func(q url.Values) { q.Set("iss", "http://evil.example") }, false},
 		{"missing iss when promised", nil, func(q url.Values) { q.Del("iss") }, false},
