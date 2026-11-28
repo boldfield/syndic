@@ -141,7 +141,66 @@ func TestCompleteClassResetIsUncertain(t *testing.T) {
 		c, _, _ := hj.Hijack()
 		_ = c.Close()
 	})
+	res, err := classAdapter(s.URL, nil).Complete(context.Background(), classReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TransportStatus != transport.TransportStatusReset || res.FailureClass != transport.FailureClassUncertain {
+		t.Fatalf("got %q %q", res.TransportStatus, res.FailureClass)
+	}
+}
+
+func TestCompleteClassTimeoutIsUncertain(t *testing.T) {
+	release := make(chan struct{})
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	req := classReq()
+	req.Deadline = time.Now().Add(100 * time.Millisecond)
+	res, err := classAdapter(s.URL, nil).Complete(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TransportStatus != transport.TransportStatusTimeout || res.FailureClass != transport.FailureClassUncertain {
+		t.Fatalf("got %q %q", res.TransportStatus, res.FailureClass)
+	}
+}
+
+func TestCompleteClass2xxBodyReadResetIsUncertain(t *testing.T) {
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("partial"))
+		hj := w.(http.Hijacker)
+		c, _, _ := hj.Hijack()
+		_ = c.Close()
+	})
 	res, _ := classAdapter(s.URL, nil).Complete(context.Background(), classReq())
+	if res.FailureClass != transport.FailureClassUncertain {
+		t.Fatalf("class = %q (%s)", res.FailureClass, res.TransportStatus)
+	}
+}
+
+func TestCompleteClass2xxBodyReadTimeoutIsUncertain(t *testing.T) {
+	release := make(chan struct{})
+	s := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	req := classReq()
+	req.Deadline = time.Now().Add(200 * time.Millisecond)
+	res, _ := classAdapter(s.URL, nil).Complete(context.Background(), req)
 	if res.FailureClass != transport.FailureClassUncertain {
 		t.Fatalf("class = %q (%s)", res.FailureClass, res.TransportStatus)
 	}
