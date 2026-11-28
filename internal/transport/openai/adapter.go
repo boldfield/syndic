@@ -447,10 +447,37 @@ func withProbeClass(ctx context.Context, pe *transport.ProbeStepError) error {
 	return &out
 }
 
+// readProbeBody reads at most limit bytes of a probe response and reports
+// whether the body ran past the limit.
+func readProbeBody(r io.Reader, limit int64) ([]byte, bool, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if int64(len(body)) > limit {
+		return body[:limit], true, err
+	}
+	return body, false, err
+}
+
+// completionUsable reports whether a 2xx body is a completion Complete could
+// use: valid JSON with at least one choice.
+func completionUsable(body []byte) bool {
+	var r ResponseBody
+	return json.Unmarshal(body, &r) == nil && len(r.Choices) > 0
+}
+
+// modelsUsable reports whether a 2xx body is a models listing with a data array.
+func modelsUsable(body []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return false
+	}
+	_, ok := m["data"].([]any)
+	return ok
+}
+
 // seen classes one probe response by the functions Complete uses, records it
 // for the step's error and tells opts.AfterResponse. It returns a step error
 // when the hook refuses the next request. readErr is the body read's error.
-func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step string, resp *http.Response, body []byte, readErr error) error {
+func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step string, resp *http.Response, body []byte, over bool, usable func([]byte) bool, readErr error) error {
 	in := transport.ClassifyInput{
 		Received:              true,
 		HTTPStatus:            resp.StatusCode,
@@ -459,8 +486,12 @@ func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step st
 	}
 	if readErr != nil {
 		in.BodyRead = transport.BodyReset
-	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(body) {
-		in.BodyRead = transport.BodyUnparsable
+	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if over {
+			in.BodyRead = transport.BodyOverLimit
+		} else if !usable(body) {
+			in.BodyRead = transport.BodyUnparsable
+		}
 	}
 	r := transport.ProbeResponse{Step: step, Status: resp.StatusCode, FailureClass: transport.Classify(in)}
 	if r.FailureClass != transport.FailureClassNone {
@@ -1085,9 +1116,9 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 	closeErr := httpResp.Body.Close()
-	stopErr := a.seen(ctx, opts, "models", httpResp, body, errors.Join(readErr, closeErr))
+	stopErr := a.seen(ctx, opts, "models", httpResp, body, over, modelsUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		return uncertainErr(readErr)
 	}
@@ -1209,10 +1240,10 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(err)}
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 		closeErr := httpResp.Body.Close()
 		cancel()
-		stopErr := a.seen(ctx, opts, stepName, httpResp, body, errors.Join(readErr, closeErr))
+		stopErr := a.seen(ctx, opts, stepName, httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 		if readErr != nil {
 			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(readErr)}
 		}
@@ -1331,9 +1362,9 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 	closeErr := httpResp.Body.Close()
-	stopErr := a.seen(ctx, opts, "system_role", httpResp, body, errors.Join(readErr, closeErr))
+	stopErr := a.seen(ctx, opts, "system_role", httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		return uncertainErr(readErr)
 	}
@@ -1609,9 +1640,9 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 			return 0, nil, uncertainErr(err)
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 		closeErr := httpResp.Body.Close()
-		stopErr := a.seen(ctx, opts, step, httpResp, body, errors.Join(readErr, closeErr))
+		stopErr := a.seen(ctx, opts, step, httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 		if readErr != nil {
 			return 0, nil, uncertainErr(readErr)
 		}
@@ -1780,9 +1811,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 10*1024*1024)
 	closeErr := httpResp.Body.Close()
-	stopErr := a.seen(ctx, opts, "over_length", httpResp, body, errors.Join(readErr, closeErr))
+	stopErr := a.seen(ctx, opts, "over_length", httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		record.OverLength = "errored"
 		return uncertainErr(readErr)
@@ -1982,9 +2013,9 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		return 0, nil, nil, nil, uncertainErr(err)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
+	respBody, over, err := readProbeBody(httpResp.Body, defaultMaxBodySize)
 	closeErr := httpResp.Body.Close()
-	stopErr := a.seen(ctx, opts, stepName, httpResp, respBody, errors.Join(err, closeErr))
+	stopErr := a.seen(ctx, opts, stepName, httpResp, respBody, over, completionUsable, errors.Join(err, closeErr))
 	if err != nil {
 		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(err)
 	}

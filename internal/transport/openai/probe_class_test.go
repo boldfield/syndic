@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -132,5 +133,47 @@ func TestProbeUnparsableSuccessBodyIsBadResponse(t *testing.T) {
 	}
 	if first.FailureClass != transport.FailureClassBadResponse || pe.FailureClass != transport.FailureClassBadResponse {
 		t.Errorf("hook class %q, error class %q, want bad_response", first.FailureClass, pe.FailureClass)
+	}
+}
+
+// probeCompletionClass serves a valid /models listing and the given 2xx
+// completion body, and returns the class the hook saw for the completion.
+func probeCompletionClass(t *testing.T, body string) transport.FailureClass {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	adapter := New(config.EndpointProfile{Name: "test", BaseURL: server.URL}, &mockResolver{secret: "test"})
+	var got transport.FailureClass
+	opts := transport.ProbeOptions{
+		Timeout: 10 * time.Second,
+		AfterResponse: func(r transport.ProbeResponse) bool {
+			if r.Step != "models" {
+				got = r.FailureClass
+				return false
+			}
+			return true
+		},
+	}
+	_, _ = adapter.ProbeWithOptions(context.Background(), "test", "gpt-4", opts)
+	return got
+}
+
+func TestProbeValidButUnusableCompletionIsBadResponse(t *testing.T) {
+	if got := probeCompletionClass(t, `{"choices":[]}`); got != transport.FailureClassBadResponse {
+		t.Errorf("class %q, want bad_response", got)
+	}
+}
+
+func TestProbeOverLimitSuccessBodyIsUncertain(t *testing.T) {
+	big := `{"choices":[{"message":{"content":"` + strings.Repeat("a", 1<<20+10) + `"}}]}`
+	if got := probeCompletionClass(t, big); got != transport.FailureClassUncertain {
+		t.Errorf("class %q, want uncertain", got)
 	}
 }
