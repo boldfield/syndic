@@ -247,6 +247,7 @@ func TestRouteArgs(t *testing.T) {
 		{[]string{"tui", "--new"}, "tui", []string{"--new"}, true},
 		{[]string{"probe", "-x"}, "probe", []string{"-x"}, true},
 		{[]string{"conversations", "--all"}, "conversations", []string{"--all"}, true},
+		{[]string{"mcp", "login", "x"}, "mcp", []string{"login", "x"}, true},
 		{[]string{"bogus"}, "", nil, false},
 		{[]string{"conversation"}, "", nil, false},
 		{[]string{"garbage", "--new", "--conversation", "x"}, "", nil, false},

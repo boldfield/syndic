@@ -39,6 +39,8 @@ func main() {
 		}
 		exitCode := cmdConversations(convCmd, args)
 		os.Exit(exitCode)
+	case "mcp":
+		os.Exit(cmdMCP(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcommand)
 		os.Exit(2)
@@ -53,7 +55,7 @@ func routeArgs(args []string) (subcommand string, rest []string, ok bool) {
 		return "tui", nil, true
 	}
 	switch first := args[0]; {
-	case first == "tui" || first == "probe" || first == "conversations":
+	case first == "tui" || first == "probe" || first == "conversations" || first == "mcp":
 		return first, args[1:], true
 	case strings.HasPrefix(first, "-"):
 		return "tui", args, true

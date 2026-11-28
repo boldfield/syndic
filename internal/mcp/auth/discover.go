@@ -405,12 +405,22 @@ func (d *Discoverer) get(ctx context.Context, target string) (*http.Response, er
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	client := d.client
-	if addrs, ok := d.pinned[originOf(req.URL)]; ok {
-		client = d.pinnedClient(addrs)
+	client, done := d.clientFor(req.URL)
+	defer done()
+	return client.Do(req)
+}
+
+// clientFor is the client that makes requests to u's origin, and a function to
+// call when the request is finished.
+func (d *Discoverer) clientFor(u *url.URL) (*http.Client, func()) {
+	addrs, ok := d.pinned[originOf(u)]
+	if !ok {
+		return d.client, func() {}
+	}
+	client := d.pinnedClient(addrs)
+	return client, func() {
 		if t, ok := client.Transport.(*http.Transport); ok {
-			defer t.CloseIdleConnections()
+			t.CloseIdleConnections()
 		}
 	}
-	return client.Do(req)
 }
