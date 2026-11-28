@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/boldfield/syndic/internal/budget"
@@ -35,6 +36,15 @@ const (
 	reasonBudgetTurn    = "budget:turn"
 )
 
+// Phases of a deliberate turn, as named in a budget error and the projection.
+const (
+	phaseProposal          = "proposal"
+	phaseCritique          = "critique"
+	phaseIntegration       = "integration"
+	phaseIntegrationRepair = "integration_repair"
+	phaseReviewRepair      = "review_repair"
+)
+
 // Stand-ins for the values a projection cannot know. They only fix a byte
 // length: a candidate hash is 64 hex characters, an attempt id or delimiter
 // 32.
@@ -55,6 +65,9 @@ type budgetRecord struct {
 	Charged            int  `json:"charged"`
 	Limit              int  `json:"limit"`
 	Exhausted          bool `json:"exhausted"`
+	// Phases lists a deliberate turn's first-round projection, one entry per
+	// projected request.
+	Phases []wire.PhaseEstimate `json:"phases,omitempty"`
 }
 
 func readBudget(turn *journal.TurnRow) (budgetRecord, bool, error) {
@@ -240,6 +253,32 @@ func (e *Engine) roleTools(eff config.Effective) (roleTools, error) {
 	return roleTools{author: author, reviewer: reviewer}, nil
 }
 
+// participantBudgets checks that no id is on a metered endpoint without
+// external spending control, and returns each id's budget constants, refusing
+// with the first constant an id lacks.
+func (e *Engine) participantBudgets(eff config.Effective, ids []string) (map[string]partBudget, error) {
+	for _, id := range ids {
+		ep := e.endpoint(e.participantConfig(id).Endpoint)
+		if ep.DeclaredBilling == "metered" && ep.SpendingControl != "external" {
+			err := budgetError(budgetSpendingCeiling)
+			err.Participant = strPtr(id)
+			return nil, err
+		}
+	}
+	consts := make(map[string]partBudget, len(ids))
+	for _, id := range ids {
+		pb, missing := e.budgetFor(eff, id)
+		if missing != "" {
+			err := budgetError(budgetContextUnknown)
+			err.Participant = strPtr(id)
+			err.Missing = strPtr(missing)
+			return nil, err
+		}
+		consts[id] = pb
+	}
+	return consts, nil
+}
+
 // projectBudget runs the submit-time budget checks and returns the record to
 // store on the turn. It computes the first-round projection and reports the
 // worst-case projection across all configured rounds, refusing only on the
@@ -250,27 +289,15 @@ func (e *Engine) roleTools(eff config.Effective) (roleTools, error) {
 // calls or results are projected: those attempts are reserved when they are
 // dispatched.
 func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int) (budgetRecord, error) {
+	if eff.Preset.Mode == config.ModeDeliberate {
+		return e.projectDeliberate(eff, input, doc)
+	}
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
 
-	for _, id := range ids {
-		ep := e.endpoint(e.participantConfig(id).Endpoint)
-		if ep.DeclaredBilling == "metered" && ep.SpendingControl != "external" {
-			err := budgetError(budgetSpendingCeiling)
-			err.Participant = strPtr(id)
-			return budgetRecord{}, err
-		}
-	}
-	consts := make(map[string]partBudget, len(ids))
-	for _, id := range ids {
-		pb, missing := e.budgetFor(eff, id)
-		if missing != "" {
-			err := budgetError(budgetContextUnknown)
-			err.Participant = strPtr(id)
-			err.Missing = strPtr(missing)
-			return budgetRecord{}, err
-		}
-		consts[id] = pb
+	consts, err := e.participantBudgets(eff, ids)
+	if err != nil {
+		return budgetRecord{}, err
 	}
 
 	defs, err := e.roleTools(eff)
@@ -644,4 +671,162 @@ func (e *Engine) settleQuarantined(tx *journal.Tx, emit hub.Emit, turnID, attemp
 		return false, err
 	}
 	return exceeded, e.releaseLateIn(tx, emit, attemptID, res)
+}
+
+// zeroReader supplies the random bytes of a projected prompt's delimiters;
+// only their length matters.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// projectDeliberate is projectBudget for a deliberate preset. It builds every
+// phase's prompts with the real builders over stand-ins: a proposal and a
+// critique for each proposer, the integration and its repair, each required
+// reviewer's review and its repair, and the deliveries. Each prompt must fit
+// its recipient's usable bound, naming the participant and the phase
+// otherwise, and the sum must fit the turn limit. As in review mode only the
+// first round is refused; no revision round is priced.
+//
+// Proposal, critique and review requests carry the definitions the preset's
+// reviewer_tools gives; integration carries those of tools; a repair or a
+// delivery carries none.
+func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *history.Document) (budgetRecord, error) {
+	proposers := eff.Preset.DeliberateProposers()
+	integrator := eff.Preset.DeliberateIntegrator()
+	reviewers := eff.Preset.EffectiveRequiredReviewers()
+	ids := slices.Clone(proposers)
+	for _, id := range append([]string{integrator}, reviewers...) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	consts, err := e.participantBudgets(eff, ids)
+	if err != nil {
+		return budgetRecord{}, err
+	}
+	defs, err := e.roleTools(eff)
+	if err != nil {
+		return budgetRecord{}, err
+	}
+
+	limit := *eff.Budgets.TurnMaxEstimatedTokens
+	total := 0
+	var phases []wire.PhaseEstimate
+
+	fits := func(phase string, pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
+		adm := pb.admission(msgs, toolDefs)
+		if !budget.Fits(adm, maxOut, pb.usable()) {
+			err := budgetError(budgetContext)
+			err.Participant = strPtr(pb.id)
+			err.Phase = strPtr(phase)
+			err.Admission = i64Ptr(satAdd(adm, maxOut))
+			err.Limit = i64Ptr(pb.usable())
+			return err
+		}
+		est := pb.estimate(msgs, toolDefs)
+		total = satAdd(total, satAdd(est, maxOut))
+		phases = append(phases, wire.PhaseEstimate{Phase: phase, Participant: pb.id, EstimatedTokens: int64(est), MaxOutputTokens: int64(maxOut)})
+		return nil
+	}
+
+	rnd := zeroReader{}
+	proposals := make([]string, len(proposers))
+	critiques := make([]string, len(proposers))
+	for i, id := range proposers {
+		proposals[i] = consts[id].proposalStandIn(eff)
+		critiques[i] = consts[id].critiqueStandIn(eff)
+	}
+
+	for _, id := range proposers {
+		pb := consts[id]
+		if err := fits(phaseProposal, pb, prompt.Proposal(doc, input), defs.reviewer, pb.proposerOutput(eff)); err != nil {
+			return budgetRecord{}, err
+		}
+	}
+	for i, id := range proposers {
+		pb := consts[id]
+		msgs, err := prompt.Critique(doc, input, proposals, i, rnd)
+		if err != nil {
+			return budgetRecord{}, err
+		}
+		if err := fits(phaseCritique, pb, msgs, defs.reviewer, pb.critiqueOutput(eff)); err != nil {
+			return budgetRecord{}, err
+		}
+	}
+
+	ib := consts[integrator]
+	intOut := ib.integratorOutput(eff)
+	result := ib.candidateStandIn(eff)
+	msgs, err := prompt.Integration(doc, input, proposals, critiques, slices.Index(proposers, integrator), rnd)
+	if err != nil {
+		return budgetRecord{}, err
+	}
+	if err := fits(phaseIntegration, ib, msgs, defs.author, intOut); err != nil {
+		return budgetRecord{}, err
+	}
+	if err := fits(phaseIntegrationRepair, ib, prompt.IntegrationRepair(msgs, result), nil, intOut); err != nil {
+		return budgetRecord{}, err
+	}
+
+	// The candidate and its disposition share the integrator's one bound.
+	half := len(result) / 2
+	candidate, disposition := result[:half], result[half:]
+	base := prompt.ReviewInput{
+		Request:       input,
+		Candidate:     candidate,
+		CandidateHash: standInHash,
+		AttemptID:     standInToken,
+		Delimiter:     standInToken,
+		History:       doc,
+	}
+	delivery := prompt.DeliveryInput{
+		TerminalState:  StateIncomplete,
+		TerminalReason: reasonBlock + standInToken,
+		CandidateHash:  standInHash,
+	}
+	for _, id := range reviewers {
+		rv := consts[id]
+		out := rv.maxOutput(*eff.Budgets.ReviewerMaxOutputTokens)
+		output := rv.standIn(out)
+		own := slices.Index(proposers, id)
+		msgs, err := prompt.DeliberateReview(base, proposals, critiques, disposition, own, rnd)
+		if err != nil {
+			return budgetRecord{}, err
+		}
+		if err := fits(phaseReview, rv, msgs, defs.reviewer, out); err != nil {
+			return budgetRecord{}, err
+		}
+		repair, err := prompt.Repair(base, output, standInToken)
+		if err != nil {
+			return budgetRecord{}, err
+		}
+		// The repair carries the deliberate review's user message.
+		repair[1].Content = msgs[1].Content
+		if err := fits(phaseReviewRepair, rv, repair, nil, out); err != nil {
+			return budgetRecord{}, err
+		}
+		delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
+	}
+
+	// Each recipient's delivery carries a block-free delivery; the deliveries
+	// go to every participant of the turn.
+	dmsgs := prompt.Delivery(delivery)
+	for _, id := range ids {
+		pb := consts[id]
+		out := pb.maxOutput(*eff.Budgets.DeliveryMaxTokens)
+		if err := fits(phaseDelivery, pb, dmsgs, nil, out); err != nil {
+			return budgetRecord{}, err
+		}
+	}
+
+	if total > limit {
+		err := budgetError(budgetTurn)
+		err.Estimated = i64Ptr(total)
+		err.Limit = i64Ptr(limit)
+		return budgetRecord{}, err
+	}
+	return budgetRecord{Projected: total, WorstCaseProjected: total, Limit: limit, Phases: phases}, nil
 }

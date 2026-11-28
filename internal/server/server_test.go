@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -488,6 +489,35 @@ func TestSoloTurnEndToEnd(t *testing.T) {
 	var wantWire, gotWire *wire.Error
 	if errors.As(want, &wantWire) != errors.As(got, &gotWire) || (wantWire != nil && wantWire.Code != gotWire.Code) {
 		t.Fatalf("cancel via socket = %v, direct = %v", got, want)
+	}
+}
+
+// A deliberate turn's per-phase projection, stored in its budget record, is
+// returned by the turn reply that /budget renders.
+func TestTurnReplyCarriesPhaseProjection(t *testing.T) {
+	h := newHarness(t)
+	s := serve(t, h.Engine, h.Store, h.Hub)
+	c := s.dial()
+	ctx := ctxT(t)
+
+	turnID, err := h.Store.CreateTurn(h.Engine.Hello().RunID, "review", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := `{"projected":30,"worst_case_projected":30,"limit":100,"phases":[{"phase":"integration","participant":"author","estimated_tokens":20,"max_output_tokens":4},{"phase":"integration_repair","participant":"author","estimated_tokens":2,"max_output_tokens":4}]}`
+	if err := h.Store.SetTurnBudget(turnID, json.RawMessage(budget)); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := c.Turn(ctx, turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []wire.PhaseEstimate{
+		{Phase: "integration", Participant: "author", EstimatedTokens: 20, MaxOutputTokens: 4},
+		{Phase: "integration_repair", Participant: "author", EstimatedTokens: 2, MaxOutputTokens: 4},
+	}
+	if !slices.Equal(turn.Budget.Phases, want) {
+		t.Fatalf("phases = %+v, want %+v", turn.Budget.Phases, want)
 	}
 }
 
