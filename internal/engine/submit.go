@@ -41,6 +41,12 @@ type openTurn struct {
 	// execTurn is the turn's self-test before its first command; nil until
 	// then. Owned by Engine.mu.
 	execTurn *execTurn
+	// execCalls counts each participant's bash calls against tools.exec
+	// max_calls (the author, per turn) and max_reviewer_calls (a reviewer,
+	// per round). submitTime is the modification time of every file in a
+	// command's scratch directory.
+	execCalls  map[string]int
+	submitTime time.Time
 
 	// Proposal-phase state of a deliberate turn, owned by Engine.mu.
 	// proposals holds each accepted proposal's text in roster order and
@@ -117,7 +123,10 @@ func submissionHash(req wire.SubmitRequest) (string, error) {
 		Preset           *string `json:"preset"`
 		QuickProfile     *string `json:"quick_profile"`
 		Workspace        string  `json:"workspace"`
-	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
+		// Attachments is omitted when empty, so a request without them hashes
+		// as it did before the member existed.
+		Attachments []string `json:"attachments,omitempty"`
+	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace, req.Attachments})
 	if err != nil {
 		return "", err
 	}
@@ -206,6 +215,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
 		}
 		return reply, nil
+	}
+
+	if werr := ValidateAttachmentPaths(req.Attachments); werr != nil {
+		return wire.SubmitReply{}, werr
 	}
 
 	if e.stopping {
@@ -333,6 +346,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		screener                               *tools.URLScreener
 		rec                                    budgetRecord
 	)
+	// The attachment policy needs only the roster, so it runs before the
+	// transaction and before any file is opened.
+	if len(req.Attachments) > 0 {
+		if we := attachmentEgressRefusal(e.roster, eff); we != nil {
+			return wire.SubmitReply{}, we
+		}
+	}
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
 		convID, err = tx.AdoptConversation(req.ConversationID, req.Workspace)
@@ -382,7 +402,16 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if we := egressRefusal(e.roster, eff, tainted); we != nil {
 			return we
 		}
-		tainted = tainted || eff.Preset.GrantsFileTools()
+		// Policy, history included, has run: only now are files opened.
+		attachments, werr, err := e.readSubmitAttachments(workspace, req.Attachments)
+		if err != nil {
+			return err
+		}
+		if werr != nil {
+			return werr
+		}
+		seedAttachmentCanary(screener, attachments)
+		tainted = tainted || eff.Preset.GrantsFileTools() || len(attachments) > 0
 		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
 			return err
 		}
@@ -411,6 +440,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			ConversationID:    convID,
 			ContextHash:       ctxHash,
 			FileTainted:       tainted,
+			Attachments:       attachments,
 			RunID:             e.runID,
 			Mode:              journalMode,
 			Preset:            eff.PresetName,
@@ -459,6 +489,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
+		submitTime:      e.clock.Now(),
 		workspace:       workspace,
 		screener:        screener,
 		required:        required,
