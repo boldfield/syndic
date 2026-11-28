@@ -2,9 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -101,20 +105,26 @@ func TestDiscoverRejectsBadMetadata(t *testing.T) {
 
 // fakeRT serves a public issuer's documents without any network.
 type fakeRT struct {
-	token string
-	seen  []string
-	auth  []string
+	// issuer is the issuer the resource names; empty is https://issuer.example.
+	issuer string
+	token  string
+	seen   []string
+	auth   []string
 }
 
 func (f *fakeRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.seen = append(f.seen, r.URL.String())
 	f.auth = append(f.auth, r.Header.Get("Authorization")+r.Header.Get("Cookie"))
 	body := ""
+	iss := f.issuer
+	if iss == "" {
+		iss = "https://issuer.example"
+	}
 	switch r.URL.String() {
 	case "https://mcp.example/.well-known/oauth-protected-resource/mcp":
-		body = `{"resource":"https://mcp.example/mcp","authorization_servers":["https://issuer.example"]}`
-	case "https://issuer.example/.well-known/oauth-authorization-server":
-		body = `{"issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/a",` +
+		body = `{"resource":"https://mcp.example/mcp","authorization_servers":["` + iss + `"]}`
+	case iss + "/.well-known/oauth-authorization-server":
+		body = `{"issuer":"` + iss + `","authorization_endpoint":"` + iss + `/a",` +
 			`"token_endpoint":"` + f.token + `","code_challenge_methods_supported":["S256"]}`
 	}
 	status := http.StatusOK
@@ -138,6 +148,25 @@ func publicDiscoverer(t *testing.T, token string, origins ...string) (*Discovere
 		t.Fatal(err)
 	}
 	d.resolver = fakeResolver{}
+	// Connections to an unlisted origin are dialed by the discoverer itself;
+	// send them to a local server that answers from rt.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := r.Clone(r.Context())
+		req.URL = &url.URL{Scheme: "https", Host: r.Host, Path: r.URL.Path}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(srv.Close)
+	d.tlsConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // test server's certificate names no real host
+	d.dial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}
 	return d, rt
 }
 
@@ -163,26 +192,114 @@ func TestDiscoverPublicIssuerPrivateTokenEndpoint(t *testing.T) {
 	}
 }
 
-func TestDiscoverPrivateIssuerRefusedBeforeConnection(t *testing.T) {
-	rt := &fakeRT{}
+func TestDiscoverPrivateIssuerEndToEnd(t *testing.T) {
+	for _, iss := range []string{"https://10.0.0.5", "https://192.168.1.1:8443"} {
+		rt := &fakeRT{issuer: iss, token: iss + "/token"}
+		d, err := newDiscoverer(Config{URL: "https://mcp.example/mcp"}, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.resolver = fakeResolver{}
+		if _, err := d.Discover(context.Background()); err == nil {
+			t.Errorf("%s accepted", iss)
+		}
+		for _, u := range rt.seen {
+			if strings.HasPrefix(u, iss) {
+				t.Errorf("connected to the unlisted issuer: %s", u)
+			}
+		}
+		rt = &fakeRT{issuer: iss, token: iss + "/token"}
+		d, err = newDiscoverer(Config{URL: "https://mcp.example/mcp", AuthOrigins: []string{iss}, AddressAllow: []string{"10.0.0.0/8", "192.168.0.0/16"}}, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.resolver = fakeResolver{}
+		got, err := d.Discover(context.Background())
+		if err != nil {
+			t.Fatalf("%s listed: %v", iss, err)
+		}
+		if got.Issuer != iss {
+			t.Errorf("issuer %q", got.Issuer)
+		}
+		fetched := false
+		for _, u := range rt.seen {
+			fetched = fetched || strings.HasPrefix(u, iss+"/.well-known/")
+		}
+		if !fetched {
+			t.Errorf("%s listed but its metadata was not fetched: %v", iss, rt.seen)
+		}
+	}
+}
+
+// rebindResolver answers the first lookup of a name with first and every
+// later one with later.
+type rebindResolver struct {
+	first, later netip.Addr
+	calls        map[string]int
+}
+
+func (r *rebindResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	r.calls[host]++
+	if r.calls[host] == 1 {
+		return []netip.Addr{r.first}, nil
+	}
+	return []netip.Addr{r.later}, nil
+}
+
+func TestDiscoverConnectsToValidatedAddress(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"issuer":"https://example.com","authorization_endpoint":"https://example.com/a",`+
+			`"token_endpoint":"https://example.com/token","code_challenge_methods_supported":["S256"]}`)
+	}))
+	srv.StartTLS()
+	defer srv.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	public := netip.MustParseAddr("93.184.216.34")
+
+	rt := &fakeRT{issuer: "https://example.com"}
 	d, err := newDiscoverer(Config{URL: "https://mcp.example/mcp"}, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.resolver = fakeResolver{}
-	if err := d.checkOrigin(context.Background(), "issuer", mustURL(t, "https://192.168.1.1")); err == nil {
-		t.Error("private issuer accepted")
+	res := &rebindResolver{first: public, later: netip.MustParseAddr("10.0.0.9"), calls: map[string]int{}}
+	d.resolver = res
+	var dialed []string
+	d.tlsConfig = &tls.Config{RootCAs: pool}
+	d.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
 	}
-	if len(rt.seen) != 0 {
-		t.Errorf("connected: %v", rt.seen)
-	}
-}
-
-func mustURL(t *testing.T, s string) *url.URL {
-	t.Helper()
-	u, err := url.Parse(s)
-	if err != nil {
+	if _, err := d.Discover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return u
+	if len(dialed) == 0 {
+		t.Fatal("no connection to the issuer")
+	}
+	for _, a := range dialed {
+		if a != "93.184.216.34:443" {
+			t.Errorf("dialed %s, not the validated address", a)
+		}
+	}
+	if res.calls["example.com"] != 1 {
+		t.Errorf("issuer resolved %d times", res.calls["example.com"])
+	}
+	for _, u := range rt.seen {
+		if strings.HasPrefix(u, "https://example.com") {
+			t.Errorf("issuer request left the pinned path: %s", u)
+		}
+	}
+
+	// A name that resolves to a private address at the check is refused
+	// before any dial.
+	dialed = nil
+	d, _ = newDiscoverer(Config{URL: "https://mcp.example/mcp"}, &fakeRT{issuer: "https://example.com"})
+	d.resolver = &rebindResolver{first: netip.MustParseAddr("127.0.0.1"), later: public, calls: map[string]int{}}
+	d.dial = func(context.Context, string, string) (net.Conn, error) {
+		t.Error("dialed")
+		return nil, errors.New("dialed")
+	}
+	if _, err := d.Discover(context.Background()); err == nil {
+		t.Error("loopback resolution accepted")
+	}
 }

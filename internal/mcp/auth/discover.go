@@ -4,14 +4,18 @@
 package auth
 
 // Every request here carries no credential, follows no redirect and keeps no
-// cookie. Every connection is made by a remote.Transport, which resolves the
-// name, applies v5's address rule and connects to the address that passed.
+// cookie. A connection to the server's own origin or a listed origin is made
+// by a remote.Transport, which resolves the name, applies v5's address rule
+// and connects to the address that passed. A connection to an origin that is
+// not listed goes to the very addresses its check validated, with no second
+// lookup and none of the server's exceptions.
 // The issuer's origin and the origin of every endpoint its metadata names is
 // a destination of its own: https and passing the address rule, or listed in
 // auth_origins. Naming an origin never excepts it.
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +87,13 @@ type Discoverer struct {
 	listed   map[string]bool
 	client   *http.Client
 	resolver tools.Resolver
+	// pinned holds, for each unlisted origin that passed its check, the
+	// addresses that passed.
+	pinned map[string][]netip.Addr
+
+	// Test seams.
+	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
+	tlsConfig *tls.Config
 }
 
 // NewDiscoverer validates the roster's settings. The server's URL must be a
@@ -104,6 +115,7 @@ func newDiscoverer(cfg Config, rt http.RoundTripper) (*Discoverer, error) {
 	d := &Discoverer{
 		server:   u,
 		listed:   map[string]bool{},
+		pinned:   map[string][]netip.Addr{},
 		resolver: net.DefaultResolver,
 		client: &http.Client{
 			Transport: rt,
@@ -180,7 +192,7 @@ func (d *Discoverer) protectedResource(ctx context.Context) (*resourceMetadata, 
 	return &prm, nil
 }
 
-var resourceMetadataParam = regexp.MustCompile(`(?i)resource_metadata="([^"]*)"`)
+var resourceMetadataParam = regexp.MustCompile(`(?i)(?:^|[\s,;])resource_metadata="([^"]*)"`)
 
 // challengeMetadata probes the server's URL with no credential and returns
 // the resource_metadata of a 401 challenge, if it has one. A document on any
@@ -272,7 +284,8 @@ func (d *Discoverer) issuerMetadata(ctx context.Context, issuer string) (*Server
 
 // checkOrigin applies the destination rule to u's origin: listed in
 // auth_origins, or https and passing v5's address rule. It makes no
-// connection to the origin; a name is resolved only to be checked.
+// connection to the origin; a name is resolved once, and the addresses that
+// passed are kept for the connections to that origin.
 func (d *Discoverer) checkOrigin(ctx context.Context, what string, u *url.URL) error {
 	if d.listed[originOf(u)] {
 		return nil
@@ -282,6 +295,9 @@ func (d *Discoverer) checkOrigin(ctx context.Context, what string, u *url.URL) e
 	}
 	if strings.ToLower(u.Scheme) != "https" {
 		return refuse("it is not https")
+	}
+	if _, ok := d.pinned[originOf(u)]; ok {
+		return nil
 	}
 	host := u.Hostname()
 	var addrs []netip.Addr
@@ -304,7 +320,42 @@ func (d *Discoverer) checkOrigin(ctx context.Context, what string, u *url.URL) e
 			return refuse(r.Reason)
 		}
 	}
+	d.pinned[originOf(u)] = addrs
 	return nil
+}
+
+// pinnedClient is a client whose every connection goes to one of addrs.
+func (d *Discoverer) pinnedClient(addrs []netip.Addr) *http.Client {
+	dial := d.dial
+	if dial == nil {
+		nd := &net.Dialer{Timeout: discoverTimeout}
+		dial = nd.DialContext
+	}
+	tr := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		TLSClientConfig:   d.tlsConfig,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			lastErr := errors.New("no address")
+			for _, a := range addrs {
+				c, err := dial(ctx, network, net.JoinHostPort(a.Unmap().String(), port))
+				if err == nil {
+					return c, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
+	return &http.Client{
+		Transport:     tr,
+		Timeout:       discoverTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // errNotFound marks a candidate location that has no document.
@@ -354,5 +405,12 @@ func (d *Discoverer) get(ctx context.Context, target string) (*http.Response, er
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	return d.client.Do(req)
+	client := d.client
+	if addrs, ok := d.pinned[originOf(req.URL)]; ok {
+		client = d.pinnedClient(addrs)
+		if t, ok := client.Transport.(*http.Transport); ok {
+			defer t.CloseIdleConnections()
+		}
+	}
+	return client.Do(req)
 }
