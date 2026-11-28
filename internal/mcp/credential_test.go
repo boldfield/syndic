@@ -84,3 +84,21 @@ func TestScrubListCoversCredentialsAndEnv(t *testing.T) {
 		t.Errorf("bytes: %q", b)
 	}
 }
+
+func TestHeaderSetBareTokenScrubbed(t *testing.T) {
+	c, err := ParseStaticCredential("https://m.example.com/mcp", `{"Authorization":"Bearer xyz-secret-42"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := NewScrubList()
+	l.AddCredential(c)
+	for _, in := range []string{
+		`{"content":"saw xyz-secret-42"}`,
+		`invalid token xyz-secret-42`,
+		"stderr: xyz-secret-42\n",
+	} {
+		if out, n := l.Scrub(in); n == 0 || strings.Contains(out, "xyz-secret-42") {
+			t.Fatalf("not scrubbed: %q -> %q", in, out)
+		}
+	}
+}

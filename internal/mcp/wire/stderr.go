@@ -11,6 +11,7 @@ type StderrSink struct {
 	max     int
 	kept    []byte
 	dropped int64
+	scrub   func([]byte) []byte
 }
 
 // NewStderrSink returns a sink that keeps at most limit bytes; a limit of zero
@@ -35,10 +36,21 @@ func (s *StderrSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Bytes returns a copy of what was kept.
+// SetScrub sets a function applied to what Bytes returns, so credential values
+// in a server's standard error do not leave the sink.
+func (s *StderrSink) SetScrub(f func([]byte) []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scrub = f
+}
+
+// Bytes returns a copy of what was kept, scrubbed when a scrub is set.
 func (s *StderrSink) Bytes() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.scrub != nil {
+		return s.scrub(append([]byte(nil), s.kept...))
+	}
 	return append([]byte(nil), s.kept...)
 }
 

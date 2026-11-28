@@ -419,3 +419,14 @@ func TestEndRunWaitsForRunInstanceStart(t *testing.T) {
 		t.Fatalf("open after EndRun: %v", err)
 	}
 }
+
+func TestStderrScrubbed(t *testing.T) {
+	l := mcp.NewScrubList()
+	l.AddEnv(map[string]string{"API_KEY": "env-secret-9"})
+	m := New(Config{Scrub: l, Backend: sandbox.NewFake(sandbox.Required(false))})
+	w := m.Stderr("srv")
+	_, _ = w.Write([]byte("bad key env-secret-9\n"))
+	if got := string(w.(*wire.StderrSink).Bytes()); strings.Contains(got, "env-secret-9") || got == "" {
+		t.Fatalf("stderr = %q", got)
+	}
+}

@@ -58,6 +58,11 @@ func ParseStaticCredential(serverURL, value string) (*Credential, error) {
 			}
 			c.header[name] = append(c.header[name], v)
 			c.values = append(c.values, v)
+			// A value of the form <scheme> <credentials> also carries the
+			// credentials alone, which a server may echo without the scheme.
+			if _, creds, ok := strings.Cut(v, " "); ok && strings.TrimSpace(creds) != "" {
+				c.values = append(c.values, strings.TrimSpace(creds))
+			}
 		}
 	} else {
 		if strings.ContainsAny(value, "\r\n") {
@@ -76,7 +81,9 @@ func (c *Credential) Values() []string {
 
 // HeaderFor returns the headers to attach to a request to target: the
 // credential's own when target is the configured server's origin, and nil for
-// any other destination, a redirect target and another server included.
+// any other destination, a redirect target and another server included. The
+// scope is the configured server's origin (scheme, host, port); a Transport
+// belongs to one server, so one origin is one server's.
 func (c *Credential) HeaderFor(target string) map[string][]string {
 	o, err := originOf(target)
 	if err != nil || o != c.origin {
@@ -202,3 +209,6 @@ func (l *ScrubList) ScrubBytes(b []byte) ([]byte, int) {
 	}
 	return []byte(s), n
 }
+
+// Origin returns the configured origin the credential is scoped to.
+func (c *Credential) Origin() string { return c.origin }
