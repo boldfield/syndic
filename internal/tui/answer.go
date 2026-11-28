@@ -215,6 +215,9 @@ func answerItems(s State, turnID string, in answerInput) []chatItem {
 				by += fmt.Sprintf(" after %d revisions", ti.Round)
 			}
 			add("outcome", outcomeLines(markApproved, fmt.Sprintf("approved by %s against %s", by, hash), in)...)
+			if n := lookupCount(s, turnID); n > 0 {
+				add("lookups", fmt.Sprintf("%schecked with %d lookups", contentPrefix, n))
+			}
 		}
 
 	case "solo_complete":
@@ -270,7 +273,7 @@ func answerItems(s State, turnID string, in answerInput) []chatItem {
 			add("draft", styledOutcomeLines(markSolo, draftText, in, draftBanner)...)
 			add("answer", shownAnswer(bodyRaw(in.content, refs[0]), in.width, in))
 		}
-		add("progress", progressLine(s, turnID, in.now, in.plainMode))
+		add("progress", append([]string{progressLine(s, turnID, in.now, in.plainMode)}, toolProgressLines(s, turnID)...)...)
 	}
 	return items
 }

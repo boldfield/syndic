@@ -90,7 +90,7 @@ func (a *App) click(x, y int) tea.Cmd {
 
 // tabSpans is the cells each tab's name takes in the tab bar.
 func (a *App) tabSpans() []span {
-	names := tabNames()
+	names := a.tabNames()
 	spans := make([]span, len(names))
 	pos := 0
 	for i, n := range names {
@@ -160,6 +160,9 @@ func (a *App) setTab(t tab) tea.Cmd {
 		a.syncDrawerWant()
 	}
 	a.updateDrawerTurns()
+	if t == tabChanges {
+		return tea.Batch(a.ensureTick(), a.checkBase(a.changesTurn()))
+	}
 	return a.ensureTick()
 }
 
