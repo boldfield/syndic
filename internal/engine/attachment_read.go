@@ -2,10 +2,12 @@ package engine
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"strings"
+	"syscall"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/wire"
@@ -19,14 +21,6 @@ const (
 	MaxAttachmentCount         = 8
 )
 
-// attachmentError represents a failure to read and validate an attachment.
-type attachmentError struct {
-	path   string
-	reason string
-}
-
-func (e *attachmentError) Error() string { return fmt.Sprintf("%s: %s", e.path, e.reason) }
-
 // ReadAttachments validates path forms and reads bounded attachments through the confined walk.
 // It returns an in-memory validated admission bundle with attachment records and content.
 // On error, it returns a *wire.Error with code "attachment".
@@ -37,22 +31,17 @@ func ReadAttachments(fs *workspace.Confined, paths []string) ([]journal.Attachme
 
 	if len(paths) > MaxAttachmentCount {
 		path := paths[MaxAttachmentCount]
+		reason := "ninth"
 		return nil, &wire.Error{
 			Code:   "attachment",
-			Detail: strPtr(fmt.Sprintf("%q: cannot attach more than %d files", path, MaxAttachmentCount)),
+			Path:   &path,
+			Reason: &reason,
 		}
 	}
 
 	// Validate path forms first (step 2)
 	if err := validateAttachmentPaths(paths); err != nil {
-		var ae *attachmentError
-		if errors.As(err, &ae) {
-			return nil, &wire.Error{
-				Code:   "attachment",
-				Detail: strPtr(fmt.Sprintf("%q: %s", ae.path, ae.reason)),
-			}
-		}
-		return nil, &wire.Error{Code: "attachment", Detail: strPtr(err.Error())}
+		return nil, err
 	}
 
 	// Read attachments (step 5)
@@ -60,50 +49,47 @@ func ReadAttachments(fs *workspace.Confined, paths []string) ([]journal.Attachme
 	var totalSize int64
 
 	for _, path := range paths {
-		// Check for protected paths
+		// Check for protected paths before opening
 		if fs.IsProtected(path) {
+			reason := "protected"
 			return nil, &wire.Error{
 				Code:   "attachment",
-				Detail: strPtr(fmt.Sprintf("%q: protected", path)),
+				Path:   &path,
+				Reason: &reason,
 			}
 		}
 
 		// Read the file through confined walk
-		content, err := readBoundedFile(fs, path)
+		content, ownerExec, err := readBoundedFile(fs, path)
 		if err != nil {
-			var ae *attachmentError
-			if errors.As(err, &ae) {
-				return nil, &wire.Error{
-					Code:   "attachment",
-					Detail: strPtr(fmt.Sprintf("%q: %s", ae.path, ae.reason)),
-				}
-			}
-			return nil, &wire.Error{
-				Code:   "attachment",
-				Detail: strPtr(fmt.Sprintf("%q: %v", path, err)),
-			}
+			return nil, err
 		}
 
 		// Validate UTF-8
 		if !utf8.Valid(content) {
+			reason := "not_text"
 			return nil, &wire.Error{
 				Code:   "attachment",
-				Detail: strPtr(fmt.Sprintf("%q: not_text", path)),
+				Path:   &path,
+				Reason: &reason,
 			}
 		}
 
 		// Check total size
 		totalSize += int64(len(content))
 		if totalSize > MaxAttachmentTotalSize {
+			reason := "total_too_large"
 			return nil, &wire.Error{
 				Code:   "attachment",
-				Detail: strPtr(fmt.Sprintf("%q: total_too_large", path)),
+				Path:   &path,
+				Reason: &reason,
 			}
 		}
 
 		attachments = append(attachments, journal.AttachmentContent{
-			Path:    path,
-			Content: content,
+			Path:      path,
+			Content:   content,
+			OwnerExec: ownerExec,
 		})
 	}
 
@@ -111,7 +97,7 @@ func ReadAttachments(fs *workspace.Confined, paths []string) ([]journal.Attachme
 }
 
 // validateAttachmentPaths checks path form requirements from v6 step 2.
-func validateAttachmentPaths(paths []string) error {
+func validateAttachmentPaths(paths []string) *wire.Error {
 	seen := make(map[string]bool)
 
 	for _, path := range paths {
@@ -122,7 +108,12 @@ func validateAttachmentPaths(paths []string) error {
 
 		// No duplicates
 		if seen[path] {
-			return &attachmentError{path: path, reason: "duplicate"}
+			reason := "duplicate"
+			return &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
 		seen[path] = true
 	}
@@ -131,32 +122,57 @@ func validateAttachmentPaths(paths []string) error {
 }
 
 // validateAttachmentPath checks that a single path meets form requirements.
-func validateAttachmentPath(path string) error {
+func validateAttachmentPath(path string) *wire.Error {
 	if path == "" {
-		return &attachmentError{path: path, reason: "form"}
+		reason := "form"
+		return &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 
 	// No absolute paths
 	if strings.HasPrefix(path, "/") {
-		return &attachmentError{path: path, reason: "form"}
+		reason := "form"
+		return &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 
 	// No trailing separator
 	if strings.HasSuffix(path, "/") {
-		return &attachmentError{path: path, reason: "form"}
+		reason := "form"
+		return &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 
 	// No control characters
 	for _, r := range path {
 		if r < 0x20 || r == 0x7F {
-			return &attachmentError{path: path, reason: "form"}
+			reason := "form"
+			return &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
 	}
 
 	// Check components
 	for _, component := range strings.Split(path, "/") {
 		if component == "" || component == "." || component == ".." {
-			return &attachmentError{path: path, reason: "form"}
+			reason := "form"
+			return &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
 	}
 
@@ -164,38 +180,97 @@ func validateAttachmentPath(path string) error {
 }
 
 // readBoundedFile reads a file with confinement checks and size bounds.
-// Returns error reasons: not_found, not_regular, outside, too_large, based on v6 design.
-func readBoundedFile(c *workspace.Confined, path string) ([]byte, error) {
+// Returns the content, the owner-execute bit, and an error.
+func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Error) {
 	f, err := c.OpenFile(path, 0, 0)
 	if err != nil {
 		// Classify the error
 		if errors.Is(err, workspace.ErrSymlink) {
-			// A symlink at the last component is a confinement violation
-			return nil, &attachmentError{path: path, reason: "outside"}
+			reason := "outside"
+			return nil, false, &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
 		if errors.Is(err, workspace.ErrSymlinkOnPath) {
-			// A symlink on the path before the last component
-			return nil, &attachmentError{path: path, reason: "outside"}
+			reason := "outside"
+			return nil, false, &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
+		if errors.Is(err, unix.ENOENT) {
+			reason := "not_found"
+			return nil, false, &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
+		}
+		// Check for not_regular via error message since workspace doesn't expose a specific error
 		if strings.Contains(err.Error(), "not a regular file") {
-			return nil, &attachmentError{path: path, reason: "not_regular"}
+			reason := "not_regular"
+			return nil, false, &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
 		}
-		// Default to not_found for missing paths
-		return nil, &attachmentError{path: path, reason: "not_found"}
+		// Generic I/O errors map to not_found per v6 design
+		reason := "not_found"
+		return nil, false, &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 	defer func() { _ = f.Close() }()
+
+	// Get file stats to extract OwnerExec bit
+	stat, err := f.Stat()
+	if err != nil {
+		reason := "not_found"
+		return nil, false, &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
+	}
+
+	sys, ok := stat.Sys().(*syscall.Stat_t)
+	if !ok {
+		reason := "not_found"
+		return nil, false, &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
+	}
+	ownerExec := (sys.Mode & unix.S_IXUSR) != 0
 
 	// Read with bounded limit: 256 KiB + 1 (to detect oversized files)
 	limitedReader := io.LimitReader(f, MaxAttachmentFileReadLimit)
 	content, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return nil, &attachmentError{path: path, reason: "not_found"}
+		reason := "not_found"
+		return nil, false, &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 
 	// If we read more than 256 KiB, the file is too large
 	if len(content) > MaxAttachmentFileSize {
-		return nil, &attachmentError{path: path, reason: "too_large"}
+		reason := "too_large"
+		return nil, false, &wire.Error{
+			Code:   "attachment",
+			Path:   &path,
+			Reason: &reason,
+		}
 	}
 
-	return content, nil
+	return content, ownerExec, nil
 }

@@ -158,7 +158,9 @@ type Error struct {
 	Route        *string         `json:"route,omitempty"`
 	// Paths names the change-set paths a base_changed refusal found not at
 	// their base.
-	Paths []string `json:"paths,omitempty"`
+	Paths  []string `json:"paths,omitempty"`
+	Path   *string  `json:"path,omitempty"`
+	Reason *string  `json:"reason,omitempty"`
 }
 
 func (e *Error) Error() string {
