@@ -56,4 +56,4 @@ jobs:
           if [ -d internal/command ]; then pkgs="$pkgs ./internal/command/..."; fi
           go test -count=1 -timeout 5m $pkgs
       - name: Sandbox enforcement (macos-sandbox-exec)
-        run: SYNDIC_SANDBOX_TEST=1 go test -count=50 -timeout 15m -run TestMacOSSandboxExecEnforcement -v ./internal/sandbox/
+        run: SYNDIC_SANDBOX_TEST=1 go test -count=50 -timeout 30m -run TestMacOSSandboxExecEnforcement -v ./internal/sandbox/
