@@ -2,7 +2,6 @@ package transport
 
 import (
 	"errors"
-	"time"
 )
 
 // FailureClass is the class of a failed send to a model endpoint. The empty
@@ -29,16 +28,19 @@ type ServerWaitKind int
 const (
 	// ServerWaitAbsent means the server stated no wait. It is the zero value.
 	ServerWaitAbsent ServerWaitKind = iota
-	// ServerWaitDuration means the server stated Duration; zero is a duration.
+	// ServerWaitDuration means the server stated Millis; zero is a duration.
 	ServerWaitDuration
 	// ServerWaitUnbounded means the server stated a wait too large to hold.
 	ServerWaitUnbounded
 )
 
 // ServerWait is a server-stated wait: absent, a duration, or unbounded.
+// The duration is a signed 64-bit count of milliseconds, which holds waits
+// beyond what a time.Duration can; a wait that does not fit is unbounded.
 type ServerWait struct {
-	Kind     ServerWaitKind
-	Duration time.Duration
+	Kind ServerWaitKind
+	// Millis is the stated wait in milliseconds; meaningful only when Kind is ServerWaitDuration.
+	Millis int64
 }
 
 // BodyRead is how the read of a 2xx response body ended.
