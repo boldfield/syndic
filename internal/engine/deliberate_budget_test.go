@@ -1,10 +1,13 @@
 package engine
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/config"
+	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/wire"
 )
 
 func effectiveWith(proposer, critique, integrator int) config.Effective {
@@ -54,5 +57,19 @@ func TestDeliberateStandIns(t *testing.T) {
 	pb = partBudget{bytesPerToken: 2.0, outputBound: &bound}
 	if got := pb.proposalStandIn(eff); len(got) != 10 {
 		t.Errorf("clamped proposal stand-in = %d bytes, want 10", len(got))
+	}
+}
+
+// A budget record keeps its phases through the journal's JSON, which is what
+// an idempotent submit replay reads them back from.
+func TestBudgetRecordPhasesRoundTrip(t *testing.T) {
+	rec := budgetRecord{Projected: 5, WorstCaseProjected: 5, Phases: []wire.PhaseEstimate{{Phase: "integration", Participant: "author", EstimatedTokens: 3, MaxOutputTokens: 2}}}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := readBudget(&journal.TurnRow{BudgetJSON: data})
+	if err != nil || !ok || len(got.Phases) != 1 || got.Phases[0] != rec.Phases[0] {
+		t.Fatalf("readBudget = %+v, %v, %v", got, ok, err)
 	}
 }
