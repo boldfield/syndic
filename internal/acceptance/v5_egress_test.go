@@ -102,7 +102,9 @@ func taintConversation(t *testing.T, s *suite, c *client.Client) (conv, toolFree
 	readPreset := "reader"
 	soloPreset := "solo"
 
-	// First turn uses tools to taint the conversation
+	// First turn uses tools to taint the conversation. The reader preset has
+	// tools = ["read"], so the turn is tainted by tool declaration, not by
+	// whether the submitted input actually exercises the tool call.
 	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "taint1",
 		Input:        "read a file",
