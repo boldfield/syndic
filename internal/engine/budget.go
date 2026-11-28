@@ -180,10 +180,30 @@ func (pb partBudget) admission(msgs []transport.Message, defs []transport.Tool) 
 	return budget.RequestAdmissionTokens(msgs, defs, pb.tokensPerByteMax, pb.overheads)
 }
 
+// admissionWithAttachments is the admission bound including attachment bytes,
+// calculated by adding the attachment bytes to the message set.
+func (pb partBudget) admissionWithAttachments(msgs []transport.Message, defs []transport.Tool, attachmentBytes int) int {
+	if attachmentBytes == 0 {
+		return pb.admission(msgs, defs)
+	}
+	extendedMsgs := append(msgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
+	return pb.admission(extendedMsgs, defs)
+}
+
 // estimate is the estimate of a request carrying msgs and the tool
 // definitions defs.
 func (pb partBudget) estimate(msgs []transport.Message, defs []transport.Tool) int {
 	return budget.RequestEstimateTokens(msgs, defs, pb.bytesPerToken, pb.overheads)
+}
+
+// estimateWithAttachments is the estimate including attachment bytes,
+// calculated by adding the attachment bytes to the message set.
+func (pb partBudget) estimateWithAttachments(msgs []transport.Message, defs []transport.Tool, attachmentBytes int) int {
+	if attachmentBytes == 0 {
+		return pb.estimate(msgs, defs)
+	}
+	extendedMsgs := append(msgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
+	return pb.estimate(extendedMsgs, defs)
 }
 
 // maxOutput is the MaxOutputTokens a request of this participant carries.
@@ -287,10 +307,11 @@ func (e *Engine) participantBudgets(eff config.Effective, ids []string) (map[str
 // Each projected author and review dispatch carries the definitions the
 // preset gives that role; a repair or delivery dispatch carries none. No tool
 // calls or results are projected: those attempts are reserved when they are
-// dispatched.
-func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int) (budgetRecord, error) {
+// dispatched. Attachment bytes (including framing and content) are accounted
+// for in every dispatch that carries them.
+func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.Document, maxRounds int, attachments []journal.AttachmentContent) (budgetRecord, error) {
 	if eff.Preset.Mode == config.ModeDeliberate {
-		return e.projectDeliberate(eff, input, doc)
+		return e.projectDeliberate(eff, input, doc, attachments)
 	}
 	ids := []string{eff.Preset.Author}
 	ids = append(ids, eff.Preset.RequiredReviewers...)
@@ -308,10 +329,19 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	limit := *eff.Budgets.TurnMaxEstimatedTokens
 	total := 0
 
+	attachmentBytes := attachmentRequestBytes(attachments, len(standInToken))
+
 	// fits checks the recipient's admission bound and adds the request's
-	// estimate and output bound to the aggregate.
-	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
-		adm := pb.admission(msgs, toolDefs)
+	// estimate and output bound to the aggregate, including attachment bytes.
+	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int, includeAttachments bool) error {
+		var adm, est int
+		if includeAttachments && attachmentBytes > 0 {
+			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
+			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
+		} else {
+			adm = pb.admission(msgs, toolDefs)
+			est = pb.estimate(msgs, toolDefs)
+		}
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)
@@ -319,7 +349,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			err.Limit = i64Ptr(pb.usable())
 			return err
 		}
-		total = satAdd(total, satAdd(pb.estimate(msgs, toolDefs), maxOut))
+		total = satAdd(total, satAdd(est, maxOut))
 		return nil
 	}
 
@@ -328,7 +358,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.AuthorWithHistory(doc, input), defs.author, authorOut); err != nil {
+	if err := fits(author, prompt.AuthorWithHistory(doc, input), defs.author, authorOut, true); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -355,14 +385,14 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, msgs, defs.reviewer, out); err != nil {
+			if err := fits(rv, msgs, defs.reviewer, out, true); err != nil {
 				return budgetRecord{}, err
 			}
 			repair, err := prompt.Repair(review, output, standInToken)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, repair, nil, out); err != nil {
+			if err := fits(rv, repair, nil, out, true); err != nil {
 				return budgetRecord{}, err
 			}
 			delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
@@ -688,12 +718,13 @@ func (zeroReader) Read(p []byte) (int, error) {
 // reviewer's review and its repair, and the deliveries. Each prompt must fit
 // its recipient's usable bound, naming the participant and the phase
 // otherwise, and the sum must fit the turn limit. As in review mode only the
-// first round is refused; no revision round is priced.
+// first round is refused; no revision round is priced. Attachment bytes are
+// accounted for in proposal, critique, integration, and review phases.
 //
 // Proposal, critique and review requests carry the definitions the preset's
 // reviewer_tools gives; integration carries those of tools; a repair or a
 // delivery carries none.
-func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *history.Document) (budgetRecord, error) {
+func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *history.Document, attachments []journal.AttachmentContent) (budgetRecord, error) {
 	proposers := eff.Preset.DeliberateProposers()
 	integrator := eff.Preset.DeliberateIntegrator()
 	reviewers := eff.Preset.EffectiveRequiredReviewers()
@@ -716,8 +747,21 @@ func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *hist
 	total := 0
 	var phases []wire.PhaseEstimate
 
+	attachmentBytes := attachmentRequestBytes(attachments, len(standInToken))
+
+	// fitsDeliberate checks admission bound for a deliberate phase, optionally
+	// including attachment bytes. Proposal, critique, integration and review
+	// phases receive attachments; repair and delivery phases do not.
 	fits := func(phase string, pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
-		adm := pb.admission(msgs, toolDefs)
+		includeAttachments := phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseReview
+		var adm, est int
+		if includeAttachments && attachmentBytes > 0 {
+			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
+			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
+		} else {
+			adm = pb.admission(msgs, toolDefs)
+			est = pb.estimate(msgs, toolDefs)
+		}
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)
@@ -726,7 +770,6 @@ func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *hist
 			err.Limit = i64Ptr(pb.usable())
 			return err
 		}
-		est := pb.estimate(msgs, toolDefs)
 		total = satAdd(total, satAdd(est, maxOut))
 		phases = append(phases, wire.PhaseEstimate{Phase: phase, Participant: pb.id, EstimatedTokens: int64(est), MaxOutputTokens: int64(maxOut)})
 		return nil

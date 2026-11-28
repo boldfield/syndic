@@ -406,7 +406,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 		seedAttachmentCanary(screener, attachments)
 		tainted = tainted || eff.Preset.GrantsFileTools() || len(attachments) > 0
-		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
+		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds, attachments); err != nil {
 			return err
 		}
 		budgetJSON, err := json.Marshal(rec)
