@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/boldfield/syndic/internal/referee"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/evidence"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 )
@@ -27,6 +30,124 @@ type Input struct {
 	EngineVersion  string
 	StartedAt      time.Time
 	AdapterVersion func(p config.Participant) string
+	// Sandbox is how the run's commands are confined; nil when no preset
+	// grants exec, and the manifest then has no exec_sandbox member.
+	Sandbox *Sandbox
+}
+
+// SandboxNoneNotice is the line the participants reply, the engine's start
+// log and the run manifest carry under tools.exec.sandbox = "none" (v7 delta,
+// section 3, "The opt-out").
+const SandboxNoneNotice = sandbox.NoneNotice
+
+// Sandbox is how commands are confined, as the run manifest records it
+// (v7 delta, section 3, "Manifest"; section 4, last bullet).
+type Sandbox struct {
+	// Backend names the backend; empty when none is available.
+	Backend string
+	// Config is the backend's configuration.
+	Config map[string]string
+	// Policy is the policy as one object; the manifest records it with its
+	// hash.
+	Policy sandbox.Policy
+	// PresetNetworkAllow is the network list in force for each preset that
+	// grants exec.
+	PresetNetworkAllow map[string][]string
+	// Proxy reports whether the per-call proxy is in use.
+	Proxy bool
+	// None is true under tools.exec.sandbox = "none".
+	None bool
+}
+
+// NewSandbox returns the record of how the roster's commands are confined
+// under backend, which may be nil when none is available. It returns nil
+// when no preset grants exec.
+func NewSandbox(roster *config.Roster, backend sandbox.Backend) *Sandbox {
+	nets := map[string][]string{}
+	for name, p := range roster.Presets {
+		if len(p.ExecParticipants()) > 0 {
+			nets[name] = orEmpty(roster.EffectiveNetworkAllow(p))
+		}
+	}
+	if len(nets) == 0 {
+		return nil
+	}
+	ex := roster.ExecSettings()
+	sb := &Sandbox{
+		Config:             map[string]string{},
+		PresetNetworkAllow: nets,
+		None:               ex.Sandbox == config.ExecSandboxNone,
+	}
+	if backend != nil {
+		sb.Backend = backend.Name()
+		maps.Copy(sb.Config, backend.Config())
+		sb.Policy.Capabilities, _ = backend.Capabilities()
+		if !sb.None && sb.Policy.Capabilities.Has(sandbox.N2) {
+			for _, list := range nets {
+				if len(list) > 0 {
+					sb.Proxy = true
+				}
+			}
+		}
+	}
+	names := slices.Clone(sandbox.FixedNames)
+	if sb.Proxy {
+		names = append(names, sandbox.ProxyVars...)
+	}
+	for _, name := range ex.EnvPassthrough {
+		if !sandbox.ReservedName(name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	sb.Policy.Path = ex.Path
+	sb.Policy.ReadOnlyPaths = orEmpty(slices.Clone(ex.ReadOnlyPaths))
+	sb.Policy.Devices = slices.Clone(sandbox.DeviceNodes)
+	sb.Policy.EnvNames = names
+	sb.Policy.NetworkAllow = orEmpty(slices.Clone(ex.NetworkAllow))
+	return sb
+}
+
+// sandboxToMap is the exec_sandbox member of the manifest.
+func sandboxToMap(sb *Sandbox) (map[string]interface{}, error) {
+	policy, err := sb.Policy.CanonicalJSON()
+	if err != nil {
+		return nil, fmt.Errorf("encode sandbox policy: %w", err)
+	}
+	hash, err := sb.Policy.Hash()
+	if err != nil {
+		return nil, fmt.Errorf("hash sandbox policy: %w", err)
+	}
+	var backend interface{}
+	if sb.Backend != "" {
+		backend = sb.Backend
+	}
+	cfg := map[string]string{}
+	maps.Copy(cfg, sb.Config)
+	nets := map[string][]string{}
+	for name, list := range sb.PresetNetworkAllow {
+		nets[name] = orEmpty(list)
+	}
+	m := map[string]interface{}{
+		"backend":              backend,
+		"config":               cfg,
+		"policy":               json.RawMessage(policy),
+		"policy_hash":          hash,
+		"network_allow":        orEmpty(sb.Policy.NetworkAllow),
+		"preset_network_allow": nets,
+		"proxy":                sb.Proxy,
+	}
+	if sb.None {
+		m["notice"] = SandboxNoneNotice
+	}
+	return m, nil
+}
+
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // Participant describes the manifest state of a roster participant.
@@ -311,6 +432,13 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 	}
 	if len(refereeProbeRecords) > 0 {
 		manifest["referee_probe_records"] = refereeProbeRecords
+	}
+	if in.Sandbox != nil {
+		sb, err := sandboxToMap(in.Sandbox)
+		if err != nil {
+			return nil, "", "", err
+		}
+		manifest["exec_sandbox"] = sb
 	}
 
 	manifestJSON, err := canonicalJSON(manifest)
