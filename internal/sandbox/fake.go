@@ -55,6 +55,7 @@ type Fake struct {
 	scripts  []FakeScript
 	starts   []Spec
 	terms    []FakeTermination
+	servers  map[int]*FakeServerProcess
 }
 
 // ErrFakeExhausted is returned by Start when no script is queued.
@@ -136,7 +137,69 @@ func (f *Fake) Start(ctx context.Context, spec Spec) (Process, error) {
 	p.pending.cond = sync.NewCond(&p.pending.mu)
 	go p.run(time.Now())
 	go p.drain()
+	if spec.ServerPipes {
+		sp := newFakeServerProcess(p)
+		if f.servers == nil {
+			f.servers = map[int]*FakeServerProcess{}
+		}
+		f.servers[call] = sp
+		return sp, nil
+	}
 	return p, nil
+}
+
+// Server returns the process of the Start call with that index when it was
+// started with Spec.ServerPipes, or nil.
+func (f *Fake) Server(call int) *FakeServerProcess {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.servers[call]
+}
+
+// FakeServerProcess is the process of a fake command started with
+// Spec.ServerPipes: standard input, standard output and standard error are
+// three separate pipes. Output still carries the script's chunks. The
+// ServerIn, ServerOut and ServerErr methods are the server's own ends.
+type FakeServerProcess struct {
+	*fakeProcess
+	inR        *io.PipeReader
+	inW        *io.PipeWriter
+	outR, errR *io.PipeReader
+	outW, errW *io.PipeWriter
+	closeOnce  sync.Once
+}
+
+func newFakeServerProcess(p *fakeProcess) *FakeServerProcess {
+	sp := &FakeServerProcess{fakeProcess: p}
+	sp.inR, sp.inW = io.Pipe()
+	sp.outR, sp.outW = io.Pipe()
+	sp.errR, sp.errW = io.Pipe()
+	return sp
+}
+
+// Stdin is the engine's end of the server's standard input.
+func (p *FakeServerProcess) Stdin() io.WriteCloser { return p.inW }
+
+// Stdout is the engine's end of the server's standard output.
+func (p *FakeServerProcess) Stdout() io.ReadCloser { return p.outR }
+
+// Stderr is the engine's end of the server's standard error.
+func (p *FakeServerProcess) Stderr() io.ReadCloser { return p.errR }
+
+// ServerIn is what the server reads as its standard input.
+func (p *FakeServerProcess) ServerIn() io.Reader { return p.inR }
+
+// ServerOut is what the server writes as its standard output.
+func (p *FakeServerProcess) ServerOut() io.Writer { return p.outW }
+
+// ServerErr is what the server writes as its standard error.
+func (p *FakeServerProcess) ServerErr() io.Writer { return p.errW }
+
+// Terminate signals the process; the server's output pipes close with it.
+func (p *FakeServerProcess) Terminate(sig syscall.Signal) error {
+	err := p.fakeProcess.Terminate(sig)
+	p.closeOnce.Do(func() { _ = p.outW.Close(); _ = p.errW.Close() })
+	return err
 }
 
 func cloneSpec(s Spec) Spec {
