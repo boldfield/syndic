@@ -95,52 +95,6 @@ func TestAttachmentRequestBytesExactMatch(t *testing.T) {
 	}
 }
 
-func TestAttachmentRequestBytesStandIn(t *testing.T) {
-	delimiter := standInToken // 32-byte placeholder
-	paths := []string{"file.txt", "dir/file.py"}
-
-	tests := []struct {
-		name           string
-		numAttachments int
-		paths          []string
-	}{
-		{
-			name:           "no attachments",
-			numAttachments: 0,
-			paths:          nil,
-		},
-		{
-			name:           "single attachment",
-			numAttachments: 1,
-			paths:          []string{"file.txt"},
-		},
-		{
-			name:           "multiple attachments",
-			numAttachments: 2,
-			paths:          paths,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := attachmentRequestBytesStandIn(tt.numAttachments, tt.paths, len(delimiter))
-
-			// Verify that result makes sense: should be greater than zero for positive input
-			if tt.numAttachments > 0 && got == 0 {
-				t.Errorf("attachmentRequestBytesStandIn() = 0, want > 0 for %d attachments", tt.numAttachments)
-			}
-
-			// Verify that it accounts for MaxAttachmentFileSize
-			if tt.numAttachments > 0 {
-				minExpected := tt.numAttachments * (MaxAttachmentFileSize + 100)
-				if got < minExpected {
-					t.Errorf("attachmentRequestBytesStandIn() = %d, want >= %d (accounting for max file size)", got, minExpected)
-				}
-			}
-		})
-	}
-}
-
 func contains(s, substr string) bool {
 	for i := 0; i+len(substr) <= len(s); i++ {
 		if s[i:i+len(substr)] == substr {

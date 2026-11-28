@@ -346,16 +346,10 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	attachmentBytes := attachmentRequestBytes(attachments, len(standInToken))
 
 	// fits checks the recipient's admission bound and adds the request's
-	// estimate and output bound to the aggregate, including attachment bytes.
-	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int, includeAttachments bool) error {
-		var adm, est int
-		if includeAttachments {
-			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
-			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
-		} else {
-			adm = pb.admission(msgs, toolDefs)
-			est = pb.estimate(msgs, toolDefs)
-		}
+	// estimate and output bound to the aggregate, including attachment bytes when specified.
+	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int, attachBytes int) error {
+		adm := pb.admissionWithAttachments(msgs, toolDefs, attachBytes)
+		est := pb.estimateWithAttachments(msgs, toolDefs, attachBytes)
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)
@@ -372,7 +366,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 
 	author := consts[eff.Preset.Author]
 	authorOut := author.maxOutput(*eff.Budgets.AuthorMaxOutputTokens)
-	if err := fits(author, prompt.AuthorWithHistory(doc, input), defs.author, authorOut, true); err != nil {
+	if err := fits(author, prompt.AuthorWithHistory(doc, input), defs.author, authorOut, attachmentBytes); err != nil {
 		return budgetRecord{}, err
 	}
 
@@ -399,14 +393,14 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, msgs, defs.reviewer, out, true); err != nil {
+			if err := fits(rv, msgs, defs.reviewer, out, attachmentBytes); err != nil {
 				return budgetRecord{}, err
 			}
 			repair, err := prompt.Repair(review, output, standInToken)
 			if err != nil {
 				return budgetRecord{}, err
 			}
-			if err := fits(rv, repair, nil, out, true); err != nil {
+			if err := fits(rv, repair, nil, out, attachmentBytes); err != nil {
 				return budgetRecord{}, err
 			}
 			delivery.ReviewerOutputs = append(delivery.ReviewerOutputs, prompt.ReviewerOutput{Participant: id, Output: output})
@@ -771,15 +765,12 @@ func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *hist
 	// including attachment bytes. Proposal, critique, integration, repair, and
 	// review phases receive attachments; delivery phase does not.
 	fits := func(phase string, pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
-		includeAttachments := phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseIntegrationRepair || phase == phaseReview || phase == phaseReviewRepair
-		var adm, est int
-		if includeAttachments {
-			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
-			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
-		} else {
-			adm = pb.admission(msgs, toolDefs)
-			est = pb.estimate(msgs, toolDefs)
+		attBytes := 0
+		if phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseIntegrationRepair || phase == phaseReview || phase == phaseReviewRepair {
+			attBytes = attachmentBytes
 		}
+		adm := pb.admissionWithAttachments(msgs, toolDefs, attBytes)
+		est := pb.estimateWithAttachments(msgs, toolDefs, attBytes)
 		if !budget.Fits(adm, maxOut, pb.usable()) {
 			err := budgetError(budgetContext)
 			err.Participant = strPtr(pb.id)

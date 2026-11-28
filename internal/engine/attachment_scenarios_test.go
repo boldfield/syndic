@@ -42,9 +42,10 @@ func TestAttachmentEstimateConsistency(t *testing.T) {
 
 	// Create partBudget and test
 	pb := partBudget{
-		id:            "test-participant",
-		bytesPerToken: bytesPerToken,
-		overheads:     overheads,
+		id:               "test-participant",
+		tokensPerByteMax: 1.0,
+		bytesPerToken:    bytesPerToken,
+		overheads:        overheads,
 	}
 
 	// Estimate without attachments should match budget package
@@ -87,9 +88,10 @@ func TestAttachmentAdmissionWithAndWithoutAttachments(t *testing.T) {
 	}
 
 	pb := partBudget{
-		id:            "test-participant",
-		bytesPerToken: 1.0,
-		overheads:     overheads,
+		id:               "test-participant",
+		tokensPerByteMax: 1.0,
+		bytesPerToken:    1.0,
+		overheads:        overheads,
 	}
 
 	// Admission without attachments
@@ -118,8 +120,9 @@ func TestAttachmentNullBytesHandling(t *testing.T) {
 	}
 
 	pb := partBudget{
-		id:            "test",
-		bytesPerToken: 1.0,
+		id:               "test",
+		tokensPerByteMax: 1.0,
+		bytesPerToken:    1.0,
 		overheads: budget.Overheads{
 			MessageTokens: 10,
 			RequestTokens: 20,
@@ -141,35 +144,6 @@ func TestAttachmentNullBytesHandling(t *testing.T) {
 	admWithout := pb.admission(msgs, nil)
 	if admWithZero != admWithout {
 		t.Errorf("admission with 0 bytes %d should equal admission without %d", admWithZero, admWithout)
-	}
-}
-
-// TestAttachmentStandInWillExceedBudget verifies that stand-in attachments
-// correctly project the worst-case byte cost.
-func TestAttachmentStandInWillExceedBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping acceptance scenario in -short mode")
-	}
-
-	delimiter := standInToken
-
-	// Single small attachment
-	smallPaths := []string{"small.txt"}
-	smallBytes := attachmentRequestBytesStandIn(1, smallPaths, len(delimiter))
-	if smallBytes < MaxAttachmentFileSize {
-		t.Errorf("standIn for single attachment %d should be >= MaxAttachmentFileSize %d", smallBytes, MaxAttachmentFileSize)
-	}
-
-	// Multiple attachments should sum up
-	manyPaths := []string{"a.txt", "b.txt", "c.txt"}
-	manyBytes := attachmentRequestBytesStandIn(3, manyPaths, len(delimiter))
-	if manyBytes < 3*MaxAttachmentFileSize {
-		t.Errorf("standIn for 3 attachments %d should be >= 3*MaxAttachmentFileSize", manyBytes)
-	}
-
-	// Three attachments should cost more than one
-	if manyBytes <= smallBytes {
-		t.Errorf("standIn for 3 attachments %d should be > standIn for 1 %d", manyBytes, smallBytes)
 	}
 }
 

@@ -38,23 +38,6 @@ func attachmentRequestBytes(attachments []journal.AttachmentContent, delimiterLe
 	return total
 }
 
-// attachmentRequestBytesStandIn calculates the worst-case byte cost of attachments when their
-// content is not known. It assumes the maximum attachment file size for each attachment.
-func attachmentRequestBytesStandIn(numAttachments int, paths []string, delimiterLen int) int {
-	if numAttachments == 0 || len(paths) == 0 {
-		return 0
-	}
-	standInDelimiter := standInToken // 32-byte placeholder
-	var total int
-	for i := 0; i < numAttachments && i < len(paths); i++ {
-		// Use a stand-in content of MaxAttachmentFileSize bytes.
-		maxContent := make([]byte, MaxAttachmentFileSize)
-		rendered := RenderAttachmentFencing(standInDelimiter, paths[i], maxContent)
-		total += len(rendered)
-	}
-	return total
-}
-
 // NewAttachmentDelimiter reads a random delimiter that does not occur in any of the
 // provided attachment contents. This is a wrapper around prompt.NewDelimiter that also
 // checks attachment content for collisions.
