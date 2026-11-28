@@ -4,6 +4,9 @@ package mcp
 // and under whose authority (v9 delta, section 2, "Server identity", and
 // section 7, "Generations").
 //
+// The table is marshalled with its Go field names, so renaming a field of the
+// table's type changes every server's identity.
+//
 // Secrets enter only as reference names and generations. A generation is a
 // random identifier kept beside the secret, so neither a value nor a digest of
 // one reaches the identity, and refreshing a token leaves it unchanged.
@@ -14,8 +17,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/boldfield/syndic/internal/mcp/jcs"
+	"github.com/boldfield/syndic/internal/secretstore"
 )
 
 // LoginIdentity is what a login recorded: the issuer, resource and client
@@ -108,4 +113,73 @@ func ServerIdentity(in IdentityInputs) (string, error) {
 	}
 	sum := sha256.Sum256(canon)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// SecretValue is a static secret as it stands now: the reference name the
+// secret store keys it by and its present value. The value only feeds the
+// store's keyed digest; it never reaches the identity.
+type SecretValue struct {
+	Ref   string
+	Value []byte
+}
+
+// PresentInputs is what is needed to compute a server's identity now from a
+// secret store, for comparison at apply.
+type PresentInputs struct {
+	// Table, Local and PolicyHash are as in IdentityInputs.
+	Table      any
+	Local      bool
+	PolicyHash string
+	// Env maps each env name of the table to its secret as it stands now.
+	Env map[string]SecretValue
+	// Auth is the table's static auth secret, or nil.
+	Auth *SecretValue
+	// LoginKey is the secret store key of the login record of a remote server
+	// using one, else nil. DecodeLogin then reads the issuer, resource and
+	// client identifier from the stored record; its Generation is ignored.
+	LoginKey    []string
+	DecodeLogin func(record []byte) (LoginIdentity, error)
+}
+
+// PresentServerIdentity reads the present generations from the store and
+// returns the server's identity now.
+func PresentServerIdentity(store *secretstore.Store, p PresentInputs) (string, error) {
+	in := IdentityInputs{
+		Table:          p.Table,
+		Local:          p.Local,
+		PolicyHash:     p.PolicyHash,
+		EnvGenerations: make(map[string]string, len(p.Env)),
+	}
+	for name, sec := range p.Env {
+		g, err := store.Static(sec.Ref, sec.Value)
+		if err != nil {
+			return "", fmt.Errorf("mcp: server identity: env secret %q: %w", name, err)
+		}
+		in.EnvNames = append(in.EnvNames, name)
+		in.EnvGenerations[name] = g
+	}
+	switch {
+	case p.LoginKey != nil:
+		if p.DecodeLogin == nil {
+			return "", fmt.Errorf("mcp: server identity: login key without a decoder")
+		}
+		rec, g, err := store.Get(p.LoginKey)
+		if err != nil {
+			return "", fmt.Errorf("mcp: server identity: login: %w", err)
+		}
+		login, err := p.DecodeLogin(rec)
+		if err != nil {
+			return "", fmt.Errorf("mcp: server identity: login: %w", err)
+		}
+		login.Generation = g
+		in.Login = &login
+		in.AuthName = strings.Join(p.LoginKey, "/")
+	case p.Auth != nil:
+		g, err := store.Static(p.Auth.Ref, p.Auth.Value)
+		if err != nil {
+			return "", fmt.Errorf("mcp: server identity: auth secret: %w", err)
+		}
+		in.AuthName, in.AuthGeneration = p.Auth.Ref, g
+	}
+	return ServerIdentity(in)
 }
