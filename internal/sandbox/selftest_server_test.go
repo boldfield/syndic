@@ -236,19 +236,17 @@ func TestServerHelperServe(t *testing.T) {
 	}{
 		{"ping with newline", "ping\n", 0, "selftest ok"},
 		{"no trailing newline", "ping", 0, "selftest ok"},
-		{"separated args", "read-denied\x1f" + missing + "\n", -1, ""},
+		{"separated args", "read-denied\x1f" + missing + "\n", 0, "selftest ok"},
+		{"two separated args", "write-denied\x1f" + filepath.Join(missing, "sub", "f") + "\n", 0, "selftest ok"},
 		{"empty stdin", "", 1, "no probe"},
 	} {
 		var out strings.Builder
 		code := sandbox.ServerHelper(strings.NewReader(tc.in), &out)
-		if tc.code >= 0 && code != tc.code {
+		if code != tc.code {
 			t.Errorf("%s: code %d, want %d (output %q)", tc.name, code, tc.code, out.String())
 		}
 		if !strings.Contains(out.String(), tc.contains) {
 			t.Errorf("%s: output %q lacks %q", tc.name, out.String(), tc.contains)
-		}
-		if strings.Contains(tc.in, "\x1f") && strings.Contains(out.String(), "unknown") {
-			t.Errorf("%s: args were not split: %q", tc.name, out.String())
 		}
 	}
 }
