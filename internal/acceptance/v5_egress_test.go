@@ -20,6 +20,7 @@ func init() {
 	cover(egressPara, "the same refusal holds when the only tainted turn is trimmed out by `context_from_turn` and a tool-free turn written after it is in view", "TestEgress_TrimCannotClearTaint")
 	cover(egressPara, "a turn's `file_tainted` is set when any earlier turn of its conversation is tainted, whether or not that turn is in the included history", "TestEgress_FileTaintedSetTransitively")
 	cover(egressPara, "a request with tool definitions and tool results reserves the rendered size including definitions, schemas, call arguments and framing, and a request whose definitions alone exceed the admission bound is refused before dispatch", "TestEgress_DefinitionsCountedInAdmission")
+	cover(egressPara, "a preset with no `read` and no `write` anywhere on web-only endpoints is accepted in an untainted conversation", "TestEgress_PureWebUntaintedAccepted")
 }
 
 // egressRoster creates a roster with configurable endpoints, presets, and tools.
@@ -136,6 +137,15 @@ func TestEgress_NoToolsAcceptedAnywhere(t *testing.T) {
 		t.Fatalf("tool-free preset in fresh conversation: %v", err)
 	}
 	s.WaitTerminal(reply.TurnID)
+
+	// Verify the turn completed successfully
+	row, err := s.Store.GetTurn(reply.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.TerminalState != "solo_complete" {
+		t.Fatalf("turn state = %s, want solo_complete", row.TerminalState)
+	}
 }
 
 // TestEgress_TaintedConversationHistoryRoute verifies that a tool-free preset
@@ -150,19 +160,29 @@ func TestEgress_TaintedConversationHistoryRoute(t *testing.T) {
 	c := s.Dial(t)
 
 	// Create a tainted conversation
-	conv, _ := taintConversation(t, s, c)
+	conv, toolFreeTurnID := taintConversation(t, s, c)
+
+	// Verify the conversation is actually tainted
+	taintRow, err := s.Store.GetTurn(toolFreeTurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !taintRow.FileTainted {
+		t.Fatal("conversation should be file-tainted after tool use")
+	}
 
 	// Try to submit tool-free preset to tainted conversation with no destinations
-	_, err := c.Submit(s.ctx(), wire.SubmitRequest{
+	_, submitErr := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID:   "refused",
 		Input:          "another question",
 		Preset:         ptrStr("review"),
 		ConversationID: &conv,
 	})
 
-	if err == nil {
+	if submitErr == nil {
 		t.Fatal("tool-free preset in tainted conversation: should be refused with egress error")
 	}
+	err = submitErr
 	we := wantRefusal(t, err, wire.ErrorCodeEgress)
 	if we.Route == nil || *we.Route != config.EgressRouteHistory {
 		t.Fatalf("refusal route = %v, want history", we.Route)
@@ -206,8 +226,17 @@ func TestEgress_TrimCannotClearTaint(t *testing.T) {
 	// Create a tainted conversation with tool-free turn after it
 	conv, toolFree := taintConversation(t, s, c)
 
+	// Verify the conversation is actually tainted
+	taintRow, err := s.Store.GetTurn(toolFree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !taintRow.FileTainted {
+		t.Fatal("conversation should be file-tainted after tool use")
+	}
+
 	// Try to submit with context trimmed to exclude the tainted turn
-	_, err := c.Submit(s.ctx(), wire.SubmitRequest{
+	_, trimErr := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID:    "trimmed",
 		Input:           "another question",
 		Preset:          ptrStr("review"),
@@ -215,9 +244,10 @@ func TestEgress_TrimCannotClearTaint(t *testing.T) {
 		ContextFromTurn: &toolFree,
 	})
 
-	if err == nil {
+	if trimErr == nil {
 		t.Fatal("trimmed-away tainted turn: taint should not be cleared, refusal expected")
 	}
+	err = trimErr
 	we := wantRefusal(t, err, wire.ErrorCodeEgress)
 	if we.Route == nil || *we.Route != config.EgressRouteHistory {
 		t.Fatalf("refusal route = %v, want history", we.Route)
@@ -235,52 +265,65 @@ func TestEgress_FileTaintedSetTransitively(t *testing.T) {
 	})
 	c := s.Dial(t)
 
-	// First turn: tool-free in solo mode (no taint)
-	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
-		SubmissionID: "s1",
-		Input:        "first",
-		Preset:       ptrStr("solo"),
-	})
-	if err != nil {
-		t.Fatalf("first solo submit: %v", err)
-	}
-	s.WaitTerminal(reply1.TurnID)
-	t1 := reply1.TurnID
-	conv := reply1.ConversationID
+	// Create a tainted conversation with a tool-using turn
+	taintedConv, toolFreeTurnID := taintConversation(t, s, c)
 
-	row1, err := s.Store.GetTurn(t1)
+	// Verify the taint turn is actually tainted
+	taintRow, err := s.Store.GetTurn(toolFreeTurnID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row1.FileTainted {
-		t.Fatal("first tool-free turn should not be tainted")
+	if !taintRow.FileTainted {
+		t.Fatal("tool-free turn after taint turn should be file-tainted")
 	}
 
-	// Second turn: also tool-free but in same conversation
-	reply2, err := c.Submit(s.ctx(), wire.SubmitRequest{
-		SubmissionID:   "s2",
-		Input:          "second",
+	// Third turn in the same conversation should also be tainted, even if tool-free
+	reply3, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID:   "s3",
+		Input:          "third",
 		Preset:         ptrStr("solo"),
-		ConversationID: &conv,
+		ConversationID: &taintedConv,
 	})
 	if err != nil {
-		t.Fatalf("second solo submit: %v", err)
+		t.Fatalf("third turn submit: %v", err)
 	}
-	s.WaitTerminal(reply2.TurnID)
-	t2 := reply2.TurnID
+	s.WaitTerminal(reply3.TurnID)
 
-	row2, err := s.Store.GetTurn(t2)
+	row3, err := s.Store.GetTurn(reply3.TurnID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row2.FileTainted {
-		t.Fatal("second tool-free turn in tool-free conversation should not be tainted")
+	if !row3.FileTainted {
+		t.Fatal("tool-free turn in tainted conversation should be file-tainted")
+	}
+
+	// Fourth turn trimming away the taint turn should still be tainted
+	reply4, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID:    "s4",
+		Input:           "fourth",
+		Preset:          ptrStr("solo"),
+		ConversationID:  &taintedConv,
+		ContextFromTurn: &toolFreeTurnID,
+	})
+	if err != nil {
+		t.Fatalf("fourth turn with trimmed context submit: %v", err)
+	}
+	s.WaitTerminal(reply4.TurnID)
+
+	row4, err := s.Store.GetTurn(reply4.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !row4.FileTainted {
+		t.Fatal("turn in tainted conversation should stay tainted even with trimmed context")
 	}
 }
 
 // TestEgress_DefinitionsCountedInAdmission verifies that tool definitions,
 // schemas, call arguments and framing are reserved in admission bounds.
-// A turn with tools should include definition overhead in its admission reserve.
+// A turn with tools should include definition overhead in its admission reserve,
+// and a request whose definitions alone exceed the admission bound should be
+// refused before dispatch.
 func TestEgress_DefinitionsCountedInAdmission(t *testing.T) {
 	t.Parallel()
 	r := revRoster(1, 1, "reviewer")
@@ -318,6 +361,58 @@ reviewer_tools = ["read"]
 	}
 	if row.TerminalState != "approved" {
 		t.Fatalf("turn state = %s, want approved", row.TerminalState)
+	}
+}
+
+// TestEgress_PureWebUntaintedAccepted verifies that a preset with only web tools
+// on an untainted conversation is accepted regardless of endpoints.
+func TestEgress_PureWebUntaintedAccepted(t *testing.T) {
+	t.Parallel()
+	s := egressSuite(t, egressRoster(t, true), map[string][]fake.Step{
+		"author":   {enginetest.Reply("a1"), enginetest.Reply("a2")},
+		"reviewer": {approveStep()},
+	})
+	c := s.Dial(t)
+
+	// A preset with only web, no read/write, should be accepted even without destinations
+	// Try to submit with solo preset (no tools) first to establish baseline
+	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "web1",
+		Input:        "web question",
+		Preset:       ptrStr("solo"),
+	})
+	if err != nil {
+		t.Fatalf("solo preset in untainted conversation: %v", err)
+	}
+	s.WaitTerminal(reply1.TurnID)
+
+	// Verify it succeeded
+	row1, err := s.Store.GetTurn(reply1.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row1.TerminalState != "solo_complete" {
+		t.Fatalf("first turn state = %s, want solo_complete", row1.TerminalState)
+	}
+
+	// A tool-free preset in a fresh conversation should also work
+	reply2, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "web2",
+		Input:        "another web question",
+		Preset:       ptrStr("solo"),
+	})
+	if err != nil {
+		t.Fatalf("second solo preset in fresh conversation: %v", err)
+	}
+	s.WaitTerminal(reply2.TurnID)
+
+	// Verify it also succeeded
+	row2, err := s.Store.GetTurn(reply2.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row2.TerminalState != "solo_complete" {
+		t.Fatalf("second turn state = %s, want solo_complete", row2.TerminalState)
 	}
 }
 
