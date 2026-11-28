@@ -26,7 +26,7 @@ func renderChanges(cs *wire.ChangeSetRecord, width int, height int) string {
 
 	// Show paths with their outcomes
 	for _, p := range cs.Paths {
-		outcome := formatOutcome(p.Outcome)
+		outcome := formatOutcomeWithState(p.Outcome, cs.State)
 		operation := p.Op
 		if operation == "" {
 			operation = "modify"
@@ -56,6 +56,16 @@ func renderChanges(cs *wire.ChangeSetRecord, width int, height int) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// formatOutcomeWithState renders a path outcome as a user-facing string, taking the change set state into account.
+// For a discarded change set, pending paths should display as "not applied".
+func formatOutcomeWithState(outcome string, changeSetState string) string {
+	// If the change set is discarded and the outcome is pending, show "not applied"
+	if changeSetState == "discarded" && outcome == "pending" {
+		return "not applied"
+	}
+	return formatOutcome(outcome)
 }
 
 // formatOutcome renders a path outcome as a user-facing string.

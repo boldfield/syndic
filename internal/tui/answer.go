@@ -214,7 +214,14 @@ func answerItems(s State, turnID string, in answerInput) []chatItem {
 			case ti.Round > 1:
 				by += fmt.Sprintf(" after %d revisions", ti.Round)
 			}
-			add("outcome", outcomeLines(markApproved, fmt.Sprintf("approved by %s against %s", by, hash), in)...)
+			approveLine := fmt.Sprintf("approved by %s against %s", by, hash)
+
+			// Add lookup count if any reviewer made tool calls
+			if lookups := totalLookupsForTurn(s, turnID); lookups > 0 {
+				approveLine += fmt.Sprintf(" checked with %d lookups", lookups)
+			}
+
+			add("outcome", outcomeLines(markApproved, approveLine, in)...)
 		}
 
 	case "solo_complete":
@@ -336,4 +343,19 @@ func approvers(s State, turnID string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// totalLookupsForTurn sums the number of web_fetch and web_search lookups made by all reviewers on the turn.
+func totalLookupsForTurn(s State, turnID string) int {
+	seen := map[string]bool{}
+	totalLookups := 0
+	for _, v := range s.Verdicts {
+		ai, ok := s.Attempts[v.AttemptID]
+		if !ok || ai.TurnID != turnID || ai.Phase != "review" || v.Class != "valid" || seen[ai.Participant] {
+			continue
+		}
+		seen[ai.Participant] = true
+		totalLookups += v.Lookups
+	}
+	return totalLookups
 }

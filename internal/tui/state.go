@@ -623,11 +623,38 @@ func apply(s State, f wire.Frame) State {
 		var body map[string]interface{}
 		if json.Unmarshal(f.Body, &body) == nil {
 			toolCalls := copyMap(s.ToolCalls)
-			if id, ok := body["id"].(string); ok {
-				if name, okn := body["name"].(string); okn {
-					toolCalls[id] = ToolCallInfo{
-						ID:   id,
-						Name: name,
+			if callID, ok := body["call_id"].(string); ok {
+				name := ""
+				if n, okn := body["name"].(string); okn {
+					name = n
+				}
+				participant := ""
+				if p, okp := body["participant"].(string); okp {
+					participant = p
+				}
+				toolCalls[callID] = ToolCallInfo{
+					ID:          callID,
+					Name:        name,
+					Participant: participant,
+				}
+			}
+			s.ToolCalls = toolCalls
+		}
+
+	case wire.EventKindToolResult:
+		var body map[string]interface{}
+		if json.Unmarshal(f.Body, &body) == nil {
+			// Store result-to-call mapping for verdict evidence processing
+			toolCalls := copyMap(s.ToolCalls)
+			if resultID, ok := body["result_id"].(string); ok {
+				if callID, ok := body["call_id"].(string); ok {
+					// Copy the tool call info and use result ID as key for lookup
+					if origCall, ok := s.ToolCalls[callID]; ok {
+						toolCalls[resultID] = ToolCallInfo{
+							ID:          resultID,
+							Name:        origCall.Name,
+							Participant: origCall.Participant,
+						}
 					}
 				}
 			}
@@ -640,20 +667,43 @@ func apply(s State, f wire.Frame) State {
 	case wire.EventKindVerdictEvidence:
 		var body map[string]interface{}
 		if json.Unmarshal(f.Body, &body) == nil {
+			verdicts := copyMap(s.Verdicts)
 			evidence := copyMap(s.Evidence)
+
 			if vID, ok := body["verdict_id"].(string); ok {
-				ei := EvidenceInfo{VerdictID: vID}
-				if old, ok := evidence[vID]; ok {
-					ei.ToolCalls = old.ToolCalls
-					ei.Lookups = old.Lookups
+				// Extract result_ids from the event
+				resultIDs := []string{}
+				if rids, ok := body["result_ids"].([]interface{}); ok {
+					for _, rid := range rids {
+						if ridStr, ok := rid.(string); ok {
+							resultIDs = append(resultIDs, ridStr)
+						}
+					}
+				}
+
+				// Count lookups from tool call names (web_fetch and web_search)
+				lookups := 0
+				for _, rid := range resultIDs {
+					if tc, ok := s.ToolCalls[rid]; ok && (tc.Name == "web_fetch" || tc.Name == "web_search") {
+						lookups++
+					}
+				}
+
+				ei := EvidenceInfo{
+					VerdictID: vID,
+					ToolCalls: resultIDs,
+					Lookups:   lookups,
 				}
 				evidence[vID] = ei
 
-				verdicts := copyMap(s.Verdicts)
+				// Update the verdict with tool call count and lookups
 				if vi, ok := verdicts[vID]; ok {
-					vi.ToolCalls = len(ei.ToolCalls)
+					vi.ToolCalls = len(resultIDs)
+					vi.Lookups = lookups
+					vi.Results = resultIDs
 					verdicts[vID] = vi
 				}
+
 				s.Verdicts = verdicts
 			}
 			s.Evidence = evidence

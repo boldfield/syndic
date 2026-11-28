@@ -88,6 +88,40 @@ func TestRenderChanges(t *testing.T) {
 			},
 			want: "partial",
 		},
+		{
+			name: "discarded change set with mixed outcomes",
+			cs: &wire.ChangeSetRecord{
+				State:       "discarded",
+				ChangesHash: "abc123def456",
+				Paths: []wire.ChangeSetPathRecord{
+					{
+						Path:       "applied_file.txt",
+						Op:         "modify",
+						BaseSHA256: "oldsha",
+						NewSHA256:  "newsha",
+						NewLen:     100,
+						Outcome:    "applied",
+					},
+					{
+						Path:       "pending_file.txt",
+						Op:         "modify",
+						BaseSHA256: "oldsha2",
+						NewSHA256:  "newsha2",
+						NewLen:     200,
+						Outcome:    "pending",
+					},
+					{
+						Path:       "conflict_file.txt",
+						Op:         "modify",
+						BaseSHA256: "oldsha3",
+						NewSHA256:  "newsha3",
+						NewLen:     300,
+						Outcome:    "conflict",
+					},
+				},
+			},
+			want: "discarded",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := renderChanges(tc.cs, 80, 24)
@@ -118,6 +152,34 @@ func TestFormatOutcome(t *testing.T) {
 		t.Run(tt.outcome, func(t *testing.T) {
 			if got := formatOutcome(tt.outcome); got != tt.want {
 				t.Errorf("formatOutcome(%q) = %q, want %q", tt.outcome, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatOutcomeWithState tests that path outcomes respect the change set state.
+// Specifically, pending outcomes in a discarded change set should show as "not applied".
+func TestFormatOutcomeWithState(t *testing.T) {
+	tests := []struct {
+		outcome       string
+		changeSetState string
+		want          string
+	}{
+		// Applied and conflict outcomes are unchanged by state
+		{"applied", "discarded", "✓ applied"},
+		{"conflict", "discarded", "✗ conflict"},
+		{"applied", "appliable", "✓ applied"},
+		// Pending in non-discarded state stays pending
+		{"pending", "appliable", "pending"},
+		{"pending", "partial", "pending"},
+		// Pending in discarded state becomes "not applied"
+		{"pending", "discarded", "not applied"},
+		{"not applied", "discarded", "not applied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.outcome+"|"+tt.changeSetState, func(t *testing.T) {
+			if got := formatOutcomeWithState(tt.outcome, tt.changeSetState); got != tt.want {
+				t.Errorf("formatOutcomeWithState(%q, %q) = %q, want %q", tt.outcome, tt.changeSetState, got, tt.want)
 			}
 		})
 	}

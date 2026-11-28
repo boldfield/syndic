@@ -512,8 +512,10 @@ func TestMergeTurnStaleIncompleteReplyKeepsOverride(t *testing.T) {
 func TestApplyToolCallAccepted(t *testing.T) {
 	s := NewState()
 	body := map[string]interface{}{
-		"id":   "tool-call-1",
-		"name": "web_fetch",
+		"call_id":     "tool-call-1",
+		"attempt_id":  "attempt-1",
+		"participant": "reviewer-1",
+		"name":        "web_fetch",
 	}
 	bodyBytes, _ := json.Marshal(body)
 	f := wire.Frame{
@@ -533,6 +535,9 @@ func TestApplyToolCallAccepted(t *testing.T) {
 		}
 		if tc.Name != "web_fetch" {
 			t.Errorf("ToolCall Name = %q, want web_fetch", tc.Name)
+		}
+		if tc.Participant != "reviewer-1" {
+			t.Errorf("ToolCall Participant = %q, want reviewer-1", tc.Participant)
 		}
 	} else {
 		t.Error("tool-call-1 not found in ToolCalls")
