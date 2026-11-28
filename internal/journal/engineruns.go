@@ -315,6 +315,10 @@ type TurnParams struct {
 	// turn has no history. FileTainted is the conversation-wide taint.
 	ContextHash *string
 	FileTainted bool
+	// Attachments are the files read at submit. They are committed with the
+	// turn: records, bases, taint (FileTainted is forced on) and the
+	// attachments_hash the turn carries, "none" when there are none.
+	Attachments []AttachmentContent
 }
 
 // CreateEngineTurn creates a new engine turn with the given parameters.
@@ -337,6 +341,11 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 		return "", err
 	}
 
+	attachments, attachmentsHash, err := preparedAttachments(p.Attachments)
+	if err != nil {
+		return "", err
+	}
+
 	var deadlineStr *string
 	if !p.TurnDeadline.IsZero() {
 		ds := p.TurnDeadline.Format(time.RFC3339Nano)
@@ -350,13 +359,16 @@ func (tx *Tx) CreateEngineTurn(p TurnParams) (turnID string, err error) {
 	}
 
 	if _, err := tx.tx.Exec(`
-		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted, submitted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr, convID, p.MaxRoundsInEffect, p.MaxRoundsCeiling, p.ContextHash, p.FileTainted, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		INSERT INTO turns (id, run_id, mode, whole_turn_deadline, submission_id, submission_hash, preset, quick_profile, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted, submitted_at, attachments_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, turnID, p.RunID, p.Mode, deadlineStr, p.SubmissionID, p.SubmissionHash, p.Preset, p.QuickProfile, p.AttemptDeadlineMS, p.TurnDeadlineMS, budgetJSONStr, convID, p.MaxRoundsInEffect, p.MaxRoundsCeiling, p.ContextHash, p.FileTainted || len(attachments) > 0, time.Now().UTC().Format(time.RFC3339Nano), attachmentsHash); err != nil {
 		if isUniqueConstraintError(err, "submission_id") {
 			return "", ErrDuplicateSubmission
 		}
 		return "", fmt.Errorf("insert engine turn: %w", err)
+	}
+	if err := tx.recordAttachments(turnID, attachments); err != nil {
+		return "", err
 	}
 
 	return turnID, nil
@@ -377,6 +389,9 @@ type TurnRow struct {
 	MaxRoundsInEffect, MaxRoundsCeiling *int
 	ContextHash                         *string
 	FileTainted                         bool
+	// AttachmentsHash is the turn's attachment manifest hash ("none" when it
+	// has no attachments); empty for a turn created before it was recorded.
+	AttachmentsHash string
 }
 
 // ErrTurnNotFound is returned by GetTurn for an unknown turn id.
@@ -425,15 +440,18 @@ func (tx *Tx) getTurnByID(turnID string) (*TurnRow, error) {
 	var contextHash sql.NullString
 	var conversationID sql.NullString
 	var fileTainted bool
+	var attachmentsHash sql.NullString
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted
+		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted, attachments_hash
 		FROM turns WHERE id = ?
 	`, turnID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &conversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &conversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted, &attachmentsHash,
 	); err != nil {
 		return nil, err
 	}
+
+	row.AttachmentsHash = attachmentsHash.String
 
 	if deadlineStr.Valid {
 		t, err := parseTime(deadlineStr.String)
@@ -539,18 +557,21 @@ func (tx *Tx) FindSubmission(submissionID string) (*TurnRow, bool, error) {
 	var maxRoundsCeiling sql.NullInt64
 	var contextHash sql.NullString
 	var fileTainted bool
+	var attachmentsHash sql.NullString
 
 	if err := tx.tx.QueryRow(`
-		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted
+		SELECT id, run_id, mode, whole_turn_deadline, terminal_state, terminal_reason, submission_id, submission_hash, epoch, phase_at_cancel, preset, quick_profile, candidate_id, attempt_deadline_ms, turn_deadline_ms, budget_json, conversation_id, max_rounds_in_effect, max_rounds_ceiling, context_hash, file_tainted, attachments_hash
 		FROM turns WHERE submission_id = ?
 	`, submissionID).Scan(
-		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID_, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &row.ConversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted,
+		&row.ID, &row.RunID, &row.Mode, &deadlineStr, &terminalState, &terminalReason, &submissionID_, &submissionHash, &row.Epoch, &phaseAtCancel, &preset, &quickProfile, &candidateID, &attemptDeadlineMS, &turnDeadlineMS, &budgetJSONStr, &row.ConversationID, &maxRoundsInEffect, &maxRoundsCeiling, &contextHash, &fileTainted, &attachmentsHash,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("query turn by submission_id: %w", err)
 	}
+
+	row.AttachmentsHash = attachmentsHash.String
 
 	if deadlineStr.Valid {
 		t, err := parseTime(deadlineStr.String)

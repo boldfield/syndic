@@ -77,8 +77,8 @@ func TestMigration014UpgradeRetainsData(t *testing.T) {
 	c := db.Conn()
 
 	var version int
-	if err := c.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 22 {
-		t.Fatalf("version = %d, %v; want 22", version, err)
+	if err := c.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 23 {
+		t.Fatalf("version = %d, %v; want 23", version, err)
 	}
 
 	var ws, ctx string
