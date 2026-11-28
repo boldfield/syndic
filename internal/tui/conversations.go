@@ -399,7 +399,11 @@ func cmdBudget(a *App, _ []string) tea.Cmd {
 // budgetLine shows a turn's tokens reserved, charged and the limit; a figure
 // the record does not carry shows as "-".
 func budgetLine(id string, b wire.BudgetRecord) string {
-	return fmt.Sprintf("budget of turn %s: reserved %s, charged %s, limit %s tokens", shortID(id), figure(b.Reserved), figure(b.Charged), figure(b.Limit))
+	line := fmt.Sprintf("budget of turn %s: reserved %s, charged %s, limit %s tokens", shortID(id), figure(b.Reserved), figure(b.Charged), figure(b.Limit))
+	for _, p := range b.Phases {
+		line += fmt.Sprintf("\n  %s %s: ~%d tokens in, up to %d out", p.Phase, p.Participant, p.EstimatedTokens, p.MaxOutputTokens)
+	}
+	return line
 }
 
 // reviewCountsMsg carries the conversation a review_count refresh read.
