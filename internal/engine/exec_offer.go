@@ -59,6 +59,19 @@ type ExecOptions struct {
 	// StateDir, Dir, Helper and Network. The engine sets the shell, the
 	// system locations, the network list flag, the sequence and the gate.
 	SelfTest sandbox.SelfTestConfig
+	// TempDir is the engine's temporary area, where each call's scratch and
+	// temporary directories are made; empty means os.TempDir().
+	TempDir string
+	// ProxyNetwork is the network of a call's proxy listener, "unix" or
+	// "tcp"; empty means "tcp".
+	ProxyNetwork string
+	// ProxyAddr is the address a command reaches its proxy at, when that is
+	// not the listener's own (a forwarder in its namespace); empty means the
+	// listener's address.
+	ProxyAddr string
+	// Environ is the environment env_passthrough names are read from, as
+	// os.Environ returns it; nil means the process environment.
+	Environ []string
 }
 
 // execState is what Start decided for exec. It is set once, under e.mu.
