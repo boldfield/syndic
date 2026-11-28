@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
@@ -20,6 +21,8 @@ func init() {
 	cover(egressPara, "the same refusal holds when the only tainted turn is trimmed out by `context_from_turn` and a tool-free turn written after it is in view", "TestEgress_TrimCannotClearTaint")
 	cover(egressPara, "a turn's `file_tainted` is set when any earlier turn of its conversation is tainted, whether or not that turn is in the included history", "TestEgress_FileTaintedSetTransitively")
 	cover(egressPara, "a request with tool definitions and tool results reserves the rendered size including definitions, schemas, call arguments and framing, and a request whose definitions alone exceed the admission bound is refused before dispatch", "TestEgress_DefinitionsCountedInAdmission")
+	cover(egressPara, "a preset whose author has `write` and whose reviewer is on an endpoint outside `tools.file_egress_destinations` is refused at roster load naming the diff route", "TestEgress_DiffRouteRefusedAtRosterLoad")
+	cover(egressPara, "a preset with `read` and `write` where all reviewers are on endpoints in `tools.file_egress_destinations` is accepted at roster load", "TestEgress_DiffRouteAcceptedWhenInDestinations")
 	cover(egressPara, "a preset with no `read` and no `write` anywhere on web-only endpoints is accepted in an untainted conversation", "TestEgress_PureWebUntaintedAccepted")
 }
 
@@ -37,6 +40,9 @@ func egressRoster(t *testing.T, lan bool, destinations ...string) string {
 			}
 			r = strings.Replace(r, old, new, 1)
 		}
+		// Add referee_model to local endpoint for web tool support
+		edit("tokens_per_byte_max = 1.0\n\n[presets.review]", "tokens_per_byte_max = 1.0\nreferee_model = \"llama2\"\n\n[presets.review]")
+		// Switch reviewer to lan endpoint
 		edit("id = \"reviewer\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"local\"", "id = \"reviewer\"\nmodel = \"llama3\"\nroute = \"api\"\nendpoint = \"lan\"")
 		edit("local_only = true", "local_only = false")
 		edit("[presets.review]", `[[endpoints]]
@@ -49,6 +55,7 @@ network_dependency = "none"
 dialect = "chat_completions_v1"
 models = ["llama3"]
 tokens_per_byte_max = 1.0
+referee_model = "llama3"
 
 [presets.review]`)
 	}
@@ -66,6 +73,18 @@ tools = ["read"]
 		r += "\n[tools]\nfile_egress_destinations = [\"" + strings.Join(destinations, `", "`) + "\"]\n"
 	}
 	return r
+}
+
+// egressRosterWithWebPreset adds a web-only preset to the roster.
+func egressRosterWithWebPreset(t *testing.T, roster string) string {
+	t.Helper()
+	return strings.Replace(roster, "[presets.review]", `[presets.webonly]
+mode = "solo"
+author = "author"
+required_reviewers = []
+tools = ["web"]
+
+[presets.review]`, 1)
 }
 
 // egressSuite creates a suite with a roster and scripts suitable for egress testing.
@@ -321,11 +340,13 @@ func TestEgress_FileTaintedSetTransitively(t *testing.T) {
 
 // TestEgress_DefinitionsCountedInAdmission verifies that tool definitions,
 // schemas, call arguments and framing are reserved in admission bounds.
-// A turn with tools should include definition overhead in its admission reserve,
-// and a request whose definitions alone exceed the admission bound should be
-// refused before dispatch.
+// Part 1: A normal tool turn should succeed, with definitions included in admission.
+// Part 2: A turn with extremely tight bounds where definitions alone exceed
+// the limit should be refused before dispatch (zero adapter calls).
 func TestEgress_DefinitionsCountedInAdmission(t *testing.T) {
 	t.Parallel()
+
+	// Part 1: Normal turn with tools succeeds - definitions are counted
 	r := revRoster(1, 1, "reviewer")
 	r = strings.Replace(r, "[presets.review]", `[presets.toolpreset]
 mode = "review"
@@ -342,7 +363,6 @@ reviewer_tools = ["read"]
 	})
 	c := s.Dial(t)
 
-	// Submit with the tool preset - definitions should be counted in admission
 	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "question",
@@ -353,8 +373,6 @@ reviewer_tools = ["read"]
 	}
 	s.WaitTerminal(reply.TurnID)
 
-	// The turn should complete successfully, demonstrating that tool
-	// definitions are properly accounted for in the admission checks.
 	row, err := s.Store.GetTurn(reply.TurnID)
 	if err != nil {
 		t.Fatal(err)
@@ -362,57 +380,167 @@ reviewer_tools = ["read"]
 	if row.TerminalState != "approved" {
 		t.Fatalf("turn state = %s, want approved", row.TerminalState)
 	}
+
+	// Part 2: Tight admission bound - definitions alone exceed the limit
+	// and request is refused before dispatch
+	s.StopGracefully()
+	rTight := revRoster(1, 1, "reviewer")
+	rTight = strings.Replace(rTight, "[presets.review]", `[presets.tightbound]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read"]
+reviewer_tools = ["read"]
+
+[budgets]
+turn_max_estimated_tokens = 50
+
+[presets.review]`, 1)
+
+	s = egressSuite(t, rTight, map[string][]fake.Step{
+		"author":   {},
+		"reviewer": {},
+	})
+	c = s.Dial(t)
+
+	_, submitErr := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "s2",
+		Input:        "q",
+		Preset:       ptrStr("tightbound"),
+	})
+
+	if submitErr == nil {
+		t.Fatal("expected submit to fail with tight bounds, but it succeeded")
+	}
+
+	we := wantRefusal(t, submitErr, wire.ErrorCodeBudget)
+	if we.Budget == nil {
+		t.Fatalf("refusal budget is nil, want turn_max_estimated_tokens")
+	}
+	if *we.Budget != "turn_max_estimated_tokens" {
+		t.Fatalf("refusal budget = %s, want turn_max_estimated_tokens", *we.Budget)
+	}
+
+	// Verify the author adapter received zero requests (refused before dispatch)
+	if n := len(s.Adapters["author"].Calls()); n != 0 {
+		t.Fatalf("author received %d requests, want 0 (should be refused before dispatch)", n)
+	}
 }
 
 // TestEgress_PureWebUntaintedAccepted verifies that a preset with only web tools
 // on an untainted conversation is accepted regardless of endpoints.
 func TestEgress_PureWebUntaintedAccepted(t *testing.T) {
 	t.Parallel()
-	s := egressSuite(t, egressRoster(t, true), map[string][]fake.Step{
-		"author":   {enginetest.Reply("a1"), enginetest.Reply("a2")},
+	// Use roster with no destinations and add a web-only preset
+	r := egressRoster(t, true)
+	r = egressRosterWithWebPreset(t, r)
+
+	s := egressSuite(t, r, map[string][]fake.Step{
+		"author":   {enginetest.Reply("a1")},
 		"reviewer": {approveStep()},
 	})
 	c := s.Dial(t)
 
-	// A preset with only web, no read/write, should be accepted even without destinations
-	// Try to submit with solo preset (no tools) first to establish baseline
-	reply1, err := c.Submit(s.ctx(), wire.SubmitRequest{
+	// A preset with only web, no read/write, should be accepted even without
+	// file_egress_destinations defined and regardless of endpoint location.
+	// This is because pure web content (without file content) is not subject
+	// to the file egress restrictions.
+	reply, err := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "web1",
 		Input:        "web question",
-		Preset:       ptrStr("solo"),
+		Preset:       ptrStr("webonly"),
 	})
 	if err != nil {
-		t.Fatalf("solo preset in untainted conversation: %v", err)
+		t.Fatalf("web-only preset in untainted conversation: %v", err)
 	}
-	s.WaitTerminal(reply1.TurnID)
+	s.WaitTerminal(reply.TurnID)
 
 	// Verify it succeeded
-	row1, err := s.Store.GetTurn(reply1.TurnID)
+	row, err := s.Store.GetTurn(reply.TurnID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row1.TerminalState != "solo_complete" {
-		t.Fatalf("first turn state = %s, want solo_complete", row1.TerminalState)
+	if row.TerminalState != "solo_complete" {
+		t.Fatalf("web-only turn state = %s, want solo_complete", row.TerminalState)
+	}
+}
+
+// TestEgress_DiffRouteRefusedAtRosterLoad verifies that a preset where the
+// author has `write` and a reviewer endpoint is outside file_egress_destinations
+// is refused at roster load, with the error naming the diff route.
+func TestEgress_DiffRouteRefusedAtRosterLoad(t *testing.T) {
+	t.Parallel()
+	// Create a roster with a "lan" endpoint (outside destinations) and a preset
+	// where author has write.
+	r := egressRoster(t, true) // lan endpoint exists but is not in destinations
+	r = strings.Replace(r, "[presets.review]", `[presets.writepreset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["write"]
+reviewer_tools = []
+
+[presets.review]`, 1)
+
+	// Try to load this roster - it should fail because reviewer is on "lan"
+	// endpoint which is outside destinations, and diff route is needed
+	var roster config.Roster
+	_, err := toml.Decode(r, &roster)
+	if err != nil {
+		t.Fatalf("toml decode failed: %v", err)
 	}
 
-	// A tool-free preset in a fresh conversation should also work
-	reply2, err := c.Submit(s.ctx(), wire.SubmitRequest{
-		SubmissionID: "web2",
-		Input:        "another web question",
-		Preset:       ptrStr("solo"),
-	})
-	if err != nil {
-		t.Fatalf("second solo preset in fresh conversation: %v", err)
+	roster.ApplyDefaults()
+	validateErr := roster.Validate()
+	if validateErr == nil {
+		t.Fatal("expected roster validation to fail with diff route violation")
 	}
-	s.WaitTerminal(reply2.TurnID)
 
-	// Verify it also succeeded
-	row2, err := s.Store.GetTurn(reply2.TurnID)
-	if err != nil {
-		t.Fatal(err)
+	errMsg := validateErr.Error()
+	if !strings.Contains(errMsg, "diff") {
+		t.Fatalf("error should name 'diff' route, got: %s", errMsg)
 	}
-	if row2.TerminalState != "solo_complete" {
-		t.Fatalf("second turn state = %s, want solo_complete", row2.TerminalState)
+	if !strings.Contains(errMsg, "reviewer") {
+		t.Fatalf("error should name 'reviewer' participant, got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "writepreset") {
+		t.Fatalf("error should name 'writepreset', got: %s", errMsg)
+	}
+}
+
+// TestEgress_DiffRouteAcceptedWhenInDestinations verifies that a preset where
+// the author has `write` and all reviewer endpoints are in file_egress_destinations
+// is accepted at roster load.
+func TestEgress_DiffRouteAcceptedWhenInDestinations(t *testing.T) {
+	t.Parallel()
+	// Create a roster with a "lan" endpoint in destinations
+	r := egressRoster(t, true, "lan") // "lan" is in destinations
+	r = strings.Replace(r, "[presets.review]", `[presets.writepreset]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["write"]
+reviewer_tools = []
+
+[presets.review]`, 1)
+
+	// This should load successfully because reviewer is on "lan" which is
+	// in destinations, so the diff route is allowed
+	var roster config.Roster
+	_, err := toml.Decode(r, &roster)
+	if err != nil {
+		t.Fatalf("toml decode failed: %v", err)
+	}
+
+	roster.ApplyDefaults()
+	validateErr := roster.Validate()
+	if validateErr != nil {
+		t.Fatalf("roster validation failed: %v", validateErr)
+	}
+
+	// Verify the roster has the writepreset
+	if _, ok := roster.Presets["writepreset"]; !ok {
+		t.Fatal("roster does not have writepreset")
 	}
 }
 
