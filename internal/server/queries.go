@@ -250,6 +250,56 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		}
 		verdictRecord.ResultIDs = evidence.ResultIDs
 		verdictRecord.ObservationIDs = evidence.ObservationIDs
+
+		// Populate tool calls, results, and observations for protocol exposure
+		verdictRecord.ToolCalls = []wire.ToolCall{}
+		verdictRecord.ToolResults = []wire.ToolResult{}
+		verdictRecord.Observations = []wire.Observation{}
+
+		// Fetch tool calls and results through a transaction
+		if err := store.Tx(func(tx *journal.Tx) error {
+			for _, callID := range evidence.ResultIDs {
+				call, err := tx.GetToolCall(callID)
+				if err == nil && call.Result != nil {
+					// Add tool call
+					verdictRecord.ToolCalls = append(verdictRecord.ToolCalls, wire.ToolCall{
+						ID:        call.ID,
+						AttemptID: call.AttemptID,
+						Name:      call.Name,
+						ArgsHash:  call.ArgsSHA256,
+						Status:    call.Result.Status,
+					})
+					// Add tool result with content ref
+					verdictRecord.ToolResults = append(verdictRecord.ToolResults, wire.ToolResult{
+						ID:      call.Result.ResultSHA256[:8],
+						CallID:  call.ID,
+						SHA256:  call.Result.ResultSHA256,
+						ByteLen: call.Result.ResultByteLen,
+						Status:  call.Result.Status,
+					})
+				}
+			}
+			// Fetch observations
+			allObs, err := tx.Observations(turnID)
+			if err == nil {
+				for _, obs := range allObs {
+					for _, obsID := range evidence.ObservationIDs {
+						if obs.ID == obsID && obs.ContentSHA256 != "" {
+							verdictRecord.Observations = append(verdictRecord.Observations, wire.Observation{
+								Path:    obs.Path,
+								Kind:    obs.Kind,
+								SHA256:  obs.ContentSHA256,
+								ByteLen: 0,
+							})
+						}
+					}
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("populating verdict evidence: %w", err)
+		}
+
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}
 
