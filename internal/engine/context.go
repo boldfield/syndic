@@ -39,13 +39,17 @@ func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *strin
 	doc := history.New()
 	tainted := make(map[string]bool, len(turns))
 	for _, t := range turns {
-		if err := doc.AddTurn(history.Turn{
+		ht := history.Turn{
 			ID:     t.ID,
 			State:  t.State,
 			Input:  []byte(t.Input),
 			Answer: []byte(t.Answer),
 			Label:  historyLabel(t),
-		}); err != nil {
+		}
+		if err := addChanges(tx, &ht); err != nil {
+			return nil, nil, err
+		}
+		if err := doc.AddTurn(ht); err != nil {
 			return nil, nil, fmt.Errorf("engine: history turn %s: %w", t.ID, err)
 		}
 		if t.FileTainted {
@@ -60,6 +64,32 @@ func renderHistory(tx *journal.Tx, conversationID string, contextFromTurn *strin
 		}
 	}
 	return doc, tainted, nil
+}
+
+// addChanges annotates a history turn with its change set's state and each
+// path's own outcome (v5 delta section 3, 6): a pending path reads
+// "not applied", so a set discarded after a partial apply still shows which
+// files were changed. A turn with no change set is left unannotated.
+func addChanges(tx *journal.Tx, t *history.Turn) error {
+	cs, err := tx.ChangeSetForTurn(t.ID)
+	if errors.Is(err, journal.ErrNoChangeSet) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("engine: history turn %s change set: %w", t.ID, err)
+	}
+	t.ChangesState = cs.State
+	for _, p := range cs.Paths {
+		outcome := history.OutcomeNotApplied
+		switch p.Outcome {
+		case journal.PathApplied:
+			outcome = history.OutcomeApplied
+		case journal.PathConflict:
+			outcome = history.OutcomeConflict
+		}
+		t.Changes = append(t.Changes, history.Change{Path: p.Path, Outcome: outcome})
+	}
+	return nil
 }
 
 // frozenHistory returns the document's hash and bytes to store, or "" and nil

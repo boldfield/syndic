@@ -156,6 +156,9 @@ type Error struct {
 	LastSeq      *int64          `json:"last_seq,omitempty"`
 	Ceiling      *int            `json:"ceiling,omitempty"`
 	Route        *string         `json:"route,omitempty"`
+	// Paths names the change-set paths a base_changed refusal found not at
+	// their base.
+	Paths []string `json:"paths,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -402,6 +405,36 @@ type OverrideRequest struct {
 
 type OverrideReply struct {
 	State string `json:"state"`
+}
+
+// ApplyRequest asks to apply a turn's change set (v5 delta section 6).
+type ApplyRequest struct {
+	TurnID string `json:"turn_id"`
+}
+
+// ChangePath is one path of a change set with its own outcome: pending,
+// applied or conflict.
+type ChangePath struct {
+	Path    string `json:"path"`
+	Outcome string `json:"outcome"`
+}
+
+// ApplyReply is the change set's state and per-path outcomes after an apply.
+type ApplyReply struct {
+	State string       `json:"state"`
+	Paths []ChangePath `json:"paths"`
+}
+
+// DiscardRequest asks to discard a turn's change set.
+type DiscardRequest struct {
+	TurnID string `json:"turn_id"`
+}
+
+// DiscardReply is the change set's state and per-path outcomes after a
+// discard; discarding changes no path outcome.
+type DiscardReply struct {
+	State string       `json:"state"`
+	Paths []ChangePath `json:"paths"`
 }
 
 type ReleaseRequest struct {
@@ -757,6 +790,8 @@ const (
 	RequestConversations = "conversations"
 	RequestConversation  = "conversation"
 	RequestReviews       = "reviews"
+	RequestApply         = "apply"
+	RequestDiscard       = "discard"
 )
 
 // String constants for error codes
@@ -787,6 +822,9 @@ const (
 	ErrorCodeWorkspaceMismatch   = "workspace_mismatch"
 	ErrorCodeMaxRounds           = "max_rounds"
 	ErrorCodeEgress              = "egress"
+	ErrorCodeBaseChanged         = "base_changed"
+	ErrorCodeWorkspaceMissing    = "workspace_missing"
+	ErrorCodeNotAppliable        = "not_appliable"
 )
 
 // String constants for event kinds

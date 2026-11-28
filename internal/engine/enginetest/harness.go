@@ -122,6 +122,7 @@ type options struct {
 	clockStart     time.Time
 	changeLines    func(transport.CompleteResult) []string
 	beforeEffect   func(turnID, attemptID, name string)
+	beforeApply    func(turnID string)
 	providers      []tools.SearchProvider
 	searchNet      *tools.SearchNetwork
 	secrets        config.SecretResolver
@@ -198,6 +199,13 @@ func WithAuthorChangeLines(f func(transport.CompleteResult) []string) Option {
 // step once f returns. A test of a cancel landing mid-step cancels in f.
 func WithBeforeToolEffect(f func(turnID, attemptID, name string)) Option {
 	return func(o *options) { o.beforeEffect = f }
+}
+
+// WithBeforeApply calls f once an apply is open, before it touches the
+// workspace, with the engine unlocked; a test blocks in f to issue requests
+// during an apply.
+func WithBeforeApply(f func(turnID string)) Option {
+	return func(o *options) { o.beforeApply = f }
 }
 
 // WithSearchProvider injects a web_search provider, as the daemon would
@@ -335,6 +343,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		NoStartupProbes:   true,
 		AuthorChangeLines: o.changeLines,
 		BeforeToolEffect:  o.beforeEffect,
+		BeforeApply:       o.beforeApply,
 		SearchProviders:   o.providers,
 		SearchNetwork:     o.searchNet,
 		Secrets:           o.secrets,
