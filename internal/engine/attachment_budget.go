@@ -21,16 +21,16 @@ func attachmentRequestBytes(attachments []journal.AttachmentContent, delimiterLe
 	var total int
 	for _, att := range attachments {
 		// ===== DELIMITER BEGIN ATTACHMENT path =====\n
-		total += 5                // "===== "
+		total += 6                // "===== "
 		total += delimiterLen     // delimiter
 		total += 18               // " BEGIN ATTACHMENT "
 		total += len(att.Path)    // path
-		total += 6                // " =====\n"
+		total += 7                // " =====\n"
 		total += len(att.Content) // content
 		// ===== DELIMITER END ATTACHMENT path =====\n\n
-		total += 5             // "===== "
+		total += 6             // "===== "
 		total += delimiterLen  // delimiter
-		total += 16            // " END ATTACHMENT "
+		total += 15            // " END ATTACHMENT "
 		total += len(att.Path) // path
 		total += 8             // " =====\n\n"
 	}
@@ -40,7 +40,7 @@ func attachmentRequestBytes(attachments []journal.AttachmentContent, delimiterLe
 // attachmentRequestBytesStandIn calculates the worst-case byte cost of
 // attachments when their content is not known. It assumes the maximum
 // attachment file size for each attachment (the actual content length is
-// unknown during projection).
+// unknown during projection). This is exported for testing only.
 func attachmentRequestBytesStandIn(numAttachments int, paths []string, delimiterLen int) int {
 	if numAttachments == 0 || len(paths) == 0 {
 		return 0
@@ -49,17 +49,17 @@ func attachmentRequestBytesStandIn(numAttachments int, paths []string, delimiter
 	for i := 0; i < numAttachments && i < len(paths); i++ {
 		path := paths[i]
 		// ===== DELIMITER BEGIN ATTACHMENT path =====\n
-		total += 5            // "===== "
+		total += 6            // "===== "
 		total += delimiterLen // delimiter
 		total += 18           // " BEGIN ATTACHMENT "
 		total += len(path)    // path
-		total += 6            // " =====\n"
+		total += 7            // " =====\n"
 		// Worst case: maximum attachment file size
 		total += MaxAttachmentFileSize // content
 		// ===== DELIMITER END ATTACHMENT path =====\n\n
-		total += 5            // "===== "
+		total += 6            // "===== "
 		total += delimiterLen // delimiter
-		total += 16           // " END ATTACHMENT "
+		total += 15           // " END ATTACHMENT "
 		total += len(path)    // path
 		total += 8            // " =====\n\n"
 	}

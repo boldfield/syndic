@@ -175,14 +175,32 @@ func (t *openTurn) reviewerRevisionInput(attemptID, delimiter string, blocks []j
 // turn's charge, in the worst case it can know: the author's revision with its
 // output bound and each required reviewer's review of a candidate as long as
 // a candidate as long as the author's output bound allows, plus the one repair
-// each may be given. authorDefs are the tool definitions the author's revision
-// carries; each review carries the reviewer definitions the preset gives, a repair none.
+// each may be given. Attachment bytes are included in every request. authorDefs
+// are the tool definitions the author's revision carries; each review carries
+// the reviewer definitions the preset gives, a repair none.
 func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []transport.Message, authorDefs []transport.Tool, authorMaxOut int) (int, error) {
 	pb, missing := e.budgetFor(t.eff, t.author)
 	if missing != "" {
 		return 0, fmt.Errorf("engine: participant %q lacks %s", t.author, missing)
 	}
-	total := satAdd(pb.estimate(authorMsgs, authorDefs), authorMaxOut)
+
+	attachments, err := tx.TurnAttachments(t.id)
+	if err != nil {
+		return 0, fmt.Errorf("engine: get turn attachments: %w", err)
+	}
+	var attachmentContent []journal.AttachmentContent
+	for _, att := range attachments {
+		attachmentContent = append(attachmentContent, journal.AttachmentContent{Path: att.Path, Content: att.Content})
+	}
+	attachmentBytes := attachmentRequestBytes(attachmentContent, len(standInToken))
+
+	var est int
+	if attachmentBytes > 0 {
+		est = pb.estimateWithAttachments(authorMsgs, authorDefs, attachmentBytes)
+	} else {
+		est = pb.estimate(authorMsgs, authorDefs)
+	}
+	total := satAdd(est, authorMaxOut)
 	next := *t
 	next.round = t.round + 1
 	next.candidateHash = standInHash
@@ -205,12 +223,24 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rb.estimate(msgs, defs), maxOut))
+		var reviewEst int
+		if attachmentBytes > 0 {
+			reviewEst = rb.estimateWithAttachments(msgs, defs, attachmentBytes)
+		} else {
+			reviewEst = rb.estimate(msgs, defs)
+		}
+		total = satAdd(total, satAdd(reviewEst, maxOut))
 		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rb.estimate(repair, nil), maxOut))
+		var repairEst int
+		if attachmentBytes > 0 {
+			repairEst = rb.estimateWithAttachments(repair, nil, attachmentBytes)
+		} else {
+			repairEst = rb.estimate(repair, nil)
+		}
+		total = satAdd(total, satAdd(repairEst, maxOut))
 	}
 	return total, nil
 }

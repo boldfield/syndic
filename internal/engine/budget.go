@@ -186,7 +186,9 @@ func (pb partBudget) admissionWithAttachments(msgs []transport.Message, defs []t
 	if attachmentBytes == 0 {
 		return pb.admission(msgs, defs)
 	}
-	extendedMsgs := append(msgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
+	extendedMsgs := make([]transport.Message, len(msgs), len(msgs)+1)
+	copy(extendedMsgs, msgs)
+	extendedMsgs = append(extendedMsgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
 	return pb.admission(extendedMsgs, defs)
 }
 
@@ -202,7 +204,9 @@ func (pb partBudget) estimateWithAttachments(msgs []transport.Message, defs []tr
 	if attachmentBytes == 0 {
 		return pb.estimate(msgs, defs)
 	}
-	extendedMsgs := append(msgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
+	extendedMsgs := make([]transport.Message, len(msgs), len(msgs)+1)
+	copy(extendedMsgs, msgs)
+	extendedMsgs = append(extendedMsgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
 	return pb.estimate(extendedMsgs, defs)
 }
 
@@ -417,7 +421,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	// history. See revisionRoundCost for what a round is assumed to carry.
 	if eff.Preset.Mode != modeSolo {
 		for round := 1; round <= maxRounds; round++ {
-			cost, err := revisionRoundCost(eff, consts, defs, input, doc, round)
+			cost, err := revisionRoundCost(eff, consts, defs, input, doc, round, attachmentBytes)
 			if err != nil {
 				return budgetRecord{}, err
 			}
@@ -476,14 +480,15 @@ func longBlockID(rv partBudget, out int, participant string, i int) string {
 // to the turn's charge: the author's revision with its output bound, and each
 // required reviewer's review and one repair, all built by the revision prompt
 // builders over the turn's history. The revision and each review carry their
-// role's definitions; a repair carries none.
+// role's definitions; a repair carries none. Attachment bytes are included in
+// the author's revision and each reviewer's review and repair.
 //
 // The candidate and every reviewer output are as long as their output bounds
 // allow. A reviewer's output bound caps the block text one verdict can open,
 // and a block it does not withdraw stays open, so by round N a reviewer may
 // hold N verdicts' worth of open blocks: N blocks, each carrying one output
 // bound of text between its evidence and remedy.
-func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs roleTools, input string, doc *history.Document, round int) (int, error) {
+func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs roleTools, input string, doc *history.Document, round int, attachmentBytes int) (int, error) {
 	if doc == nil {
 		doc = history.New()
 	}
@@ -506,7 +511,13 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs 
 	if err != nil {
 		return 0, err
 	}
-	total := satAdd(author.estimate(msgs, defs.author), authorOut)
+	var est int
+	if attachmentBytes > 0 {
+		est = author.estimateWithAttachments(msgs, defs.author, attachmentBytes)
+	} else {
+		est = author.estimate(msgs, defs.author)
+	}
+	total := satAdd(est, authorOut)
 
 	for _, id := range eff.Preset.RequiredReviewers {
 		rv := consts[id]
@@ -534,12 +545,24 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs 
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(review, defs.reviewer), out))
+		var reviewEst int
+		if attachmentBytes > 0 {
+			reviewEst = rv.estimateWithAttachments(review, defs.reviewer, attachmentBytes)
+		} else {
+			reviewEst = rv.estimate(review, defs.reviewer)
+		}
+		total = satAdd(total, satAdd(reviewEst, out))
 		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		total = satAdd(total, satAdd(rv.estimate(repair, nil), out))
+		var repairEst int
+		if attachmentBytes > 0 {
+			repairEst = rv.estimateWithAttachments(repair, nil, attachmentBytes)
+		} else {
+			repairEst = rv.estimate(repair, nil)
+		}
+		total = satAdd(total, satAdd(repairEst, out))
 	}
 	return total, nil
 }
@@ -750,10 +773,10 @@ func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *hist
 	attachmentBytes := attachmentRequestBytes(attachments, len(standInToken))
 
 	// fitsDeliberate checks admission bound for a deliberate phase, optionally
-	// including attachment bytes. Proposal, critique, integration and review
-	// phases receive attachments; repair and delivery phases do not.
+	// including attachment bytes. Proposal, critique, integration, repair, and
+	// review phases receive attachments; delivery phase does not.
 	fits := func(phase string, pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
-		includeAttachments := phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseReview
+		includeAttachments := phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseIntegrationRepair || phase == phaseReview || phase == phaseReviewRepair
 		var adm, est int
 		if includeAttachments && attachmentBytes > 0 {
 			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
