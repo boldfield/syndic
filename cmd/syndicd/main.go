@@ -166,7 +166,13 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	// this build supports no provider and web_search is not offered whatever
 	// [tools.web.search] configures. The operator-selected integration is
 	// injected here, as a tools.SearchProvider, when one is chosen.
+	execOpts, err := execOptions(paths.Dir)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "exec options: %v\n", err)
+		return 1
+	}
 	eng, err := engine.New(engine.Options{
+		Exec:          execOpts,
 		Store:         store,
 		Hub:           eventHub,
 		RosterPath:    rosterAbs,
