@@ -41,6 +41,12 @@ type openTurn struct {
 	// execTurn is the turn's self-test before its first command; nil until
 	// then. Owned by Engine.mu.
 	execTurn *execTurn
+	// execCalls counts each participant's bash calls against tools.exec
+	// max_calls (the author, per turn) and max_reviewer_calls (a reviewer,
+	// per round). submitTime is the modification time of every file in a
+	// command's scratch directory.
+	execCalls  map[string]int
+	submitTime time.Time
 
 	// Proposal-phase state of a deliberate turn, owned by Engine.mu.
 	// proposals holds each accepted proposal's text in roster order and
@@ -454,6 +460,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		eff:             eff,
 		attemptDeadline: attempt,
 		turnDeadline:    turnDeadline,
+		submitTime:      e.clock.Now(),
 		workspace:       workspace,
 		screener:        screener,
 		required:        required,

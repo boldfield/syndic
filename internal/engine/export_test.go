@@ -5,6 +5,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 	"os"
@@ -160,6 +161,20 @@ func (e *Engine) RefereeAdapterCount() int {
 func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) (RefereeOutcome, error) {
 	out, err := e.dispatchCommandReferee(commandCall{turnID: turnID, caller: caller, callID: callID, command: command})
 	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
+}
+
+// RunBashAs runs one bash call of caller through the effect's own path with
+// no workspace, and returns the error code of the call's result. It is for
+// calls that the deterministic checks refuse, which need none.
+func (e *Engine) RunBashAs(turnID, caller, callID, cmd string) (code string, err error) {
+	e.mu.Lock()
+	t := e.open
+	e.mu.Unlock()
+	if t == nil || t.id != turnID {
+		return "", errors.New("turn not open")
+	}
+	res, err := e.runBash(nil, t, caller, "", journal.ToolCall{ID: callID, Name: tools.NameBash}, bashArgs{Command: cmd}, func() error { return nil })
+	return res.ErrorCode, err
 }
 
 // ExecOfferReason is why exec is not offered to caller outside any turn, or
