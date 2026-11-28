@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -164,4 +165,151 @@ func messagesText(req transport.CompleteRequest) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// Across a revision round, a reviewer's command and the author's each belong
+// to their own round's candidate: what one command wrote is in no other
+// call's scratch directory and in no request, the second round's reviewer
+// builds from the second candidate's change set, and the author's second-round
+// call reaches the second round's reviewer as evidence and not the first's.
+func TestBashRevisionRounds(t *testing.T) {
+	area := t.TempDir()
+	scripts := append(sandbox.FakeSelfTestScripts("", false), sandbox.FakeSelfTestScripts("", false)...)
+	for i := 0; i < 3; i++ {
+		scripts = append(scripts, sandbox.FakeScript{Chunks: []sandbox.FakeChunk{{Data: []byte("out\n")}}})
+	}
+	be := &probeBackend{Fake: sandbox.NewFake(allCaps, scripts...), area: area}
+	reviewerArgs, _ := json.Marshal(map[string]string{"command": "true"})
+	authorArgs, _ := json.Marshal(map[string]string{"command": "echo round2-marker"})
+
+	author := []fake.Step{
+		toolStepWith(call("w1", tools.NameWriteFile, `{"path":"b.txt","content":"new file\n"}`)),
+		enginetest.Reply(authorText),
+		enginetest.Reply(commandAllow),
+		toolStepWith(
+			call("w2", tools.NameWriteFile, `{"path":"c.txt","content":"second\n"}`),
+			call("b2", tools.NameBash, string(authorArgs)),
+		),
+		enginetest.Reply(commandAllow),
+		enginetest.Reply(revisedText),
+		enginetest.Reply(commandAllow),
+	}
+	reviewer := []fake.Step{
+		toolStepWith(call("r1", tools.NameBash, string(reviewerArgs))),
+		blockStep("b1"),
+		toolStepWith(call("r2", tools.NameBash, string(reviewerArgs))),
+		v2Verdict("1", "approve", "", "b1 withdrawn"),
+	}
+	roster := strings.Replace(refereeRoster(`
+[presets.execreview]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read", "write", "exec"]
+reviewer_tools = ["read", "exec"]
+
+[tools]
+max_calls_per_turn = 30
+`), "max_rounds = 0", "max_rounds = 2", 1)
+	opts := append(refereeOpts(), enginetest.WithToolCalls("reviewer", transport.TriYes), enginetest.WithExec(engine.ExecOptions{
+		Backend:  be,
+		Shells:   []string{fakeShell(t, "bash")},
+		SelfTest: sandbox.SelfTestConfig{Dir: t.TempDir()},
+		TempDir:  area,
+	}))
+	h := enginetest.New(t, roster, map[string][]fake.Step{"author": author, "reviewer": reviewer}, opts...)
+	reply, err := h.Engine.Submit(toolReq("s1", "execreview", workspaceDir(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+
+	// The calls ran in the order: round-1 reviewer, round-2 author, round-2
+	// reviewer. Each has its own scratch directory, with no other's file.
+	runs := be.seen()
+	if len(runs) != 3 {
+		t.Fatalf("%d commands started, want 3", len(runs))
+	}
+	want := [][]string{{"a.txt", "b.txt"}, {"a.txt", "b.txt", "c.txt"}, {"a.txt", "b.txt", "c.txt"}}
+	for i, r := range runs {
+		if !slices.Equal(r.scratchNames, want[i]) {
+			t.Errorf("call %d: scratch directory held %v, want %v", i, r.scratchNames, want[i])
+		}
+		for j := 0; j < i; j++ {
+			if r.scratch == runs[j].scratch {
+				t.Errorf("calls %d and %d share a scratch directory", j, i)
+			}
+		}
+	}
+
+	// What a command wrote is in no request: the command text carries no
+	// such name, so a request naming it carried the file.
+	var all []transport.CompleteRequest
+	for _, id := range []string{"author", "reviewer"} {
+		for _, c := range h.Adapters[id].Calls() {
+			all = append(all, c.Request)
+		}
+	}
+	for _, req := range all {
+		if strings.Contains(messagesText(req), "gen.txt") {
+			t.Error("a file a command wrote appears in a request")
+		}
+	}
+
+	// The author's second-round call is evidence of the second candidate
+	// only.
+	reviews := h.Adapters["reviewer"].Calls()
+	firstHash := reviews[0].Request.Envelope.CandidateHash
+	var sawSecond bool
+	for _, c := range reviews {
+		carries := strings.Contains(messagesText(c.Request), "round2-marker")
+		if c.Request.Envelope.CandidateHash == firstHash {
+			if carries {
+				t.Error("a round-1 reviewer request carries the author's round-2 call")
+			}
+			continue
+		}
+		sawSecond = sawSecond || carries
+	}
+	if !sawSecond {
+		t.Error("the round-2 reviewer's requests lack the author's round-2 call")
+	}
+
+	// The round-2 reviewer's build used the second candidate's change set,
+	// not the first's, and the verdicts' evidence holds the reviewers' own results.
+	err = h.Store.Tx(func(tx *journal.Tx) error {
+		ecs, err := tx.ExecCallsByTurn(reply.TurnID)
+		if err != nil || len(ecs) != 3 {
+			t.Fatalf("exec calls %+v, err %v", ecs, err)
+		}
+		slices.SortFunc(ecs, func(x, y journal.ExecCall) int { return x.RecordedAt.Compare(y.RecordedAt) })
+		if ecs[0].View.OverlaySHA256 == ecs[2].View.OverlaySHA256 {
+			t.Error("the round-2 reviewer's overlay is the first candidate's change set")
+		}
+		if ecs[1].View.OverlaySHA256 != ecs[2].View.OverlaySHA256 {
+			t.Error("the author's round-2 overlay and the round-2 reviewer's differ")
+		}
+		verdicts, err := tx.ListVerdicts(reply.TurnID)
+		if err != nil || len(verdicts) != 2 {
+			t.Fatalf("verdicts %+v, err %v", verdicts, err)
+		}
+		var counts []int
+		for _, v := range verdicts {
+			ev, err := tx.GetVerdictEvidence(v.ID)
+			if err != nil {
+				return err
+			}
+			counts = append(counts, len(ev.ResultIDs))
+		}
+		// The round-1 verdict rests on its one call, the round-2 verdict on
+		// that reviewer's two; the author's call is in neither.
+		slices.Sort(counts)
+		if !slices.Equal(counts, []int{1, 2}) {
+			t.Errorf("verdict result counts %v, want [1 2]", counts)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
