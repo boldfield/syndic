@@ -1,6 +1,10 @@
 package config
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 // The routes by which file-derived content reaches a participant (v5 delta
 // section 6, "Egress of file-derived content"). A participant is named with
@@ -49,24 +53,186 @@ func (p Preset) WebParticipants() []string { return p.toolParticipants("web") }
 func (p Preset) ExecParticipants() []string { return p.toolParticipants("exec") }
 
 func (p Preset) toolParticipants(group string) []string {
+	return p.participantsWhere(func(set []string) bool { return slices.Contains(set, group) })
+}
+
+// participantsWhere returns the participants whose tool set satisfies has,
+// author first. In a deliberate preset tools is the integrator's set and
+// reviewer_tools everyone else's.
+func (p Preset) participantsWhere(has func(set []string) bool) []string {
 	if p.Mode == ModeDeliberate {
 		v := p.deliberateEgressView()
-		ids := v.toolParticipants(group)
+		ids := v.participantsWhere(has)
 		// The integrator also proposes and critiques, so it holds
 		// reviewer_tools in those phases.
-		if slices.Contains(p.ReviewerTools, group) && !slices.Contains(ids, p.Integrator) {
+		if has(p.ReviewerTools) && !slices.Contains(ids, p.Integrator) {
 			ids = append(ids, p.Integrator)
 		}
 		return ids
 	}
 	var ids []string
-	if slices.Contains(p.Tools, group) {
+	if has(p.Tools) {
 		ids = append(ids, p.Author)
 	}
-	if slices.Contains(p.ReviewerTools, group) {
+	if has(p.ReviewerTools) {
 		ids = append(ids, p.RequiredReviewers...)
 	}
 	return ids
+}
+
+// MCPGrantPrefix starts a tool-set entry that grants MCP tools: mcp:<server>
+// for every allowed tool of a server, mcp:<server>/<tool> for one.
+const MCPGrantPrefix = "mcp:"
+
+// IsMCPGrant reports whether a tool-set entry is an MCP grant.
+func IsMCPGrant(entry string) bool { return strings.HasPrefix(entry, MCPGrantPrefix) }
+
+func hasMCPGrant(set []string) bool { return slices.ContainsFunc(set, IsMCPGrant) }
+
+// MCPToolRef is one allowed MCP tool a grant names.
+type MCPToolRef struct {
+	Server, Tool, Class string
+}
+
+// MCPGrantTools resolves one tool-set entry to the tools it grants, sorted by
+// tool name. A server or tool the roster does not declare is an error.
+func (r *Roster) MCPGrantTools(entry string) ([]MCPToolRef, error) {
+	spec := strings.TrimPrefix(entry, MCPGrantPrefix)
+	server, tool, one := strings.Cut(spec, "/")
+	var srv MCPServer
+	var ok bool
+	if r.MCP != nil {
+		srv, ok = r.MCP.Servers[server]
+	}
+	if !ok {
+		return nil, fmt.Errorf("MCP grant %q names server %q, which is not in the roster", entry, server)
+	}
+	if one {
+		class, ok := srv.Tools[tool]
+		if !ok {
+			return nil, fmt.Errorf("MCP grant %q names tool %q, which server %q does not allow", entry, tool, server)
+		}
+		return []MCPToolRef{{server, tool, class}}, nil
+	}
+	refs := make([]MCPToolRef, 0, len(srv.Tools))
+	for t, class := range srv.Tools {
+		refs = append(refs, MCPToolRef{server, t, class})
+	}
+	slices.SortFunc(refs, func(a, b MCPToolRef) int { return strings.Compare(a.Tool, b.Tool) })
+	return refs, nil
+}
+
+// mcpToolsOf returns the tools every MCP grant in set resolves to; an
+// unresolvable grant contributes none (it is refused on its own).
+func (r *Roster) mcpToolsOf(set []string) []MCPToolRef {
+	var out []MCPToolRef
+	for _, e := range set {
+		if IsMCPGrant(e) {
+			refs, _ := r.MCPGrantTools(e)
+			out = append(out, refs...)
+		}
+	}
+	return out
+}
+
+// mcpToolIsWeb reports whether a tool counts as web for
+// tools.allow_web_with_read: any tool of a remote server, and any tool of a
+// local server with a non-empty network_allow.
+func (r *Roster) mcpToolIsWeb(t MCPToolRef) bool {
+	srv := r.MCP.Servers[t.Server]
+	return srv.Transport == MCPTransportHTTP ||
+		(srv.Transport == MCPTransportStdio && len(srv.NetworkAllow) > 0)
+}
+
+func (r *Roster) grantsMCPWeb(set []string) bool {
+	return slices.ContainsFunc(r.mcpToolsOf(set), r.mcpToolIsWeb)
+}
+
+// webParticipants returns the participants given web, counting a web MCP tool
+// as web, author first.
+func (r *Roster) webParticipants(p Preset) []string {
+	return p.participantsWhere(func(set []string) bool {
+		return slices.Contains(set, "web") || r.grantsMCPWeb(set)
+	})
+}
+
+// validatePresetMCP applies the roster-load rules for the MCP grants of one
+// preset (v9 section 2, "Presets").
+func (r *Roster) validatePresetMCP(name string, p Preset) []error {
+	var errs []error
+	for _, set := range [][]string{p.Tools, p.ReviewerTools} {
+		for _, e := range set {
+			if IsMCPGrant(e) {
+				if _, err := r.MCPGrantTools(e); err != nil {
+					errs = append(errs, fmt.Errorf("preset %q: %w", name, err))
+				}
+			}
+		}
+	}
+	for _, t := range r.mcpToolsOf(p.ReviewerTools) {
+		if t.Class == MCPClassEffect {
+			errs = append(errs, fmt.Errorf("preset %q: reviewer_tools may hold only read tools; MCP tool %s/%s is effect", name, t.Server, t.Tool))
+		}
+	}
+	if p.Mode == "solo" {
+		for _, t := range r.mcpToolsOf(p.Tools) {
+			if t.Class == MCPClassEffect {
+				errs = append(errs, fmt.Errorf("preset %q: effect MCP tool %s/%s requires a review or deliberate preset, not solo", name, t.Server, t.Tool))
+			}
+		}
+	}
+	for _, id := range p.participantsWhere(hasMCPGrant) {
+		i := slices.IndexFunc(r.Participants, func(q Participant) bool { return q.ID == id })
+		if i < 0 {
+			continue
+		}
+		part := r.Participants[i]
+		switch {
+		case part.Route == "cli":
+			errs = append(errs, fmt.Errorf("preset %q: CLI participant %q cannot have MCP tools", name, id))
+		case part.Route == "api" && part.Endpoint == "":
+			errs = append(errs, fmt.Errorf("preset %q: api participant %q missing endpoint but has MCP tools", name, id))
+		case part.Route == "api":
+			hasReferee := false
+			for _, ep := range r.Endpoints {
+				if ep.Name == part.Endpoint {
+					hasReferee = ep.RefereeModel != ""
+					break
+				}
+			}
+			if !hasReferee {
+				errs = append(errs, fmt.Errorf("preset %q: endpoint %q used by participant %q has no referee_model but MCP tools are granted", name, part.Endpoint, id))
+			}
+		}
+	}
+	return errs
+}
+
+// validateMCPScratchNetwork refuses a local server with both
+// workspace = "scratch" and a non-empty network_allow when
+// tools.allow_web_with_read is false, whatever the presets grant. The setting
+// is false when the roster or any preset turns it off.
+func (r *Roster) validateMCPScratchNetwork() []error {
+	if r.MCP == nil {
+		return nil
+	}
+	off := r.Tools != nil && r.Tools.AllowWebWithRead != nil && !*r.Tools.AllowWebWithRead
+	for _, p := range r.Presets {
+		if p.AllowWebWithRead != nil && !*p.AllowWebWithRead {
+			off = true
+		}
+	}
+	if !off {
+		return nil
+	}
+	var errs []error
+	for name, s := range r.MCP.Servers {
+		if s.Transport == MCPTransportStdio && s.Workspace == MCPWorkspaceScratch && len(s.NetworkAllow) > 0 {
+			errs = append(errs, fmt.Errorf("mcp.%s: workspace = %q with a non-empty network_allow is refused when tools.allow_web_with_read = false", name, MCPWorkspaceScratch))
+		}
+	}
+	slices.SortFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
+	return errs
 }
 
 // FileRoutes returns every participant of the preset that could receive
@@ -177,7 +343,7 @@ func (r *Roster) WebWithFileViolation(p Preset, tainted bool) []string {
 	if r.AllowWebWithFile(p) || (!tainted && !p.GrantsFileTools()) {
 		return nil
 	}
-	return p.WebParticipants()
+	return r.webParticipants(p)
 }
 
 // deliberateEgressView maps a deliberate preset onto the author-and-reviewers

@@ -626,14 +626,14 @@ func (r *Roster) Validate() error {
 	for name, preset := range r.Presets {
 		// Validate author tools
 		for _, tool := range preset.Tools {
-			if !validAuthorTools[tool] {
+			if !validAuthorTools[tool] && !IsMCPGrant(tool) {
 				errs = append(errs, fmt.Errorf("preset %q: invalid author tool %q", name, tool))
 			}
 		}
 
 		// Validate reviewer tools
 		for _, tool := range preset.ReviewerTools {
-			if !validReviewerTools[tool] {
+			if !validReviewerTools[tool] && !IsMCPGrant(tool) {
 				errs = append(errs, fmt.Errorf("preset %q: invalid reviewer tool %q", name, tool))
 			}
 		}
@@ -642,6 +642,8 @@ func (r *Roster) Validate() error {
 		if preset.Mode == "solo" && slices.Contains(preset.Tools, "write") {
 			errs = append(errs, fmt.Errorf("preset %q: solo mode cannot have write tools", name))
 		}
+
+		errs = append(errs, r.validatePresetMCP(name, preset)...)
 
 		// Every participant file-derived content could reach must be on an
 		// endpoint it may go to; the error names the participant and the route.
@@ -724,6 +726,8 @@ func (r *Roster) Validate() error {
 				name, web, exposed))
 		}
 	}
+
+	errs = append(errs, r.validateMCPScratchNetwork()...)
 
 	// Validate endpoint referee configuration
 	for _, ep := range r.Endpoints {
