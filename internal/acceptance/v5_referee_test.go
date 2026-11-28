@@ -10,7 +10,6 @@ import (
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/transport/fake"
-	"github.com/boldfield/syndic/internal/wire"
 )
 
 const refereePara = "Referee"
@@ -153,6 +152,15 @@ endpoint = "ep"
 eligible_roles = ["author"]
 pool = "default"
 
+[[participants]]
+id = "reviewer"
+model = "m-reviewer"
+route = "api"
+endpoint = "ep"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = true
+
 [[endpoints]]
 name = "ep"
 base_url = "http://localhost:11434/v1"
@@ -161,13 +169,13 @@ declared_execution = "local"
 declared_billing = "none"
 network_dependency = "none"
 dialect = "chat_completions_v1"
-models = ["m-author"]
+models = ["m-author", "m-reviewer"]
 tokens_per_byte_max = 1.0
 
 [presets.review]
 mode = "review"
 author = "author"
-required_reviewers = []
+required_reviewers = ["reviewer"]
 tools = ["read", "web"]
 `
 }
@@ -236,12 +244,9 @@ func TestReferee_PayloadAuthorizedFieldsOnly(t *testing.T) {
 // a participant on an endpoint with no referee model is refused at load.
 func TestReferee_RosterRefusesNoModel(t *testing.T) {
 	t.Parallel()
-	s := newSuite(t, refereeRosterNoModel(), map[string][]fake.Step{})
-	c := s.Dial(t)
-	preset := "review"
-	_, err := c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: "s1", Input: "test", Preset: &preset, Workspace: t.TempDir()})
-	if err == nil {
-		t.Fatal("expected error for roster without referee model")
+	s := newSuite(t, refereeRosterNoModel(), map[string][]fake.Step{}, enginetest.NoStart())
+	if err := s.Engine.Start(); err == nil {
+		t.Fatal("expected error for roster without referee model, but engine.Start() succeeded")
 	}
 }
 
@@ -283,8 +288,9 @@ declared_execution = "local"
 declared_billing = "none"
 network_dependency = "none"
 dialect = "chat_completions_v1"
-models = ["m-author", "m-reviewer"]
+models = ["m-author", "m-reviewer", "m-referee"]
 tokens_per_byte_max = 1.0
+referee_model = "m-referee"
 referee_endpoint = "ep2"
 
 [[endpoints]]
@@ -328,7 +334,7 @@ max_output_tokens = 64
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "fetch")
 	s.WaitTerminal(turnID)
@@ -362,7 +368,7 @@ func TestReferee_FlatEndpointProbed(t *testing.T) {
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -424,7 +430,7 @@ func TestReferee_DenyYieldsToolError(t *testing.T) {
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -457,7 +463,7 @@ func TestReferee_FailureYieldsDeny(t *testing.T) {
 			probeStep(),
 			failStep(transport.TransportStatusReset, transport.StatusInterrupted),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -493,7 +499,7 @@ func TestReferee_LateAllowQuarantined(t *testing.T) {
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -582,7 +588,7 @@ max_output_tokens = 64
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -608,7 +614,7 @@ func TestReferee_NotAskedForRefusedURL(t *testing.T) {
 		"referee:ep2:m-referee": {
 			probeStep(),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -646,7 +652,7 @@ func TestReferee_DecisionReservedChargedReconciled(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -685,7 +691,7 @@ func TestReferee_ManifestCarriesModel(t *testing.T) {
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
@@ -719,7 +725,7 @@ func TestReferee_TranscriptShowsDecision(t *testing.T) {
 				NativeFinishReason: "stop",
 			},
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)

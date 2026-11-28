@@ -410,16 +410,6 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 	for key := range o.modelToolCalls {
 		targets = append(targets, target{"", key[0], key[1]})
 	}
-	// Also seed probe records for referee models on each endpoint.
-	for _, ep := range roster.Endpoints {
-		if ep.RefereeModel != "" {
-			refEndpoint := ep.Name
-			if ep.RefereeEndpoint != "" {
-				refEndpoint = ep.RefereeEndpoint
-			}
-			targets = append(targets, target{"", refEndpoint, ep.RefereeModel})
-		}
-	}
 	for _, p := range targets {
 		key := [2]string{p.endpoint, p.model}
 		if seeded[key] {
