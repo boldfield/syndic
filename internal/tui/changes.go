@@ -61,7 +61,8 @@ type toolResultBody struct {
 type refereeBody struct {
 	CallID    string `json:"call_id"`
 	AttemptID string `json:"attempt_id"`
-	Verdict   string `json:"verdict"`
+	Verdict   string `json:"verdict"`  // web_referee_decision
+	Decision  string `json:"decision"` // referee_decision
 }
 
 type verdictEvidenceBody struct {
@@ -122,6 +123,9 @@ func applyEvidence(s State, turnID string, seq int64, kind string, body json.Raw
 		}
 		c := calls[b.CallID]
 		c.ID, c.Referee = b.CallID, b.Verdict
+		if b.Verdict == "" {
+			c.Referee = b.Decision
+		}
 		if c.AttemptID == "" {
 			c.AttemptID = b.AttemptID
 		}
@@ -404,6 +408,18 @@ func classifyPaths(workspace string, cs wire.ChangeSetRecord) baseCheck {
 }
 
 func classifyPath(root *os.Root, p wire.ChangeSetPathRecord) string {
+	// The engine opens every component with O_NOFOLLOW, so a symlink anywhere
+	// on the path, or a non-regular leaf, blocks the apply.
+	parts := strings.Split(p.Path, "/")
+	for i := range parts {
+		st, err := root.Lstat(strings.Join(parts[:i+1], "/"))
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil || st.Mode()&fs.ModeSymlink != 0 || (i < len(parts)-1 && !st.IsDir()) {
+			return "conflict"
+		}
+	}
 	f, err := root.Open(p.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if p.BaseSHA256 == "" || p.BaseSHA256 == "absent" {
@@ -579,12 +595,16 @@ const (
 type diffEdit struct {
 	op   byte // ' ', '-', '+'
 	text string
+	noNL bool // the line ends its file without a newline
 }
 
 // unifiedDiffLines is a unified diff of old against new.
 func unifiedDiffLines(from, to, old, new string) []string {
 	out := []string{"--- " + from, "+++ " + to}
-	script := editScript(diffSplit(old), diffSplit(new))
+	oldLines, oldNL := diffSplit(old)
+	newLines, newNL := diffSplit(new)
+	script := editScript(oldLines, newLines)
+	script = markEOFChange(script, oldNL, newNL)
 	n := len(script)
 	// aPos[i] and bPos[i] are the line numbers script[i] has in each file.
 	aPos, bPos := make([]int, n+1), make([]int, n+1)
@@ -625,6 +645,9 @@ func unifiedDiffLines(from, to, old, new string) []string {
 			hunkRange(aPos[start], aPos[end]-aPos[start]), hunkRange(bPos[start], bPos[end]-bPos[start])))
 		for _, e := range script[start:end] {
 			out = append(out, string(e.op)+e.text)
+			if e.noNL {
+				out = append(out, `\ No newline at end of file`)
+			}
 		}
 		i = end
 	}
@@ -641,11 +664,40 @@ func hunkRange(start, n int) string {
 	return fmt.Sprintf("%d,%d", start, n)
 }
 
-func diffSplit(s string) []string {
+// diffSplit is s's lines and whether the last one ends in a newline.
+func diffSplit(s string) ([]string, bool) {
 	if s == "" {
-		return nil
+		return nil, true
 	}
-	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n"), strings.HasSuffix(s, "\n")
+}
+
+// markEOFChange makes the script carry the newline state of each file's last
+// line: a final context line that differs only in its newline becomes a removal
+// and an addition, and a last line without a newline is flagged.
+func markEOFChange(script []diffEdit, oldNL, newNL bool) []diffEdit {
+	if last := len(script) - 1; last >= 0 && script[last].op == ' ' && oldNL != newNL {
+		t := script[last].text
+		script = append(script[:last:last], diffEdit{'-', t, !oldNL}, diffEdit{'+', t, !newNL})
+		return script
+	}
+	script = append([]diffEdit(nil), script...)
+	for i := len(script) - 1; i >= 0; i-- {
+		if script[i].op != '+' {
+			script[i].noNL = !oldNL
+			break
+		}
+	}
+	for i := len(script) - 1; i >= 0; i-- {
+		if script[i].op == '+' {
+			script[i].noNL = !newNL
+			break
+		}
+		if script[i].op == ' ' {
+			break
+		}
+	}
+	return script
 }
 
 // editScript is the line edits turning a into b: the common ends trimmed, the
@@ -661,11 +713,11 @@ func editScript(a, b []string) []diffEdit {
 	}
 	var out []diffEdit
 	for _, l := range a[:pre] {
-		out = append(out, diffEdit{' ', l})
+		out = append(out, diffEdit{' ', l, false})
 	}
 	out = append(out, middleEdits(a[pre:len(a)-suf], b[pre:len(b)-suf])...)
 	for _, l := range a[len(a)-suf:] {
-		out = append(out, diffEdit{' ', l})
+		out = append(out, diffEdit{' ', l, false})
 	}
 	return out
 }
@@ -674,10 +726,10 @@ func middleEdits(a, b []string) []diffEdit {
 	var out []diffEdit
 	if len(a) == 0 || len(b) == 0 || (len(a)+1)*(len(b)+1) > maxDiffCells {
 		for _, l := range a {
-			out = append(out, diffEdit{'-', l})
+			out = append(out, diffEdit{'-', l, false})
 		}
 		for _, l := range b {
-			out = append(out, diffEdit{'+', l})
+			out = append(out, diffEdit{'+', l, false})
 		}
 		return out
 	}
@@ -696,22 +748,22 @@ func middleEdits(a, b []string) []diffEdit {
 	for i < len(a) && j < len(b) {
 		switch {
 		case a[i] == b[j]:
-			out = append(out, diffEdit{' ', a[i]})
+			out = append(out, diffEdit{' ', a[i], false})
 			i++
 			j++
 		case lcs[(i+1)*w+j] >= lcs[i*w+j+1]:
-			out = append(out, diffEdit{'-', a[i]})
+			out = append(out, diffEdit{'-', a[i], false})
 			i++
 		default:
-			out = append(out, diffEdit{'+', b[j]})
+			out = append(out, diffEdit{'+', b[j], false})
 			j++
 		}
 	}
 	for ; i < len(a); i++ {
-		out = append(out, diffEdit{'-', a[i]})
+		out = append(out, diffEdit{'-', a[i], false})
 	}
 	for ; j < len(b); j++ {
-		out = append(out, diffEdit{'+', b[j]})
+		out = append(out, diffEdit{'+', b[j], false})
 	}
 	return out
 }

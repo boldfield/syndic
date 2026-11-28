@@ -609,3 +609,58 @@ func TestEvidenceReducerIgnoresMalformedBodies(t *testing.T) {
 		t.Error("a zero State cannot take a call")
 	}
 }
+
+func TestUnifiedDiffEOFNewlineOnlyChange(t *testing.T) {
+	got := strings.Join(unifiedDiffLines("a/f", "b/f", "x\n", "x"), "\n")
+	want := "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+x\n\\ No newline at end of file"
+	if got != want {
+		t.Errorf("newline removed:\n%s", got)
+	}
+	got = strings.Join(unifiedDiffLines("a/f", "b/f", "x", "x\n"), "\n")
+	want = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n\\ No newline at end of file\n+x"
+	if got != want {
+		t.Errorf("newline added:\n%s", got)
+	}
+	got = strings.Join(unifiedDiffLines("a/f", "b/f", "a\nb", "a\nc"), "\n")
+	want = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file"
+	if got != want {
+		t.Errorf("both without newline:\n%s", got)
+	}
+}
+
+func TestChangesTabBaseCheckRejectsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "real.txt"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "d", "f.txt"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if os.Symlink("real.txt", filepath.Join(dir, "a.txt")) != nil || os.Symlink("d", filepath.Join(dir, "link")) != nil {
+		t.Skip("symlinks unavailable")
+	}
+	a := chatApp(t)
+	cs := changeSetFixture(a, "appliable", "pending", "pending", "pending")
+	cs.Paths[0].Path = "a.txt"
+	cs.Paths[1].Path = "link/f.txt"
+	cs.Paths[2].Path = "real.txt"
+	base := sum("one\ntwo\nthree\n")
+	for i := range cs.Paths {
+		cs.Paths[i].BaseSHA256 = base
+	}
+	bc := classifyPaths(dir, *cs)
+	if bc.paths["a.txt"] != "conflict" || bc.paths["link/f.txt"] != "conflict" || bc.paths["real.txt"] != "pending" {
+		t.Errorf("symlink classification: %v", bc.paths)
+	}
+}
+
+func TestRefereeDecisionEventUsesTheJournalsDecisionField(t *testing.T) {
+	s := applyEvidence(State{}, "t1", 1, wire.EventKindToolCallAccepted, json.RawMessage(`{"call_id":"c","attempt_id":"a","participant":"p","name":"bash","class":"exec"}`))
+	s = applyEvidence(s, "t1", 2, wire.EventKindRefereeDecision, json.RawMessage(`{"decision_id":"d","call_id":"c","decision":"deny","reason":"x","cause":"y"}`))
+	if got := s.ToolCalls["c"].Referee; got != "deny" {
+		t.Errorf("referee = %q", got)
+	}
+}
