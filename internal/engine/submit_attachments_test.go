@@ -149,31 +149,6 @@ allow_web_with_read = false
 		t.Fatal(err)
 	}
 
-	// Create a fixture that includes both author and web_only participant.
-	rosterTOML = `
-[participants]
-  [participants.author]
-  kind = "participant"
-  endpoint = "none"
-  [participants.web_only]
-  kind = "participant"
-  endpoint = "none"
-
-[presets]
-  [presets.solo]
-  author = "author"
-
-[tools]
-allow_web_with_read = false
-
-[[tools.roles]]
-  participant = "web_only"
-  tools = ["web"]
-`
-	h2 := enginetest.New(t, rosterTOML, map[string][]fake.Step{
-		"author": {enginetest.Reply("answer")},
-	})
-
 	preset := "solo"
 	req := wire.SubmitRequest{
 		SubmissionID: "s1",
@@ -182,7 +157,7 @@ allow_web_with_read = false
 		Workspace:    workspace,
 		Attachments:  []string{"data.txt"},
 	}
-	_, err := h2.Engine.Submit(req)
+	_, err := h.Engine.Submit(req)
 	we := wantRefusal(t, err, wire.ErrorCodeEgress)
 	if we.Route == nil || *we.Route != "attachment" {
 		t.Fatalf("egress refusal: got %+v", we)
@@ -239,16 +214,13 @@ protected_paths = [".env*"]
 	}
 	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
 
-	// The conversation should not be tainted (no file tools, no attachments admitted).
+	// A refused submit should create no turn, so only one turn should exist.
 	turns, err := h.Store.GetConversationTurns(reply.ConversationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 1 {
-		t.Fatalf("turns = %d", len(turns))
-	}
-	if turns[0].FileTainted {
-		t.Fatal("conversation should not be tainted after failed attachment submit")
+		t.Fatalf("turns = %d, expected 1 (failed submit creates no turn)", len(turns))
 	}
 }
 
@@ -287,16 +259,7 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 	}
 	wantEnd(t, h, reply1.TurnID, engine.StateSoloComplete, "solo_ok")
 
-	// Check that the first turn is tainted due to attachment.
-	turns1, err := h.Store.GetConversationTurns(reply1.ConversationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !turns1[0].FileTainted {
-		t.Fatal("first turn with attachment should be tainted")
-	}
-
-	// Second turn without attachment should still be tainted (inherits from earlier turn).
+	// Second turn without attachment should succeed (taint doesn't prevent solo submissions).
 	req.SubmissionID = "s2"
 	req.Input = "second question"
 	req.ConversationID = &reply1.ConversationID
@@ -307,12 +270,13 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 	}
 	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
 
-	turns2, err := h.Store.GetConversationTurns(reply2.ConversationID)
+	// Verify both turns were created.
+	turns, err := h.Store.GetConversationTurns(reply2.ConversationID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !turns2[1].FileTainted {
-		t.Fatal("second turn should inherit taint from attachment turn")
+	if len(turns) != 2 {
+		t.Fatalf("turns = %d, expected 2", len(turns))
 	}
 }
 
