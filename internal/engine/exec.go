@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -54,6 +55,50 @@ func (e *Engine) execCallsRemaining(t *openTurn, caller string) int {
 		limit = ex.MaxCalls
 	}
 	return limit - t.execCalls[caller]
+}
+
+// execGranted reports whether caller may run commands in turn t: the author
+// under tools, a reviewer under reviewer_tools once a candidate is frozen. A
+// call needs the turn's workspace. e.mu is held.
+func (e *Engine) execGranted(t *openTurn, caller string, fs *workspace.Confined) bool {
+	if fs == nil {
+		return false
+	}
+	if caller == t.author {
+		return true
+	}
+	return t.candidateID != "" && slices.Contains(t.eff.Preset.ReviewerTools, tools.GroupExec)
+}
+
+// execOverlay is the staging map to lay over the record for caller's build:
+// the author's own, and for a reviewer the frozen candidate's change set,
+// whatever the author's staging holds since (v7 delta, section 5, "Snapshot
+// and freeze").
+func (e *Engine) execOverlay(t *openTurn, caller string) ([]journal.StagingEntry, error) {
+	var staged []journal.StagingEntry
+	err := e.store.Tx(func(tx *journal.Tx) error {
+		if caller == t.author {
+			var err error
+			staged, err = tx.Staging(t.id)
+			return err
+		}
+		cs, err := tx.ChangeSetForTurn(t.id)
+		if errors.Is(err, journal.ErrNoChangeSet) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, p := range cs.Paths {
+			base := p.BaseSHA256
+			if p.Op == observation.OpCreate {
+				base = ""
+			}
+			staged = append(staged, journal.StagingEntry{TurnID: t.id, Path: p.Path, BaseSHA256: base, NewSHA256: p.NewSHA256})
+		}
+		return nil
+	})
+	return staged, err
 }
 
 // execRunner is the runner of one call, over the run's backend and shell.
@@ -115,7 +160,7 @@ func (e *Engine) runBash(fs *workspace.Confined, t *openTurn, caller, attemptID 
 	// A call refused below as not offered still counts against the bound.
 	t.execCalls[caller]++
 	reason := e.execOffReason(t, caller)
-	if reason == "" && (caller != t.author || fs == nil) {
+	if reason == "" && !e.execGranted(t, caller, fs) {
 		reason = "not_granted:" + caller
 	}
 	st := e.execState
@@ -171,11 +216,8 @@ func (e *Engine) runBash(fs *workspace.Confined, t *openTurn, caller, attemptID 
 	}
 
 	// The scratch build, with its bound.
-	var staged []journal.StagingEntry
-	if err := e.store.Tx(func(tx *journal.Tx) (err error) {
-		staged, err = tx.Staging(t.id)
-		return err
-	}); err != nil {
+	staged, err := e.execOverlay(t, caller)
+	if err != nil {
 		return tools.Result{}, err
 	}
 	view, err := scratch.Build(scratchDir,
