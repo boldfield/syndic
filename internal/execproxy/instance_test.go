@@ -2,6 +2,7 @@ package execproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
@@ -91,6 +92,29 @@ func TestMCPStoreJournalRecordsInstanceAndCall(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var callID string
+	if err := store.Tx(func(tx *journal.Tx) error {
+		run, _, err := tx.CreateRun(json.RawMessage(`{}`))
+		if err != nil {
+			return err
+		}
+		turn, err := tx.CreateTurn(run, "review", nil)
+		if err != nil {
+			return err
+		}
+		attempt, err := tx.BeginAttempt(turn, "author", "author", 1, nil, "")
+		if err != nil {
+			return err
+		}
+		c, err := tx.RecordMCPCall(journal.MCPCallInput{
+			AttemptID: attempt, Server: "docs", Tool: "search", Args: []byte(`{"q":"x"}`),
+			RefereeAllowed: true, RefereeReason: "reads docs", ServerIdentity: "id1", PinSHA256: "pin1", Revision: "2025-06-18",
+		})
+		callID = c.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var call atomic.Value
 	call.Store("")
 	j := MCPStoreJournal{Store: store, InstanceID: inst.ID, Call: func() string { return call.Load().(string) }}
@@ -104,6 +128,13 @@ func TestMCPStoreJournalRecordsInstanceAndCall(t *testing.T) {
 	if st, _, _ := connectReq(t, ip.Addr(), "evil.test:443", auth(ip.Credential())); st != 403 {
 		t.Fatalf("unlisted: %d", st)
 	}
+	// A call in flight: the connection it opens carries the call's id.
+	call.Store(callID)
+	st, c, _ = connectReq(t, ip.Addr(), "api.example.com:443", auth(ip.Credential()))
+	if st != 200 {
+		t.Fatal(st)
+	}
+	_ = c.Close()
 	var conns []journal.MCPConnection
 	waitFor(t, func() bool {
 		_ = store.Tx(func(tx *journal.Tx) error {
@@ -111,12 +142,15 @@ func TestMCPStoreJournalRecordsInstanceAndCall(t *testing.T) {
 			conns, err = tx.MCPConnections(inst.ID)
 			return err
 		})
-		return len(conns) == 2 && conns[0].Close != nil
+		return len(conns) == 3 && conns[0].Close != nil && conns[2].Close != nil
 	})
 	if c0 := conns[0]; c0.Host != "api.example.com" || c0.Port != 443 || !c0.Allowed || c0.CallID != "" {
 		t.Fatalf("first = %+v", c0)
 	}
 	if c1 := conns[1]; c1.Host != "evil.test" || c1.Allowed || c1.RefusalStatus != 403 {
 		t.Fatalf("second = %+v", c1)
+	}
+	if c2 := conns[2]; c2.CallID != callID || !c2.Allowed {
+		t.Fatalf("third = %+v, want call %q", c2, callID)
 	}
 }
