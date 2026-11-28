@@ -13,6 +13,9 @@ import (
 
 // containTokenGroup names a process-group container that holds a token file
 // and releases it, as the macOS profile container does.
+// callBound bounds every step of a forked test call.
+const callBound = 10 * time.Second
+
 const containTokenGroup = "test_token_group"
 
 type tokenGroup struct {
@@ -42,8 +45,10 @@ func startTokenCall(t *testing.T, dir, script string) (*supervisedProcess, error
 		return nil, err
 	}
 	_ = f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), callBound)
+	defer cancel()
 	p, err := testSupervisor(t, Sequence{KillGrace: time.Second, CleanupDeadline: 10 * time.Second}).start(
-		context.Background(),
+		ctx,
 		launch{container: containTokenGroup, config: map[string]string{"Token": token}},
 		shellSpec(dir, script))
 	if err != nil {
@@ -63,11 +68,22 @@ func TestReleaseBeforeEmptyIsReported(t *testing.T) {
 		if err != nil {
 			t.Fatalf("call %d: start refused: %v", i, err)
 		}
-		_, _ = io.Copy(io.Discard, p.Output())
-		if _, err := p.Wait(); err != nil {
-			t.Fatalf("call %d: wait: %v", i, err)
+		done := make(chan error, 1)
+		go func() {
+			_, _ = io.Copy(io.Discard, p.Output())
+			_, err := p.Wait()
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("call %d: wait: %v", i, err)
+			}
+		case <-time.After(callBound):
+			_ = p.Terminate(9)
+			t.Fatalf("call %d: output and wait did not finish within %s", i, callBound)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), callBound)
 		err = p.ConfirmEmpty(ctx)
 		cancel()
 		if err != nil {
@@ -90,7 +106,11 @@ func TestLiveCallRefusesStartOnSameDirectory(t *testing.T) {
 	t.Cleanup(func() {
 		_ = p.Terminate(9)
 		_ = p.Output().Close()
-		<-p.reaped
+		select {
+		case <-p.reaped:
+		case <-time.After(callBound):
+			t.Errorf("live call was not reaped within %s", callBound)
+		}
 	})
 	if _, err := startTokenCall(t, dir, "true"); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("second start on a live call's directory: %v, want a refusal", err)
