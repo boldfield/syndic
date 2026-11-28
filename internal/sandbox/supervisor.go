@@ -486,6 +486,9 @@ func Supervise(stderr io.Writer) int {
 	for {
 		select {
 		case <-s.empty:
+			// Released before the report: once the engine has read
+			// empty, the call's files must already be gone.
+			s.release()
 			s.report(supervisorEvent{Event: eventEmpty})
 			return 0
 		case sig := <-sigs:
@@ -514,6 +517,8 @@ type supervisor struct {
 	mu        sync.Mutex
 	signalled bool // a signal was sent: the shell's exit is a termination
 	killing   bool // SIGKILL was sent: go on sending it while anything remains
+
+	releaseOnce sync.Once
 
 	exited chan struct{} // the shell has exited and been reaped
 	empty  chan struct{} // nothing contained remains
@@ -557,11 +562,15 @@ type releaser interface {
 	release()
 }
 
-// release releases the container's files, if it has any.
+// release releases the container's files, if it has any, once. It runs
+// before the supervisor reports the containment empty, and again when the
+// supervisor returns, to cover the paths that report no emptiness.
 func (s *supervisor) release() {
-	if r, ok := s.container.(releaser); ok {
-		r.release()
-	}
+	s.releaseOnce.Do(func() {
+		if r, ok := s.container.(releaser); ok {
+			r.release()
+		}
+	})
 }
 
 // newContainer constructs the container cfg names.
@@ -642,6 +651,7 @@ func (s *supervisor) terminateAlone() {
 	confirmed := s.seq.Run(s, shellExited, nil)
 	s.report(supervisorEvent{Event: eventSequence, Confirmed: confirmed})
 	<-s.empty
+	s.release()
 	s.report(supervisorEvent{Event: eventEmpty})
 }
 
