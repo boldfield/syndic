@@ -88,7 +88,7 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 	// Check that it's a regular file
 	if (stat.Mode & unix.S_IFMT) != unix.S_IFREG {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o", stat.Mode)
+		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o: %w", stat.Mode, ErrNotRegular)
 	}
 
 	return os.NewFile(uintptr(fd), path), nil
@@ -259,7 +259,7 @@ func (c *Confined) checkProtectedPaths(path string) error {
 
 	for _, pattern := range c.patterns {
 		if pattern.MatchString(normalized) {
-			return fmt.Errorf("path matches protected pattern: %q", path)
+			return fmt.Errorf("path matches protected pattern: %q: %w", path, ErrProtected)
 		}
 	}
 
@@ -340,6 +340,9 @@ var ErrSymlink = errors.New("path is a symbolic link")
 // before the last is a symbolic link: the walk refuses to follow it, and the
 // path is neither present nor absent.
 var ErrSymlinkOnPath = errors.New("path has a symbolic link on it")
+
+// ErrProtected is returned (wrapped) when a path matches a protected pattern.
+var ErrProtected = errors.New("path is protected")
 
 // IsProtected reports whether path matches a protected pattern.
 func (c *Confined) IsProtected(path string) bool {
