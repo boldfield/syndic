@@ -507,3 +507,83 @@ func TestMergeTurnStaleIncompleteReplyKeepsOverride(t *testing.T) {
 		t.Fatalf("state = %q, want overridden", got)
 	}
 }
+
+// TestApplyToolCallAccepted tests that tool call events are tracked in state.
+func TestApplyToolCallAccepted(t *testing.T) {
+	s := NewState()
+	body := map[string]interface{}{
+		"id":   "tool-call-1",
+		"name": "web_fetch",
+	}
+	bodyBytes, _ := json.Marshal(body)
+	f := wire.Frame{
+		Seq:  10,
+		Kind: wire.EventKindToolCallAccepted,
+		Body: bodyBytes,
+	}
+
+	s = apply(s, f)
+
+	if len(s.ToolCalls) != 1 {
+		t.Errorf("ToolCalls length = %d, want 1", len(s.ToolCalls))
+	}
+	if tc, ok := s.ToolCalls["tool-call-1"]; ok {
+		if tc.ID != "tool-call-1" {
+			t.Errorf("ToolCall ID = %q, want tool-call-1", tc.ID)
+		}
+		if tc.Name != "web_fetch" {
+			t.Errorf("ToolCall Name = %q, want web_fetch", tc.Name)
+		}
+	} else {
+		t.Error("tool-call-1 not found in ToolCalls")
+	}
+}
+
+// TestApplyVerdictEvidence tests that verdict evidence events update state.
+func TestApplyVerdictEvidence(t *testing.T) {
+	s := NewState()
+	s.Verdicts["verdict-1"] = VerdictInfo{ID: "verdict-1", AttemptID: "attempt-1"}
+
+	body := map[string]interface{}{
+		"verdict_id": "verdict-1",
+	}
+	bodyBytes, _ := json.Marshal(body)
+	f := wire.Frame{
+		Seq:  11,
+		Kind: wire.EventKindVerdictEvidence,
+		Body: bodyBytes,
+	}
+
+	s = apply(s, f)
+
+	if len(s.Evidence) != 1 {
+		t.Errorf("Evidence length = %d, want 1", len(s.Evidence))
+	}
+	if ei, ok := s.Evidence["verdict-1"]; ok {
+		if ei.VerdictID != "verdict-1" {
+			t.Errorf("Evidence VerdictID = %q, want verdict-1", ei.VerdictID)
+		}
+	} else {
+		t.Error("verdict-1 not found in Evidence")
+	}
+}
+
+// TestMergeTurnClearsStaleChangeSet tests that MergeTurn clears a stale ChangeSet.
+func TestMergeTurnClearsStaleChangeSet(t *testing.T) {
+	s := State{Turns: map[string]TurnInfo{
+		"t1": {
+			ID:        "t1",
+			State:     "approved",
+			ChangeSet: &wire.ChangeSetRecord{State: "applied"},
+		},
+	}}
+	s = MergeTurn(s, "t1", &wire.TurnReply{
+		State:     "approved",
+		Mode:      "review",
+		Preset:    "review",
+		ChangeSet: nil,
+	}, testTime)
+	if s.Turns["t1"].ChangeSet != nil {
+		t.Errorf("ChangeSet should be cleared but is %v", s.Turns["t1"].ChangeSet)
+	}
+}
