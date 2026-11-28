@@ -5,6 +5,7 @@ import (
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 	"os"
@@ -17,6 +18,12 @@ import (
 // first request.
 func (e *Engine) SetPayloadHook(f func(kind string, payload any) any) {
 	e.payloadHook = f
+}
+
+// SetExecBeforeRunHook installs a hook that runs after a bash call is
+// journaled and before its command is run. Call it before the first request.
+func (e *Engine) SetExecBeforeRunHook(f func()) {
+	e.execBeforeRun = f
 }
 
 // SetCrashHook installs a hook the terminal path consults after its Tx
@@ -162,6 +169,20 @@ func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) 
 	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
 }
 
+// RunBashAs runs one bash call of caller through the effect's own path with
+// no workspace, and returns the error code of the call's result. It is for
+// calls that the deterministic checks refuse, which need none.
+func (e *Engine) RunBashAs(turnID, caller, callID, cmd string) (code string, err error) {
+	e.mu.Lock()
+	t := e.open
+	e.mu.Unlock()
+	if t == nil || t.id != turnID {
+		return "", errors.New("turn not open")
+	}
+	res, err := e.runBash(nil, t, caller, "", journal.ToolCall{ID: callID, Name: tools.NameBash}, bashArgs{Command: cmd}, func() error { return nil })
+	return res.ErrorCode, err
+}
+
 // ExecOfferReason is why exec is not offered to caller outside any turn, or
 // empty when it would be.
 func (e *Engine) ExecOfferReason(caller string) string {
@@ -190,3 +211,6 @@ func (e *Engine) ProjectBudget(preset, input string) (wire.SubmitReply, error) {
 	}
 	return wire.SubmitReply{EstimatedTokens: int64(rec.Projected), Phases: rec.Phases}, nil
 }
+
+// RemoveCallArea removes a call's directory as the engine does.
+var RemoveCallArea = removeCallArea
