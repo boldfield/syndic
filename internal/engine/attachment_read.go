@@ -2,10 +2,12 @@ package engine
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
@@ -152,9 +154,9 @@ func validateAttachmentPath(path string) *wire.Error {
 		}
 	}
 
-	// No control characters
+	// No control characters (includes C0, C1, and DEL)
 	for _, r := range path {
-		if r < 0x20 || r == 0x7F {
+		if unicode.IsControl(r) {
 			reason := "form"
 			return &wire.Error{
 				Code:   "attachment",
@@ -217,12 +219,11 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 				Reason: &reason,
 			}
 		}
-		// Other errors (permissions, I/O, etc.) are generic I/O failures, not "not_found"
-		reason := "not_found"
+		// Other errors (permissions, I/O, etc.) are internal failures, not attachment refusals
+		detail := fmt.Sprintf("I/O error reading %q: %v", path, err)
 		return nil, false, &wire.Error{
-			Code:   "attachment",
-			Path:   &path,
-			Reason: &reason,
+			Code:   "internal",
+			Detail: &detail,
 		}
 	}
 	defer func() { _ = f.Close() }()
@@ -230,21 +231,19 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 	// Get file stats to extract OwnerExec bit
 	stat, err := f.Stat()
 	if err != nil {
-		reason := "not_found"
+		detail := fmt.Sprintf("stat error on %q: %v", path, err)
 		return nil, false, &wire.Error{
-			Code:   "attachment",
-			Path:   &path,
-			Reason: &reason,
+			Code:   "internal",
+			Detail: &detail,
 		}
 	}
 
 	sys, ok := stat.Sys().(*syscall.Stat_t)
 	if !ok {
-		reason := "not_found"
+		detail := fmt.Sprintf("unexpected stat representation for %q", path)
 		return nil, false, &wire.Error{
-			Code:   "attachment",
-			Path:   &path,
-			Reason: &reason,
+			Code:   "internal",
+			Detail: &detail,
 		}
 	}
 	ownerExec := (sys.Mode & unix.S_IXUSR) != 0
@@ -255,11 +254,10 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 	limitedReader := io.LimitReader(f, maxReadLimit)
 	content, err := io.ReadAll(limitedReader)
 	if err != nil {
-		reason := "not_found"
+		detail := fmt.Sprintf("read error on %q: %v", path, err)
 		return nil, false, &wire.Error{
-			Code:   "attachment",
-			Path:   &path,
-			Reason: &reason,
+			Code:   "internal",
+			Detail: &detail,
 		}
 	}
 

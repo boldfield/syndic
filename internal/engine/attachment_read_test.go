@@ -400,7 +400,7 @@ func TestReadAttachments_Protected(t *testing.T) {
 
 	_, errResp := engine.ReadAttachments(c, []string{".env"})
 	if errResp == nil || errResp.Code != "attachment" {
-		t.Errorf("got no error, want attachment error")
+		t.Fatalf("got no error, want attachment error")
 	}
 	if errResp.Reason == nil || *errResp.Reason != "protected" {
 		reasonStr := "(nil)"
@@ -472,7 +472,7 @@ func TestReadAttachments_GrowingFile(t *testing.T) {
 
 	_, errResp = engine.ReadAttachments(c, []string{"growing.txt"})
 	if errResp == nil || errResp.Code != "attachment" {
-		t.Errorf("got no error for growing file, want attachment error")
+		t.Fatalf("got no error for growing file, want attachment error")
 	}
 	if errResp.Reason == nil || *errResp.Reason != "too_large" {
 		reasonStr := "(nil)"
@@ -499,7 +499,7 @@ func TestReadAttachments_Device(t *testing.T) {
 
 	_, errResp := engine.ReadAttachments(c, []string{"testfifo"})
 	if errResp == nil || errResp.Code != "attachment" {
-		t.Errorf("got no error for FIFO, want attachment error")
+		t.Fatalf("got no error for FIFO, want attachment error")
 	}
 	if errResp.Reason == nil || *errResp.Reason != "not_regular" {
 		reasonStr := "(nil)"
@@ -578,5 +578,113 @@ func TestReadAttachments_OwnerExec(t *testing.T) {
 				t.Errorf("got OwnerExec=%v, want %v", attachments[0].OwnerExec, tt.wantExec)
 			}
 		})
+	}
+}
+
+func TestReadAttachments_IOFailure(t *testing.T) {
+	tempdir := t.TempDir()
+	c, err := workspace.OpenConfined(tempdir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Create a file with no read permissions
+	filename := filepath.Join(tempdir, "noaccess.txt")
+	if err := os.WriteFile(filename, []byte("secret"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(filename, 0644) }() // Restore for cleanup
+
+	// Try to read the unreadable file
+	_, errResp := engine.ReadAttachments(c, []string{"noaccess.txt"})
+	if errResp == nil {
+		t.Fatalf("got no error for unreadable file, want error")
+	}
+	// I/O failures should return internal error, not attachment error
+	if errResp.Code != "internal" {
+		t.Errorf("got error code %q, want \"internal\"", errResp.Code)
+	}
+	if errResp.Detail == nil {
+		t.Errorf("got no detail for internal error")
+	}
+}
+
+func TestReadAttachments_ControlCharacters(t *testing.T) {
+	tempdir := t.TempDir()
+	c, err := workspace.OpenConfined(tempdir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"C0 control (null)", "a\x00b.txt"},
+		{"C1 control (NEL U+0085)", "a\u0085b.txt"},
+		{"DEL control", "a\x7Fb.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, errResp := engine.ReadAttachments(c, []string{tt.path})
+			if errResp == nil || errResp.Code != "attachment" {
+				t.Fatalf("got no error, want attachment error")
+			}
+			if errResp.Reason == nil || *errResp.Reason != "form" {
+				reasonStr := "(nil)"
+				if errResp.Reason != nil {
+					reasonStr = *errResp.Reason
+				}
+				t.Errorf("got reason %q, want \"form\"", reasonStr)
+			}
+		})
+	}
+}
+
+func TestReadAttachments_ErrorStructure(t *testing.T) {
+	tempdir := t.TempDir()
+	c, err := workspace.OpenConfined(tempdir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	// Create a valid file
+	if err := os.WriteFile(filepath.Join(tempdir, "file.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	attachments, errResp := engine.ReadAttachments(c, []string{"file.txt"})
+	if errResp != nil {
+		t.Fatalf("got unexpected error: %v", errResp)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("got %d attachments, want 1", len(attachments))
+	}
+
+	// Test error structure for a missing file
+	_, errResp = engine.ReadAttachments(c, []string{"missing.txt"})
+	if errResp == nil {
+		t.Fatalf("got no error for missing file")
+	}
+	if errResp.Code != "attachment" {
+		t.Errorf("got code %q, want \"attachment\"", errResp.Code)
+	}
+	if errResp.Path == nil || *errResp.Path != "missing.txt" {
+		pathStr := "(nil)"
+		if errResp.Path != nil {
+			pathStr = *errResp.Path
+		}
+		t.Errorf("got path %q, want \"missing.txt\"", pathStr)
+	}
+	if errResp.Reason == nil || *errResp.Reason != "not_found" {
+		reasonStr := "(nil)"
+		if errResp.Reason != nil {
+			reasonStr = *errResp.Reason
+		}
+		t.Errorf("got reason %q, want \"not_found\"", reasonStr)
 	}
 }
