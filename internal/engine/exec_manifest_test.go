@@ -34,6 +34,20 @@ func runSandboxMember(t *testing.T, h *enginetest.Harness) map[string]json.RawMe
 	return member
 }
 
+// runSandboxPreset returns the record of preset name in member.
+func runSandboxPreset(t *testing.T, member map[string]json.RawMessage, name string) map[string]json.RawMessage {
+	t.Helper()
+	var presets map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(member["presets"], &presets); err != nil {
+		t.Fatalf("presets: %v: %s", err, member["presets"])
+	}
+	rec, ok := presets[name]
+	if !ok {
+		t.Fatalf("no preset %q in %s", name, member["presets"])
+	}
+	return rec
+}
+
 func TestRunManifestRecordsSandboxPolicy(t *testing.T) {
 	roster := execRoster(`
 [tools.exec]
@@ -44,6 +58,14 @@ network_allow = ["proxy.golang.org"]
 `)
 	h := enginetest.New(t, roster, nil, execOpts(t, passingBackend(allCaps), fakeShell(t, "bash"))...)
 	member := runSandboxMember(t, h)
+	var presets map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(member["presets"], &presets); err != nil || len(presets) != 1 {
+		t.Fatalf("presets = %s, want one exec preset (%v)", member["presets"], err)
+	}
+	var rec map[string]json.RawMessage
+	for _, r := range presets {
+		rec = r
+	}
 
 	want := sandbox.Policy{
 		Path:          "/opt/bin:/usr/bin",
@@ -57,21 +79,21 @@ network_allow = ["proxy.golang.org"]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(member["policy"]) != string(canonical) {
-		t.Fatalf("policy = %s, want %s", member["policy"], canonical)
+	if string(rec["policy"]) != string(canonical) {
+		t.Fatalf("policy = %s, want %s", rec["policy"], canonical)
 	}
 	var hash string
-	if err := json.Unmarshal(member["policy_hash"], &hash); err != nil {
+	if err := json.Unmarshal(rec["policy_hash"], &hash); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(member["policy"])
+	sum := sha256.Sum256(rec["policy"])
 	if hash != hex.EncodeToString(sum[:]) {
 		t.Fatalf("policy_hash = %s, want SHA-256 of the policy's canonical JSON", hash)
 	}
-	if string(member["backend"]) != `"fake"` || string(member["proxy"]) != "true" {
-		t.Fatalf("backend = %s, proxy = %s", member["backend"], member["proxy"])
+	if string(member["backend"]) != `"fake"` || string(member["proxy"]) != "true" || string(rec["proxy"]) != "true" {
+		t.Fatalf("backend = %s, proxy = %s, preset proxy = %s", member["backend"], member["proxy"], rec["proxy"])
 	}
-	if got := string(member["network_allow"]); got != `["proxy.golang.org"]` {
+	if got := string(rec["network_allow"]); got != `["proxy.golang.org"]` {
 		t.Fatalf("network_allow = %s", got)
 	}
 	if _, ok := member["notice"]; ok {
@@ -108,7 +130,7 @@ sandbox = "none"
 	var policy struct {
 		Capabilities []string `json:"capabilities"`
 	}
-	if err := json.Unmarshal(member["policy"], &policy); err != nil || !slices.Equal(policy.Capabilities, []string{"D"}) {
+	if err := json.Unmarshal(runSandboxPreset(t, member, "execreview")["policy"], &policy); err != nil || !slices.Equal(policy.Capabilities, []string{"D"}) {
 		t.Fatalf("capabilities = %v (%v)", policy.Capabilities, err)
 	}
 	if n := h.Engine.ExecSandboxNotice(); n != line {

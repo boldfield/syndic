@@ -47,95 +47,113 @@ type Sandbox struct {
 	Backend string
 	// Config is the backend's configuration.
 	Config map[string]string
-	// Policy is the policy as one object; the manifest records it with its
-	// hash.
-	Policy sandbox.Policy
-	// PresetNetworkAllow is the network list in force for each preset that
-	// grants exec.
-	PresetNetworkAllow map[string][]string
-	// Proxy reports whether the per-call proxy is in use.
-	Proxy bool
+	// Presets is the confinement of each preset that grants exec, by preset
+	// name. A preset's network_allow replaces the roster's, so each has its
+	// own policy.
+	Presets map[string]PresetSandbox
 	// None is true under tools.exec.sandbox = "none".
 	None bool
+}
+
+// PresetSandbox is the confinement of the commands of one preset.
+type PresetSandbox struct {
+	// Policy is the policy as one object, with the preset's network list;
+	// the manifest records it with its hash.
+	Policy sandbox.Policy
+	// Proxy reports whether the per-call proxy is in use.
+	Proxy bool
+}
+
+// Proxy reports whether the per-call proxy is in use for any preset.
+func (sb *Sandbox) Proxy() bool {
+	for _, p := range sb.Presets {
+		if p.Proxy {
+			return true
+		}
+	}
+	return false
 }
 
 // NewSandbox returns the record of how the roster's commands are confined
 // under backend, which may be nil when none is available. It returns nil
 // when no preset grants exec.
 func NewSandbox(roster *config.Roster, backend sandbox.Backend) *Sandbox {
-	nets := map[string][]string{}
-	for name, p := range roster.Presets {
-		if len(p.ExecParticipants()) > 0 {
-			nets[name] = orEmpty(roster.EffectiveNetworkAllow(p))
-		}
-	}
-	if len(nets) == 0 {
-		return nil
-	}
 	ex := roster.ExecSettings()
 	sb := &Sandbox{
-		Config:             map[string]string{},
-		PresetNetworkAllow: nets,
-		None:               ex.Sandbox == config.ExecSandboxNone,
+		Config:  map[string]string{},
+		Presets: map[string]PresetSandbox{},
+		None:    ex.Sandbox == config.ExecSandboxNone,
 	}
+	var caps sandbox.CapSet
 	if backend != nil {
 		sb.Backend = backend.Name()
 		maps.Copy(sb.Config, backend.Config())
-		sb.Policy.Capabilities, _ = backend.Capabilities()
-		if !sb.None && sb.Policy.Capabilities.Has(sandbox.N2) {
-			for _, list := range nets {
-				if len(list) > 0 {
-					sb.Proxy = true
-				}
+		caps, _ = backend.Capabilities()
+	}
+	for name, p := range roster.Presets {
+		if len(p.ExecParticipants()) == 0 {
+			continue
+		}
+		nets := orEmpty(roster.EffectiveNetworkAllow(p))
+		proxy := !sb.None && len(nets) > 0 && caps.Has(sandbox.N2)
+		names := slices.Clone(sandbox.FixedNames)
+		if proxy {
+			names = append(names, sandbox.ProxyVars...)
+		}
+		for _, n := range ex.EnvPassthrough {
+			if !sandbox.ReservedName(n) && !slices.Contains(names, n) {
+				names = append(names, n)
 			}
 		}
-	}
-	names := slices.Clone(sandbox.FixedNames)
-	if sb.Proxy {
-		names = append(names, sandbox.ProxyVars...)
-	}
-	for _, name := range ex.EnvPassthrough {
-		if !sandbox.ReservedName(name) && !slices.Contains(names, name) {
-			names = append(names, name)
+		sort.Strings(names)
+		sb.Presets[name] = PresetSandbox{
+			Policy: sandbox.Policy{
+				Path:          ex.Path,
+				ReadOnlyPaths: orEmpty(slices.Clone(ex.ReadOnlyPaths)),
+				Devices:       slices.Clone(sandbox.DeviceNodes),
+				EnvNames:      names,
+				Capabilities:  caps,
+				NetworkAllow:  nets,
+			},
+			Proxy: proxy,
 		}
 	}
-	sort.Strings(names)
-	sb.Policy.Path = ex.Path
-	sb.Policy.ReadOnlyPaths = orEmpty(slices.Clone(ex.ReadOnlyPaths))
-	sb.Policy.Devices = slices.Clone(sandbox.DeviceNodes)
-	sb.Policy.EnvNames = names
-	sb.Policy.NetworkAllow = orEmpty(slices.Clone(ex.NetworkAllow))
+	if len(sb.Presets) == 0 {
+		return nil
+	}
 	return sb
 }
 
 // sandboxToMap is the exec_sandbox member of the manifest.
 func sandboxToMap(sb *Sandbox) (map[string]interface{}, error) {
-	policy, err := sb.Policy.CanonicalJSON()
-	if err != nil {
-		return nil, fmt.Errorf("encode sandbox policy: %w", err)
-	}
-	hash, err := sb.Policy.Hash()
-	if err != nil {
-		return nil, fmt.Errorf("hash sandbox policy: %w", err)
-	}
 	var backend interface{}
 	if sb.Backend != "" {
 		backend = sb.Backend
 	}
 	cfg := map[string]string{}
 	maps.Copy(cfg, sb.Config)
-	nets := map[string][]string{}
-	for name, list := range sb.PresetNetworkAllow {
-		nets[name] = orEmpty(list)
+	presets := map[string]interface{}{}
+	for name, p := range sb.Presets {
+		policy, err := p.Policy.CanonicalJSON()
+		if err != nil {
+			return nil, fmt.Errorf("encode sandbox policy of preset %q: %w", name, err)
+		}
+		hash, err := p.Policy.Hash()
+		if err != nil {
+			return nil, fmt.Errorf("hash sandbox policy of preset %q: %w", name, err)
+		}
+		presets[name] = map[string]interface{}{
+			"policy":        json.RawMessage(policy),
+			"policy_hash":   hash,
+			"network_allow": orEmpty(p.Policy.NetworkAllow),
+			"proxy":         p.Proxy,
+		}
 	}
 	m := map[string]interface{}{
-		"backend":              backend,
-		"config":               cfg,
-		"policy":               json.RawMessage(policy),
-		"policy_hash":          hash,
-		"network_allow":        orEmpty(sb.Policy.NetworkAllow),
-		"preset_network_allow": nets,
-		"proxy":                sb.Proxy,
+		"backend": backend,
+		"config":  cfg,
+		"presets": presets,
+		"proxy":   sb.Proxy(),
 	}
 	if sb.None {
 		m["notice"] = SandboxNoneNotice
