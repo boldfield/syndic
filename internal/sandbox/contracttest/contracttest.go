@@ -385,10 +385,16 @@ func (r *running) waitFor(s string, d time.Duration) bool {
 	return false
 }
 
+// eofWait bounds the wait for the pipe's end of file after the processes are
+// gone. The end comes when the last holder of the write end exits, which on a
+// loaded machine can trail the shell's exit by more than a second; output
+// cut off before it would be judged as if the command had printed less.
+const eofWait = 10 * time.Second
+
 // terminate runs the engine's termination sequence (v7 delta, section 3,
 // "Containment and termination"): SIGTERM, the grace wait unless the shell
 // has exited, SIGKILL, and ConfirmEmpty bounded by the cleanup deadline. It
-// then reads the pipe for at most one second more and closes it.
+// then reads the pipe to its end, for at most eofWait, and closes it.
 func (r *running) terminate(t *testing.T) error {
 	t.Helper()
 	exited := false
@@ -419,7 +425,7 @@ func (r *running) terminate(t *testing.T) error {
 	}
 	select {
 	case <-r.eof:
-	case <-time.After(time.Second):
+	case <-time.After(eofWait):
 	}
 	_ = r.proc.Output().Close()
 	return confirmErr
@@ -687,15 +693,33 @@ func testConfirmAfterTerminate(t *testing.T, c *call) {
 	}
 }
 
-// beating reports whether a beater in dir is still writing its beat file.
+// beatWait bounds how long beating waits for a beat that should come every
+// beatEvery. A live beater beats within a few beatEvery even on a loaded
+// machine; the bound is generous so that only a dead beater reaches it.
+const beatWait = 3 * time.Second
+
+// beating reports whether a beater in dir is still writing its beat file. It
+// returns as soon as the file changes, and reports false only when no beat
+// has come within beatWait: the judgement waits on the beat, not on an
+// elapsed time short enough for a slow machine to outlast.
 func beating(dir string) bool {
+	return beatsWithin(dir, beatWait)
+}
+
+func beatsWithin(dir string, d time.Duration) bool {
 	read := func() string {
 		b, _ := os.ReadFile(filepath.Join(dir, beatFile))
 		return string(b)
 	}
 	before := read()
-	time.Sleep(6 * beatEvery)
-	return read() != before
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		time.Sleep(beatEvery / 5)
+		if read() != before {
+			return true
+		}
+	}
+	return false
 }
 
 // stopBeater asks any beater in dir to stop and waits until it has.
@@ -708,7 +732,7 @@ func stopBeater(t *testing.T, dir string) {
 		return
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for beating(dir) {
+	for beatsWithin(dir, 20*beatEvery) {
 		if time.Now().After(deadline) {
 			t.Errorf("a beater in %s did not stop", dir)
 			return
