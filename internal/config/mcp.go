@@ -69,6 +69,15 @@ type MCPServer struct {
 	AuthOrigins  []string   `toml:"auth_origins"`  // origins the login may use
 	Scopes       []string   `toml:"scopes"`
 	ClientID     string     `toml:"client_id"`
+
+	// keys holds the keys written in the table, so a setting of the other
+	// transport is refused even when its value is empty.
+	keys map[string]bool
+}
+
+// set reports whether the table wrote key, or its value is non-zero.
+func (s MCPServer) set(key string, nonZero bool) bool {
+	return nonZero || s.keys[key]
 }
 
 // MCPConfig is the [mcp] table: the mcp.max_* limits and one sub-table per
@@ -117,6 +126,12 @@ func (m *MCPConfig) UnmarshalTOML(data any) error {
 		}
 		if m.Servers == nil {
 			m.Servers = map[string]MCPServer{}
+		}
+		if tbl, ok := v.(map[string]any); ok {
+			s.keys = make(map[string]bool, len(tbl))
+			for k := range tbl {
+				s.keys[k] = true
+			}
 		}
 		m.Servers[name] = s
 	}
@@ -258,12 +273,12 @@ func (r *Roster) validateMCPLocal(where string, s MCPServer) []error {
 		name string
 		set  bool
 	}{
-		{"url", s.URL != ""},
-		{"auth", s.Auth != nil},
-		{"address_allow", len(s.AddressAllow) > 0},
-		{"auth_origins", len(s.AuthOrigins) > 0},
-		{"scopes", len(s.Scopes) > 0},
-		{"client_id", s.ClientID != ""},
+		{"url", s.set("url", s.URL != "")},
+		{"auth", s.set("auth", s.Auth != nil)},
+		{"address_allow", s.set("address_allow", len(s.AddressAllow) > 0)},
+		{"auth_origins", s.set("auth_origins", len(s.AuthOrigins) > 0)},
+		{"scopes", s.set("scopes", len(s.Scopes) > 0)},
+		{"client_id", s.set("client_id", s.ClientID != "")},
 	} {
 		if f.set {
 			errs = append(errs, fmt.Errorf("%s.%s is a setting of remote servers; transport is %q", where, f.name, s.Transport))
@@ -337,13 +352,13 @@ func validateMCPRemote(where string, s MCPServer) []error {
 		name string
 		set  bool
 	}{
-		{"command", s.Command != ""},
-		{"args", len(s.Args) > 0},
-		{"env", len(s.Env) > 0},
-		{"instance", s.Instance != ""},
-		{"state", s.State != ""},
-		{"workspace", s.Workspace != ""},
-		{"network_allow", len(s.NetworkAllow) > 0},
+		{"command", s.set("command", s.Command != "")},
+		{"args", s.set("args", len(s.Args) > 0)},
+		{"env", s.set("env", len(s.Env) > 0)},
+		{"instance", s.set("instance", s.Instance != "")},
+		{"state", s.set("state", s.State != "")},
+		{"workspace", s.set("workspace", s.Workspace != "")},
+		{"network_allow", s.set("network_allow", len(s.NetworkAllow) > 0)},
 	} {
 		if f.set {
 			errs = append(errs, fmt.Errorf("%s.%s is a setting of local servers; transport is %q", where, f.name, s.Transport))

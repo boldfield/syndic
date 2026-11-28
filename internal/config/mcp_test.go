@@ -165,3 +165,33 @@ func TestMCPLocalDefaults(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+func TestMCPEmptyWrongTransportSettingsRefused(t *testing.T) {
+	remote := "transport = \"http\"\nurl = \"https://a.example/mcp\"\n"
+	local := "transport = \"stdio\"\ncommand = \"x\"\n"
+	cases := []struct{ name, body, want string }{
+		{"args", remote + "args = []\n", "args"},
+		{"env", remote + "env = {}\n", "env"},
+		{"instance", remote + "instance = \"\"\n", "instance"},
+		{"network_allow", remote + "network_allow = []\n", "network_allow"},
+		{"command", remote + "command = \"\"\n", "command"},
+		{"address_allow", local + "address_allow = []\n", "address_allow"},
+		{"auth_origins", local + "auth_origins = []\n", "auth_origins"},
+		{"scopes", local + "scopes = []\n", "scopes"},
+		{"url", local + "url = \"\"\n", "url"},
+		{"client_id", local + "client_id = \"\"\n", "client_id"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, err := loadMCP(t, "[mcp.s]\n"+c.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.ApplyDefaults()
+			err = r.Validate()
+			if err == nil || !strings.Contains(err.Error(), "mcp.s."+c.want) {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
