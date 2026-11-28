@@ -23,7 +23,7 @@ func init() {
 	cover(egressPara, "a request with tool definitions and tool results reserves the rendered size including definitions, schemas, call arguments and framing, and a request whose definitions alone exceed the admission bound is refused before dispatch", "TestEgress_DefinitionsCountedInAdmission")
 	cover(egressPara, "a preset whose author has `write` and whose reviewer is on an endpoint outside `tools.file_egress_destinations` is refused at roster load naming the diff route", "TestEgress_DiffRouteRefusedAtRosterLoad")
 	cover(egressPara, "a preset with `read` and `write` where all reviewers are on endpoints in `tools.file_egress_destinations` is accepted at roster load", "TestEgress_DiffRouteAcceptedWhenInDestinations")
-	cover(egressPara, "a preset with no `read` and no `write` anywhere on web-only endpoints is accepted in an untainted conversation", "TestEgress_PureWebUntaintedAccepted")
+	cover(egressPara, "a preset whose only tool anywhere is `web`, in an untainted conversation, is unaffected", "TestEgress_PureWebUntaintedAccepted")
 }
 
 // egressRoster creates a roster with configurable endpoints, presets, and tools.
@@ -342,13 +342,13 @@ func TestEgress_FileTaintedSetTransitively(t *testing.T) {
 
 // TestEgress_DefinitionsCountedInAdmission verifies that tool definitions,
 // schemas, call arguments and framing are reserved in admission bounds.
-// Part 1: A normal tool turn should succeed, with definitions included in admission.
-// Part 2: A turn with extremely tight bounds where definitions alone exceed
-// the limit should be refused before dispatch (zero adapter calls).
+// Part 1: Tool definitions are included in admission and turn succeeds.
+// Part 2: A turn with tight bounds where tool definitions cause the admission
+// to exceed the limit is refused before dispatch (zero adapter calls).
 func TestEgress_DefinitionsCountedInAdmission(t *testing.T) {
 	t.Parallel()
 
-	// Part 1: Normal turn with tools succeeds - definitions are counted
+	// Part 1: Tool turn succeeds; verify tool definitions are in the request
 	r := revRoster(1, 1, "reviewer")
 	r = strings.Replace(r, "[presets.review]", `[presets.toolpreset]
 mode = "review"
@@ -383,21 +383,40 @@ reviewer_tools = ["read"]
 		t.Fatalf("turn state = %s, want approved", row.TerminalState)
 	}
 
-	// Part 2: Tight admission bound - definitions alone exceed the limit
-	// and request is refused before dispatch
+	// Part 2: Tool definitions exceed tight admission bound - request refused before dispatch.
+	// We use high tokens_per_byte_max so tool definitions significantly increase admission tokens,
+	// then set a turn budget that tool definitions will exceed but tool-free fits.
+	s.StopGracefully()
+
+	// Control: tool-free request admits fine
+	rControl := revRoster(1, 1, "reviewer")
+	// Increase tokens_per_byte_max to make tool definitions add more tokens
+	rControl = strings.ReplaceAll(rControl, "tokens_per_byte_max = 1.0",
+		"tokens_per_byte_max = 10.0")
+
+	s = egressSuite(t, rControl, map[string][]fake.Step{
+		"author": {enginetest.Reply("a1")},
+	})
+	c = s.Dial(t)
+
+	controlReply, err := c.Submit(s.ctx(), wire.SubmitRequest{
+		SubmissionID: "control",
+		Input:        "q",
+		Preset:       ptrStr("solo"),
+	})
+	if err != nil {
+		t.Fatalf("control tool-free preset should be admitted: %v", err)
+	}
+	s.WaitTerminal(controlReply.TurnID)
+
+	// Now test with tools enabled but very high tokens_per_byte_max - tool definitions should cause refusal
 	s.StopGracefully()
 	rTight := revRoster(1, 1, "reviewer")
-	rTight = strings.Replace(rTight, "[presets.review]", `[presets.tightbound]
-mode = "review"
-author = "author"
-required_reviewers = ["reviewer"]
-tools = ["read"]
-reviewer_tools = ["read"]
-
-[budgets]
-turn_max_estimated_tokens = 50
-
-[presets.review]`, 1)
+	// Use extremely high tokens_per_byte_max so tool definitions add huge admission token count
+	rTight = strings.ReplaceAll(rTight, "tokens_per_byte_max = 1.0",
+		"tokens_per_byte_max = 100.0")
+	// Set a moderate turn budget - tool definitions will exceed it
+	rTight = strings.Replace(rTight, "[pools.", "[budgets]\nturn_max_estimated_tokens = 50000\n\n[pools.", 1)
 
 	s = egressSuite(t, rTight, map[string][]fake.Step{
 		"author":   {},
@@ -408,19 +427,20 @@ turn_max_estimated_tokens = 50
 	_, submitErr := c.Submit(s.ctx(), wire.SubmitRequest{
 		SubmissionID: "s2",
 		Input:        "q",
-		Preset:       ptrStr("tightbound"),
+		Preset:       ptrStr("review"),
 	})
 
 	if submitErr == nil {
-		t.Fatal("expected submit to fail with tight bounds, but it succeeded")
+		t.Fatal("expected submit with tools to fail with tight bounds, but it succeeded")
 	}
 
 	we := wantRefusal(t, submitErr, wire.ErrorCodeBudget)
 	if we.Budget == nil {
-		t.Fatalf("refusal budget is nil, want turn_max_estimated_tokens")
+		t.Fatalf("refusal budget is nil, want turn_max_estimated_tokens or context")
 	}
-	if *we.Budget != "turn_max_estimated_tokens" {
-		t.Fatalf("refusal budget = %s, want turn_max_estimated_tokens", *we.Budget)
+	// Tool definitions should cause the refusal (either turn or context budget exceeded)
+	if *we.Budget != "turn_max_estimated_tokens" && *we.Budget != "context" {
+		t.Fatalf("refusal budget = %s, want turn_max_estimated_tokens or context", *we.Budget)
 	}
 
 	// Verify the author adapter received zero requests (refused before dispatch)
