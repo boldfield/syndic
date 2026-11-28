@@ -3,6 +3,7 @@ package contracttest
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,5 +249,40 @@ func AssertSecretEcho(req transport.CompleteRequest, result transport.CompleteRe
 		return errors.New("secret_echo: check result should fail")
 	}
 
+	return nil
+}
+
+// AssertClassConsistent validates that a result's failure class agrees with
+// its TransportStatus: a transport-ok result has none, and every other
+// TransportStatus has the class section 7 of the v10 delta gives it.
+func AssertClassConsistent(result transport.CompleteResult) error {
+	ts := result.TransportStatus
+	var want transport.FailureClass
+	switch {
+	case ts == transport.TransportStatusOK || ts == "":
+		want = transport.FailureClassNone
+	case ts == transport.TransportStatusUnreachable:
+		want = transport.FailureClassUnreachable
+	case ts == transport.TransportStatusTimeout || ts == transport.TransportStatusReset:
+		want = transport.FailureClassUncertain
+	case ts == transport.TransportStatusMalformedBody:
+		want = transport.FailureClassBadResponse
+	case ts == transport.TransportStatusUnauthorized || ts == transport.TransportStatusModelUnavailable:
+		want = transport.FailureClassRejectedConfig
+	case strings.HasPrefix(ts, "http_"):
+		code, err := strconv.Atoi(strings.TrimPrefix(ts, "http_"))
+		if err != nil {
+			return fmt.Errorf("class: transport status %q is not http_<code>", ts)
+		}
+		want = transport.Classify(transport.ClassifyInput{Received: true, HTTPStatus: code, TransportStatus: ts})
+	default:
+		if result.FailureClass == transport.FailureClassNone {
+			return fmt.Errorf("class: failed result with transport status %q carries no class", ts)
+		}
+		return nil
+	}
+	if result.FailureClass != want {
+		return fmt.Errorf("class: transport status %q has class %q, want %q", ts, result.FailureClass, want)
+	}
 	return nil
 }
