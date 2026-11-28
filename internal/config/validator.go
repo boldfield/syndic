@@ -620,8 +620,8 @@ func (r *Roster) Validate() error {
 	}
 
 	// Validate tool sets
-	validAuthorTools := map[string]bool{"read": true, "web": true, "write": true}
-	validReviewerTools := map[string]bool{"read": true, "web": true}
+	validAuthorTools := map[string]bool{"read": true, "web": true, "write": true, "exec": true}
+	validReviewerTools := map[string]bool{"read": true, "web": true, "exec": true}
 
 	for name, preset := range r.Presets {
 		// Validate author tools
@@ -895,6 +895,8 @@ func (r *Roster) Validate() error {
 			}
 		}
 	}
+
+	errs = append(errs, r.validateExec()...)
 
 	// Validate Quick profiles
 	for profileName, qp := range r.Quick {

@@ -42,22 +42,28 @@ func (p Preset) GrantsFileTools() bool {
 
 // WebParticipants returns the participants the preset gives web, author
 // first.
-func (p Preset) WebParticipants() []string {
+func (p Preset) WebParticipants() []string { return p.toolParticipants("web") }
+
+// ExecParticipants returns the participants the preset gives exec, author
+// first.
+func (p Preset) ExecParticipants() []string { return p.toolParticipants("exec") }
+
+func (p Preset) toolParticipants(group string) []string {
 	if p.Mode == ModeDeliberate {
 		v := p.deliberateEgressView()
-		ids := v.WebParticipants()
+		ids := v.toolParticipants(group)
 		// The integrator also proposes and critiques, so it holds
 		// reviewer_tools in those phases.
-		if slices.Contains(p.ReviewerTools, "web") && !slices.Contains(ids, p.Integrator) {
+		if slices.Contains(p.ReviewerTools, group) && !slices.Contains(ids, p.Integrator) {
 			ids = append(ids, p.Integrator)
 		}
 		return ids
 	}
 	var ids []string
-	if slices.Contains(p.Tools, "web") {
+	if slices.Contains(p.Tools, group) {
 		ids = append(ids, p.Author)
 	}
-	if slices.Contains(p.ReviewerTools, "web") {
+	if slices.Contains(p.ReviewerTools, group) {
 		ids = append(ids, p.RequiredReviewers...)
 	}
 	return ids
@@ -194,4 +200,26 @@ func (p Preset) deliberateEgressView() Preset {
 		}
 	}
 	return v
+}
+
+// ExecSettings returns the roster's resolved [tools.exec], with defaults for
+// anything absent.
+func (r *Roster) ExecSettings() ExecSettings {
+	if r.Tools == nil {
+		return (*ExecConfig)(nil).Settings()
+	}
+	return r.Tools.Exec.Settings()
+}
+
+// EffectiveNetworkAllow returns the exec network list for the preset: the
+// preset's own network_allow when it sets one, which replaces the roster's,
+// else tools.exec.network_allow.
+func (r *Roster) EffectiveNetworkAllow(p Preset) []string {
+	if p.NetworkAllow != nil {
+		return slices.Clone(p.NetworkAllow)
+	}
+	if r.Tools != nil && r.Tools.Exec != nil {
+		return slices.Clone(r.Tools.Exec.NetworkAllow)
+	}
+	return nil
 }
