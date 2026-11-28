@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/boldfield/syndic/internal/config"
 	"github.com/boldfield/syndic/internal/history"
@@ -74,7 +75,11 @@ func (e *Engine) searchOffered() bool { return e.searchOffReason() == "" }
 // offered: tools.ForGroups with web_search included only when it is offered,
 // and without web_fetch, which has no effect in the engine yet and so must
 // not be advertised.
+//
+// An MCP grant names no group: the tools it grants are listed and pinned
+// per turn (mcp_offer.go), so it is left out here.
 func (e *Engine) groupDefs(groups []string) ([]transport.Tool, error) {
+	groups = slices.DeleteFunc(slices.Clone(groups), config.IsMCPGrant)
 	defs, err := tools.ForGroups(groups, e.searchOffered())
 	if err != nil {
 		return nil, err

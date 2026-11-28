@@ -435,14 +435,22 @@ func (e *Engine) roleToolDefs(t *openTurn, groups []string, caller string, remai
 			offered = append(offered, g)
 		}
 	}
-	if len(offered) == 0 {
+	mcpDefs, err := e.mcpDefs(t, groups, caller)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(offered) == 0 && len(mcpDefs) == 0 {
 		return nil, false, nil
 	}
 	if remaining <= 0 {
 		return nil, true, nil
 	}
-	defs, err = e.groupDefs(offered)
-	return defs, false, err
+	if len(offered) > 0 {
+		if defs, err = e.groupDefs(offered); err != nil {
+			return nil, false, err
+		}
+	}
+	return append(defs, mcpDefs...), false, nil
 }
 
 // groupOffered reports whether the caller may be offered the group's tools:
@@ -533,6 +541,11 @@ func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, caller, attemp
 		effects[tools.NameWriteFile] = wrap(write.WriteFile)
 		effects[tools.NameEditFile] = wrap(write.EditFile)
 		effects[tools.NameUnstage] = wrap(write.Unstage)
+	}
+	for _, grants := range [][]string{t.eff.Preset.Tools, t.eff.Preset.ReviewerTools} {
+		for _, en := range e.mcpEntries(t, grants, caller) {
+			effects[en.Name] = e.mcpPlaceholderEffect()
+		}
 	}
 	if e.searchOffered() {
 		effects[tools.NameWebSearch] = e.webSearchEffect(t, caller, attemptID, hook)

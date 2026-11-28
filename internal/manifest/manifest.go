@@ -33,6 +33,27 @@ type Input struct {
 	// Sandbox is how the run's commands are confined; nil when no preset
 	// grants exec, and the manifest then has no exec_sandbox member.
 	Sandbox *Sandbox
+	// MCP is what the run records of its MCP servers; nil when the roster
+	// configures none, and the manifest then has no mcp member.
+	MCP *MCP
+}
+
+// MCP is what the run manifest records of MCP tools (v9 delta, section 2,
+// "Pins"; section 3, "Revisions").
+type MCP struct {
+	// PinFileSHA256 is the hash of the pin file as read at engine start.
+	PinFileSHA256 string
+	// Servers is the revision in use with each configured server, by name.
+	Servers map[string]MCPServer
+}
+
+// MCPServer is one server's record.
+type MCPServer struct {
+	// Revision is the protocol revision in use with the server; empty when
+	// the listing at engine start did not establish one.
+	Revision string
+	// Detail says why Revision is empty.
+	Detail string
 }
 
 // SandboxNoneNotice is the line the participants reply, the engine's start
@@ -457,6 +478,21 @@ func buildManifestJSON(in Input, participants map[string]Participant, probeManif
 			return nil, "", "", err
 		}
 		manifest["exec_sandbox"] = sb
+	}
+
+	if in.MCP != nil {
+		servers := make(map[string]interface{}, len(in.MCP.Servers))
+		for name, srv := range in.MCP.Servers {
+			rec := map[string]interface{}{"revision": srv.Revision}
+			if srv.Detail != "" {
+				rec["detail"] = srv.Detail
+			}
+			servers[name] = rec
+		}
+		manifest["mcp"] = map[string]interface{}{
+			"pin_file_sha256": in.MCP.PinFileSHA256,
+			"servers":         servers,
+		}
 	}
 
 	manifestJSON, err := canonicalJSON(manifest)

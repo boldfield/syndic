@@ -270,6 +270,7 @@ func (e *Engine) participantStatus(p config.Participant) wire.Participant {
 			ws.SearchOff = &reason
 		}
 	}
+	ws.MCPOff = e.mcpOffFor(p.ID)
 	return ws
 }
 

@@ -18,6 +18,9 @@ import (
 // runTurn hands the turn's author dispatch to the scheduler. The dispatch
 // runs at once when the author's pool has a free slot and queues otherwise.
 func (e *Engine) runTurn(t *openTurn) {
+	// What the turn offers is decided before anything is dispatched, from the
+	// pin file read at submit and a listing taken now.
+	e.prepareMCPTurn(t)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.open != t {
