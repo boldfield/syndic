@@ -897,6 +897,7 @@ func (r *Roster) Validate() error {
 	}
 
 	errs = append(errs, r.validateExec()...)
+	errs = append(errs, r.validateMCP()...)
 
 	// Validate Quick profiles
 	for profileName, qp := range r.Quick {

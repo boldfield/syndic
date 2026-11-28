@@ -440,6 +440,7 @@ type Roster struct {
 	Pools         map[string]Pool         `toml:"pools"`
 	Quick         map[string]QuickProfile `toml:"quick"`
 	Tools         *ToolsConfig            `toml:"tools"`
+	MCP           *MCPConfig              `toml:"mcp"`
 }
 
 // String returns a string representation that never contains resolved secret values.
@@ -592,6 +593,9 @@ func (r *Roster) ApplyDefaults() {
 		r.Tools.Exec = &ExecConfig{}
 	}
 	r.Tools.Exec.applyDefaults()
+	if r.MCP != nil {
+		r.MCP.applyDefaults()
+	}
 }
 
 // Resolve resolves deadlines and budgets for a given preset and quick profile.
