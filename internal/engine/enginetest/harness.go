@@ -340,6 +340,19 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		hn.gated[p.ID] = &gatedAdapter{inner: fa, dead: &hn.dead}
 	}
 
+	// Also create adapters for non-participant scripts (e.g., referee participants).
+	rosterIDs := make(map[string]bool)
+	for _, p := range roster.Participants {
+		rosterIDs[p.ID] = true
+	}
+	for scriptID, steps := range scripts {
+		if !rosterIDs[scriptID] {
+			fa := fake.New(steps, fake.Options{DefaultReportedModel: DefaultReportedModel, CancelUnconfirmed: o.unconfirmed, BlockingCancel: o.blockingCancel})
+			hn.Adapters[scriptID] = fa
+			hn.gated[scriptID] = &gatedAdapter{inner: fa, dead: &hn.dead}
+		}
+	}
+
 	eng, err := engine.New(engine.Options{
 		Store:         store,
 		Hub:           h,
@@ -396,6 +409,16 @@ func seedProbeRecords(t *testing.T, store *journal.Store, roster *config.Roster,
 	}
 	for key := range o.modelToolCalls {
 		targets = append(targets, target{"", key[0], key[1]})
+	}
+	// Also seed probe records for referee models on each endpoint.
+	for _, ep := range roster.Endpoints {
+		if ep.RefereeModel != "" {
+			refEndpoint := ep.Name
+			if ep.RefereeEndpoint != "" {
+				refEndpoint = ep.RefereeEndpoint
+			}
+			targets = append(targets, target{"", refEndpoint, ep.RefereeModel})
+		}
 	}
 	for _, p := range targets {
 		key := [2]string{p.endpoint, p.model}

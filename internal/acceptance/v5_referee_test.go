@@ -183,7 +183,7 @@ func TestReferee_PayloadAuthorizedFieldsOnly(t *testing.T) {
 			refereeFetchStep("fetching a page", refereeFetch("f1", "http://example.com/page")),
 			enginetest.Reply("checked the page"),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -212,7 +212,7 @@ func TestReferee_PayloadAuthorizedFieldsOnly(t *testing.T) {
 		t.Fatalf("%d referee decisions, want 1", len(ds))
 	}
 
-	refRequests := s.Adapters["m-referee"].Calls()
+	refRequests := s.Adapters["referee:ep2:m-referee"].Calls()
 	if len(refRequests) == 0 {
 		t.Fatal("no referee requests recorded")
 	}
@@ -318,7 +318,7 @@ max_output_tokens = 64
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -352,7 +352,7 @@ func TestReferee_FlatEndpointProbed(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -414,7 +414,7 @@ func TestReferee_DenyYieldsToolError(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -453,7 +453,7 @@ func TestReferee_FailureYieldsDeny(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			failStep(transport.TransportStatusReset, transport.StatusInterrupted),
 		},
@@ -483,7 +483,7 @@ func TestReferee_LateAllowQuarantined(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -572,7 +572,7 @@ max_output_tokens = 64
 		"author": {
 			refereeFetchStep("fetching", refereeFetch("f1", "http://example.com")),
 		},
-		"m-referee": {
+		"referee:ep:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -605,13 +605,16 @@ func TestReferee_NotAskedForRefusedURL(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
+		"referee:ep2:m-referee": {
+			probeStep(),
+		},
 	})
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "test")
 	s.WaitTerminal(turnID)
 	wantTurn(t, s.Turn(t, c, turnID), engine.StateApproved, "all_approved")
 
-	refCalls := s.Adapters["m-referee"].Calls()
+	refCalls := s.Adapters["referee:ep2:m-referee"].Calls()
 	if len(refCalls) > 0 {
 		t.Error("referee should not be consulted for pre-send refused URL")
 	}
@@ -629,7 +632,7 @@ func TestReferee_DecisionReservedChargedReconciled(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -672,7 +675,7 @@ func TestReferee_ManifestCarriesModel(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
@@ -706,7 +709,7 @@ func TestReferee_TranscriptShowsDecision(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-		"m-referee": {
+		"referee:ep2:m-referee": {
 			probeStep(),
 			fake.Step{
 				Kind:               fake.StepKindReply,
