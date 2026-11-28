@@ -17,3 +17,10 @@ func platformBackend(ctx context.Context, sup sandbox.Supervisor, sys sandbox.Sy
 	}
 	return nil
 }
+
+// fixtureUnix is false here: the call's proxy listener is a loopback TCP
+// listener, named by its own address.
+const (
+	fixtureUnix      = false
+	fixtureProxyAddr = ""
+)

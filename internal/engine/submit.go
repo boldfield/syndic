@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/boldfield/syndic/internal/config"
@@ -40,6 +41,14 @@ type openTurn struct {
 	// execTurn is the turn's self-test before its first command; nil until
 	// then. Owned by Engine.mu.
 	execTurn *execTurn
+
+	// Proposal-phase state of a deliberate turn, owned by Engine.mu.
+	// proposals holds each accepted proposal's text in roster order and
+	// proposalAttempts maps each proposal attempt to its proposer.
+	proposers        []string
+	proposals        []string
+	proposalsDone    int
+	proposalAttempts map[string]string
 
 	// Review state, owned by Engine.mu.
 	required      []string
@@ -244,13 +253,15 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		return wire.SubmitReply{}, err
 	}
 
+	// A deliberate preset's author is its integrator, and its required
+	// reviewers may be implied.
+	author, required, thinkers := eff.Preset.Author, eff.Preset.RequiredReviewers, []string{eff.Preset.Author}
 	if eff.Preset.Mode == config.ModeDeliberate {
-		invalid := refusal(wire.ErrorCodePresetInvalid)
-		invalid.Detail = strPtr("deliberate_mode_unsupported")
-		return wire.SubmitReply{}, invalid
+		author, required = eff.Preset.DeliberateIntegrator(), eff.Preset.EffectiveRequiredReviewers()
+		thinkers = append(eff.Preset.DeliberateProposers(), author)
 	}
 
-	for _, id := range eff.Preset.RequiredReviewers {
+	for _, id := range required {
 		p := e.built.Participants[id]
 		if p.EligibleRequiredReviewer == transport.TriNo {
 			invalid := refusal(wire.ErrorCodePresetInvalid)
@@ -267,7 +278,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		}
 	}
 
-	for _, id := range append([]string{eff.Preset.Author}, eff.Preset.RequiredReviewers...) {
+	for _, id := range append(slices.Clone(thinkers), required...) {
 		if mp := e.built.Participants[id]; !mp.Usable {
 			unprobed := refusal(wire.ErrorCodeUnprobed)
 			unprobed.Participant = strPtr(id)
@@ -280,14 +291,14 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 
 	// Check tool capability requirement: tool-granted roles must have tool_calls: yes
 	if len(eff.Preset.Tools) > 0 {
-		if mp := e.built.Participants[eff.Preset.Author]; mp.ToolCalls != transport.TriYes {
+		if mp := e.built.Participants[author]; mp.ToolCalls != transport.TriYes {
 			invalid := refusal(wire.ErrorCodePresetInvalid)
-			invalid.Detail = strPtr("no_tool_calls:" + eff.Preset.Author)
+			invalid.Detail = strPtr("no_tool_calls:" + author)
 			return wire.SubmitReply{}, invalid
 		}
 	}
 	if len(eff.Preset.ReviewerTools) > 0 {
-		for _, id := range eff.Preset.RequiredReviewers {
+		for _, id := range append(slices.Clone(thinkers[:len(thinkers)-1]), required...) {
 			if mp := e.built.Participants[id]; mp.ToolCalls != transport.TriYes {
 				invalid := refusal(wire.ErrorCodePresetInvalid)
 				invalid.Detail = strPtr("no_tool_calls:" + id)
@@ -385,12 +396,18 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			}
 			contextHash, ctxHash = hash, &hash
 		}
+		// A deliberate turn is a review-mode turn once it has a candidate; its
+		// own mode is the deliberation mode the first phase marks.
+		journalMode := eff.Preset.Mode
+		if journalMode == config.ModeDeliberate {
+			journalMode = modeReview
+		}
 		turnID, err = tx.CreateEngineTurn(journal.TurnParams{
 			ConversationID:    convID,
 			ContextHash:       ctxHash,
 			FileTainted:       tainted,
 			RunID:             e.runID,
-			Mode:              eff.Preset.Mode,
+			Mode:              journalMode,
 			Preset:            eff.PresetName,
 			QuickProfile:      eff.QuickProfile,
 			SubmissionID:      req.SubmissionID,
@@ -430,7 +447,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 	t := &openTurn{
 		id:              turnID,
 		mode:            eff.Preset.Mode,
-		author:          eff.Preset.Author,
+		author:          author,
 		input:           req.Input,
 		history:         doc,
 		contextHash:     contextHash,
@@ -439,7 +456,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		turnDeadline:    turnDeadline,
 		workspace:       workspace,
 		screener:        screener,
-		required:        eff.Preset.RequiredReviewers,
+		required:        required,
 		approved:        map[string]bool{},
 		results:         map[string]reviewResult{},
 		maxRounds:       maxRounds,

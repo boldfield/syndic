@@ -11,8 +11,8 @@ import (
 // execOptions is the daemon's wiring of command execution: the supervisor is
 // this binary's hidden subcommand, the backend the platform's, and the
 // self-test keeps its check-2 file in the engine's state directory. The
-// self-test's network fixture is left unset: with a network list in force
-// check 6 then fails and exec is unoffered, until a proxy fixture is wired.
+// self-test's network fixture is selfTestNetwork, for check 6 under a
+// network list.
 func execOptions(stateDir string) (engine.ExecOptions, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -24,6 +24,6 @@ func execOptions(stateDir string) (engine.ExecOptions, error) {
 	return engine.ExecOptions{
 		Supervisor: sandbox.Supervisor{Command: []string{exe, sandbox.SupervisorArg}},
 		NewBackend: platformBackend,
-		SelfTest:   sandbox.SelfTestConfig{StateDir: stateDir, Helper: exe},
+		SelfTest:   sandbox.SelfTestConfig{StateDir: stateDir, Helper: exe, Network: selfTestNetwork},
 	}, nil
 }
