@@ -159,6 +159,10 @@ type Error struct {
 	// Paths names the change-set paths a base_changed refusal found not at
 	// their base.
 	Paths []string `json:"paths,omitempty"`
+	// Path and Reason say which attachment an attachment refusal is about
+	// and why (v6 section 4).
+	Path   *string `json:"path,omitempty"`
+	Reason *string `json:"reason,omitempty"`
 }
 
 func (e *Error) Error() string {
@@ -825,6 +829,7 @@ const (
 	ErrorCodeBaseChanged         = "base_changed"
 	ErrorCodeWorkspaceMissing    = "workspace_missing"
 	ErrorCodeNotAppliable        = "not_appliable"
+	ErrorCodeAttachment          = "attachment"
 )
 
 // String constants for event kinds
