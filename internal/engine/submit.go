@@ -13,6 +13,7 @@ import (
 	"github.com/boldfield/syndic/internal/history"
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
+	"github.com/boldfield/syndic/internal/mcp"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
@@ -47,6 +48,13 @@ type openTurn struct {
 	// command's scratch directory.
 	execCalls  map[string]int
 	submitTime time.Time
+
+	// The pin file as read at submit, fixed for the turn, and what the turn
+	// offers from it; mcp is set once by prepareMCPTurn.
+	mcpPins    *mcp.Snapshot
+	mcpPinHash string
+	mcpPinErr  error
+	mcp        *mcpTurn
 
 	// Proposal-phase state of a deliberate turn, owned by Engine.mu.
 	// proposals holds each accepted proposal's text in roster order and
@@ -335,6 +343,16 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		maxRounds = *req.MaxRounds
 	}
 
+	// The pin file is read once, here, and is fixed for the turn.
+	var (
+		mcpPins    *mcp.Snapshot
+		mcpPinHash string
+		mcpPinErr  error
+	)
+	if len(mcpServerNames(e.roster)) > 0 {
+		mcpPins, mcpPinHash, mcpPinErr = readMCPPins(e.roster, e.rosterAbs)
+	}
+
 	attempt := eff.Deadlines.Attempt.Duration
 	turn := eff.Deadlines.Turn.Duration
 	turnDeadline := e.clock.Now().UTC().Add(turn)
@@ -457,6 +475,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if err != nil {
 			return err
 		}
+		if mcpPinHash != "" {
+			if err := tx.SetTurnMCPPinFile(turnID, mcpPinHash); err != nil {
+				return err
+			}
+		}
 		submitted := wire.EvTurnSubmitted{
 			TurnID:          turnID,
 			SubmissionID:    req.SubmissionID,
@@ -498,6 +521,9 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		maxRounds:       maxRounds,
 		stopAttempt:     map[string]func() bool{},
 		pending:         map[string]time.Time{},
+		mcpPins:         mcpPins,
+		mcpPinHash:      mcpPinHash,
+		mcpPinErr:       mcpPinErr,
 	}
 	e.open = t
 	e.armTurn(t)

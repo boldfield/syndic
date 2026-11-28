@@ -128,6 +128,7 @@ type options struct {
 	searchNet      *tools.SearchNetwork
 	secrets        config.SecretResolver
 	exec           engine.ExecOptions
+	mcp            engine.MCPOptions
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -238,6 +239,11 @@ func WithSecrets(r config.SecretResolver) Option {
 // through Options.Exec.
 func WithExec(x engine.ExecOptions) Option {
 	return func(o *options) { o.exec = x }
+}
+
+// WithMCP sets the engine's seam to MCP servers.
+func WithMCP(m engine.MCPOptions) Option {
+	return func(o *options) { o.mcp = m }
 }
 
 // NoStart builds the engine without starting it.
@@ -364,6 +370,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		SearchNetwork:      o.searchNet,
 		Secrets:            o.secrets,
 		Exec:               o.exec,
+		MCP:                o.mcp,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {

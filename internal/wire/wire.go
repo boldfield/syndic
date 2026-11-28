@@ -299,6 +299,16 @@ type Participant struct {
 	// the named provider is not one this build supports, or the provider host
 	// fails a pre-send check or the allowlist (v5 delta section 6).
 	SearchOff *string `json:"search_off,omitempty"`
+	// MCPOff names each MCP tool a preset gives the participant that was not
+	// offered at the last listing, and why (v9 delta, section 2, "Pins").
+	MCPOff []MCPOff `json:"mcp_off,omitempty"`
+}
+
+// MCPOff is one MCP tool that is not offered, with the reason.
+type MCPOff struct {
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
+	Reason string `json:"reason"`
 }
 
 // ProbeSubject represents a probe target that is not a participant (e.g., a referee).

@@ -178,6 +178,7 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 		RosterPath:    rosterAbs,
 		EngineVersion: version,
 		NewAdapter:    newAdapterFunc,
+		MCP:           newMCPOptions(config.NewEnvFileResolver(absPath(*secretsDir))),
 
 		ProbeMissing:   *probeMissing,
 		ProbeRawDir:    *probeRawDir,

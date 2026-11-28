@@ -195,6 +195,11 @@ type Options struct {
 	// self-test's fixtures. The zero value leaves exec unoffered under
 	// sandbox = "required" (v7 delta, section 3).
 	Exec ExecOptions
+
+	// MCP is the engine's seam to MCP servers: how a server is listed. The
+	// daemon lists remote servers; a server with no listing stays unoffered
+	// and the participants reply says so. Tests inject fakes.
+	MCP MCPOptions
 }
 
 // Engine is the review engine.
@@ -222,6 +227,7 @@ type Engine struct {
 	searchNet       *tools.SearchNetwork                    // nil means the system resolver and dialer
 	secrets         config.SecretResolver
 	exec            ExecOptions
+	mcp             MCPOptions
 
 	// execGate is the run's one execution gate (v7 delta, section 3,
 	// "Containment unverified"), open until a command's containment is
@@ -289,6 +295,9 @@ type Engine struct {
 	// execState is what Start decided for exec: backend, shell and the reason
 	// it is unoffered, if it is. Nil before Start. Owned by mu.
 	execState *execState
+
+	// mcpOff is the MCP tools the latest listing did not offer. Owned by mu.
+	mcpOff []wire.MCPOff
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -330,6 +339,7 @@ func New(o Options) (*Engine, error) {
 		searchNet:       o.SearchNetwork,
 		secrets:         o.Secrets,
 		exec:            o.Exec,
+		mcp:             o.MCP,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),
@@ -567,6 +577,12 @@ func (e *Engine) Start() error {
 	}
 	e.addRefereeAdapters(roster, adapters, versions)
 
+	// The servers are listed with e.mu released: a listing reaches a server.
+	e.mu.Unlock()
+	mcpRecord, mcpOff := e.mcpStartRecord(context.Background(), roster, path)
+	e.mu.Lock()
+	e.mcpOff = mcpOff
+
 	startedAt := e.clock.Now().UTC()
 	execSandbox := manifest.NewSandbox(roster, execSt.backend)
 	build := func() (manifest.Built, error) {
@@ -579,6 +595,7 @@ func (e *Engine) Start() error {
 			StartedAt:      startedAt,
 			AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
 			Sandbox:        execSandbox,
+			MCP:            mcpRecord,
 		})
 	}
 	built, err := build()
