@@ -34,7 +34,9 @@ const maxTokenBytes = 1 << 20
 
 // LoginOptions is what Login needs beyond discovery.
 type LoginOptions struct {
-	// ClientID is mcp.<server>.client_id, the client the operator registered.
+	// ClientID is mcp.<server>.client_id, the client the operator registered;
+	// it is used when the server accepts neither a client ID metadata
+	// document nor registration.
 	ClientID string
 	// Scopes is mcp.<server>.scopes. When empty, the scopes the
 	// protected-resource metadata names are asked for.
@@ -69,13 +71,14 @@ func LoginKey(issuer, resource, clientID string) []string {
 // Login runs steps 1 to 6 for the server and returns the new generation of
 // the stored login. Nothing is stored unless every check has passed.
 func (d *Discoverer) Login(ctx context.Context, opts LoginOptions) (string, error) {
-	if opts.ClientID == "" {
-		return "", errors.New("login: no client identity: set mcp.<server>.client_id")
-	}
 	if opts.Store == nil {
 		return "", errors.New("login: no secret store")
 	}
 	disc, err := d.Discover(ctx)
+	if err != nil {
+		return "", err
+	}
+	client, err := d.resolveClient(ctx, disc, opts.ClientID, opts.Store)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +105,7 @@ func (d *Discoverer) Login(ctx context.Context, opts LoginOptions) (string, erro
 	}
 	q := url.Values{}
 	q.Set("response_type", "code")
-	q.Set("client_id", opts.ClientID)
+	q.Set("client_id", client.ID)
 	q.Set("redirect_uri", redirect)
 	q.Set("state", state)
 	q.Set("code_challenge", challenge)
@@ -134,7 +137,7 @@ func (d *Discoverer) Login(ctx context.Context, opts LoginOptions) (string, erro
 	if opts.Now != nil {
 		now = opts.Now
 	}
-	tok, err := d.exchange(ctx, disc, opts.ClientID, code, verifier, redirect, now)
+	tok, err := d.exchange(ctx, disc, client, code, verifier, redirect, now)
 	if err != nil {
 		return "", err
 	}
@@ -142,7 +145,7 @@ func (d *Discoverer) Login(ctx context.Context, opts LoginOptions) (string, erro
 	if err != nil {
 		return "", err
 	}
-	return opts.Store.Put(LoginKey(disc.Issuer, disc.Resource, opts.ClientID), rec, true)
+	return opts.Store.Put(LoginKey(disc.Issuer, disc.Resource, client.ID), rec, true)
 }
 
 // checkResponse applies step 5 to the authorization response (the state has
@@ -165,12 +168,15 @@ func checkResponse(p url.Values, disc *Discovery) (string, error) {
 	return code, nil
 }
 
-func (d *Discoverer) exchange(ctx context.Context, disc *Discovery, clientID, code, verifier, redirect string, now func() time.Time) (*Tokens, error) {
+func (d *Discoverer) exchange(ctx context.Context, disc *Discovery, client ClientIdentity, code, verifier, redirect string, now func() time.Time) (*Tokens, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", redirect)
-	form.Set("client_id", clientID)
+	form.Set("client_id", client.ID)
+	if client.Secret != "" {
+		form.Set("client_secret", client.Secret)
+	}
 	form.Set("code_verifier", verifier)
 	form.Set("resource", disc.Resource)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, disc.Metadata.TokenEndpoint, strings.NewReader(form.Encode()))
@@ -179,9 +185,9 @@ func (d *Discoverer) exchange(ctx context.Context, disc *Discovery, clientID, co
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	client, done := d.clientFor(req.URL)
+	hc, done := d.clientFor(req.URL)
 	defer done()
-	resp, err := client.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("login: token request: %w", err)
 	}
@@ -211,7 +217,7 @@ func (d *Discoverer) exchange(ctx context.Context, disc *Discovery, clientID, co
 		return nil, errors.New("login: token response carries no bearer access token")
 	}
 	t := &Tokens{
-		Issuer: disc.Issuer, Resource: disc.Resource, ClientID: clientID,
+		Issuer: disc.Issuer, Resource: disc.Resource, ClientID: client.ID,
 		AccessToken: tr.AccessToken, TokenType: "Bearer", RefreshToken: tr.RefreshToken, Scope: tr.Scope,
 	}
 	if tr.ExpiresIn > 0 {

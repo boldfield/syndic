@@ -52,6 +52,8 @@ func runLogin(t *testing.T, s *authtest.Server, resourcePath string, edit func(u
 
 func runLoginWith(t *testing.T, s *authtest.Server, resourcePath string, store *secretstore.Store, edit func(url.Values), replay bool) *loginRun {
 	t.Helper()
+	// These tests exercise the flow with the hand-registered client.
+	s.Set(func(c *authtest.Config) { c.AcceptMetadataDocument, c.AcceptRegistration = false, false })
 	d, err := NewDiscoverer(Config{URL: s.URL + resourcePath, AuthOrigins: []string{s.URL}})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +211,7 @@ func TestLoginTwoResourcesStoredSeparately(t *testing.T) {
 }
 
 func TestLoginNeedsClientID(t *testing.T) {
-	s := authtest.New(t)
+	s := authtest.New(t, func(c *authtest.Config) { c.AcceptMetadataDocument, c.AcceptRegistration = false, false })
 	store, _ := secretstore.Open(t.TempDir())
 	d, err := NewDiscoverer(Config{URL: s.ResourceURL(), AuthOrigins: []string{s.URL}})
 	if err != nil {
