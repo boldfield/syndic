@@ -696,7 +696,7 @@ func testConfirmAfterTerminate(t *testing.T, c *call) {
 // beatWait bounds how long beating waits for a beat that should come every
 // beatEvery. A live beater beats within a few beatEvery even on a loaded
 // machine; the bound is generous so that only a dead beater reaches it.
-const beatWait = 3 * time.Second
+const beatWait = time.Second
 
 // beating reports whether a beater in dir is still writing its beat file. It
 // returns as soon as the file changes, and reports false only when no beat
@@ -732,7 +732,7 @@ func stopBeater(t *testing.T, dir string) {
 		return
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for beatsWithin(dir, 20*beatEvery) {
+	for beatsWithin(dir, 10*beatEvery) {
 		if time.Now().After(deadline) {
 			t.Errorf("a beater in %s did not stop", dir)
 			return
