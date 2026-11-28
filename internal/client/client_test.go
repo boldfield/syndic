@@ -1307,7 +1307,8 @@ func TestApplyRetry(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if frame.Type == wire.RequestHello {
+			switch frame.Type {
+			case wire.RequestHello:
 				reply, _ := wire.NewReply(frame.ID, wire.HelloReply{
 					EngineVersion: "1.0",
 					Protocol:      1,
@@ -1318,7 +1319,7 @@ func TestApplyRetry(t *testing.T) {
 					State:         "started",
 				})
 				_ = w.Write(reply)
-			} else if frame.Type == wire.RequestApply {
+			case wire.RequestApply:
 				requestCount++
 				reply, _ := wire.NewReply(frame.ID, wire.ApplyReply{
 					State: "applied",
@@ -1374,7 +1375,8 @@ func TestDiscardRetry(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if frame.Type == wire.RequestHello {
+			switch frame.Type {
+			case wire.RequestHello:
 				reply, _ := wire.NewReply(frame.ID, wire.HelloReply{
 					EngineVersion: "1.0",
 					Protocol:      1,
@@ -1385,7 +1387,7 @@ func TestDiscardRetry(t *testing.T) {
 					State:         "started",
 				})
 				_ = w.Write(reply)
-			} else if frame.Type == wire.RequestDiscard {
+			case wire.RequestDiscard:
 				requestCount++
 				reply, _ := wire.NewReply(frame.ID, wire.DiscardReply{
 					State: "discarded",
