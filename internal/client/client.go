@@ -265,6 +265,56 @@ func (c *Client) Transcript(ctx context.Context, turnID, cursor string, limit in
 	return reply, nil
 }
 
+// Apply applies the turn's change set. It is idempotent: when the reply is
+// lost, asking again returns the journaled state (an applied set writes
+// nothing) or the same refusal.
+func (c *Client) Apply(ctx context.Context, turnID string) (wire.ApplyReply, error) {
+	var reply wire.ApplyReply
+	body, err := c.doRequest(ctx, wire.RequestApply, wire.ApplyRequest{TurnID: turnID})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal apply reply: %w", err)
+	}
+	return reply, nil
+}
+
+// Discard discards the turn's change set; it changes no path outcome.
+func (c *Client) Discard(ctx context.Context, turnID string) (wire.DiscardReply, error) {
+	var reply wire.DiscardReply
+	body, err := c.doRequest(ctx, wire.RequestDiscard, wire.DiscardRequest{TurnID: turnID})
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal discard reply: %w", err)
+	}
+	return reply, nil
+}
+
+// Evidence returns one page of the turn's tool, referee, evidence and
+// change-set events in journal order. cursor is the previous page's
+// NextCursor, or empty for the first page.
+func (c *Client) Evidence(ctx context.Context, turnID, cursor string, limit int) (wire.EvidenceReply, error) {
+	var reply wire.EvidenceReply
+	req := wire.EvidenceRequest{TurnID: turnID}
+	if cursor != "" {
+		req.Cursor = &cursor
+	}
+	if limit > 0 {
+		req.Limit = &limit
+	}
+	body, err := c.doRequest(ctx, wire.RequestEvidence, req)
+	if err != nil {
+		return reply, err
+	}
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, fmt.Errorf("unmarshal evidence reply: %w", err)
+	}
+	return reply, nil
+}
+
 func (c *Client) Content(ctx context.Context, ref string) ([]byte, error) {
 	var result []byte
 	var totalSize int64
