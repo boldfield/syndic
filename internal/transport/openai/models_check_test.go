@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,7 @@ func checkServer(t *testing.T, h http.HandlerFunc) *Adapter {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return New(config.EndpointProfile{Name: "test", BaseURL: srv.URL}, &mockResolver{secret: "test"})
+	return New(config.EndpointProfile{Name: "test", BaseURL: srv.URL, Auth: &config.SecretRef{Source: "env", Name: "test-secret"}}, &mockResolver{secret: "test"})
 }
 
 func TestCheckModelsListsModels(t *testing.T) {
@@ -38,6 +39,7 @@ func TestCheckModelsNotListed(t *testing.T) {
 		"next":      `{"data":[{"id":"a"}],"next_page_token":"x"}`,
 		"cut":       `{"data":[{"id":"` + strings.Repeat("a", 1<<20) + `"}]}`,
 		"malformed": `not json`,
+		"null data": `{"data":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := checkServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) })
@@ -123,11 +125,11 @@ func TestCheckModelsClassMatchesCompletionAndProbe(t *testing.T) {
 }
 
 func TestCheckModelsSendsGetOnlyToModelsRoute(t *testing.T) {
-	var method, path string
+	var method, path, auth string
 	var n atomic.Int32
 	a := checkServer(t, func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
-		method, path = r.Method, r.URL.Path
+		method, path, auth = r.Method, r.URL.Path, r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	})
 	if _, err := a.CheckModels(context.Background()); err != nil {
@@ -136,6 +138,63 @@ func TestCheckModelsSendsGetOnlyToModelsRoute(t *testing.T) {
 	if method != "GET" || path != "/models" || n.Load() != 1 {
 		t.Errorf("%s %s x%d", method, path, n.Load())
 	}
+	if auth != "Bearer test" {
+		t.Errorf("Authorization = %q", auth)
+	}
+}
+
+func TestCheckModelsDoesNotFollowRedirect(t *testing.T) {
+	var n atomic.Int32
+	a := checkServer(t, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+	})
+	got, err := a.CheckModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Load() != 1 || got.Status != http.StatusTemporaryRedirect || got.OK {
+		t.Errorf("requests=%d got %+v", n.Load(), got)
+	}
+}
+
+func TestCheckModelsReadsAtMostTheBound(t *testing.T) {
+	var read int64
+	a := checkServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 2<<20))
+	})
+	a.client.Transport = countingTransport{base: http.DefaultTransport, n: &read}
+	got, err := a.CheckModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read > modelsCheckBodyLimit || got.Listed {
+		t.Errorf("read %d, got %+v", read, got)
+	}
+}
+
+type countingTransport struct {
+	base http.RoundTripper
+	n    *int64
+}
+
+func (c countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(r)
+	if resp != nil {
+		resp.Body = &countingBody{ReadCloser: resp.Body, n: c.n}
+	}
+	return resp, err
+}
+
+type countingBody struct {
+	io.ReadCloser
+	n *int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	k, err := b.ReadCloser.Read(p)
+	*b.n += int64(k)
+	return k, err
 }
 
 func TestCheckModelsNoResponseIsUnreachable(t *testing.T) {

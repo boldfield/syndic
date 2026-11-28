@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -40,22 +41,13 @@ func (a *Adapter) CheckModels(ctx context.Context) (transport.ModelsCheck, error
 		return res, err
 	}
 
+	// A health check is one GET: a redirect is reported, never followed.
 	client := *a.client
-	policy := a.client.CheckRedirect
-	redirected := false
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if policy != nil {
-			if err := policy(req, via); err != nil {
-				return err
-			}
-		}
-		redirected = true
-		return nil
-	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		in := transport.ClassifyInput{Err: err, RedirectFollowed: redirected, EngineCancelled: ctx.Err() != nil}
-		if !redirected && isConnectionRefusedOrDNSErr(err) {
+		in := transport.ClassifyInput{Err: err, EngineCancelled: ctx.Err() != nil}
+		if isConnectionRefusedOrDNSErr(err) {
 			in.TransportStatus = transport.TransportStatusUnreachable
 			err = fmt.Errorf("%w: %w", transport.ErrUnreachable, err)
 		} else {
@@ -65,7 +57,9 @@ func (a *Adapter) CheckModels(ctx context.Context) (transport.ModelsCheck, error
 		return res, err
 	}
 
-	body, over, readErr := readProbeBody(resp.Body, modelsCheckBodyLimit)
+	// Read no more than the bound; a body that fills it is treated as cut.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, modelsCheckBodyLimit))
+	over := int64(len(body)) >= modelsCheckBodyLimit
 	readErr = errors.Join(readErr, resp.Body.Close())
 
 	in := transport.ClassifyInput{
@@ -115,7 +109,7 @@ func parseModelList(body []byte) (ids []string, listed bool) {
 		return nil, false
 	}
 	var data []map[string]any
-	if raw, ok := m["data"]; !ok || json.Unmarshal(raw, &data) != nil {
+	if raw, ok := m["data"]; !ok || string(raw) == "null" || json.Unmarshal(raw, &data) != nil {
 		return nil, false
 	}
 	if raw, ok := m["has_more"]; ok {
