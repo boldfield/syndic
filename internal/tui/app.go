@@ -23,6 +23,7 @@ const (
 	tabChat tab = iota
 	tabTranscript
 	tabParticipants
+	tabChanges
 	numTabs
 )
 
@@ -1519,7 +1520,7 @@ func (a *App) scrollAnswer(delta int) {
 const tabGap = "  "
 
 // tabNames are the tabs' names, in tab order.
-func tabNames() []string { return []string{"chat", "transcript", "participants"} }
+func tabNames() []string { return []string{"chat", "transcript", "participants", "changes"} }
 
 // tabBar names the tabs, the active one in brackets.
 func (a *App) tabBar() string {
@@ -1587,6 +1588,16 @@ func (a *App) View() string {
 			tabView = strings.Join(full[min(a.pScroll, max(len(full)-bodyHeight, 0)):], "\n")
 		} else {
 			tabView = renderParticipants(a.state, w, bodyHeight, a.selectedParticipantID(), a.now())
+		}
+	case tabChanges:
+		if turn, ok := a.state.Turns[a.state.CurrentTurn]; ok {
+			if turn.ChangeSet != nil {
+				tabView = renderChanges(turn.ChangeSet, w, bodyHeight)
+			} else {
+				tabView = "no change set available"
+			}
+		} else {
+			tabView = "no current turn"
 		}
 	}
 	lines := strings.Split(tabView, "\n")

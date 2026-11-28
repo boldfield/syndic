@@ -37,6 +37,8 @@ var commands = map[string]commandHandler{
 	"trim":          cmdTrim,
 	"rounds":        cmdRounds,
 	"budget":        cmdBudget,
+	"apply":         cmdApply,
+	"discard":       cmdDiscard,
 }
 
 // commandHelp is one line per command, in the order /help lists them.
@@ -58,6 +60,8 @@ var commandHelp = []string{
 	"/raw on|off               show answers unrendered (on) or as Markdown (off)",
 	"/notify on|off            ring the terminal on a live terminal event",
 	"/mouse on|off             enable or disable mouse input for tabs and drawer",
+	"/apply                    apply the approved turn's change set to the workspace",
+	"/discard                  discard the approved turn's change set without applying",
 	"/resume                   reconnect to the engine",
 	"/quit                     leave; an open turn keeps running",
 	"/help                     this list",
@@ -693,4 +697,52 @@ func whyLinesRaw(id string, tr *wire.TurnReply, notice *BudgetNotice) []string {
 		lines = append(lines, fmt.Sprintf("tokens: reserved %s, charged %s, limit %s (projected %s)", figure(b.Reserved), figure(b.Charged), figure(b.Limit), figure(b.Projected)))
 	}
 	return lines
+}
+
+func cmdApply(a *App, args []string) tea.Cmd {
+	if len(args) > 0 {
+		a.refusal = "usage: /apply (no arguments)"
+		return nil
+	}
+	turn := answerTurn(a.state)
+	if turn == "" {
+		a.refusal = "no approved turn to apply; nothing sent"
+		return nil
+	}
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+	gen, cl := a.gen, a.cl
+	return func() tea.Msg {
+		_, err := cl.Apply(context.Background(), turn)
+		if err != nil {
+			return commandMsg{gen: gen, err: err}
+		}
+		return commandMsg{gen: gen, text: "applying " + turn}
+	}
+}
+
+func cmdDiscard(a *App, args []string) tea.Cmd {
+	if len(args) > 0 {
+		a.refusal = "usage: /discard (no arguments)"
+		return nil
+	}
+	turn := answerTurn(a.state)
+	if turn == "" {
+		a.refusal = "no approved turn to discard; nothing sent"
+		return nil
+	}
+	if a.cl == nil {
+		a.refusal = "engine: not connected"
+		return nil
+	}
+	gen, cl := a.gen, a.cl
+	return func() tea.Msg {
+		_, err := cl.Discard(context.Background(), turn)
+		if err != nil {
+			return commandMsg{gen: gen, err: err}
+		}
+		return commandMsg{gen: gen, text: "discarding " + turn}
+	}
 }

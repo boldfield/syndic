@@ -99,10 +99,11 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
-	Round           int    // revisions started so far: the larger of eventRounds and recordRound
-	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
-	InputRef        string // content ref of what the user typed, once the record says
-	ContextFrom     string // first earlier turn the turn's history included, once the record says
+	Round           int                   // revisions started so far: the larger of eventRounds and recordRound
+	MaxRounds       int                   // the round limit the turn runs with; 0 when not known or the turn has no loop
+	InputRef        string                // content ref of what the user typed, once the record says
+	ContextFrom     string                // first earlier turn the turn's history included, once the record says
+	ChangeSet       *wire.ChangeSetRecord // the turn's frozen change set, absent when it has none
 
 	// The two round sources each count from the turn's start, so Round takes
 	// the larger rather than adding them: a record fetched between replayed
@@ -945,6 +946,12 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		}
 	}
 	s.Blocks = blocks
+
+	// Merge change set from turn reply
+	if turn.ChangeSet != nil {
+		ti.ChangeSet = turn.ChangeSet
+		turns[turnID] = ti
+	}
 
 	return s
 }
