@@ -125,8 +125,9 @@ type ToolResult struct {
 // empty for kind a. JournalSeq is the journal-wide position at which it was
 // recorded, which orders it against verdicts.
 type Observation struct {
-	ID              string
-	TurnID          string
+	ID     string
+	TurnID string
+	// AttemptID is empty for an attachment base, which no attempt made.
 	AttemptID       string
 	SnapshotVersion int
 	Path            string
@@ -691,12 +692,13 @@ const observationSelect = `SELECT id, turn_id, attempt_id, snapshot_version, pat
 func scanObservation(sc interface{ Scan(...any) error }) (Observation, error) {
 	var o Observation
 	var path []byte
-	var contentSHA sql.NullString
+	var contentSHA, attemptID sql.NullString
 	var at string
-	if err := sc.Scan(&o.ID, &o.TurnID, &o.AttemptID, &o.SnapshotVersion, &path, &o.Kind, &contentSHA, &o.JournalSeq, &at); err != nil {
+	if err := sc.Scan(&o.ID, &o.TurnID, &attemptID, &o.SnapshotVersion, &path, &o.Kind, &contentSHA, &o.JournalSeq, &at); err != nil {
 		return Observation{}, err
 	}
 	o.Path = string(path)
+	o.AttemptID = attemptID.String
 	o.ContentSHA256 = contentSHA.String
 	var err error
 	if o.RecordedAt, err = parseTime(at); err != nil {
