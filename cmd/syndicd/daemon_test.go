@@ -18,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/engine/enginetest"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/lockfile"
+	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
 )
 
@@ -358,7 +359,34 @@ func TestStopBlockedTurn(t *testing.T) {
 	}
 }
 
+// blockingCancelAdapter holds Cancel, before it reaches the real adapter,
+// until released or its context ends, so the attempt it cancels cannot
+// settle while the daemon is stopping.
+type blockingCancelAdapter struct {
+	transport.Adapter
+	release <-chan struct{}
+}
+
+func (a blockingCancelAdapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return transport.CancelStatus{}, ctx.Err()
+	}
+	return a.Adapter.Cancel(ctx, attemptID)
+}
+
 func TestDoubleSignalExits130AndRecovers(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	releaseCancel := func() { once.Do(func() { close(release) }) }
+	adapterHook = func(a transport.Adapter) transport.Adapter {
+		return blockingCancelAdapter{Adapter: a, release: release}
+	}
+	t.Cleanup(func() {
+		adapterHook = nil
+		releaseCancel()
+	})
 	cs := newChatServer(t, make(chan struct{}))
 	d := newDaemonDirs(t, daemonRoster(cs.URL, "30s", false))
 	d.start()
@@ -381,7 +409,8 @@ func TestDoubleSignalExits130AndRecovers(t *testing.T) {
 		t.Fatal("lock not released")
 	}
 
-	// A fresh run on the same journal starts.
+	// A fresh run on the same journal starts. Cancel is free to return now.
+	releaseCancel()
 	d.stdout = threadSafeBuffer{}
 	d.start()
 	d.sig <- os.Interrupt
