@@ -127,6 +127,7 @@ func (e *Engine) performToolStep(t *openTurn, caller string, req transport.Compl
 			return toolStepOutcome{}, err
 		}
 		defer func() { _ = fs.Close() }()
+		fs.SetAfterComponent(e.afterWalk)
 	}
 	effects := e.toolEffects(fs, t, caller, attemptID, hook)
 	return runToolStep(e.store, toolStep{
