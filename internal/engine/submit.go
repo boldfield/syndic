@@ -117,7 +117,10 @@ func submissionHash(req wire.SubmitRequest) (string, error) {
 		Preset           *string `json:"preset"`
 		QuickProfile     *string `json:"quick_profile"`
 		Workspace        string  `json:"workspace"`
-	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace})
+		// Attachments is omitted when empty, so a request without them hashes
+		// as it did before the member existed.
+		Attachments []string `json:"attachments,omitempty"`
+	}{req.AllowProvisional, req.ContextFromTurn, req.ConversationID, req.Input, req.MaxRounds, req.Preset, req.QuickProfile, req.Workspace, req.Attachments})
 	if err != nil {
 		return "", err
 	}
@@ -206,6 +209,10 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			reply.QuickProfile = strPtr(prior.QuickProfile)
 		}
 		return reply, nil
+	}
+
+	if werr := ValidateAttachmentPaths(req.Attachments); werr != nil {
+		return wire.SubmitReply{}, werr
 	}
 
 	if e.stopping {
@@ -333,6 +340,13 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		screener                               *tools.URLScreener
 		rec                                    budgetRecord
 	)
+	// The attachment policy needs only the roster, so it runs before the
+	// transaction and before any file is opened.
+	if len(req.Attachments) > 0 {
+		if we := attachmentEgressRefusal(e.roster, eff); we != nil {
+			return wire.SubmitReply{}, we
+		}
+	}
 	err = e.tx(func(tx *journal.Tx, emit hub.Emit) error {
 		var err error
 		convID, err = tx.AdoptConversation(req.ConversationID, req.Workspace)
@@ -382,7 +396,16 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if we := egressRefusal(e.roster, eff, tainted); we != nil {
 			return we
 		}
-		tainted = tainted || eff.Preset.GrantsFileTools()
+		// Policy, history included, has run: only now are files opened.
+		attachments, werr, err := e.readSubmitAttachments(workspace, req.Attachments)
+		if err != nil {
+			return err
+		}
+		if werr != nil {
+			return werr
+		}
+		seedAttachmentCanary(screener, attachments)
+		tainted = tainted || eff.Preset.GrantsFileTools() || len(attachments) > 0
 		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
 			return err
 		}
@@ -411,6 +434,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			ConversationID:    convID,
 			ContextHash:       ctxHash,
 			FileTainted:       tainted,
+			Attachments:       attachments,
 			RunID:             e.runID,
 			Mode:              journalMode,
 			Preset:            eff.PresetName,
