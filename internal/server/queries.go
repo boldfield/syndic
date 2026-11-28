@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -240,6 +241,16 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 			ValidationStatus: v.ValidationStatus,
 			Reason:           v.Reason,
 		}
+		// A verdict recorded without tool evidence has no evidence row; any
+		// other failure is a storage error and fails the request.
+		ev, err := store.GetVerdictEvidence(v.ID)
+		switch {
+		case err == nil:
+			verdictRecord.ResultIDs = ev.ResultIDs
+			verdictRecord.ObservationIDs = ev.ObservationIDs
+		case !errors.Is(err, journal.ErrNoSuchContent):
+			return nil, fmt.Errorf("verdict %s evidence: %w", v.ID, err)
+		}
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}
 
@@ -258,6 +269,14 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		reply.OpenBlocks = append(reply.OpenBlocks, blockRecord)
 	}
 
+	cs, err := store.ChangeSetForTurn(turnID)
+	switch {
+	case err == nil:
+		reply.ChangeSet = changeSetRecord(cs)
+	case !errors.Is(err, journal.ErrNoChangeSet):
+		return nil, fmt.Errorf("turn %s change set: %w", turnID, err)
+	}
+
 	// Set deadlines if available
 	if turn.AttemptDeadlineMS > 0 {
 		reply.Deadlines.Attempt = turn.AttemptDeadlineMS
@@ -274,6 +293,94 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 	}
 
 	return reply, nil
+}
+
+// changeSetRecord is the wire form of a frozen change set: hashes and content
+// refs for every path, so a client sees what would be applied and pages the
+// bytes through the content request.
+func changeSetRecord(cs journal.ChangeSet) *wire.ChangeSetRecord {
+	rec := &wire.ChangeSetRecord{
+		ID:           cs.ID,
+		State:        cs.State,
+		ChangesHash:  cs.ChangesHash,
+		SnapshotHash: cs.SnapshotHash,
+		Paths:        make([]wire.ChangeSetPathRecord, len(cs.Paths)),
+	}
+	for i, p := range cs.Paths {
+		pr := wire.ChangeSetPathRecord{
+			Path:       p.Path,
+			Op:         p.Op,
+			BaseSHA256: p.BaseSHA256,
+			NewSHA256:  p.NewSHA256,
+			NewLen:     p.NewLen,
+			NewRef:     wire.ContentRef(p.NewSHA256),
+			Outcome:    p.Outcome,
+		}
+		if p.BaseSHA256 != "" {
+			ref := wire.ContentRef(p.BaseSHA256)
+			pr.BaseRef = &ref
+		}
+		rec.Paths[i] = pr
+	}
+	return rec
+}
+
+// buildEvidence answers an evidence request: the turn's tool, referee,
+// evidence and change-set events in journal order, from the cursor. The page
+// is cut to the limit and then to what fits one frame; it resumes after its
+// last item. An item carries hashes, never content, so only a first item that
+// alone exceeds the frame is errReplyTooLarge.
+func buildEvidence(store *journal.Store, id, turnID string, cursor *string, limit int) (*wire.EvidenceReply, error) {
+	if _, err := store.GetTurn(turnID); err != nil {
+		return nil, err
+	}
+	var after int64
+	if cursor != nil {
+		n, err := strconv.ParseInt(*cursor, 10, 64)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("evidence cursor %q: %w", *cursor, journal.ErrMalformedCursor)
+		}
+		after = n
+	}
+	events, err := store.TurnEventsOfKinds(turnID, wire.EvidenceEventKinds, after, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	more := len(events) > limit
+	if more {
+		events = events[:limit]
+	}
+	items := make([]wire.EvidenceItem, len(events))
+	for i, ev := range events {
+		items[i] = wire.EvidenceItem{Seq: ev.Seq, Kind: ev.Kind, Data: ev.Data}
+	}
+	page := func(n int) *wire.EvidenceReply {
+		r := &wire.EvidenceReply{Items: items[:n]}
+		if n < len(items) || more {
+			next := strconv.FormatInt(items[n-1].Seq, 10)
+			r.NextCursor = &next
+		}
+		return r
+	}
+	if len(items) == 0 || replyFits(id, page(len(items))) {
+		if len(items) == 0 {
+			return &wire.EvidenceReply{Items: []wire.EvidenceItem{}}, nil
+		}
+		return page(len(items)), nil
+	}
+	lo, hi := 0, len(items)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if replyFits(id, page(mid)) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo == 0 {
+		return nil, errReplyTooLarge
+	}
+	return page(lo), nil
 }
 
 // buildTranscript builds a transcript for a turn, paging with cursor.
