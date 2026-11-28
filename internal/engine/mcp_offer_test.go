@@ -282,3 +282,74 @@ func TestMCPWithoutTransportIsUnoffered(t *testing.T) {
 		t.Fatalf("off = %v", off)
 	}
 }
+
+// The pin file is read under the roster's mcp.max_definition_bytes, not the
+// default: a pinned definition between the default and a raised bound is
+// offered, and the turn and manifest record the pin file's hash.
+func TestMCPPinFileReadUnderRosterDefinitionBound(t *testing.T) {
+	const bound = 65536
+	big := mcpToolJSON("alpha", strings.Repeat("d", 20000))
+	h := enginetest.New(t, refereeRoster(fmt.Sprintf("\n[mcp]\nmax_definition_bytes = %d\n", bound)+mcpRosterExtra),
+		map[string][]fake.Step{"author": {enginetest.Reply(authorText)}},
+		append(refereeOpts(), enginetest.WithMCP(engine.MCPOptions{List: mcpFakeList(client2026, big)}), enginetest.NoStart())...)
+	path := filepath.Join(filepath.Dir(h.RosterPath), mcp.PinFileName)
+	def, err := mcp.BuildDefinition([]byte(big), bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def.Bytes) <= mcp.DefaultMaxDefinitionBytes {
+		t.Fatalf("definition is %d bytes, not over the default bound", len(def.Bytes))
+	}
+	snap, _, err := mcp.LoadMax(path, bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap, err = snap.Set("docs", def); err != nil {
+		t.Fatal(err)
+	}
+	if err := snap.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	_, hash, err := mcp.LoadMax(path, bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	if off := authorOff(t, h); off["docs/alpha"] != "" {
+		t.Fatalf("alpha not offered at start: %q", off["docs/alpha"])
+	}
+	turn := mcpSubmit(t, h, "s1")
+	wantEnd(t, h, turn, engine.StateSoloComplete, "solo_ok")
+	reqs := requestsOf(h, "author")
+	if len(reqs) != 1 || len(reqs[0].Tools) != 1 || !strings.Contains(reqs[0].Tools[0].Function.Description, string(def.Bytes)) {
+		t.Fatalf("author was not offered the pinned definition: %+v", reqs)
+	}
+
+	var recorded string
+	err = h.Store.Tx(func(tx *journal.Tx) error {
+		var err error
+		recorded, err = tx.TurnMCPPinFile(turn)
+		return err
+	})
+	if err != nil || recorded != hash {
+		t.Fatalf("turn records pin file hash %q (%v), want %q", recorded, err, hash)
+	}
+	run, err := h.Store.GetRun(h.Engine.Hello().RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		MCP struct {
+			PinFileSHA256 string `json:"pin_file_sha256"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(run.Manifest, &top); err != nil {
+		t.Fatal(err)
+	}
+	if top.MCP.PinFileSHA256 != hash {
+		t.Fatalf("manifest pin file hash %q, want %q", top.MCP.PinFileSHA256, hash)
+	}
+}

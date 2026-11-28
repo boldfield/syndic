@@ -350,7 +350,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		mcpPinErr  error
 	)
 	if len(mcpServerNames(e.roster)) > 0 {
-		mcpPins, mcpPinHash, mcpPinErr = readMCPPins(e.rosterAbs)
+		mcpPins, mcpPinHash, mcpPinErr = readMCPPins(e.roster, e.rosterAbs)
 	}
 
 	attempt := eff.Deadlines.Attempt.Duration

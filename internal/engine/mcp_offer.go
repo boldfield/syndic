@@ -84,10 +84,11 @@ func mcpPinPath(rosterPath string) string {
 	return filepath.Join(filepath.Dir(rosterPath), mcp.PinFileName)
 }
 
-// readMCPPins reads the pin file once. An unreadable or invalid file gives a
-// nil snapshot and the error; every tool is then unoffered with its reason.
-func readMCPPins(rosterPath string) (*mcp.Snapshot, string, error) {
-	return mcp.Load(mcpPinPath(rosterPath))
+// readMCPPins reads the pin file once, holding each definition to the
+// roster's mcp.max_definition_bytes. An unreadable or invalid file gives a nil
+// snapshot and the error; every tool is then unoffered with its reason.
+func readMCPPins(roster *config.Roster, rosterPath string) (*mcp.Snapshot, string, error) {
+	return mcp.LoadMax(mcpPinPath(rosterPath), mcpListOptions(roster).MaxDefinitionBytes)
 }
 
 // mcpListOptions are the roster's bounds on a listing.
@@ -165,7 +166,7 @@ func (e *Engine) mcpStartRecord(ctx context.Context, roster *config.Roster, rost
 	if len(servers) == 0 {
 		return nil, nil
 	}
-	snap, hash, perr := readMCPPins(rosterPath)
+	snap, hash, perr := readMCPPins(roster, rosterPath)
 	if perr != nil {
 		log.Printf("engine: mcp pin file: %v", perr)
 	}
