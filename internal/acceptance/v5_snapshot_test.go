@@ -641,7 +641,7 @@ func TestSnapshot_ReviewerFirstReadBumpsVersion(t *testing.T) {
 			frozen = append(frozen, p.CandidateHash)
 		}
 	}
-	reqs := h.Adapters["reviewer"].Calls()
+	reqs := snapReviewCalls(h)
 	if len(frozen) != 2 || len(reqs) != 3 {
 		t.Fatalf("frozen candidates %v, reviewer requests %d, want two rounds", frozen, len(reqs))
 	}
@@ -681,6 +681,18 @@ func TestSnapshot_ReviewerFirstReadBumpsVersion(t *testing.T) {
 	if got := snapReadLive(t, dir, "g.txt"); got != "changed after the record\n" {
 		t.Fatalf("live g.txt = %q: the live edit was not made", got)
 	}
+}
+
+// snapReviewCalls returns the reviewer's review-phase requests in order. The
+// terminal_delivery request sent after approval races a read of all calls.
+func snapReviewCalls(h *enginetest.Harness) []fake.CompleteCall {
+	var out []fake.CompleteCall
+	for _, c := range h.Adapters["reviewer"].Calls() {
+		if c.Request.Envelope.Phase == "review" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // snapOutside makes a file outside the workspace holding secret.

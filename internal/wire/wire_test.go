@@ -366,6 +366,20 @@ func TestEventKindsConstant(t *testing.T) {
 		"budget_exhausted",
 		"override",
 		"conversation_created",
+		"tool_call_accepted",
+		"tool_result",
+		"observation",
+		"staged",
+		"unstaged",
+		"web_referee_decision",
+		"referee_decision",
+		"verdict_evidence",
+		"change_set_frozen",
+		"apply_started",
+		"apply_file",
+		"apply_finished",
+		"apply_recovered",
+		"change_set_discarded",
 	}
 
 	// Check exact set match
@@ -1748,4 +1762,49 @@ func buildExactFrame(t *testing.T) (Frame, []byte) {
 		t.Fatalf("encoded length %d, want %d", len(enc), MaxFrameBytes)
 	}
 	return f, enc
+}
+
+// Every kind an evidence request returns is a known event kind, and the
+// content ref of a hash is the ref the content request pages.
+func TestEvidenceKindsAreEventKinds(t *testing.T) {
+	known := map[string]bool{}
+	for _, k := range EventKinds {
+		known[k] = true
+	}
+	for _, k := range EvidenceEventKinds {
+		if !known[k] {
+			t.Errorf("evidence kind %q is not in EventKinds", k)
+		}
+	}
+	if got := ContentRef("ab12"); got != "content:ab12" {
+		t.Errorf("ContentRef = %q", got)
+	}
+}
+
+// An evidence item carries its payload verbatim and a turn record carries the
+// change set with refs, never content.
+func TestEvidenceAndChangeSetJSONShape(t *testing.T) {
+	item := EvidenceItem{Seq: 7, Kind: EventKindToolResult, Data: json.RawMessage(`{"sha256":"ab","byte_len":3}`)}
+	b, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"seq":7,"kind":"tool_result","data":{"sha256":"ab","byte_len":3}}` {
+		t.Errorf("item = %s", b)
+	}
+	cs := ChangeSetRecord{ID: "c", State: "appliable", Paths: []ChangeSetPathRecord{{Path: "a", Op: "create", NewSHA256: "ff", NewLen: 2, NewRef: ContentRef("ff"), Outcome: "pending"}}}
+	b, err = json.Marshal(TurnReply{ChangeSet: &cs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back TurnReply
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ChangeSet == nil || back.ChangeSet.Paths[0].NewRef != "content:ff" || back.ChangeSet.Paths[0].BaseRef != nil {
+		t.Errorf("round trip = %+v", back.ChangeSet)
+	}
+	if b, _ := json.Marshal(TurnReply{}); strings.Contains(string(b), "change_set") {
+		t.Errorf("empty turn reply carries a change set: %s", b)
+	}
 }

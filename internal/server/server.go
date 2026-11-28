@@ -826,6 +826,17 @@ func (c *connection) handleRequest(frame wire.Frame) {
 		}
 		reply, err := buildReviews(c.server.store, frame.ID, req.TurnID, req.Cursor, req.Limit)
 		c.respond(frame.ID, "reviews", reply, err)
+	case wire.RequestEvidence:
+		var req wire.EvidenceRequest
+		if !c.decode(frame, &req, "turn_id") {
+			return
+		}
+		limit := maxTranscriptLimit
+		if req.Limit != nil && *req.Limit > 0 && *req.Limit < limit {
+			limit = *req.Limit
+		}
+		reply, err := buildEvidence(c.server.store, frame.ID, req.TurnID, req.Cursor, limit)
+		c.respond(frame.ID, "evidence", reply, err)
 	default:
 		c.sendError(frame.ID, &wire.Error{Code: wire.ErrorCodeBadRequest})
 	}
