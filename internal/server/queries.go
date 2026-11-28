@@ -242,10 +242,11 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		}
 		// Get verdict evidence (tool results and observations it used)
 		evidence, err := store.GetVerdictEvidence(v.ID)
-		if err == nil {
-			verdictRecord.ResultIDs = evidence.ResultIDs
-			verdictRecord.ObservationIDs = evidence.ObservationIDs
+		if err != nil {
+			return nil, fmt.Errorf("verdict %s evidence: %w", v.ID, err)
 		}
+		verdictRecord.ResultIDs = evidence.ResultIDs
+		verdictRecord.ObservationIDs = evidence.ObservationIDs
 		reply.Verdicts = append(reply.Verdicts, verdictRecord)
 	}
 
@@ -277,6 +278,24 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		if err := json.Unmarshal(turn.BudgetJSON, &reply.Budget); err != nil {
 			return nil, fmt.Errorf("turn %s budget_json: %w", turnID, err)
 		}
+	}
+
+	// Get change set state if the turn has a candidate
+	cs, err := store.ChangeSetForTurn(turnID)
+	if err == nil {
+		csState := &wire.ChangeSetState{
+			State: cs.State,
+			Paths: make([]wire.ChangeSetPath, len(cs.Paths)),
+		}
+		for i, p := range cs.Paths {
+			csState.Paths[i] = wire.ChangeSetPath{
+				Path:    p.Path,
+				Outcome: p.Outcome,
+			}
+		}
+		reply.ChangeSet = csState
+	} else if !errors.Is(err, journal.ErrNoChangeSet) {
+		return nil, fmt.Errorf("change set for turn %s: %w", turnID, err)
 	}
 
 	return reply, nil

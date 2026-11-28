@@ -1749,3 +1749,121 @@ func buildExactFrame(t *testing.T) (Frame, []byte) {
 	}
 	return f, enc
 }
+
+// TestToolTypesJSON verifies that new tool-related types marshal correctly
+func TestToolTypesJSON(t *testing.T) {
+	call := ToolCall{
+		ID:        "call-123",
+		AttemptID: "attempt-456",
+		Name:      "read_file",
+		ArgsHash:  "abc123def",
+		Status:    "accepted",
+	}
+
+	data, err := json.Marshal(call)
+	if err != nil {
+		t.Fatalf("Failed to marshal ToolCall: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal to map: %v", err)
+	}
+
+	expectedKeys := map[string]bool{
+		"id":         true,
+		"attempt_id": true,
+		"name":       true,
+		"args_hash":  true,
+		"status":     true,
+	}
+
+	if len(m) != len(expectedKeys) {
+		t.Errorf("ToolCall has %d keys, expected %d. Keys: %v", len(m), len(expectedKeys), m)
+	}
+	for key := range m {
+		if !expectedKeys[key] {
+			t.Errorf("Unexpected key in ToolCall: %s", key)
+		}
+	}
+}
+
+// TestChangeSetStateJSON verifies that ChangeSetState marshals correctly
+func TestChangeSetStateJSON(t *testing.T) {
+	state := ChangeSetState{
+		State: "applied",
+		Paths: []ChangeSetPath{
+			{Path: "file1.txt", Outcome: "applied"},
+			{Path: "file2.txt", Outcome: "conflict"},
+		},
+	}
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("Failed to marshal ChangeSetState: %v", err)
+	}
+
+	var roundtrip ChangeSetState
+	if err := json.Unmarshal(data, &roundtrip); err != nil {
+		t.Fatalf("Failed to unmarshal ChangeSetState: %v", err)
+	}
+
+	if roundtrip.State != "applied" || len(roundtrip.Paths) != 2 {
+		t.Errorf("ChangeSetState roundtrip failed: %+v", roundtrip)
+	}
+	if roundtrip.Paths[0].Path != "file1.txt" || roundtrip.Paths[0].Outcome != "applied" {
+		t.Errorf("First path incorrect: %+v", roundtrip.Paths[0])
+	}
+}
+
+// TestRefereDecisionJSON verifies that RefereDecision marshals correctly
+func TestRefereDecisionJSON(t *testing.T) {
+	decision := RefereDecision{
+		ID:        "decision-789",
+		CallID:    "call-123",
+		AttemptID: "attempt-456",
+		Verdict:   "allow",
+		ReasonSHA: "sha256hash",
+	}
+
+	data, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("Failed to marshal RefereDecision: %v", err)
+	}
+
+	var roundtrip RefereDecision
+	if err := json.Unmarshal(data, &roundtrip); err != nil {
+		t.Fatalf("Failed to unmarshal RefereDecision: %v", err)
+	}
+
+	if roundtrip.ID != "decision-789" || roundtrip.Verdict != "allow" {
+		t.Errorf("RefereDecision roundtrip failed: %+v", roundtrip)
+	}
+}
+
+// TestNewEventKindsPresent verifies that new tool/apply event kinds are present
+func TestNewEventKindsPresent(t *testing.T) {
+	expectedNewKinds := []string{
+		EventKindToolCallAccepted,
+		EventKindToolResult,
+		EventKindObservation,
+		EventKindRefereDecision,
+		EventKindChangeSetFrozen,
+		EventKindApplyStarted,
+		EventKindApplyFile,
+		EventKindApplyFinished,
+	}
+
+	for _, kind := range expectedNewKinds {
+		found := false
+		for _, k := range EventKinds {
+			if k == kind {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("EventKinds missing new event kind: %s", kind)
+		}
+	}
+}

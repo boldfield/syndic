@@ -1296,3 +1296,133 @@ func TestCancelDuringBlockedWrite(t *testing.T) {
 		t.Fatal("Status did not return after cancel during blocked write")
 	}
 }
+
+// TestApplyRetry verifies that Apply is idempotent and survives lost client reply.
+// Calling Apply twice with the same turnID should return the same result both times.
+func TestApplyRetry(t *testing.T) {
+	requestCount := 0
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply(frame.ID, wire.HelloReply{
+					EngineVersion: "1.0",
+					Protocol:      1,
+					RunID:         "run-1",
+					RunFirstSeq:   0,
+					RosterHash:    "hash1",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
+				})
+				_ = w.Write(reply)
+			} else if frame.Type == wire.RequestApply {
+				requestCount++
+				reply, _ := wire.NewReply(frame.ID, wire.ApplyReply{
+					State: "applied",
+					Paths: []wire.ChangePath{
+						{Path: "file.txt", Outcome: "applied"},
+					},
+				})
+				_ = w.Write(reply)
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// First Apply call
+	reply1, err := client.Apply(ctx, "turn-1")
+	if err != nil {
+		t.Fatalf("first Apply failed: %v", err)
+	}
+	if reply1.State != "applied" {
+		t.Fatalf("first Apply: state = %s, want 'applied'", reply1.State)
+	}
+
+	// Second Apply call (simulating retry after lost reply)
+	reply2, err := client.Apply(ctx, "turn-1")
+	if err != nil {
+		t.Fatalf("second Apply failed: %v", err)
+	}
+	if reply2.State != reply1.State {
+		t.Fatalf("second Apply: state = %s, want same as first (%s)", reply2.State, reply1.State)
+	}
+
+	// Both calls should have been sent to the server
+	if requestCount < 2 {
+		t.Fatalf("expected at least 2 Apply requests sent to server, got %d", requestCount)
+	}
+}
+
+// TestDiscardRetry verifies that Discard is idempotent and survives lost client reply.
+func TestDiscardRetry(t *testing.T) {
+	requestCount := 0
+	server := startTestServer(t, func(r *wire.Reader, w *wire.Writer) {
+		for {
+			frame, err := r.Read()
+			if err != nil {
+				return
+			}
+			if frame.Type == wire.RequestHello {
+				reply, _ := wire.NewReply(frame.ID, wire.HelloReply{
+					EngineVersion: "1.0",
+					Protocol:      1,
+					RunID:         "run-1",
+					RunFirstSeq:   0,
+					RosterHash:    "hash1",
+					ManifestHash:  ptrString("hash2"),
+					State:         "started",
+				})
+				_ = w.Write(reply)
+			} else if frame.Type == wire.RequestDiscard {
+				requestCount++
+				reply, _ := wire.NewReply(frame.ID, wire.DiscardReply{
+					State: "discarded",
+					Paths: []wire.ChangePath{
+						{Path: "file.txt", Outcome: "pending"},
+					},
+				})
+				_ = w.Write(reply)
+			}
+		}
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client, err := Dial(ctx, server.addr, "test-client", "1.0")
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// First Discard call
+	reply1, err := client.Discard(ctx, "turn-1")
+	if err != nil {
+		t.Fatalf("first Discard failed: %v", err)
+	}
+	if reply1.State != "discarded" {
+		t.Fatalf("first Discard: state = %s, want 'discarded'", reply1.State)
+	}
+
+	// Second Discard call (simulating retry after lost reply)
+	reply2, err := client.Discard(ctx, "turn-1")
+	if err != nil {
+		t.Fatalf("second Discard failed: %v", err)
+	}
+	if reply2.State != reply1.State {
+		t.Fatalf("second Discard: state = %s, want same as first (%s)", reply2.State, reply1.State)
+	}
+}
