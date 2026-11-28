@@ -127,6 +127,7 @@ type options struct {
 	providers      []tools.SearchProvider
 	searchNet      *tools.SearchNetwork
 	secrets        config.SecretResolver
+	exec           engine.ExecOptions
 }
 
 // Option adjusts how New seeds and starts the harness.
@@ -231,6 +232,12 @@ func WithSearchNetwork(n *tools.SearchNetwork) Option {
 // WithSecrets replaces the resolver of the search provider credential.
 func WithSecrets(r config.SecretResolver) Option {
 	return func(o *options) { o.secrets = r }
+}
+
+// WithExec sets the engine's command execution seam, as the daemon would
+// through Options.Exec.
+func WithExec(x engine.ExecOptions) Option {
+	return func(o *options) { o.exec = x }
 }
 
 // NoStart builds the engine without starting it.
@@ -356,6 +363,7 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		SearchProviders:    o.providers,
 		SearchNetwork:      o.searchNet,
 		Secrets:            o.secrets,
+		Exec:               o.exec,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {

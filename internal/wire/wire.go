@@ -500,6 +500,35 @@ type VerdictRecord struct {
 	Parsed           bool   `json:"parsed"`
 	ValidationStatus string `json:"validation_status"`
 	Reason           string `json:"reason,omitempty"`
+	// ResultIDs and ObservationIDs are the journal ids of the tool results
+	// and observations the verdict's reviewer received before giving it. The
+	// evidence request lists those records by id with their content hashes.
+	ResultIDs      []string `json:"result_ids,omitempty"`
+	ObservationIDs []string `json:"observation_ids,omitempty"`
+}
+
+// ChangeSetPathRecord is one path of a frozen change set: what it changes,
+// the hashes that bind it to its base, and its own outcome. NewRef and
+// BaseRef are content refs that the content request pages; BaseRef is absent
+// for a created file.
+type ChangeSetPathRecord struct {
+	Path       string  `json:"path"`
+	Op         string  `json:"op"`
+	BaseSHA256 string  `json:"base_sha256,omitempty"`
+	NewSHA256  string  `json:"new_sha256"`
+	NewLen     int64   `json:"new_len"`
+	BaseRef    *string `json:"base_ref,omitempty"`
+	NewRef     string  `json:"new_ref"`
+	Outcome    string  `json:"outcome"`
+}
+
+// ChangeSetRecord is a turn's frozen change set with its state.
+type ChangeSetRecord struct {
+	ID           string                `json:"id"`
+	State        string                `json:"state"`
+	ChangesHash  string                `json:"changes_hash"`
+	SnapshotHash string                `json:"snapshot_hash"`
+	Paths        []ChangeSetPathRecord `json:"paths"`
 }
 
 type OpenBlock struct {
@@ -548,6 +577,38 @@ type TurnReply struct {
 	// the context_from_turn it was submitted with, or the conversation's first
 	// turn when nothing was trimmed. Absent for a turn with no history.
 	ContextFromTurn *string `json:"context_from_turn,omitempty"`
+	// ChangeSet is the turn's frozen change set, absent when it has none.
+	ChangeSet *ChangeSetRecord `json:"change_set,omitempty"`
+}
+
+// ContentRef is the content ref of stored tool evidence with the given
+// SHA-256: the ref the content request pages.
+func ContentRef(sha256 string) string { return "content:" + sha256 }
+
+// EvidenceRequest asks for a page of a turn's tool, referee, evidence and
+// change-set events, oldest first.
+type EvidenceRequest struct {
+	TurnID string  `json:"turn_id"`
+	Cursor *string `json:"cursor,omitempty"`
+	Limit  *int    `json:"limit,omitempty"`
+}
+
+// EvidenceItem is one journaled event of the turn. Data is the event's
+// payload as journaled: it names bytes by SHA-256 (args_sha256, sha256,
+// reason_sha256, base_sha256, new_sha256) and never carries them, so an item
+// stays small whatever the evidence's size; ContentRef of a hash gives the
+// ref that pages the bytes.
+type EvidenceItem struct {
+	Seq  int64           `json:"seq"`
+	Kind string          `json:"kind"`
+	Data json.RawMessage `json:"data"`
+}
+
+// EvidenceReply is one page of EvidenceItems in journal order. NextCursor
+// resumes after the last item; absent when the page is the last.
+type EvidenceReply struct {
+	Items      []EvidenceItem `json:"items"`
+	NextCursor *string        `json:"next_cursor,omitempty"`
 }
 
 type TranscriptRequest struct {
@@ -811,6 +872,7 @@ const (
 	RequestReviews       = "reviews"
 	RequestApply         = "apply"
 	RequestDiscard       = "discard"
+	RequestEvidence      = "evidence"
 )
 
 // String constants for error codes
@@ -873,7 +935,43 @@ const (
 	EventKindBudgetExhausted        = "budget_exhausted"
 	EventKindOverride               = "override"
 	EventKindConversationCreated    = "conversation_created"
+
+	// Tool, referee, evidence and change-set state (v5 delta section 6). The
+	// web referee's decision has a kind of its own: referee_decision is the
+	// bash referee's (v7 delta).
+	EventKindToolCallAccepted   = "tool_call_accepted"
+	EventKindToolResult         = "tool_result"
+	EventKindObservation        = "observation"
+	EventKindStaged             = "staged"
+	EventKindUnstaged           = "unstaged"
+	EventKindWebRefereeDecision = "web_referee_decision"
+	EventKindRefereeDecision    = "referee_decision"
+	EventKindVerdictEvidence    = "verdict_evidence"
+	EventKindChangeSetFrozen    = "change_set_frozen"
+	EventKindApplyStarted       = "apply_started"
+	EventKindApplyFile          = "apply_file"
+	EventKindApplyFinished      = "apply_finished"
+	EventKindApplyRecovered     = "apply_recovered"
+	EventKindChangeSetDiscarded = "change_set_discarded"
 )
+
+// EvidenceEventKinds are the event kinds an evidence request returns.
+var EvidenceEventKinds = []string{
+	EventKindToolCallAccepted,
+	EventKindToolResult,
+	EventKindObservation,
+	EventKindStaged,
+	EventKindUnstaged,
+	EventKindWebRefereeDecision,
+	EventKindRefereeDecision,
+	EventKindVerdictEvidence,
+	EventKindChangeSetFrozen,
+	EventKindApplyStarted,
+	EventKindApplyFile,
+	EventKindApplyFinished,
+	EventKindApplyRecovered,
+	EventKindChangeSetDiscarded,
+}
 
 var EventKinds = []string{
 	EventKindRunOpened,
@@ -900,4 +998,18 @@ var EventKinds = []string{
 	EventKindBudgetExhausted,
 	EventKindOverride,
 	EventKindConversationCreated,
+	EventKindToolCallAccepted,
+	EventKindToolResult,
+	EventKindObservation,
+	EventKindStaged,
+	EventKindUnstaged,
+	EventKindWebRefereeDecision,
+	EventKindRefereeDecision,
+	EventKindVerdictEvidence,
+	EventKindChangeSetFrozen,
+	EventKindApplyStarted,
+	EventKindApplyFile,
+	EventKindApplyFinished,
+	EventKindApplyRecovered,
+	EventKindChangeSetDiscarded,
 }

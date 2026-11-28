@@ -18,6 +18,7 @@ import (
 	"github.com/boldfield/syndic/internal/hub"
 	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/manifest"
+	"github.com/boldfield/syndic/internal/sandbox"
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
@@ -189,6 +190,12 @@ type Options struct {
 	// Secrets resolves the search provider credential; nil means the env and
 	// file resolver over SecretsDir, as the adapters use.
 	Secrets config.SecretResolver
+
+	// Exec is the engine's seam to command execution: the sandbox backend,
+	// the supervisor for sandbox = "none", the shell candidates and the
+	// self-test's fixtures. The zero value leaves exec unoffered under
+	// sandbox = "required" (v7 delta, section 3).
+	Exec ExecOptions
 }
 
 // Engine is the review engine.
@@ -215,6 +222,12 @@ type Engine struct {
 	searchProviders map[string]tools.SearchProvider         // injected web_search providers by name; see Options.SearchProviders
 	searchNet       *tools.SearchNetwork                    // nil means the system resolver and dialer
 	secrets         config.SecretResolver
+	exec            ExecOptions
+
+	// execGate is the run's one execution gate (v7 delta, section 3,
+	// "Containment unverified"), open until a command's containment is
+	// unverified. Its zero value is open and it has its own lock.
+	execGate sandbox.Gate
 
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
@@ -269,6 +282,10 @@ type Engine struct {
 	// attempt id: a referee does not run on its caller's. A hold opened for
 	// the attempt takes its adapter from here. Owned by mu.
 	refereeAdapters map[string]transport.Adapter
+
+	// execState is what Start decided for exec: backend, shell and the reason
+	// it is unoffered, if it is. Nil before Start. Owned by mu.
+	execState *execState
 }
 
 // New returns an Engine. It does not read the roster or touch the journal;
@@ -309,6 +326,7 @@ func New(o Options) (*Engine, error) {
 		searchProviders: make(map[string]tools.SearchProvider, len(o.SearchProviders)),
 		searchNet:       o.SearchNetwork,
 		secrets:         o.Secrets,
+		exec:            o.Exec,
 		running:         make(map[string]bool),
 		inflight:        make(map[string]int),
 		queued:          make(map[string]bool),
@@ -522,6 +540,11 @@ func (e *Engine) Start() error {
 		return &RosterError{Err: err}
 	}
 
+	execSt, err := e.prepareExec(roster)
+	if err != nil {
+		return err
+	}
+
 	adapters := make(map[string]transport.Adapter, len(roster.Participants))
 	versions := make(map[string]string, len(roster.Participants))
 	for _, p := range roster.Participants {
@@ -639,6 +662,8 @@ func (e *Engine) Start() error {
 		e.probeFailed = res.failed
 		e.mu.Unlock()
 	}
+	// The self-test runs commands, so it runs with e.mu released too.
+	e.runExecSelfTest(context.Background(), execSt)
 	probed := e.runStartupProbes(context.Background(), roster, built, adapters, versions, progress)
 	e.mu.Lock()
 	if probed.wrote {
@@ -699,6 +724,7 @@ func (e *Engine) Start() error {
 	e.rosterAbs = path
 	e.adapters = adapters
 	e.built = built
+	e.execState = execSt
 	e.runState = "started"
 	e.manifestHash = manifestHash
 	e.startedAt = startedAt
