@@ -3,10 +3,12 @@ package engine_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/engine/enginetest"
+	"github.com/boldfield/syndic/internal/journal"
 	"github.com/boldfield/syndic/internal/transport/fake"
 	"github.com/boldfield/syndic/internal/wire"
 )
@@ -68,11 +70,56 @@ protected_paths = [".env*", "secret/"]
 }
 
 func TestAttachmentUnauthorizedParticipantRefusal(t *testing.T) {
-	t.Skip("TODO: Requires custom endpoint configuration to test unauthorized participant refusal")
+	rosterTOML := createUnauthorizedRoster()
+	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
+		"author":                {enginetest.Reply("answer one")},
+		"reviewer-unauthorized": {approveStep()},
+	})
+
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "data.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preset := "review"
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "question",
+		Preset:       &preset,
+		Workspace:    workspace,
+		Attachments:  []string{"data.txt"},
+	}
+	_, err := h.Engine.Submit(req)
+	we := wantRefusal(t, err, wire.ErrorCodeEgress)
+	if we.Route == nil || *we.Route != "attachment" {
+		t.Fatalf("want egress/route attachment, got %+v", we)
+	}
 }
 
 func TestAttachmentWebOnlyRefusal(t *testing.T) {
-	t.Skip("TODO: Requires custom preset with web-only participant and allow_web_with_read=false")
+	rosterTOML := createWebOnlyRoster()
+	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
+		"author": {enginetest.Reply("answer one")},
+	})
+
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "data.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preset := "webreview"
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "question",
+		Preset:       &preset,
+		Workspace:    workspace,
+		Attachments:  []string{"data.txt"},
+	}
+	_, err := h.Engine.Submit(req)
+	we := wantRefusal(t, err, wire.ErrorCodeEgress)
+	if we.Route == nil || *we.Route != "attachment" {
+		t.Fatalf("want egress/route attachment, got %+v", we)
+	}
 }
 
 func TestAttachmentNoTaintAfterFailedSubmit(t *testing.T) {
@@ -107,7 +154,7 @@ protected_paths = [".env*"]
 		t.Fatalf("protected file should refuse: %+v", we)
 	}
 
-	// Now submit without attachments - should not be tainted by the failed submit.
+	// Now submit without attachments to create first turn.
 	req.SubmissionID = "s2"
 	req.Attachments = nil
 	reply, err := h.Engine.Submit(req)
@@ -115,21 +162,34 @@ protected_paths = [".env*"]
 		t.Fatalf("second submit: %v", err)
 	}
 	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
+	conv := reply.ConversationID
 
-	// A refused submit should create no turn, so only one turn should exist.
-	turns, err := h.Store.GetConversationTurns(reply.ConversationID)
+	// Now submit another turn in the same conversation - should not be tainted by the failed attachment submit.
+	// This verifies that the failed submit did not add taint to the conversation.
+	req.SubmissionID = "s3"
+	req.Input = "third question"
+	req.ConversationID = &conv
+	reply2, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("third submit in same conversation: %v", err)
+	}
+	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
+
+	// A refused submit should create no turn, so only two turns should exist.
+	turns, err := h.Store.GetConversationTurns(conv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 1 {
-		t.Fatalf("turns = %d, expected 1 (failed submit creates no turn)", len(turns))
+	if len(turns) != 2 {
+		t.Fatalf("turns = %d, expected 2 (failed submit creates no turn)", len(turns))
 	}
 }
 
 func TestAttachmentExtendsTaint(t *testing.T) {
-	rosterTOML := enginetest.RosterTOML
+	rosterTOML := createTaintTestRoster()
 	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
-		"author": {enginetest.Reply("answer one"), enginetest.Reply("answer two")},
+		"author":   {enginetest.Reply("answer one"), enginetest.Reply("answer two")},
+		"reviewer": {approveStep()},
 	})
 
 	workspace := t.TempDir()
@@ -138,7 +198,7 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 	}
 
 	preset := "solo"
-	// First turn with an attachment.
+	// First turn with an attachment (tool-free preset).
 	req := wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "first question",
@@ -148,14 +208,15 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 	}
 	reply1, err := h.Engine.Submit(req)
 	if err != nil {
-		t.Fatalf("first submit: %v", err)
+		t.Fatalf("first submit with attachment: %v", err)
 	}
 	wantEnd(t, h, reply1.TurnID, engine.StateSoloComplete, "solo_ok")
+	conv := reply1.ConversationID
 
-	// Second turn without attachment should succeed (taint doesn't prevent solo submissions).
+	// Second turn without attachment in same conversation (taint should be set).
 	req.SubmissionID = "s2"
 	req.Input = "second question"
-	req.ConversationID = &reply1.ConversationID
+	req.ConversationID = &conv
 	req.Attachments = nil
 	reply2, err := h.Engine.Submit(req)
 	if err != nil {
@@ -163,13 +224,129 @@ func TestAttachmentExtendsTaint(t *testing.T) {
 	}
 	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
 
-	// Verify both turns were created.
-	turns, err := h.Store.GetConversationTurns(reply2.ConversationID)
+	// Now try a review turn with a reviewer on an unauthorized endpoint.
+	// This should be refused with egress/route history because the conversation is tainted.
+	presetReview := "review-unauthorized"
+	req.SubmissionID = "s3"
+	req.Input = "third question"
+	req.Preset = &presetReview
+	_, err = h.Engine.Submit(req)
+	wantEgressRefusal(t, err, "reviewer-unauthorized", "history")
+
+	// Try the same but with context trimmed to after the first turn (which has the attachment).
+	// The history route should still refuse due to transitive taint.
+	trimReq := wire.SubmitRequest{
+		SubmissionID:    "s4",
+		Input:           "fourth question",
+		Preset:          &presetReview,
+		ConversationID:  &conv,
+		ContextFromTurn: &reply1.TurnID,
+	}
+	_, err = h.Engine.Submit(trimReq)
+	wantEgressRefusal(t, err, "reviewer-unauthorized", "history")
+
+	// Verify only 2 turns were created (s3 and s4 were refused).
+	turns, err := h.Store.GetConversationTurns(conv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 2 {
-		t.Fatalf("turns = %d, expected 2", len(turns))
+		t.Fatalf("turns = %d, expected 2 (unauthorized submissions refused)", len(turns))
+	}
+}
+
+func createUnauthorizedRoster() string {
+	r := enginetest.RosterTOML
+	// Update policy to allow remote
+	r = replace(r, "local_only = true", "local_only = false")
+	// Add unauthorized endpoint before policy section
+	r = replace(r, "[policy]", `[[endpoints]]
+name = "unauthorized"
+base_url = "http://192.168.1.100:11434/v1"
+declared_location = "lan"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama3"]
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer-unauthorized"
+model = "llama3"
+route = "api"
+endpoint = "unauthorized"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = true
+
+[policy]`)
+	// Update the main review preset to use the unauthorized reviewer
+	r = replace(r, "required_reviewers = [\"reviewer\"]", `required_reviewers = ["reviewer-unauthorized"]`)
+	return r
+}
+
+func createWebOnlyRoster() string {
+	r := enginetest.RosterTOML
+	// Add referee model to the endpoint for web support
+	r = replace(r, "models = [\"llama2\", \"llama3\"]\ntoken", `models = ["llama2", "llama3"]
+referee_model = "llama3"
+token`)
+	// Add webreview preset
+	r = replace(r, "[presets.solo]", `[presets.webreview]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+reviewer_tools = ["web"]
+allow_web_with_read = false
+
+[presets.solo]`)
+	return r
+}
+
+func replace(s, old, new string) string {
+	return strings.Replace(s, old, new, 1)
+}
+
+func createTaintTestRoster() string {
+	r := enginetest.RosterTOML
+	// Update policy to allow remote
+	r = replace(r, "local_only = true", "local_only = false")
+	// Add unauthorized endpoint before policy section
+	r = replace(r, "[policy]", `[[endpoints]]
+name = "unauthorized"
+base_url = "http://192.168.1.100:11434/v1"
+declared_location = "lan"
+declared_execution = "remote"
+declared_billing = "none"
+network_dependency = "none"
+dialect = "chat_completions_v1"
+models = ["llama3"]
+tokens_per_byte_max = 1.0
+
+[[participants]]
+id = "reviewer-unauthorized"
+model = "llama3"
+route = "api"
+endpoint = "unauthorized"
+eligible_roles = ["reviewer"]
+pool = "default"
+accept_unknown_truncation = true
+
+[presets.review-unauthorized]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer-unauthorized"]
+
+[policy]`)
+	return r
+}
+
+func wantEgressRefusal(t *testing.T, err error, participant, route string) {
+	t.Helper()
+	we := wantRefusal(t, err, wire.ErrorCodeEgress)
+	if we.Participant == nil || *we.Participant != participant || we.Route == nil || *we.Route != route {
+		t.Fatalf("egress refusal = %+v, want participant %q route %q", we, participant, route)
 	}
 }
 
@@ -210,5 +387,22 @@ func TestAttachmentHashBackwardCompatibility(t *testing.T) {
 	}
 	if again2.TurnID != reply1.TurnID {
 		t.Fatalf("empty attachments should replay the same: %q vs %q", again2.TurnID, reply1.TurnID)
+	}
+
+	// Verify the hash matches the pre-upgrade hex value.
+	wantHash := "78f4796ca721163b01fe3e0e5dfe60f4f527958fdd54c3f24099135fdcf8c0df"
+	var row *journal.TurnRow
+	if err := h.Store.Tx(func(tx *journal.Tx) error {
+		var err error
+		row, _, err = tx.FindSubmission("s1")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if row == nil {
+		t.Fatal("submission not found")
+	}
+	if row.SubmissionHash != wantHash {
+		t.Fatalf("hash = %q, want %q", row.SubmissionHash, wantHash)
 	}
 }
