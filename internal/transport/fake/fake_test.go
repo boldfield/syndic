@@ -2203,3 +2203,22 @@ func TestFakeProbeAfterResponseRefusal(t *testing.T) {
 		t.Errorf("sent %v, want only models", steps)
 	}
 }
+
+func TestFakeCheckModelsScriptsAndCounts(t *testing.T) {
+	a := New(nil, Options{ModelsChecks: []ModelsCheckStep{
+		{HTTPStatus: 429, ServerWait: transport.ServerWait{Kind: transport.ServerWaitDuration, Millis: 1000}},
+		{HTTPStatus: 200, Models: []string{"m"}},
+	}})
+	first, _ := a.CheckModels(context.Background())
+	if first.FailureClass != transport.FailureClassThrottled || first.OK || first.ServerWait.Millis != 1000 {
+		t.Errorf("first %+v", first)
+	}
+	second, _ := a.CheckModels(context.Background())
+	third, _ := a.CheckModels(context.Background())
+	if !second.OK || !second.Listed || second.Models[0] != "m" || !third.OK {
+		t.Errorf("second %+v third %+v", second, third)
+	}
+	if n := a.ModelsCheckCalls(); n != 3 {
+		t.Errorf("calls %d", n)
+	}
+}
