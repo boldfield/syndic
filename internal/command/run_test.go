@@ -447,3 +447,24 @@ func TestContainmentUnverified(t *testing.T) {
 		})
 	}
 }
+
+// A call whose Enter fails, as when the run's gate has closed, starts
+// nothing; one whose Enter succeeds starts after it ran.
+func TestRunEnterBeforeStart(t *testing.T) {
+	r, fake := fakeRunner(t, Bounds{}, output(""))
+	r.Shell = Sh
+	gate := &sandbox.Gate{}
+	entered := 0
+	call := fakeCall("true")
+	call.Enter = func() error { entered++; return gate.Enter() }
+	if _, err := r.Run(context.Background(), call); err != nil {
+		t.Fatal(err)
+	}
+	gate.Close("unverified")
+	if _, err := r.Run(context.Background(), call); !errors.Is(err, sandbox.ErrGateClosed) {
+		t.Fatalf("err %v, want a closed gate", err)
+	}
+	if entered != 2 || len(fake.Starts()) != 1 {
+		t.Errorf("entered %d times, %d starts; want 2 and 1", entered, len(fake.Starts()))
+	}
+}

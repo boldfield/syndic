@@ -73,6 +73,7 @@ type bashRun struct {
 	h     *enginetest.Harness
 	be    *probeBackend
 	turn  string
+	ws    string
 	calls []journal.ToolCall
 }
 
@@ -112,13 +113,14 @@ func runBashTurn(t *testing.T, commands []string, allowed int, extra string) *ba
 			TempDir:  area,
 		}))
 	}
+	ws := workspaceDir(t)
 	h := enginetest.New(t, execRoster("\n[tools]\nmax_calls_per_turn = 30\n"+extra), map[string][]fake.Step{"author": script}, opts...)
-	reply, err := h.Engine.Submit(toolReq("s1", "exec", workspaceDir(t)))
+	reply, err := h.Engine.Submit(toolReq("s1", "exec", ws))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
-	return &bashRun{h: h, be: be, turn: reply.TurnID, calls: toolCalls(t, h, reply.TurnID)}
+	return &bashRun{h: h, be: be, turn: reply.TurnID, ws: ws, calls: toolCalls(t, h, reply.TurnID)}
 }
 
 // A command over 4,096 bytes is refused before the scratch build: nothing is
@@ -244,6 +246,14 @@ func TestBashWritesAreDiscarded(t *testing.T) {
 			}
 		}
 	}
+	for _, n := range []string{"gen.txt", "tmp.txt"} {
+		if _, err := os.Stat(filepath.Join(run.ws, n)); !os.IsNotExist(err) {
+			t.Errorf("%s reached the workspace (err %v)", n, err)
+		}
+	}
+	if es, err := os.ReadDir(run.ws); err != nil || len(es) != 1 || es[0].Name() != "a.txt" {
+		t.Errorf("workspace holds %v, err %v, want only a.txt", es, err)
+	}
 	err := run.h.Store.Tx(func(tx *journal.Tx) error {
 		staged, err := tx.Staging(run.turn)
 		if err != nil || len(staged) != 0 {
@@ -255,6 +265,76 @@ func TestBashWritesAreDiscarded(t *testing.T) {
 		ecs, err := tx.ExecCallsByTurn(run.turn)
 		if err != nil || len(ecs) != 2 || ecs[0].RefereeDecisionID == "" || ecs[1].Result == nil {
 			t.Errorf("exec calls %+v, err %v", ecs, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Under a preset with a change set, what a command writes is not staged and
+// not frozen: the change set holds only the author's own write_file.
+func TestBashWritesNeverReachChangeSet(t *testing.T) {
+	network := false
+	area := t.TempDir()
+	scripts := append(sandbox.FakeSelfTestScripts("", network), sandbox.FakeSelfTestScripts("", network)...)
+	scripts = append(scripts, sandbox.FakeScript{Chunks: []sandbox.FakeChunk{{Data: []byte("out\n")}}})
+	be := &probeBackend{Fake: sandbox.NewFake(allCaps, scripts...), area: area}
+	bashArgs, _ := json.Marshal(map[string]string{"command": "echo a > gen.txt"})
+	author := []fake.Step{
+		toolStepWith(
+			call("w1", tools.NameWriteFile, `{"path":"b.txt","content":"new file\n"}`),
+			call("b1", tools.NameBash, string(bashArgs)),
+		),
+		enginetest.Reply(commandAllow),
+		enginetest.Reply(authorText),
+	}
+	reviewer := []fake.Step{enginetest.ReplyFunc(func(req transport.CompleteRequest) string {
+		return fake.VerdictApprove(req.Envelope.CandidateHash, req.Envelope.AttemptID)
+	})}
+	roster := refereeRoster(`
+[presets.execreview]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read", "write", "exec"]
+
+[tools]
+max_calls_per_turn = 30
+`)
+	opts := append(refereeOpts(), enginetest.WithExec(engine.ExecOptions{
+		Backend:  be,
+		Shells:   []string{fakeShell(t, "bash")},
+		SelfTest: sandbox.SelfTestConfig{Dir: t.TempDir()},
+		TempDir:  area,
+	}))
+	h := enginetest.New(t, roster, map[string][]fake.Step{"author": author, "reviewer": reviewer}, opts...)
+	ws := workspaceDir(t)
+	reply, err := h.Engine.Submit(toolReq("s1", "execreview", ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateApproved, "all_approved")
+	if n := len(be.seen()); n != 1 {
+		t.Fatalf("%d commands started, want 1", n)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "gen.txt")); !os.IsNotExist(err) {
+		t.Errorf("gen.txt reached the workspace (err %v)", err)
+	}
+	cs, err := h.Store.ChangeSetForTurn(reply.TurnID)
+	if err != nil || len(cs.Paths) != 1 || cs.Paths[0].Path != "b.txt" {
+		t.Fatalf("change set = %+v, %v", cs, err)
+	}
+	err = h.Store.Tx(func(tx *journal.Tx) error {
+		staged, err := tx.Staging(reply.TurnID)
+		if err != nil {
+			return err
+		}
+		for _, e := range staged {
+			if e.Path != "b.txt" {
+				t.Errorf("staging holds %q, want only b.txt", e.Path)
+			}
 		}
 		return nil
 	})
