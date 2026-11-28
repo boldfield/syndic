@@ -378,13 +378,11 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
+		// The max-tokens phase found no working field or its reply named no
+		// model: report the last of its responses, so its class and wait reach
+		// the caller.
 		incomplete := fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
-		if record.MaxTokensField == "" {
-			// The max-tokens phase received responses and none worked: report
-			// the last of them, so its class and wait reach the caller.
-			return record, stepError(probeCtx, incomplete, rawSteps, "max_completion_tokens_retry", "max_completion_tokens", "max_tokens_retry", "max_tokens")
-		}
-		return record, incomplete
+		return record, stepError(probeCtx, incomplete, rawSteps, "max_completion_tokens_retry", "max_completion_tokens", "max_tokens_retry", "max_tokens")
 	}
 
 	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
@@ -481,11 +479,16 @@ func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step st
 	in := transport.ClassifyInput{
 		Received:              true,
 		HTTPStatus:            resp.StatusCode,
-		QuotaMarker:           hasQuotaMarker(resp.StatusCode, body),
 		BadGatewayServerFault: a.profile.BadGateway == config.BadGatewayServerFault,
+	}
+	if readErr == nil && !over {
+		in.QuotaMarker = hasQuotaMarker(resp.StatusCode, body)
 	}
 	if readErr != nil {
 		in.BodyRead = transport.BodyReset
+		if isDeadlineExceededErr(readErr) {
+			in.BodyRead = transport.BodyTimeout
+		}
 	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if over {
 			in.BodyRead = transport.BodyOverLimit
@@ -493,10 +496,12 @@ func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step st
 			in.BodyRead = transport.BodyUnparsable
 		}
 	}
-	r := transport.ProbeResponse{Step: step, Status: resp.StatusCode, FailureClass: transport.Classify(in)}
-	if r.FailureClass != transport.FailureClassNone {
-		r.ServerWait = readServerWait(resp.StatusCode, resp.Header, time.Now())
-		r.NoRetry = readNoRetry(resp.Header)
+	r := transport.ProbeResponse{
+		Step:         step,
+		Status:       resp.StatusCode,
+		FailureClass: transport.Classify(in),
+		ServerWait:   readServerWait(resp.StatusCode, resp.Header, time.Now()),
+		NoRetry:      readNoRetry(resp.Header),
 	}
 	if obs, ok := ctx.Value(probeObsKey{}).(*probeObs); ok {
 		obs.seen[step] = r
@@ -1611,17 +1616,17 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 			maxTokensField: limit,
 		})
 		if err != nil {
-			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
-			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if err := a.addProbeAuth(httpReq, secrets); err != nil {
-			return 0, nil, err
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: err}
 		}
 
 		if opts.BeforeSend != nil {
@@ -1630,24 +1635,24 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 				Step:    step,
 				Timeout: opts.Timeout,
 			}); err != nil {
-				return 0, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+				return 0, nil, &transport.ProbeStepError{Step: step, Err: fmt.Errorf("%w: %w", transport.ErrNotSent, err)}
 			}
 		}
 
 		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: step, Timeout: opts.Timeout})
 		if err != nil {
 			record.ToolCalls = transport.TriUnknown
-			return 0, nil, uncertainErr(err)
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
 		body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 		closeErr := httpResp.Body.Close()
 		stopErr := a.seen(ctx, opts, step, httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 		if readErr != nil {
-			return 0, nil, uncertainErr(readErr)
+			return 0, nil, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: uncertainErr(readErr)}
 		}
 		if closeErr != nil {
-			return 0, nil, uncertainErr(closeErr)
+			return 0, nil, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: uncertainErr(closeErr)}
 		}
 
 		recordRawStepWithRequest(rawSteps, step, "/chat/completions", httpResp.StatusCode, httpResp.Header, body, bodyBytes)

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -175,5 +176,89 @@ func TestProbeOverLimitSuccessBodyIsUncertain(t *testing.T) {
 	big := `{"choices":[{"message":{"content":"` + strings.Repeat("a", 1<<20+10) + `"}}]}`
 	if got := probeCompletionClass(t, big); got != transport.FailureClassUncertain {
 		t.Errorf("class %q, want uncertain", got)
+	}
+}
+
+func TestProbeSuccessResponseCarriesWaitAndNoRetry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("x-should-retry", "false")
+		// A usable completion that names no model.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	adapter := New(config.EndpointProfile{Name: "test", BaseURL: server.URL}, &mockResolver{secret: "test"})
+	var maxTokens *transport.ProbeResponse
+	opts := transport.ProbeOptions{
+		Timeout:            10 * time.Second,
+		DisableCalibration: true,
+		AfterResponse: func(r transport.ProbeResponse) bool {
+			if r.Step == "max_tokens" {
+				maxTokens = &r
+			}
+			return true
+		},
+	}
+	_, err := adapter.ProbeWithOptions(context.Background(), "test", "gpt-4", opts)
+
+	want := transport.ServerWait{Kind: transport.ServerWaitDuration, Millis: 5000}
+	if maxTokens == nil {
+		t.Fatal("hook never saw max_tokens")
+	}
+	if maxTokens.ServerWait != want || !maxTokens.NoRetry {
+		t.Errorf("hook saw wait %+v noRetry %v, want %+v true", maxTokens.ServerWait, maxTokens.NoRetry, want)
+	}
+	if !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Fatalf("error %v is not ErrIncompleteProbe", err)
+	}
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a ProbeStepError", err)
+	}
+	if pe.Step != "max_tokens" || pe.ServerWait != want || !pe.NoRetry {
+		t.Errorf("step %q wait %+v noRetry %v, want max_tokens %+v true", pe.Step, pe.ServerWait, pe.NoRetry, want)
+	}
+}
+
+func TestProbeToolCallsAutoFailureReportsItsOwnStep(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if _, ok := req["tools"]; ok {
+			if _, forced := req["tool_choice"].(map[string]any); forced {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(toolChoiceRefusal))
+				return
+			}
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		_, _ = w.Write([]byte(`{"model":"gpt-4","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	adapter := New(config.EndpointProfile{Name: "test", BaseURL: server.URL}, &mockResolver{secret: "test"})
+	_, err := adapter.ProbeWithOptions(context.Background(), "test", "gpt-4", transport.ProbeOptions{Timeout: 10 * time.Second, DisableCalibration: true})
+
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a ProbeStepError", err)
+	}
+	if pe.Step != "tool_calls_auto" || pe.FailureClass != transport.FailureClassUncertain {
+		t.Errorf("step %q class %q, want tool_calls_auto uncertain", pe.Step, pe.FailureClass)
+	}
+	if !errors.Is(err, transport.ErrUncertain) {
+		t.Errorf("error %v is not ErrUncertain", err)
 	}
 }
