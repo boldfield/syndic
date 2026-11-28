@@ -504,11 +504,11 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	for _, msg := range req.Messages {
 		if msg.Role != "system" && msg.Role != "user" && msg.Role != "assistant" && msg.Role != "tool" {
-			return result, fmt.Errorf("%w: invalid message role: %s", transport.ErrNotSent, msg.Role)
+			return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: invalid message role: %s", transport.ErrNotSent, msg.Role))
 		}
 		// Tool messages must have a non-empty ToolCallID
 		if msg.Role == "tool" && msg.ToolCallID == "" {
-			return result, fmt.Errorf("%w: tool message with empty ToolCallID", transport.ErrNotSent)
+			return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: tool message with empty ToolCallID", transport.ErrNotSent))
 		}
 	}
 
@@ -518,7 +518,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	if a.profile.Auth != nil {
 		authVal, err := a.resolver.Resolve(*a.profile.Auth)
 		if err != nil {
-			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 		}
 		resolvedSecrets = append(resolvedSecrets, authVal)
 		headers.Set("Authorization", "Bearer "+authVal)
@@ -527,7 +527,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	for headerName, secretRef := range a.profile.ExtraHeaders {
 		headerVal, err := a.resolver.Resolve(secretRef)
 		if err != nil {
-			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 		}
 		resolvedSecrets = append(resolvedSecrets, headerVal)
 		headers.Set(headerName, headerVal)
@@ -536,12 +536,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	reqBody := buildRequestBody(req, &a.profile)
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 	}
 
 	baseURL, err := url.Parse(a.profile.BaseURL)
 	if err != nil {
-		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 	}
 
 	endpoint := baseURL.JoinPath("/chat/completions")
@@ -555,7 +555,7 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
-		return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+		return a.finish(result, transport.ClassifyInput{}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 	}
 
 	httpReq.Header = headers
@@ -579,68 +579,81 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	httpReq = httpReq.WithContext(cancelFunc)
 
+	redirectFollowed := false
+	client := *a.client
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if err := a.client.CheckRedirect(r, via); err != nil {
+			return err
+		}
+		redirectFollowed = true
+		return nil
+	}
+
 	if req.BeforeSend != nil {
 		if err := req.BeforeSend(&req); err != nil {
 			result.TransportStatus = "not_sent"
-			return result, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+			return a.finish(result, transport.ClassifyInput{TransportStatus: result.TransportStatus}, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err))
 		}
 	}
 
-	httpResp, err := a.client.Do(httpReq)
+	httpResp, err := client.Do(httpReq)
 	if err != nil {
-		if isDeadlineExceededErr(err) {
+		in := transport.ClassifyInput{RedirectFollowed: redirectFollowed}
+		in.EngineCancelled = errors.Is(cancelFunc.Err(), context.Canceled)
+		switch {
+		case isDeadlineExceededErr(err):
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusTimeout
-			return result, nil
-		}
-
-		if cancelFunc.Err() != nil {
+			err = nil
+		case cancelFunc.Err() != nil:
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusCancelled
-			return result, nil
-		}
-
-		if isConnectionResetErr(err) {
+			err = nil
+		case isConnectionResetErr(err):
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusReset
-			return result, nil
-		}
-
-		if isConnectionRefusedOrDNSErr(err) {
+			err = nil
+		case isConnectionRefusedOrDNSErr(err):
 			result.Status = transport.StatusError
 			result.TransportStatus = transport.TransportStatusUnreachable
-			return result, nil
+			err = nil
 		}
-
-		return result, err
+		in.TransportStatus = result.TransportStatus
+		return a.finish(result, in, nil, err)
 	}
 
 	defer func() {
 		_ = httpResp.Body.Close()
 	}()
 
+	recv := transport.ClassifyInput{
+		Received:              true,
+		HTTPStatus:            httpResp.StatusCode,
+		RedirectFollowed:      redirectFollowed,
+		BadGatewayServerFault: a.profile.BadGateway == config.BadGatewayServerFault,
+	}
+
 	limitedBody := io.LimitReader(httpResp.Body, a.maxBodySize+1)
 	rawBody, err := io.ReadAll(limitedBody)
 	if err != nil {
-		if isDeadlineExceededErr(err) {
+		recv.BodyRead = transport.BodyReset
+		var goErr error
+		switch {
+		case isDeadlineExceededErr(err):
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusTimeout
-			return result, nil
-		}
-
-		if cancelFunc.Err() != nil {
+			recv.BodyRead = transport.BodyTimeout
+		case cancelFunc.Err() != nil:
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusCancelled
-			return result, nil
-		}
-
-		if isConnectionResetErr(err) {
+		case isConnectionResetErr(err):
 			result.Status = transport.StatusInterrupted
 			result.TransportStatus = transport.TransportStatusReset
-			return result, nil
+		default:
+			goErr = err
 		}
-
-		return result, err
+		recv.TransportStatus = result.TransportStatus
+		return a.finish(result, recv, httpResp.Header, goErr)
 	}
 
 	if int64(len(rawBody)) > a.maxBodySize {
@@ -648,8 +661,12 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		result.TransportStatus = transport.TransportStatusBodyTooLarge
 		result.RawOutput = ""
 		result.Text = ""
-		return result, nil
+		recv.BodyRead = transport.BodyOverLimit
+		recv.TransportStatus = result.TransportStatus
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
+
+	recv.QuotaMarker = hasQuotaMarker(httpResp.StatusCode, rawBody)
 
 	rawOutput := string(rawBody)
 	result.RawOutput, result.ScrubCount = transport.Scrub(rawOutput, resolvedSecrets)
@@ -657,32 +674,34 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 	if httpResp.StatusCode == 401 || httpResp.StatusCode == 403 {
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.TransportStatusUnauthorized
-		return result, nil
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
 
 	if httpResp.StatusCode == 404 {
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.TransportStatusModelUnavailable
-		return result, nil
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.HTTPStatusString(httpResp.StatusCode)
-		return result, nil
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
 
 	var respData ResponseBody
 	if err := json.Unmarshal(rawBody, &respData); err != nil {
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.TransportStatusMalformedBody
-		return result, nil
+		recv.BodyRead = transport.BodyUnparsable
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
 
 	if len(respData.Choices) == 0 {
 		result.Status = transport.StatusError
 		result.TransportStatus = transport.TransportStatusMalformedBody
-		return result, nil
+		recv.BodyRead = transport.BodyUnparsable
+		return a.finish(result, recv, httpResp.Header, nil)
 	}
 
 	textContent := respData.Choices[0].Message.Content
@@ -733,7 +752,22 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 		a.mu.Unlock()
 	}
 
-	return result, nil
+	return a.finish(result, recv, httpResp.Header, nil)
+}
+
+// finish sets the class, the server-stated wait and the no-retry mark on a
+// result and returns it with err. A transport-ok result keeps no class.
+func (a *Adapter) finish(result transport.CompleteResult, in transport.ClassifyInput, h http.Header, err error) (transport.CompleteResult, error) {
+	in.Err = err
+	if in.TransportStatus == "" {
+		in.TransportStatus = result.TransportStatus
+	}
+	result.FailureClass = transport.Classify(in)
+	if h != nil && result.FailureClass != transport.FailureClassNone {
+		result.ServerWait = readServerWait(in.HTTPStatus, h, time.Now())
+		result.NoRetry = readNoRetry(h)
+	}
+	return result, err
 }
 
 func (a *Adapter) Cancel(ctx context.Context, attemptID string) (transport.CancelStatus, error) {
