@@ -266,14 +266,12 @@ func (l *ScrubList) ScrubCut(b []byte) ([]byte, int) {
 	return []byte(out), n
 }
 
-// ScrubStderr scrubs a local server's kept standard error; cut reports that
-// the sink dropped output at its bound. It fits wire.StderrSink.SetScrub.
-func (l *ScrubList) ScrubStderr(kept []byte, cut bool) []byte {
-	if cut {
-		out, _ := l.ScrubCut(kept)
-		return out
-	}
-	out, _ := l.ScrubBytes(kept)
+// ScrubStderr scrubs a local server's kept standard error. The end of what is
+// kept is always a cut: the bound may have fallen there, or the server may
+// still be writing a value, or have died partway through one. So the tail is
+// guarded as ScrubCut does. It fits wire.StderrSink.SetScrub.
+func (l *ScrubList) ScrubStderr(kept []byte) []byte {
+	out, _ := l.ScrubCut(kept)
 	return out
 }
 

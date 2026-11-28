@@ -11,7 +11,7 @@ type StderrSink struct {
 	max     int
 	kept    []byte
 	dropped int64
-	scrub   func(kept []byte, cut bool) []byte
+	scrub   func(kept []byte) []byte
 }
 
 // NewStderrSink returns a sink that keeps at most limit bytes; a limit of zero
@@ -37,10 +37,10 @@ func (s *StderrSink) Write(p []byte) (int, error) {
 }
 
 // SetScrub sets a function applied to what Bytes returns, so credential values
-// in a server's standard error do not leave the sink. cut reports that output
-// was dropped at the bound, so the kept bytes end where the bound fell and a
-// value may be split there.
-func (s *StderrSink) SetScrub(f func(kept []byte, cut bool) []byte) {
+// in a server's standard error do not leave the sink. The kept bytes may end
+// partway through a value: where the bound fell, or where the server has not
+// yet written the rest of it, since Bytes may be read while the server runs.
+func (s *StderrSink) SetScrub(f func(kept []byte) []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scrub = f
@@ -52,7 +52,7 @@ func (s *StderrSink) Bytes() []byte {
 	defer s.mu.Unlock()
 	out := append([]byte(nil), s.kept...)
 	if s.scrub != nil {
-		return s.scrub(out, s.dropped > 0)
+		return s.scrub(out)
 	}
 	return out
 }

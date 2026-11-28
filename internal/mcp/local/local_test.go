@@ -462,3 +462,22 @@ func TestStderrSecretAtBoundIsNotLeaked(t *testing.T) {
 		})
 	}
 }
+
+// A secret the server has written only part of is not visible in a read of
+// the sink taken before the rest arrives.
+func TestStderrPartialSecretBeforeRestIsNotLeaked(t *testing.T) {
+	l := mcp.NewScrubList()
+	l.AddEnv(map[string]string{"K": "SUPERSECRETVALUE1234"})
+	m := New(Config{Scrub: l, StderrLimit: 100, Backend: sandbox.NewFake(sandbox.Required(false))})
+	w := m.Stderr("srv")
+	sink := w.(*wire.StderrSink)
+	_, _ = w.Write([]byte("x SUPERSEC"))
+	if got := string(sink.Bytes()); got != "x " {
+		t.Fatalf("stderr between writes = %q", got)
+	}
+	_, _ = w.Write([]byte("RETVALUE1234 done\n"))
+	got := string(sink.Bytes())
+	if strings.Contains(got, "SUPER") || strings.Contains(got, "1234") || !strings.Contains(got, "done") {
+		t.Fatalf("stderr after rest = %q", got)
+	}
+}

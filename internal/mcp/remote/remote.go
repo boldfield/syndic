@@ -136,6 +136,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req = req.Clone(req.Context())
 		// Drop any credential-bearing header the caller set, then attach the
 		// credential only when the destination is the configured origin.
+		// The headers are dropped on every request, auth origins included;
+		// that holds because static auth and login are not configured
+		// together for one server.
 		for k := range t.cred.HeaderFor(t.cred.Origin()) {
 			req.Header.Del(k)
 		}
