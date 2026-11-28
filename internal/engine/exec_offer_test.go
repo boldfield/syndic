@@ -176,3 +176,23 @@ func TestExecSelfTestRunsAgainBeforeATurnsFirstCommand(t *testing.T) {
 }
 
 func asRosterError(err error, target **engine.RosterError) bool { return errors.As(err, target) }
+
+func TestExecBackendBuiltFromRosterSystemLocations(t *testing.T) {
+	be := passingBackend(allCaps)
+	var got sandbox.SystemLocations
+	opts := append(refereeOpts(), enginetest.WithExec(engine.ExecOptions{
+		NewBackend: func(_ context.Context, _ sandbox.Supervisor, sys sandbox.SystemLocations) sandbox.Backend {
+			got = sys
+			return be
+		},
+		Shells:   []string{fakeShell(t, "bash")},
+		SelfTest: sandbox.SelfTestConfig{Dir: t.TempDir()},
+	}))
+	h := enginetest.New(t, execRoster(""), nil, opts...)
+	if r := h.Engine.ExecOffReason(); r != "" {
+		t.Fatalf("exec off: %q", r)
+	}
+	if len(got.Path) == 0 {
+		t.Errorf("backend built without the configured path: %+v", got)
+	}
+}

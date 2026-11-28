@@ -44,6 +44,10 @@ type ExecOptions struct {
 	// Backend is the OS sandbox backend used under tools.exec.sandbox =
 	// "required". Nil means none is available, and exec is unoffered.
 	Backend sandbox.Backend
+	// NewBackend builds the backend for the system locations the roster
+	// configures, when Backend is nil. The daemon sets it to the platform's
+	// backend; a nil result means the platform has none.
+	NewBackend func(ctx context.Context, sup sandbox.Supervisor, sys sandbox.SystemLocations) sandbox.Backend
 	// Supervisor starts commands under tools.exec.sandbox = "none".
 	Supervisor sandbox.Supervisor
 	// Shells are the candidate shell paths, in order; empty means /bin/bash
@@ -137,10 +141,20 @@ func (e *Engine) prepareExec(roster *config.Roster) (*execState, error) {
 	ex := roster.ExecSettings()
 	st.networkList = execNetworkList(roster)
 	st.none = ex.Sandbox == config.ExecSandboxNone
-	if st.none {
+	system := sandbox.SystemLocations{
+		Path:          filepath.SplitList(ex.Path),
+		ReadOnlyPaths: slices.Clone(ex.ReadOnlyPaths),
+		Devices:       slices.Clone(sandbox.DeviceNodes),
+	}
+	switch {
+	case st.none:
 		st.backend = sandbox.NewNone(e.exec.Supervisor)
-	} else {
+	case e.exec.Backend != nil:
 		st.backend = e.exec.Backend
+	case e.exec.NewBackend != nil:
+		if b := e.exec.NewBackend(context.Background(), e.exec.Supervisor, system); b != nil {
+			st.backend = b
+		}
 	}
 
 	if st.backend != nil && !st.none {
@@ -159,11 +173,7 @@ func (e *Engine) prepareExec(roster *config.Roster) (*execState, error) {
 	st.selfTest = e.exec.SelfTest
 	st.selfTest.Argv = st.execArgv
 	st.selfTest.Path = ex.Path
-	st.selfTest.System = sandbox.SystemLocations{
-		Path:          filepath.SplitList(ex.Path),
-		ReadOnlyPaths: slices.Clone(ex.ReadOnlyPaths),
-		Devices:       slices.Clone(sandbox.DeviceNodes),
-	}
+	st.selfTest.System = system
 	st.selfTest.NetworkList = st.networkList
 	st.selfTest.Sequence = sandbox.Sequence{
 		KillGrace:       time.Duration(ex.KillGraceS) * time.Second,
