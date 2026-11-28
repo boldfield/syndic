@@ -1117,9 +1117,7 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 	return group, poolID, endpoint, model, nil
 }
 
-// openWorkspace opens a confined workspace with empty protected-path patterns.
-// The workspace is opened with no specific patterns; workspace configuration
-// or the absence of files determines the actual protection.
-func (e *Engine) openWorkspace(root string) (*workspace.Confined, error) {
-	return workspace.OpenConfined(root, []string{})
+// openWorkspace opens a confined workspace with the given protected-path patterns.
+func (e *Engine) openWorkspace(root string, patterns []string) (*workspace.Confined, error) {
+	return workspace.OpenConfined(root, patterns)
 }

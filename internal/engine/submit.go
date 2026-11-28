@@ -92,7 +92,7 @@ type openTurn struct {
 func submissionHash(req wire.SubmitRequest) (string, error) {
 	body, err := json.Marshal(struct {
 		AllowProvisional *bool    `json:"allow_provisional"`
-		Attachments      []string `json:"attachments"`
+		Attachments      []string `json:"attachments,omitempty"`
 		ContextFromTurn  *string  `json:"context_from_turn"`
 		ConversationID   *string  `json:"conversation_id"`
 		Input            string   `json:"input"`
@@ -355,16 +355,37 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if conv.Workspace != nil {
 			workspace = *conv.Workspace
 		}
-		// Read attachments before the history (v6 section 4, step 5). This happens
-		// after policy checks but before seeding the canary, so attachment bytes are
-		// added to the screener's corpus before any web call.
+		// The history is rendered once, here, and admission, the stored
+		// document and the context hash are all taken from these bytes.
+		if doc, taintedTurns, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
+			return err
+		}
+		// Get the initial tainted state from the conversation history,
+		// before checking policy (v6 section 4, step 4).
+		tainted, err := tx.ConversationFileTainted(convID)
+		if err != nil {
+			return err
+		}
+		// Check history-route egress policy (v6 section 4, step 4) before reading attachments.
+		// This check applies when the conversation was tainted before this turn.
+		if we := egressRefusal(e.roster, eff, tainted); we != nil {
+			return we
+		}
+		// Read attachments before the history corpus is seeded (v6 section 4, step 5).
+		// This happens after policy checks but before seeding the canary, so attachment
+		// bytes are added to the screener's corpus before any web call.
 		if len(req.Attachments) > 0 {
 			if workspace == "" {
-				return refusal(wire.ErrorCodeNotFound)
+				notFound := refusal(wire.ErrorCodeNotFound)
+				notFound.Detail = strPtr("no_workspace")
+				return notFound
 			}
-			// Open confined workspace with empty patterns for now; workspace config
-			// defines the protected-path patterns.
-			confined, err1 := e.openWorkspace(workspace)
+			// Get protected patterns from roster configuration.
+			var patterns []string
+			if e.roster != nil && e.roster.Tools != nil {
+				patterns = e.roster.Tools.ProtectedPaths
+			}
+			confined, err1 := e.openWorkspace(workspace, patterns)
 			if err1 != nil {
 				return err1
 			}
@@ -374,11 +395,6 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			if attErr != nil {
 				return attErr
 			}
-		}
-		// The history is rendered once, here, and admission, the stored
-		// document and the context hash are all taken from these bytes.
-		if doc, taintedTurns, err = renderHistory(tx, convID, req.ContextFromTurn); err != nil {
-			return err
 		}
 		if screener, err = e.newTurnScreener(); err != nil {
 			return err
@@ -390,18 +406,11 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		for _, att := range attachments {
 			screener.AddBytes(tools.RouteSnapshotRead, att.Content)
 		}
-		// The taint comes from every turn the journal records for the
-		// conversation, not from the history in view, so a trim cannot
-		// launder it. This turn is tainted too when its preset grants read
-		// or write to any role.
-		tainted, err := tx.ConversationFileTainted(convID)
-		if err != nil {
-			return err
-		}
-		if we := egressRefusal(e.roster, eff, tainted); we != nil {
-			return we
-		}
-		tainted = tainted || eff.Preset.GrantsFileTools()
+		// Extend taint when attachments are admitted (v6 section 4):
+		// "a turn is file-tainted when it ran with read or write for any role,
+		// or was admitted with an attachment, or when any earlier turn of its
+		// conversation is file-tainted."
+		tainted = tainted || eff.Preset.GrantsFileTools() || len(attachments) > 0
 		if rec, err = e.projectBudget(eff, req.Input, doc, maxRounds); err != nil {
 			return err
 		}
