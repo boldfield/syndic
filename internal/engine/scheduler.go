@@ -243,6 +243,10 @@ func (e *Engine) onAttemptDeadline(t *openTurn, attemptID string) {
 		e.finishLocked(t, StateIncomplete, reasonProposalFailed+id)
 		return
 	}
+	if id, ok := t.critiqueAttempts[attemptID]; ok {
+		e.finishLocked(t, StateIncomplete, reasonCritiqueFailed+id)
+		return
+	}
 	e.finishLocked(t, StateIncomplete, reasonDeadlineAttempt+attemptID)
 }
 
