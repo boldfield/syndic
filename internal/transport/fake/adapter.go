@@ -35,8 +35,15 @@ type Step struct {
 	Delay              time.Duration
 	EchoedString       string
 	Err                error
-	Usage              *transport.Usage
-	ToolCalls          []transport.ToolCall
+	// Usage is the usage reported with the result, a failed one included.
+	Usage     *transport.Usage
+	ToolCalls []transport.ToolCall
+	// HTTPStatus is the status of the response the step stands for. When it is
+	// set and FailureClass is not, the class is derived with transport.Classify.
+	HTTPStatus   int
+	FailureClass transport.FailureClass
+	ServerWait   transport.ServerWait
+	NoRetry      bool
 	// Build, when set on a reply step, computes Text from the request, so a
 	// reply can carry values that exist only after dispatch (an attempt id
 	// or a candidate hash).
@@ -62,6 +69,7 @@ type Adapter struct {
 	usageAvailable       bool
 	blockingCancel       bool
 	ProbeUncertainStep   string
+	probeSteps           map[string]ProbeStep
 
 	mu             sync.Mutex
 	calls          []CompleteCall
@@ -91,6 +99,7 @@ func New(script []Step, opts Options) *Adapter {
 		usageAvailable:       opts.UsageAvailable,
 		blockingCancel:       opts.BlockingCancel,
 		ProbeUncertainStep:   opts.ProbeUncertainStep,
+		probeSteps:           opts.ProbeSteps,
 		hangingAttempt:       make(map[string]context.CancelFunc),
 		cancelBlocked:        make(chan struct{}),
 	}
@@ -106,6 +115,27 @@ type Options struct {
 	UsageAvailable       bool
 	BlockingCancel       bool   // when true, Cancel blocks on cancelBlocked until released
 	ProbeUncertainStep   string // probe step that fails after its BeforeSend hook as ErrUncertain
+	// ProbeSteps scripts the response of a probe step by name. A step with no
+	// entry answers 200.
+	ProbeSteps map[string]ProbeStep
+}
+
+// ProbeStep scripts the response a probe step received. When HTTPStatus is set
+// and FailureClass is not, the class is derived with transport.Classify.
+type ProbeStep struct {
+	HTTPStatus   int
+	FailureClass transport.FailureClass
+	ServerWait   transport.ServerWait
+	NoRetry      bool
+}
+
+// derive gives the class a scripted response carries: the scripted one, or the
+// one transport.Classify gives its status.
+func derive(status int, class transport.FailureClass, transportStatus string, err error) transport.FailureClass {
+	if class != transport.FailureClassNone || status == 0 {
+		return class
+	}
+	return transport.Classify(transport.ClassifyInput{Received: true, HTTPStatus: status, TransportStatus: transportStatus, Err: err})
 }
 
 // Probe returns the configured capability record.
@@ -141,6 +171,23 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transp
 		if a.ProbeUncertainStep == step {
 			return transport.CapabilityRecord{}, fmt.Errorf("%w: fake probe failure after send at %s", transport.ErrUncertain, step)
 		}
+		ps, scripted := a.probeSteps[step]
+		if !scripted {
+			ps.HTTPStatus = 200
+		}
+		resp := transport.ProbeResponse{
+			Step:         step,
+			Status:       ps.HTTPStatus,
+			FailureClass: derive(ps.HTTPStatus, ps.FailureClass, "", nil),
+			ServerWait:   ps.ServerWait,
+			NoRetry:      ps.NoRetry,
+		}
+		if opts.AfterResponse != nil && !opts.AfterResponse(resp) {
+			return transport.CapabilityRecord{}, &transport.ProbeStepError{
+				Step: step, Status: resp.Status, FailureClass: resp.FailureClass,
+				ServerWait: resp.ServerWait, NoRetry: resp.NoRetry, Err: transport.ErrProbeStopped,
+			}
+		}
 	}
 	// Like the real adapter, the record names the endpoint and model probed.
 	rec := a.capability
@@ -157,7 +204,7 @@ func (a *Adapter) Probe(ctx context.Context, endpoint, model string, opts transp
 }
 
 // Complete consumes one step from the script and returns the result.
-func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (transport.CompleteResult, error) {
+func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (res transport.CompleteResult, err error) {
 	a.mu.Lock()
 
 	// Record the call with a deep copy of the entire request including messages.
@@ -184,6 +231,13 @@ func (a *Adapter) Complete(ctx context.Context, req transport.CompleteRequest) (
 
 	step := a.script[a.current]
 	a.current++
+	defer func() {
+		res.FailureClass = derive(step.HTTPStatus, step.FailureClass, res.TransportStatus, err)
+		res.ServerWait, res.NoRetry = step.ServerWait, step.NoRetry
+		if res.Usage == nil {
+			res.Usage = step.Usage
+		}
+	}()
 
 	identity := step.Identity
 	if identity == (transport.ModelIdentity{}) {
