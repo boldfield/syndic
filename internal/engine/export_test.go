@@ -205,7 +205,7 @@ func (e *Engine) ProjectBudget(preset, input string) (wire.SubmitReply, error) {
 	if err != nil {
 		return wire.SubmitReply{}, err
 	}
-	rec, err := e.projectBudget(eff, input, nil, 0)
+	rec, err := e.projectBudget(eff, input, nil, 0, nil)
 	if err != nil {
 		return wire.SubmitReply{}, err
 	}
