@@ -26,6 +26,10 @@ const (
 	numTabs
 )
 
+// tabChanges follows the fixed tabs. It exists only while the turn on screen
+// has a change set, so a conversation without one never shows it.
+const tabChanges = numTabs
+
 // tabBarHeight and stripHeight are the one-line regions at the top and bottom.
 const (
 	tabBarHeight = 1
@@ -98,6 +102,8 @@ type App struct {
 	pSelected   int                       // index of the selected row of the participants tab, in id order
 	pScrolled   bool                      // the participants tab shows its full content from pScroll, not fitted around the selection
 	pScroll     int                       // first line shown while pScrolled
+	cScroll     int                       // first line of the changes tab shown
+	baseChecks  map[string]*baseCheck     // the live base check of each turn's change set
 
 	list          listState // the command list's selection and dismissal
 	showShortHelp bool      // ? showed the short help line
@@ -508,6 +514,7 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := a.update(msg)
 	a.forgetStaleList()
+	a.clampTab()
 	cmds := []tea.Cmd{cmd, a.syncTranscript()}
 	switch m := msg.(type) {
 	case tea.KeyMsg:
@@ -518,7 +525,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	a.refreshTranscript()
 	if _, ok := msg.(contentMsg); !ok {
-		cmds = append(cmds, a.fetchAnswerContent(), a.fetchTranscriptContent())
+		cmds = append(cmds, a.fetchAnswerContent(), a.fetchTranscriptContent(), a.fetchEvidenceContent())
 	}
 	return a, tea.Batch(cmds...)
 }
@@ -598,6 +605,10 @@ func (a *App) updateApp(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onReviewCounts(msg)
 	case turnMsg:
 		return a.onTurn(msg)
+	case evidenceMsg:
+		return a.onEvidence(msg)
+	case baseCheckMsg:
+		return a.onBaseCheck(msg)
 	case commandMsg:
 		return a.onCommand(msg)
 	case whyMsg:
@@ -763,9 +774,9 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "tab":
-		return a, a.setTab((a.tab + 1) % numTabs)
+		return a, a.setTab((a.tab + 1) % a.tabCount())
 	case "shift+tab":
-		return a, a.setTab((a.tab + numTabs - 1) % numTabs)
+		return a, a.setTab((a.tab + a.tabCount() - 1) % a.tabCount())
 	case "enter":
 		return a, a.enter()
 	}
@@ -810,6 +821,30 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				a.chatFollow.End()
 			}
+			return a, nil
+		}
+	}
+
+	if a.tab == tabChanges {
+		page := max(a.bodyHeight()-1, 1)
+		switch msg.String() {
+		case "up":
+			a.scrollChanges(-1)
+			return a, nil
+		case "down":
+			a.scrollChanges(1)
+			return a, nil
+		case "pgup":
+			a.scrollChanges(-page)
+			return a, nil
+		case "pgdown":
+			a.scrollChanges(page)
+			return a, nil
+		case "home":
+			a.cScroll = 0
+			return a, nil
+		case "end":
+			a.scrollChanges(1 << 30)
 			return a, nil
 		}
 	}
@@ -1247,6 +1282,13 @@ func (a *App) onFrame(msg eventMsg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, bellCmd)
 		}
 	}
+	if changeSetEvent(msg.frame.Kind) {
+		// An apply or a discard changed the change set: the record says how,
+		// and the open changes tab shows it again.
+		if id := changeSetTurn(a.state, msg.frame.Body); id != "" {
+			cmds = append(cmds, turnCmd(a.ctx, a.gen, a.cl, id))
+		}
+	}
 	switch msg.frame.Kind {
 	case wire.EventKindEngineStarted, wire.EventKindParticipantState, wire.EventKindCapacity:
 		cmds = append(cmds, a.requestStatus())
@@ -1388,7 +1430,40 @@ func (a *App) onTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if len(msg.turn.OpenBlocks) > 0 || len(a.openBlocksByTurn[msg.id]) == 0 {
 		a.openBlocksByTurn[msg.id] = msg.turn.OpenBlocks
 	}
-	return a, tea.Batch(a.syncTranscript(), refresh)
+	cmds := []tea.Cmd{a.syncTranscript(), refresh}
+	if msg.id == a.changesTurn() {
+		// Progress and the change set are rebuilt from what the journal stored;
+		// nothing is run again.
+		if a.cl != nil {
+			cmds = append(cmds, evidenceCmd(a.ctx, a.gen, a.cl, msg.id))
+		}
+		cmds = append(cmds, a.checkBase(msg.id))
+	}
+	return a, tea.Batch(cmds...)
+}
+
+// onEvidence folds a turn's stored evidence into the state.
+func (a *App) onEvidence(msg evidenceMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != a.gen {
+		return a, nil
+	}
+	if msg.err != nil {
+		a.refusal = "evidence: " + formatRefusal(msg.err)
+		return a, nil
+	}
+	a.state = fillTargets(foldEvidence(a.state, msg.turn, msg.items), a.content)
+	return a, nil
+}
+
+// onBaseCheck stores a finished base check, unless the change set has moved on.
+func (a *App) onBaseCheck(msg baseCheckMsg) (tea.Model, tea.Cmd) {
+	if cs := a.state.Turns[msg.turn].ChangeSet; cs != nil && cs.ID == msg.check.changeSet {
+		checks := copyMap(a.baseChecks)
+		bc := msg.check
+		checks[msg.turn] = &bc
+		a.baseChecks = checks
+	}
+	return a, nil
 }
 
 // attemptDone reports whether the attempt has a final status.
@@ -1397,6 +1472,7 @@ func attemptDone(ai AttemptInfo) bool { return ai.Status != "" && ai.Status != "
 // onContent stores a fetched body.
 func (a *App) onContent(msg contentMsg) (tea.Model, tea.Cmd) {
 	a.content.Store(msg.ref, msg.data, msg.err)
+	a.state = fillTargets(a.state, a.content)
 	return a, nil
 }
 
@@ -1519,11 +1595,68 @@ func (a *App) scrollAnswer(delta int) {
 const tabGap = "  "
 
 // tabNames are the tabs' names, in tab order.
-func tabNames() []string { return []string{"chat", "transcript", "participants"} }
+func (a *App) tabNames() []string {
+	names := []string{"chat", "transcript", "participants"}
+	if a.changesAvailable() {
+		names = append(names, "changes")
+	}
+	return names
+}
+
+// tabCount is how many tabs there are now.
+func (a *App) tabCount() tab { return tab(len(a.tabNames())) }
+
+// changesTurn is the turn the changes tab is about: the one the other tabs show.
+func (a *App) changesTurn() string { return answerTurn(a.state) }
+
+// changesAvailable reports whether the turn on screen has a change set.
+func (a *App) changesAvailable() bool {
+	return a.state.Turns[a.changesTurn()].ChangeSet != nil
+}
+
+// clampTab returns to the chat when the active tab is gone: the turn on
+// screen changed to one without a change set.
+func (a *App) clampTab() {
+	if a.tab >= a.tabCount() {
+		a.tab = tabChat
+	}
+}
+
+// changesIn gathers what the changes tab needs.
+func (a *App) changesIn() changesInput {
+	return changesInput{content: a.content, check: a.baseChecks[a.changesTurn()]}
+}
+
+// scrollChanges moves the changes tab by n lines, within its content.
+func (a *App) scrollChanges(n int) {
+	total := len(changesLines(a.state, a.changesTurn(), a.changesIn()))
+	a.cScroll = min(max(a.cScroll+n, 0), max(total-a.bodyHeight(), 0))
+}
+
+// fetchEvidenceContent starts the fetches the tool progress and the changes tab wait on.
+func (a *App) fetchEvidenceContent() tea.Cmd {
+	turn := a.changesTurn()
+	refs := toolArgRefs(a.state, turn)
+	refs = append(refs, changesRefs(a.state.Turns[turn].ChangeSet)...)
+	return tea.Batch(fetchRefs(a.ctx, a.cl, a.content, refs)...)
+}
+
+// checkBase starts a base check of the turn's change set, unless one runs.
+func (a *App) checkBase(turnID string) tea.Cmd {
+	cs := a.state.Turns[turnID].ChangeSet
+	if cs == nil {
+		return nil
+	}
+	workspace := a.workDir
+	if workspace == "" {
+		workspace, _ = os.Getwd()
+	}
+	return baseCheckCmd(workspace, turnID, *cs)
+}
 
 // tabBar names the tabs, the active one in brackets.
 func (a *App) tabBar() string {
-	names := tabNames()
+	names := a.tabNames()
 	parts := make([]string, len(names))
 	for i, n := range names {
 		if tab(i) == a.tab {
@@ -1579,6 +1712,11 @@ func (a *App) View() string {
 		if !bottom && count > 0 {
 			tInfo = fmt.Sprintf("↓ %d new lines · %s", count, tInfo)
 		}
+	case tabChanges:
+		full := changesLines(a.state, a.changesTurn(), a.changesIn())
+		first := min(a.cScroll, max(len(full)-bodyHeight, 0))
+		tabView = strings.Join(full[first:], "\n")
+		tInfo = fmt.Sprintf("%d%%", scrollPercent(len(full), bodyHeight, first))
 	case tabParticipants:
 		if a.pScrolled {
 			// A refresh can shorten the content under the offset, so the
@@ -1648,7 +1786,7 @@ func (a *App) View() string {
 	// line, short help, input, status line. The optional regions' lines are
 	// reserved here and filled by the tasks that own them.
 	tabBar := a.tabBar()
-	if a.tab == tabTranscript {
+	if a.tab == tabTranscript || a.tab == tabChanges {
 		// The transcript shows where its view stands at the tab bar's right.
 		tabBar = withScrollInfo(tabBar, w, tInfo)
 	}

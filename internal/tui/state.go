@@ -99,10 +99,11 @@ type TurnInfo struct {
 	TerminalReason  *string
 	CandidateHash   *string
 	PhaseAtCancel   *string
-	Round           int    // revisions started so far: the larger of eventRounds and recordRound
-	MaxRounds       int    // the round limit the turn runs with; 0 when not known or the turn has no loop
-	InputRef        string // content ref of what the user typed, once the record says
-	ContextFrom     string // first earlier turn the turn's history included, once the record says
+	Round           int                   // revisions started so far: the larger of eventRounds and recordRound
+	MaxRounds       int                   // the round limit the turn runs with; 0 when not known or the turn has no loop
+	InputRef        string                // content ref of what the user typed, once the record says
+	ContextFrom     string                // first earlier turn the turn's history included, once the record says
+	ChangeSet       *wire.ChangeSetRecord // the turn's frozen change set, once the record says
 
 	// The two round sources each count from the turn's start, so Round takes
 	// the larger rather than adding them: a record fetched between replayed
@@ -140,6 +141,10 @@ type VerdictInfo struct {
 	AttemptID string
 	Parsed    bool
 	Class     string
+	// Participant is the reviewer that gave the verdict, as verdict_evidence
+	// names it. ResultIDs are the tool results it received before giving it.
+	Participant string
+	ResultIDs   []string
 }
 
 // BlockInfo holds information about a block.
@@ -214,6 +219,11 @@ type State struct {
 	// turn_submitted events and submit replies say. It names the conversation
 	// of a running turn the chat no longer shows.
 	TurnConversation map[string]string
+
+	// ToolCalls are the tool calls the turns made, by call id, as events and
+	// evidence pages report them. ResultCall maps a result id to its call.
+	ToolCalls  map[string]ToolCallInfo
+	ResultCall map[string]string
 }
 
 // withTurnConversation records that the turn belongs to the conversation,
@@ -274,6 +284,8 @@ func NewState() State {
 		Blocks:        make(map[string]BlockInfo),
 		Verdicts:      make(map[string]VerdictInfo),
 		Messages:      make(map[string]MessageInfo),
+		ToolCalls:     make(map[string]ToolCallInfo),
+		ResultCall:    make(map[string]string),
 	}
 }
 
@@ -572,12 +584,10 @@ func apply(s State, f wire.Frame) State {
 		var body wire.EvVerdictRecorded
 		if json.Unmarshal(f.Body, &body) == nil {
 			verdicts := copyMap(s.Verdicts)
-			verdicts[body.VerdictID] = VerdictInfo{
-				ID:        body.VerdictID,
-				AttemptID: body.AttemptID,
-				Parsed:    body.Parsed,
-				Class:     body.ValidationStatus,
-			}
+			// verdict_evidence can arrive first; what it said is kept.
+			vi := verdicts[body.VerdictID]
+			vi.ID, vi.AttemptID, vi.Parsed, vi.Class = body.VerdictID, body.AttemptID, body.Parsed, body.ValidationStatus
+			verdicts[body.VerdictID] = vi
 			s.Verdicts = verdicts
 			attempts := copyMap(s.Attempts)
 			if ai, ok := attempts[body.AttemptID]; ok {
@@ -587,6 +597,10 @@ func apply(s State, f wire.Frame) State {
 			}
 			s.Attempts = attempts
 		}
+
+	case wire.EventKindToolCallAccepted, wire.EventKindToolResult, wire.EventKindWebRefereeDecision,
+		wire.EventKindRefereeDecision, wire.EventKindVerdictEvidence:
+		s = applyEvidence(s, "", f.Seq, f.Kind, f.Body)
 
 	case wire.EventKindCapacity, wire.EventKindVerdictsDelivered:
 		// These events don't directly update state; they're informational.
@@ -849,6 +863,11 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	if turn.ContextFromTurn != nil {
 		ti.ContextFrom = *turn.ContextFromTurn
 	}
+	// A record read before the change set froze can arrive after one that has
+	// it, so only a terminal record takes the change set away.
+	if turn.ChangeSet != nil || final {
+		ti.ChangeSet = turn.ChangeSet
+	}
 	if turn.EstimatedPromptTokens > 0 && (final || ti.EstimatedTokens == 0) {
 		ti.EstimatedTokens = turn.EstimatedPromptTokens
 	}
@@ -923,7 +942,14 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		if _, known := verdicts[v.ID]; known && !final {
 			continue
 		}
-		verdicts[v.ID] = VerdictInfo{ID: v.ID, AttemptID: v.AttemptID, Parsed: v.Parsed, Class: v.ValidationStatus}
+		// The record's result ids are the engine's whole list; events may have
+		// said the same earlier, and never more.
+		vi := verdicts[v.ID]
+		vi.ID, vi.AttemptID, vi.Parsed, vi.Class = v.ID, v.AttemptID, v.Parsed, v.ValidationStatus
+		if len(v.ResultIDs) > 0 {
+			vi.ResultIDs = append([]string(nil), v.ResultIDs...)
+		}
+		verdicts[v.ID] = vi
 		if ai, ok := attempts[v.AttemptID]; ok {
 			ai.VerdictClass = v.ValidationStatus
 			ai.VerdictParsed = v.Parsed
