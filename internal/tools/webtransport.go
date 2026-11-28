@@ -91,6 +91,18 @@ func NewPinnedFetcher(s *URLScreener, r Referee, res Resolver) (*PinnedFetcher, 
 	return &PinnedFetcher{screener: s, referee: r, resolver: res}, nil
 }
 
+// WithNetwork sets the dialer and TLS configuration of the pinned connection,
+// as SearchNetwork does for a searcher, so a test outside this package can
+// carry a connection to a local listener and record the validated address it
+// was asked to dial. Its Resolver is not used: the fetcher keeps the one it was
+// built with. The daemon calls it with nothing.
+func (f *PinnedFetcher) WithNetwork(n *SearchNetwork) *PinnedFetcher {
+	if n != nil {
+		f.dial, f.tlsConfig = n.Dial, n.TLSConfig
+	}
+	return f
+}
+
 // Fetch sends one GET. A refusal is a *RefusalError.
 func (f *PinnedFetcher) Fetch(ctx context.Context, rawURL string) (*http.Response, error) {
 	if v := f.screener.Screen(rawURL); !v.Allowed {
