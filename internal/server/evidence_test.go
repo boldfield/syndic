@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/client"
 	"github.com/boldfield/syndic/internal/engine"
@@ -349,7 +350,8 @@ func TestApplyLostReplyRetry(t *testing.T) {
 		got, err = b.Apply(deadline, reply.TurnID)
 		var we *wire.Error
 		if errors.As(err, &we) && we.Code == wire.ErrorCodeBusy {
-			continue // the first apply is still running
+			time.Sleep(10 * time.Millisecond) // the first apply is still running
+			continue
 		}
 		if err != nil {
 			t.Fatal(err)

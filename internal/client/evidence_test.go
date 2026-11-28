@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,11 +104,11 @@ func TestApplyDiscardEvidenceRoundTrip(t *testing.T) {
 // hanging; asking again on a new connection returns the result.
 func TestApplyReplyLostThenRetried(t *testing.T) {
 	requests := make(chan int, 4)
-	n := 0
+	var n atomic.Int32
 	server := startTestServer(t, helloThen(func(frame wire.Frame, w *wire.Writer) bool {
-		n++
-		requests <- n
-		if n == 1 {
+		c := int(n.Add(1))
+		requests <- c
+		if c == 1 {
 			return false // the request is read, the reply never sent
 		}
 		f, _ := wire.NewReply(frame.ID, wire.ApplyReply{State: "applied"})
