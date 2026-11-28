@@ -14,6 +14,7 @@ import (
 
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func sum(s string) string {
@@ -602,6 +603,12 @@ func TestTranscriptShowsReviewerToolsUnderTheirOwnVerdict(t *testing.T) {
 	if !strings.Contains(text, "author read_file main.go ok") {
 		t.Errorf("the author's call is missing:\n%s", text)
 	}
+	// A long target wraps to the width like the rows around it.
+	for _, l := range transcriptLines(a.state, "t1", a.transcriptIn(), 24) {
+		if w := lipgloss.Width(l); w > 24 {
+			t.Errorf("transcript line is %d cells at width 24: %q", w, l)
+		}
+	}
 }
 
 func TestEvidenceReducerIgnoresMalformedBodies(t *testing.T) {
@@ -633,6 +640,24 @@ func TestUnifiedDiffEOFNewlineOnlyChange(t *testing.T) {
 	want = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+c\n\\ No newline at end of file"
 	if got != want {
 		t.Errorf("both without newline:\n%s", got)
+	}
+	// A line whose newline state differs between the sides is never context,
+	// even when lines are added or removed after it.
+	nl := `\ No newline at end of file`
+	for _, c := range []struct{ name, old, new, want string }{
+		{"append after a last line without newline", "x\ny", "x\ny\nz\n",
+			"@@ -1,2 +1,3 @@\n x\n-y\n" + nl + "\n+y\n+z"},
+		{"append without newline after one without", "x", "x\ny",
+			"@@ -1 +1,2 @@\n-x\n" + nl + "\n+x\n+y\n" + nl},
+		{"shared line becomes the last without newline", "a\nb\n", "a",
+			"@@ -1,2 +1 @@\n-a\n-b\n+a\n" + nl},
+		{"shared line stops being the last without newline", "a", "a\nb\n",
+			"@@ -1 +1,2 @@\n-a\n" + nl + "\n+a\n+b"},
+	} {
+		got := strings.Join(unifiedDiffLines("a/f", "b/f", c.old, c.new), "\n")
+		if want := "--- a/f\n+++ b/f\n" + c.want; got != want {
+			t.Errorf("%s:\n%s\nwant:\n%s", c.name, got, want)
+		}
 	}
 }
 

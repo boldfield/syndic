@@ -258,6 +258,11 @@ func roleOf(s State, c ToolCallInfo) string {
 // referee's refusal when it fired. The transcript also shows an allow; the
 // chat's progress line names only a deny.
 func toolLine(s State, c ToolCallInfo, showAllow bool) string {
+	return safeLine(toolText(s, c, showAllow))
+}
+
+// toolText is toolLine before escaping.
+func toolText(s State, c ToolCallInfo, showAllow bool) string {
 	status := c.Status
 	if status == "" {
 		status = "running"
@@ -271,7 +276,7 @@ func toolLine(s State, c ToolCallInfo, showAllow bool) string {
 	if c.Referee == "deny" || (showAllow && c.Referee != "") {
 		line += " · referee: " + c.Referee
 	}
-	return safeLine(line)
+	return line
 }
 
 // toolProgressLines are the lines the chat's progress line is followed by
@@ -296,8 +301,9 @@ func verdictCalls(s State, v VerdictInfo) []ToolCallInfo {
 	return out
 }
 
-// resultLine is what a call's result was: its status, and its size or error.
-func resultLine(c ToolCallInfo) string {
+// resultText is one tool result as one line, before escaping: status, size or
+// error, and id.
+func resultText(c ToolCallInfo) string {
 	line := "result " + c.Status
 	switch {
 	case c.ErrorCode != "":
@@ -308,14 +314,15 @@ func resultLine(c ToolCallInfo) string {
 	if c.ResultID != "" {
 		line += " (" + c.ResultID + ")"
 	}
-	return safeLine(line)
+	return line
 }
 
 // attemptToolLines are the lines the transcript shows under an attempt. A
 // reviewer's calls and their results sit under the verdict that received them;
-// any other call sits under the attempt that made it.
-func attemptToolLines(s State, turnID, attemptID string) []string {
+// any other call sits under the attempt that made it. Each is wrapped to width.
+func attemptToolLines(s State, turnID, attemptID string, width int) []string {
 	var lines []string
+	add := func(text string) { lines = append(lines, SafeTextWithPrefix(text, width)...) }
 	reported := map[string]bool{}
 	for _, v := range s.Verdicts {
 		for _, c := range verdictCalls(s, v) {
@@ -324,18 +331,19 @@ func attemptToolLines(s State, turnID, attemptID string) []string {
 	}
 	for _, c := range sortedCalls(s, turnID) {
 		if c.AttemptID == attemptID && !reported[c.ID] {
-			lines = append(lines, contentPrefix+toolLine(s, c, true))
+			add(toolText(s, c, true))
 		}
 	}
 	for _, v := range s.Verdicts {
 		if v.AttemptID != attemptID || len(v.ResultIDs) == 0 {
 			continue
 		}
-		lines = append(lines, contentPrefix+fmt.Sprintf("lookups before this verdict: %d", len(v.ResultIDs)))
+		add(fmt.Sprintf("lookups before this verdict: %d", len(v.ResultIDs)))
 		calls := verdictCalls(s, v)
 		sort.SliceStable(calls, func(i, j int) bool { return calls[i].Seq < calls[j].Seq })
 		for _, c := range calls {
-			lines = append(lines, contentPrefix+toolLine(s, c, true), contentPrefix+"  "+resultLine(c))
+			add(toolText(s, c, true))
+			add("  " + resultText(c))
 		}
 	}
 	return lines
@@ -644,18 +652,14 @@ const (
 )
 
 type diffEdit struct {
-	op   byte // ' ', '-', '+'
-	text string
-	noNL bool // the line ends its file without a newline
+	op   byte   // ' ', '-', '+'
+	text string // the line with its newline, if it has one
 }
 
 // unifiedDiffLines is a unified diff of old against new.
 func unifiedDiffLines(from, to, old, new string) []string {
 	out := []string{"--- " + from, "+++ " + to}
-	oldLines, oldNL := diffSplit(old)
-	newLines, newNL := diffSplit(new)
-	script := editScript(oldLines, newLines)
-	script = markEOFChange(script, oldNL, newNL)
+	script := editScript(diffSplit(old), diffSplit(new))
 	n := len(script)
 	// aPos[i] and bPos[i] are the line numbers script[i] has in each file.
 	aPos, bPos := make([]int, n+1), make([]int, n+1)
@@ -695,8 +699,8 @@ func unifiedDiffLines(from, to, old, new string) []string {
 		out = append(out, fmt.Sprintf("@@ -%s +%s @@",
 			hunkRange(aPos[start], aPos[end]-aPos[start]), hunkRange(bPos[start], bPos[end]-bPos[start])))
 		for _, e := range script[start:end] {
-			out = append(out, string(e.op)+e.text)
-			if e.noNL {
+			out = append(out, string(e.op)+strings.TrimSuffix(e.text, "\n"))
+			if !strings.HasSuffix(e.text, "\n") {
 				out = append(out, `\ No newline at end of file`)
 			}
 		}
@@ -715,40 +719,15 @@ func hunkRange(start, n int) string {
 	return fmt.Sprintf("%d,%d", start, n)
 }
 
-// diffSplit is s's lines and whether the last one ends in a newline.
-func diffSplit(s string) ([]string, bool) {
-	if s == "" {
-		return nil, true
+// diffSplit is s's lines, each with its newline kept, so a file's last line
+// matches the other side's only when both end the same way: a line without a
+// newline is always its file's last, and its marker lands on the right side.
+func diffSplit(s string) []string {
+	lines := strings.SplitAfter(s, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
 	}
-	return strings.Split(strings.TrimSuffix(s, "\n"), "\n"), strings.HasSuffix(s, "\n")
-}
-
-// markEOFChange makes the script carry the newline state of each file's last
-// line: a final context line that differs only in its newline becomes a removal
-// and an addition, and a last line without a newline is flagged.
-func markEOFChange(script []diffEdit, oldNL, newNL bool) []diffEdit {
-	if last := len(script) - 1; last >= 0 && script[last].op == ' ' && oldNL != newNL {
-		t := script[last].text
-		script = append(script[:last:last], diffEdit{'-', t, !oldNL}, diffEdit{'+', t, !newNL})
-		return script
-	}
-	script = append([]diffEdit(nil), script...)
-	for i := len(script) - 1; i >= 0; i-- {
-		if script[i].op != '+' {
-			script[i].noNL = !oldNL
-			break
-		}
-	}
-	for i := len(script) - 1; i >= 0; i-- {
-		if script[i].op == '+' {
-			script[i].noNL = !newNL
-			break
-		}
-		if script[i].op == ' ' {
-			break
-		}
-	}
-	return script
+	return lines
 }
 
 // editScript is the line edits turning a into b: the common ends trimmed, the
@@ -764,11 +743,11 @@ func editScript(a, b []string) []diffEdit {
 	}
 	var out []diffEdit
 	for _, l := range a[:pre] {
-		out = append(out, diffEdit{' ', l, false})
+		out = append(out, diffEdit{' ', l})
 	}
 	out = append(out, middleEdits(a[pre:len(a)-suf], b[pre:len(b)-suf])...)
 	for _, l := range a[len(a)-suf:] {
-		out = append(out, diffEdit{' ', l, false})
+		out = append(out, diffEdit{' ', l})
 	}
 	return out
 }
@@ -777,10 +756,10 @@ func middleEdits(a, b []string) []diffEdit {
 	var out []diffEdit
 	if len(a) == 0 || len(b) == 0 || (len(a)+1)*(len(b)+1) > maxDiffCells {
 		for _, l := range a {
-			out = append(out, diffEdit{'-', l, false})
+			out = append(out, diffEdit{'-', l})
 		}
 		for _, l := range b {
-			out = append(out, diffEdit{'+', l, false})
+			out = append(out, diffEdit{'+', l})
 		}
 		return out
 	}
@@ -799,22 +778,22 @@ func middleEdits(a, b []string) []diffEdit {
 	for i < len(a) && j < len(b) {
 		switch {
 		case a[i] == b[j]:
-			out = append(out, diffEdit{' ', a[i], false})
+			out = append(out, diffEdit{' ', a[i]})
 			i++
 			j++
 		case lcs[(i+1)*w+j] >= lcs[i*w+j+1]:
-			out = append(out, diffEdit{'-', a[i], false})
+			out = append(out, diffEdit{'-', a[i]})
 			i++
 		default:
-			out = append(out, diffEdit{'+', b[j], false})
+			out = append(out, diffEdit{'+', b[j]})
 			j++
 		}
 	}
 	for ; i < len(a); i++ {
-		out = append(out, diffEdit{'-', a[i], false})
+		out = append(out, diffEdit{'-', a[i]})
 	}
 	for ; j < len(b); j++ {
-		out = append(out, diffEdit{'+', b[j], false})
+		out = append(out, diffEdit{'+', b[j]})
 	}
 	return out
 }

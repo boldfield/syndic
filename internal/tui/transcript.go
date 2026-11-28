@@ -99,14 +99,14 @@ func transcriptRows(s State, turnID string, in transcriptInput, width int) ([]st
 			add(it.Ref, repairPair(s, in, it, itemOf(in.items, "attempt:"+rid), width)...)
 			add(it.Ref, blockRowLines(blocks[id], width)...)
 			add(it.Ref, blockRowLines(blocks[rid], width)...)
-			add(it.Ref, attemptToolLines(s, turnID, id)...)
-			add(it.Ref, attemptToolLines(s, turnID, rid)...)
+			add(it.Ref, attemptToolLines(s, turnID, id, width)...)
+			add(it.Ref, attemptToolLines(s, turnID, rid, width)...)
 		} else {
 			add(it.Ref, wrapHeader(headerParts(s, in, it), width)...)
 			add(it.Ref, SafeTextWithPrefix(bodyText(s, in, it), width)...)
 			if isAttempt {
 				add(it.Ref, blockRowLines(blocks[id], width)...)
-				add(it.Ref, attemptToolLines(s, turnID, id)...)
+				add(it.Ref, attemptToolLines(s, turnID, id, width)...)
 			}
 		}
 		add(it.Ref, "")
