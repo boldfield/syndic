@@ -659,6 +659,10 @@ func SelfTestHelper(args []string, stdout io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "ping":
+		say(stdout, selfTestOK)
+	case serverHelperMode:
+		return serverHelper(os.Stdin, stdout)
 	case "read-denied":
 		if len(args) != 2 {
 			return 2
