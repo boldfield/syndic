@@ -55,6 +55,10 @@ type TurnWorkspace struct {
 	mu   sync.Mutex
 	inst *Instance
 	view WorkspaceView
+	// unresolved is set when a start left a process whose containment is
+	// unverified and no Instance to end: the copy stays in place and no call
+	// rebuilds it or starts another.
+	unresolved error
 }
 
 // Call serves one call. send carries it over inst's pipes, as for
@@ -66,6 +70,9 @@ func (w *TurnWorkspace) Call(ctx context.Context, send func(ctx context.Context,
 	defer w.mu.Unlock()
 	if w.Source.Overlay == nil || w.Source.Build == nil || w.Instances == nil {
 		return CallReply{Kind: CallNotSent, Err: errors.New("mcp: workspace copy needs instances and a source")}
+	}
+	if w.unresolved != nil {
+		return CallReply{Kind: CallNotSent, Err: w.unresolved}
 	}
 	present, err := w.Source.Overlay()
 	if err != nil {
@@ -97,6 +104,9 @@ func (w *TurnWorkspace) Call(ctx context.Context, send func(ctx context.Context,
 	req.WorkspaceDir = w.Dir
 	inst, err := w.Instances.Open(ctx, req)
 	if err != nil {
+		if errors.Is(err, ErrContainmentUnverified) {
+			w.unresolved = err
+		}
 		return CallReply{Kind: CallNotSent, Err: err}
 	}
 	w.inst, w.view = inst, view

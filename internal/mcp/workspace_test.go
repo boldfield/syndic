@@ -176,3 +176,27 @@ func TestTurnWorkspaceBuildErrorSendsNothing(t *testing.T) {
 		t.Fatalf("reply %v %v sent=%v starts=%d", r.Kind, r.Err, sent, starts)
 	}
 }
+
+func TestTurnWorkspaceUnverifiedStartNeverRebuilds(t *testing.T) {
+	starts := 0
+	m := &Instances{
+		Journal: &fakeJournal{},
+		Start: func(context.Context, InstanceRequest) (ServerProcess, error) {
+			starts++
+			return unconfirmedProc{}, errors.New("start failed")
+		},
+		Terminate: func(ServerProcess) bool { return false },
+	}
+	overlay, builds := "a", 0
+	w := newTestWorkspace(m, &overlay, &builds, nil)
+	ok := func(context.Context, *Instance, WorkspaceView) CallReply { return CallReply{Kind: CallResult} }
+	for i := 0; i < 3; i++ {
+		r := w.Call(context.Background(), ok)
+		if r.Kind != CallNotSent || !errors.Is(r.Err, ErrContainmentUnverified) {
+			t.Fatalf("call %d: %v %v", i, r.Kind, r.Err)
+		}
+	}
+	if starts != 1 || builds != 1 {
+		t.Fatalf("starts=%d builds=%d, want 1 and 1", starts, builds)
+	}
+}
