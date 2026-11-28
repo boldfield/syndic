@@ -142,6 +142,25 @@ type VerdictInfo struct {
 	AttemptID string
 	Parsed    bool
 	Class     string
+	ToolCalls int      // number of tool calls made by this reviewer
+	Lookups   int      // number of distinct web_fetch and web_search calls
+	Results   []string // ids of tool results this verdict received
+}
+
+// ToolCallInfo tracks a tool call event.
+type ToolCallInfo struct {
+	ID          string
+	AttemptID   string
+	Name        string
+	Participant string
+	Status      string
+}
+
+// EvidenceInfo tracks reviewer evidence.
+type EvidenceInfo struct {
+	VerdictID string
+	ToolCalls []string // tool call result ids
+	Lookups   int      // count of web_fetch and web_search calls
 }
 
 // BlockInfo holds information about a block.
@@ -192,6 +211,8 @@ type State struct {
 	Blocks              map[string]BlockInfo
 	Verdicts            map[string]VerdictInfo
 	Messages            map[string]MessageInfo
+	ToolCalls           map[string]ToolCallInfo // tool call id to info
+	Evidence            map[string]EvidenceInfo // verdict id to evidence
 	LastBudgetNotice    *BudgetNotice
 	LastBudgetExceeded  *struct{ Estimated, Reported int64 }
 	LastBudgetExhausted *struct{ Charged, Limit int64 }
@@ -276,6 +297,8 @@ func NewState() State {
 		Blocks:        make(map[string]BlockInfo),
 		Verdicts:      make(map[string]VerdictInfo),
 		Messages:      make(map[string]MessageInfo),
+		ToolCalls:     make(map[string]ToolCallInfo),
+		Evidence:      make(map[string]EvidenceInfo),
 	}
 }
 
@@ -574,12 +597,18 @@ func apply(s State, f wire.Frame) State {
 		var body wire.EvVerdictRecorded
 		if json.Unmarshal(f.Body, &body) == nil {
 			verdicts := copyMap(s.Verdicts)
-			verdicts[body.VerdictID] = VerdictInfo{
+			vi := VerdictInfo{
 				ID:        body.VerdictID,
 				AttemptID: body.AttemptID,
 				Parsed:    body.Parsed,
 				Class:     body.ValidationStatus,
 			}
+			if old, ok := verdicts[body.VerdictID]; ok {
+				vi.ToolCalls = old.ToolCalls
+				vi.Lookups = old.Lookups
+				vi.Results = old.Results
+			}
+			verdicts[body.VerdictID] = vi
 			s.Verdicts = verdicts
 			attempts := copyMap(s.Attempts)
 			if ai, ok := attempts[body.AttemptID]; ok {
@@ -588,6 +617,46 @@ func apply(s State, f wire.Frame) State {
 				attempts[body.AttemptID] = ai
 			}
 			s.Attempts = attempts
+		}
+
+	case wire.EventKindToolCallAccepted:
+		var body map[string]interface{}
+		if json.Unmarshal(f.Body, &body) == nil {
+			toolCalls := copyMap(s.ToolCalls)
+			if id, ok := body["id"].(string); ok {
+				if name, okn := body["name"].(string); okn {
+					toolCalls[id] = ToolCallInfo{
+						ID:   id,
+						Name: name,
+					}
+				}
+			}
+			s.ToolCalls = toolCalls
+		}
+
+	case wire.EventKindWebRefereeDecision, wire.EventKindRefereeDecision:
+		// These don't update state directly; they're tracked in the evidence request.
+
+	case wire.EventKindVerdictEvidence:
+		var body map[string]interface{}
+		if json.Unmarshal(f.Body, &body) == nil {
+			evidence := copyMap(s.Evidence)
+			if vID, ok := body["verdict_id"].(string); ok {
+				ei := EvidenceInfo{VerdictID: vID}
+				if old, ok := evidence[vID]; ok {
+					ei.ToolCalls = old.ToolCalls
+					ei.Lookups = old.Lookups
+				}
+				evidence[vID] = ei
+
+				verdicts := copyMap(s.Verdicts)
+				if vi, ok := verdicts[vID]; ok {
+					vi.ToolCalls = len(ei.ToolCalls)
+					verdicts[vID] = vi
+				}
+				s.Verdicts = verdicts
+			}
+			s.Evidence = evidence
 		}
 
 	case wire.EventKindCapacity, wire.EventKindVerdictsDelivered:
@@ -951,9 +1020,13 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 	}
 	s.Blocks = blocks
 
-	// Merge change set from turn reply
+	// Merge change set from turn reply: set it if present, clear it if
+	// explicitly absent in a final reply.
 	if turn.ChangeSet != nil {
 		ti.ChangeSet = turn.ChangeSet
+		turns[turnID] = ti
+	} else if final && ti.ChangeSet != nil {
+		ti.ChangeSet = nil
 		turns[turnID] = ti
 	}
 

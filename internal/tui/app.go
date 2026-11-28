@@ -1542,6 +1542,14 @@ func (a *App) maxTab() tab {
 	return tabParticipants
 }
 
+// clampTab ensures the current tab is within the available tabs for the current mode.
+func (a *App) clampTab() {
+	max := a.maxTab()
+	if a.tab > max {
+		a.tab = max
+	}
+}
+
 // tabNames are the tabs' names, in tab order. E-only tabs are excluded in solo mode.
 func (a *App) tabNames() []string {
 	names := []string{"chat", "transcript", "participants"}
@@ -1574,6 +1582,9 @@ func (a *App) statusLine(w int) string {
 // View lays out the tab bar, the active tab, banners, the input and, last, the status line.
 func (a *App) View() string {
 	w := a.width
+
+	// Clamp the current tab to available tabs in case the mode changed.
+	a.clampTab()
 
 	// When the terminal is too small, show a resize message
 	if a.isTerminalTooSmall() {
