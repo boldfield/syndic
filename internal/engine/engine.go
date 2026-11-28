@@ -162,6 +162,11 @@ type Options struct {
 	// wait inside an effect. It exists for tests of a cancel that lands while
 	// a call is executing; the daemon never sets it.
 	BeforeToolEffect func(turnID, attemptID, name string)
+	// AfterWalkComponent, when set, runs inside the confined walk of every
+	// author or reviewer tool step, after a path component is opened and before
+	// the next openat. It exists for tests of a component swapped in flight;
+	// the daemon never sets it.
+	AfterWalkComponent func(i int, name string)
 	// BeforeApply, when set, is called once an apply is open, with the engine
 	// unlocked, before it classifies or writes anything. It exists for tests
 	// of what a request made during an apply sees; the daemon never sets it.
@@ -204,6 +209,7 @@ type Engine struct {
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
 	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	afterWalk       func(i int, name string)                // nil means no hook inside a confined walk
 	beforeApply     func(turnID string)                     // nil means no wait before an apply
 	searchProviders map[string]tools.SearchProvider         // injected web_search providers by name; see Options.SearchProviders
 	searchNet       *tools.SearchNetwork                    // nil means the system resolver and dialer
@@ -297,6 +303,7 @@ func New(o Options) (*Engine, error) {
 		newAdapter:      o.NewAdapter,
 		changeLines:     o.AuthorChangeLines,
 		beforeEffect:    o.BeforeToolEffect,
+		afterWalk:       o.AfterWalkComponent,
 		beforeApply:     o.BeforeApply,
 		searchProviders: make(map[string]tools.SearchProvider, len(o.SearchProviders)),
 		searchNet:       o.SearchNetwork,

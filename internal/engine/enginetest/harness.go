@@ -122,6 +122,7 @@ type options struct {
 	clockStart     time.Time
 	changeLines    func(transport.CompleteResult) []string
 	beforeEffect   func(turnID, attemptID, name string)
+	afterWalk      func(i int, name string)
 	beforeApply    func(turnID string)
 	providers      []tools.SearchProvider
 	searchNet      *tools.SearchNetwork
@@ -199,6 +200,13 @@ func WithAuthorChangeLines(f func(transport.CompleteResult) []string) Option {
 // step once f returns. A test of a cancel landing mid-step cancels in f.
 func WithBeforeToolEffect(f func(turnID, attemptID, name string)) Option {
 	return func(o *options) { o.beforeEffect = f }
+}
+
+// WithAfterWalkComponent calls f inside every tool step's confined path walk,
+// after a component is opened and before the next openat, so a test can swap
+// that next component in flight.
+func WithAfterWalkComponent(f func(i int, name string)) Option {
+	return func(o *options) { o.afterWalk = f }
 }
 
 // WithBeforeApply calls f once an apply is open, before it touches the
@@ -340,13 +348,14 @@ func New(t *testing.T, rosterTOML string, scripts map[string][]fake.Step, opts .
 		Clock:         crashClock{inner: hn.Clock, dead: &hn.dead},
 		// The harness seeds the records it wants; start-time probing would
 		// replace the states SkipProbe sets up.
-		NoStartupProbes:   true,
-		AuthorChangeLines: o.changeLines,
-		BeforeToolEffect:  o.beforeEffect,
-		BeforeApply:       o.beforeApply,
-		SearchProviders:   o.providers,
-		SearchNetwork:     o.searchNet,
-		Secrets:           o.secrets,
+		NoStartupProbes:    true,
+		AuthorChangeLines:  o.changeLines,
+		BeforeToolEffect:   o.beforeEffect,
+		AfterWalkComponent: o.afterWalk,
+		BeforeApply:        o.beforeApply,
+		SearchProviders:    o.providers,
+		SearchNetwork:      o.searchNet,
+		Secrets:            o.secrets,
 		NewAdapter: func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error) {
 			a, ok := hn.gated[p.ID]
 			if !ok {
