@@ -161,3 +161,17 @@ func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) 
 	out, err := e.dispatchCommandReferee(commandCall{turnID: turnID, caller: caller, callID: callID, command: command})
 	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
 }
+
+// ProjectBudget runs the submit-time budget projection for the named preset
+// over an empty history, without the submit path's deliberate refusal.
+func (e *Engine) ProjectBudget(preset, input string) (wire.SubmitReply, error) {
+	eff, err := e.roster.Resolve(preset, "")
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+	rec, err := e.projectBudget(eff, input, nil, 0)
+	if err != nil {
+		return wire.SubmitReply{}, err
+	}
+	return wire.SubmitReply{EstimatedTokens: int64(rec.Projected), Phases: rec.Phases}, nil
+}

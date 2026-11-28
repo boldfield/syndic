@@ -502,3 +502,12 @@ func TestConversationLinesFitTheWidth(t *testing.T) {
 		t.Errorf("line %q split a character", l)
 	}
 }
+
+// A deliberate turn's budget lists each phase of its projection.
+func TestBudgetLineListsPhases(t *testing.T) {
+	b := wire.BudgetRecord{Phases: []wire.PhaseEstimate{{Phase: "integration", Participant: "author", EstimatedTokens: 120, MaxOutputTokens: 30}}}
+	got := budgetLine("0123456789", b)
+	if want := "\n  integration author: ~120 tokens in, up to 30 out"; !strings.HasSuffix(got, want) {
+		t.Errorf("budgetLine = %q, want suffix %q", got, want)
+	}
+}
