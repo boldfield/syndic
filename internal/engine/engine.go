@@ -564,6 +564,7 @@ func (e *Engine) Start() error {
 	e.addRefereeAdapters(roster, adapters, versions)
 
 	startedAt := e.clock.Now().UTC()
+	execSandbox := manifest.NewSandbox(roster, execSt.backend)
 	build := func() (manifest.Built, error) {
 		return manifest.Build(manifest.Input{
 			Store:          e.store,
@@ -573,6 +574,7 @@ func (e *Engine) Start() error {
 			EngineVersion:  e.version,
 			StartedAt:      startedAt,
 			AdapterVersion: func(p config.Participant) string { return versions[p.ID] },
+			Sandbox:        execSandbox,
 		})
 	}
 	built, err := build()
