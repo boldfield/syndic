@@ -23,6 +23,10 @@ func (e *Engine) runTurn(t *openTurn) {
 	if e.open != t {
 		return
 	}
+	if t.mode == config.ModeDeliberate {
+		e.startProposals(t)
+		return
+	}
 	if err := e.schedule(t, t.author, func() { e.startAuthor(t) }); err != nil {
 		e.finishLocked(t, StateIncomplete, reasonAuthorFailed+"error")
 	}
