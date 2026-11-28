@@ -245,13 +245,15 @@ func (e *Engine) runBash(fs *workspace.Confined, t *openTurn, caller, attemptID 
 		return tools.Result{}, err
 	}
 
-	res, err := runner.Run(ctx, command.Call{Command: args.Command, TimeoutS: &timeoutS, Spec: spec, Revoke: revoke, Enter: e.execGate.Enter})
+	if e.execBeforeRun != nil {
+		e.execBeforeRun()
+	}
+	res, err := runner.Run(ctx, command.Call{Command: args.Command, TimeoutS: &timeoutS, Spec: spec, Revoke: revoke, Gate: e.execGate.Start})
 	switch {
 	case errors.Is(err, sandbox.ErrGateClosed):
-		// Nothing started: the gate closed after the pre-check.
-		if err := e.recordExecOutcome(call.ID, journal.ExecAbandoned, journal.ExecCauseCancelled); err != nil {
-			return tools.Result{}, err
-		}
+		// Nothing started: the gate closed after the pre-check. The turn was
+		// not cancelled and nothing was abandoned, so no outcome is
+		// recorded; the tool error is the record.
 		reason, _ := e.execGate.Closed()
 		return e.journalToolError(call.ID, execErrNotOffered, "bash is not available: %s:%s", execOffGateClosed, reason)
 	case errors.Is(err, command.ErrContainmentUnverified):

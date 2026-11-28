@@ -155,10 +155,11 @@ type Call struct {
 	// Revoke, when not nil, is called when termination begins, before any
 	// wait; see sandbox.Sequence.Run.
 	Revoke func()
-	// Enter, when not nil, is called immediately before the process is
-	// started. An error from it ends the call, wrapped, with nothing
-	// started.
-	Enter func() error
+	// Gate, when not nil, wraps the process start: Run passes it the start
+	// and it calls it, or does not, holding the run's gate open throughout
+	// (sandbox.Gate.Start). An error it returns without starting ends the
+	// call, with nothing started.
+	Gate func(start func() error) error
 }
 
 // Result is the design's result less view, which is the caller's (v7 delta,
@@ -217,14 +218,23 @@ func (r *Runner) Run(ctx context.Context, call Call) (*Result, error) {
 	spec.Timeout = timeout
 	spec.Env = withoutStartupFiles(spec.Env)
 
-	if call.Enter != nil {
-		if err := call.Enter(); err != nil {
-			return nil, fmt.Errorf("command: enter: %w", err)
-		}
-	}
 	// Cancellation is handled by the termination sequence once the command
 	// has started, so that nothing is left uncontained by an aborted start.
-	proc, err := r.Backend.Start(context.WithoutCancel(ctx), spec)
+	var proc sandbox.Process
+	startFn := func() error {
+		var err error
+		proc, err = r.Backend.Start(context.WithoutCancel(ctx), spec)
+		return err
+	}
+	if call.Gate != nil {
+		var gateErr *sandbox.GateClosedError
+		err = call.Gate(startFn)
+		if errors.As(err, &gateErr) {
+			return nil, fmt.Errorf("command: enter: %w", err)
+		}
+	} else {
+		err = startFn()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("command: start: %w", err)
 	}

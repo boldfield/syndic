@@ -45,6 +45,19 @@ func (g *Gate) Enter() error {
 	return nil
 }
 
+// Start runs start while holding the gate open: it returns a *GateClosedError
+// without calling start on a closed gate, and a Close cannot return while
+// start runs. A command whose process is started inside start therefore
+// either began before the gate closed or does not begin.
+func (g *Gate) Start(start func() error) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return &GateClosedError{Reason: g.reason}
+	}
+	return start()
+}
+
 // Close closes the gate for the rest of the run. The first reason is kept;
 // closing a closed gate changes nothing.
 func (g *Gate) Close(reason string) {

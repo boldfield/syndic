@@ -20,6 +20,12 @@ func (e *Engine) SetPayloadHook(f func(kind string, payload any) any) {
 	e.payloadHook = f
 }
 
+// SetExecBeforeRunHook installs a hook that runs after a bash call is
+// journaled and before its command is run. Call it before the first request.
+func (e *Engine) SetExecBeforeRunHook(f func()) {
+	e.execBeforeRun = f
+}
+
 // SetCrashHook installs a hook the terminal path consults after its Tx
 // committed and before each Adapter.Cancel call. When it returns true the
 // engine stops there: no call is made and nothing further is written. Call it

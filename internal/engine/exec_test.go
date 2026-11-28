@@ -82,6 +82,13 @@ type bashRun struct {
 // command. allowed is how many commands the referee answers.
 func runBashTurn(t *testing.T, commands []string, allowed int, extra string) *bashRun {
 	t.Helper()
+	return runBashTurnWith(t, commands, allowed, extra, nil)
+}
+
+// runBashTurnWith is runBashTurn with a setup that runs on the harness before
+// the first request.
+func runBashTurnWith(t *testing.T, commands []string, allowed int, extra string, setup func(*enginetest.Harness)) *bashRun {
+	t.Helper()
 	network := strings.Contains(extra, "network_allow")
 	area := t.TempDir()
 	scripts := append(sandbox.FakeSelfTestScripts("", network), sandbox.FakeSelfTestScripts("", network)...)
@@ -115,6 +122,9 @@ func runBashTurn(t *testing.T, commands []string, allowed int, extra string) *ba
 	}
 	ws := workspaceDir(t)
 	h := enginetest.New(t, execRoster("\n[tools]\nmax_calls_per_turn = 30\n"+extra), map[string][]fake.Step{"author": script}, opts...)
+	if setup != nil {
+		setup(h)
+	}
 	reply, err := h.Engine.Submit(toolReq("s1", "exec", ws))
 	if err != nil {
 		t.Fatal(err)
@@ -375,5 +385,28 @@ func TestBashProxyListenerRevokedWhenCallEnds(t *testing.T) {
 	if c, err := net.DialTimeout("tcp", runs[0].proxy, time.Second); err == nil {
 		_ = c.Close()
 		t.Fatalf("the proxy listener %s still accepts after the call", runs[0].proxy)
+	}
+}
+
+// A gate that closes after the pre-check, while the call is journaled, ends
+// the call with a gate_closed tool error: nothing starts, and no outcome is
+// journaled, since nothing was cancelled or abandoned.
+func TestBashGateClosedAfterPreCheck(t *testing.T) {
+	run := runBashTurnWith(t, []string{"echo hi"}, 1, "", func(h *enginetest.Harness) {
+		h.Engine.SetExecBeforeRunHook(func() { h.Engine.ExecGate().Close("call b0 unverified") })
+	})
+	wantCalls(t, run.calls, [2]string{journal.ToolCallError, "not_offered"})
+	if got := len(run.be.seen()); got != 0 {
+		t.Fatalf("%d commands started after the gate closed", got)
+	}
+	err := run.h.Store.Tx(func(tx *journal.Tx) error {
+		ecs, err := tx.ExecCallsByTurn(run.turn)
+		if err != nil || len(ecs) != 1 || len(ecs[0].Outcomes) != 0 || ecs[0].Result != nil {
+			t.Errorf("exec calls %+v, err %v; want one with no outcome or result", ecs, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
