@@ -196,7 +196,7 @@ func TestReferee_PayloadAuthorizedFieldsOnly(t *testing.T) {
 		"reviewer": {
 			verdict(fake.VerdictApprove),
 		},
-	})
+	}, enginetest.WithToolCalls("author", transport.TriYes), enginetest.WithModelToolCalls("ep2", "m-referee", transport.TriYes))
 	c := s.Dial(t)
 	turnID := s.Submit(t, c, "check a webpage")
 	s.WaitTerminal(turnID)
