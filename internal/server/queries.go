@@ -243,7 +243,10 @@ func buildTurnRecord(store *journal.Store, openState func(turnID string) (string
 		// Get verdict evidence (tool results and observations it used)
 		evidence, err := store.GetVerdictEvidence(v.ID)
 		if err != nil {
-			return nil, fmt.Errorf("verdict %s evidence: %w", v.ID, err)
+			if !errors.Is(err, journal.ErrNoSuchContent) {
+				return nil, fmt.Errorf("verdict %s evidence: %w", v.ID, err)
+			}
+			// No evidence is the normal case; evidence is only recorded for tool-based verdicts
 		}
 		verdictRecord.ResultIDs = evidence.ResultIDs
 		verdictRecord.ObservationIDs = evidence.ObservationIDs

@@ -506,19 +506,19 @@ type ToolCall struct {
 
 // ToolResult represents the result of a tool call.
 type ToolResult struct {
-	ID        string `json:"id"`
-	CallID    string `json:"call_id"`
-	SHA256    string `json:"sha256"`
-	ByteLen   int64  `json:"byte_len"`
-	Status    string `json:"status"`
+	ID      string `json:"id"`
+	CallID  string `json:"call_id"`
+	SHA256  string `json:"sha256"`
+	ByteLen int64  `json:"byte_len"`
+	Status  string `json:"status"`
 }
 
 // Observation represents a snapshot of a file, directory, or absence.
 type Observation struct {
-	Path      string `json:"path"`
-	Kind      string `json:"kind"` // "file", "absent", or "directory"
-	SHA256    string `json:"sha256,omitempty"`
-	ByteLen   int64  `json:"byte_len,omitempty"`
+	Path    string `json:"path"`
+	Kind    string `json:"kind"` // "file", "absent", or "directory"
+	SHA256  string `json:"sha256,omitempty"`
+	ByteLen int64  `json:"byte_len,omitempty"`
 }
 
 // RefereDecision represents a decision made by a referee for a web tool call.
