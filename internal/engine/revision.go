@@ -67,6 +67,11 @@ func (t *openTurn) resetRound() {
 	t.outputs = nil
 	t.reviewersBegun = 0
 	t.reviewerCalls = nil
+	for id := range t.execCalls {
+		if id != t.author {
+			delete(t.execCalls, id)
+		}
+	}
 }
 
 func historyOf(t *openTurn) *history.Document {

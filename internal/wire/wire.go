@@ -391,6 +391,9 @@ type SubmitRequest struct {
 	ConversationID   *string `json:"conversation_id,omitempty"`
 	ContextFromTurn  *string `json:"context_from_turn,omitempty"`
 	MaxRounds        *int    `json:"max_rounds,omitempty"`
+	// Attachments are at most 8 workspace-relative paths the engine reads at
+	// submit and sends with the turn.
+	Attachments []string `json:"attachments,omitempty"`
 }
 
 type SubmitReply struct {

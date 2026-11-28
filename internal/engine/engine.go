@@ -234,6 +234,10 @@ type Engine struct {
 	// unverified. Its zero value is open and it has its own lock.
 	execGate sandbox.Gate
 
+	// execBeforeRun, when set by a test, runs after a bash call is journaled
+	// and before its command is run.
+	execBeforeRun func()
+
 	// payloadHook lets tests replace an event payload (for example with one
 	// that cannot be marshalled) to make a transaction fail after its row
 	// writes. It is set before any request and never changed afterwards.

@@ -433,6 +433,8 @@ func (e *Engine) roleToolDefs(t *openTurn, groups []string, caller string, remai
 			offered = append(offered, g)
 		case g == tools.GroupWeb && e.searchOffered() && e.groupOffered(g, caller):
 			offered = append(offered, g)
+		case g == tools.GroupExec && caller == t.author && t.workspace != "" && e.execOffReason(t, caller) == "":
+			offered = append(offered, g)
 		}
 	}
 	mcpDefs, err := e.mcpDefs(t, groups, caller)
@@ -546,6 +548,9 @@ func (e *Engine) toolEffects(fs *workspace.Confined, t *openTurn, caller, attemp
 		for _, en := range e.mcpEntries(t, grants, caller) {
 			effects[en.Name] = e.mcpPlaceholderEffect()
 		}
+	}
+	if fs != nil && e.execState != nil && e.execState.off == "" {
+		effects[tools.NameBash] = e.bashEffect(fs, t, caller, attemptID, hook)
 	}
 	if e.searchOffered() {
 		effects[tools.NameWebSearch] = e.webSearchEffect(t, caller, attemptID, hook)

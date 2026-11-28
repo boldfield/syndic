@@ -28,6 +28,9 @@ const (
 	// EgressRouteVerdict is a reviewer's findings, written with file content
 	// in view, that a revision gives the author.
 	EgressRouteVerdict = "verdict"
+	// EgressRouteAttachment is a file the human attached to the submit, which
+	// every participant of the preset receives.
+	EgressRouteAttachment = "attachment"
 )
 
 // FileRoute is a participant of a preset and the route by which it could
