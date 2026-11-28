@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/boldfield/syndic/internal/wire"
 	tea "github.com/charmbracelet/bubbletea"
@@ -571,8 +573,7 @@ func TestTranscriptShowsReviewerToolsUnderTheirOwnVerdict(t *testing.T) {
 	lines := transcriptLines(a.state, "t1", a.transcriptIn(), 100)
 	text := strings.Join(lines, "\n")
 
-	// Find the block of lines of each reviewer's attempts: the calls sit in the
-	// attempt that made them, the lookup count in the verdict's.
+	// Find the block of lines of each reviewer's attempts.
 	idx := func(sub string) int {
 		for i, l := range lines {
 			if strings.Contains(l, sub) {
@@ -584,6 +585,13 @@ func TestTranscriptShowsReviewerToolsUnderTheirOwnVerdict(t *testing.T) {
 	}
 	if call := idx("reviewer 1 web_fetch"); call <= idx("rev-a") || call >= idx("reviewer 2 search_files") {
 		t.Errorf("reviewer 1's call is not under reviewer 1:\n%s", text)
+	}
+	// Each reviewer's calls and results sit under that reviewer's verdict.
+	if v1, c1, r1 := idx("rev-a"), idx("reviewer 1 web_fetch"), idx("result error referee_denied"); v1 >= c1 || c1 >= r1 || r1 >= idx("reviewer 2 search_files") {
+		t.Errorf("reviewer 1's call and result are not together under its verdict:\n%s", text)
+	}
+	if c, r := idx("reviewer 2 read_file"), idx("result ok (r4)"); c > r || idx("result ok (r3)") > c {
+		t.Errorf("reviewer 2's results are not under its verdict:\n%s", text)
 	}
 	if strings.Count(text, "lookups before this verdict: 1") != 1 || strings.Count(text, "lookups before this verdict: 2") != 1 {
 		t.Errorf("each verdict should show its own count (1 and 2):\n%s", text)
@@ -639,6 +647,9 @@ func TestChangesTabBaseCheckRejectsSymlinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "d", "f.txt"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if os.Symlink("real.txt", filepath.Join(dir, "a.txt")) != nil || os.Symlink("d", filepath.Join(dir, "link")) != nil {
 		t.Skip("symlinks unavailable")
 	}
@@ -647,11 +658,23 @@ func TestChangesTabBaseCheckRejectsSymlinks(t *testing.T) {
 	cs.Paths[0].Path = "a.txt"
 	cs.Paths[1].Path = "link/f.txt"
 	cs.Paths[2].Path = "real.txt"
+	cs.Paths = append(cs.Paths, cs.Paths[2])
+	cs.Paths[3].Path = "pipe"
 	base := sum("one\ntwo\nthree\n")
 	for i := range cs.Paths {
 		cs.Paths[i].BaseSHA256 = base
 	}
-	bc := classifyPaths(dir, *cs)
+	done := make(chan baseCheck, 1)
+	go func() { done <- classifyPaths(dir, *cs) }()
+	var bc baseCheck
+	select {
+	case bc = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the base check hangs on a FIFO")
+	}
+	if bc.paths["pipe"] != "conflict" {
+		t.Errorf("a FIFO is a conflict: %v", bc.paths)
+	}
 	if bc.paths["a.txt"] != "conflict" || bc.paths["link/f.txt"] != "conflict" || bc.paths["real.txt"] != "pending" {
 		t.Errorf("symlink classification: %v", bc.paths)
 	}

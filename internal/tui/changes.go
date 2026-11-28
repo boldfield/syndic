@@ -38,7 +38,10 @@ type ToolCallInfo struct {
 	// Referee is the referee's verdict on the call, "allow" or "deny", or empty.
 	Referee  string
 	ResultID string
-	Seq      int64
+	// ByteLen and ErrorCode describe the result: its size, or why it failed.
+	ByteLen   int64
+	ErrorCode string
+	Seq       int64
 }
 
 // The payloads of the journaled tool events, with the field names the journal
@@ -53,9 +56,11 @@ type toolCallBody struct {
 }
 
 type toolResultBody struct {
-	ResultID string `json:"result_id"`
-	CallID   string `json:"call_id"`
-	Status   string `json:"status"`
+	ResultID  string `json:"result_id"`
+	CallID    string `json:"call_id"`
+	Status    string `json:"status"`
+	ByteLen   int64  `json:"byte_len"`
+	ErrorCode string `json:"error_code"`
 }
 
 type refereeBody struct {
@@ -109,6 +114,7 @@ func applyEvidence(s State, turnID string, seq int64, kind string, body json.Raw
 		}
 		c := calls[b.CallID]
 		c.ID, c.Status, c.ResultID = b.CallID, b.Status, b.ResultID
+		c.ByteLen, c.ErrorCode = b.ByteLen, b.ErrorCode
 		if c.TurnID == "" {
 			c.TurnID = turnOf(c.AttemptID)
 		}
@@ -277,18 +283,58 @@ func toolProgressLines(s State, turnID string) []string {
 	return lines
 }
 
-// attemptToolLines are the lines the transcript shows under an attempt: the
-// calls it made, and for a reviewer's verdict how many results it had received.
+// verdictCalls are the calls whose results a verdict received, in the order
+// the verdict lists them.
+func verdictCalls(s State, v VerdictInfo) []ToolCallInfo {
+	var out []ToolCallInfo
+	for _, rid := range v.ResultIDs {
+		if c, ok := s.ToolCalls[s.ResultCall[rid]]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// resultLine is what a call's result was: its status, and its size or error.
+func resultLine(c ToolCallInfo) string {
+	line := "result " + c.Status
+	switch {
+	case c.ErrorCode != "":
+		line += " " + c.ErrorCode
+	case c.ByteLen > 0:
+		line += fmt.Sprintf(" %d bytes", c.ByteLen)
+	}
+	if c.ResultID != "" {
+		line += " (" + c.ResultID + ")"
+	}
+	return safeLine(line)
+}
+
+// attemptToolLines are the lines the transcript shows under an attempt. A
+// reviewer's calls and their results sit under the verdict that received them;
+// any other call sits under the attempt that made it.
 func attemptToolLines(s State, turnID, attemptID string) []string {
 	var lines []string
+	reported := map[string]bool{}
+	for _, v := range s.Verdicts {
+		for _, c := range verdictCalls(s, v) {
+			reported[c.ID] = true
+		}
+	}
 	for _, c := range sortedCalls(s, turnID) {
-		if c.AttemptID == attemptID {
+		if c.AttemptID == attemptID && !reported[c.ID] {
 			lines = append(lines, contentPrefix+toolLine(s, c))
 		}
 	}
 	for _, v := range s.Verdicts {
-		if v.AttemptID == attemptID && len(v.ResultIDs) > 0 {
-			lines = append(lines, contentPrefix+fmt.Sprintf("lookups before this verdict: %d", len(v.ResultIDs)))
+		if v.AttemptID != attemptID || len(v.ResultIDs) == 0 {
+			continue
+		}
+		lines = append(lines, contentPrefix+fmt.Sprintf("lookups before this verdict: %d", len(v.ResultIDs)))
+		calls := verdictCalls(s, v)
+		sort.SliceStable(calls, func(i, j int) bool { return calls[i].Seq < calls[j].Seq })
+		for _, c := range calls {
+			lines = append(lines, contentPrefix+toolLine(s, c), contentPrefix+"  "+resultLine(c))
 		}
 	}
 	return lines
@@ -417,6 +463,10 @@ func classifyPath(root *os.Root, p wire.ChangeSetPathRecord) string {
 			break
 		}
 		if err != nil || st.Mode()&fs.ModeSymlink != 0 || (i < len(parts)-1 && !st.IsDir()) {
+			return "conflict"
+		}
+		// A special file at the leaf blocks an open; the engine calls it a conflict.
+		if i == len(parts)-1 && !st.Mode().IsRegular() {
 			return "conflict"
 		}
 	}
