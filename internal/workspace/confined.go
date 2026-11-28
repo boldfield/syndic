@@ -88,7 +88,7 @@ func (c *Confined) OpenFile(path string, flags int, perm fs.FileMode) (*os.File,
 	// Check that it's a regular file
 	if (stat.Mode & unix.S_IFMT) != unix.S_IFREG {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o", stat.Mode)
+		return nil, fmt.Errorf("opened path is not a regular file: mode=0%o: %w", stat.Mode, ErrNotRegular)
 	}
 
 	return os.NewFile(uintptr(fd), path), nil

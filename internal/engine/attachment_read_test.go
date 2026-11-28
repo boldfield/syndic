@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/boldfield/syndic/internal/engine"
 	"github.com/boldfield/syndic/internal/workspace"
 )
@@ -318,12 +320,12 @@ func TestReadAttachments_MaxCount(t *testing.T) {
 	if errResp == nil || errResp.Code != "attachment" {
 		t.Errorf("got no error for 9 files, want attachment error")
 	}
-	if errResp.Reason == nil || *errResp.Reason != "ninth" {
+	if errResp.Reason == nil || *errResp.Reason != "form" {
 		reasonStr := "(nil)"
 		if errResp.Reason != nil {
 			reasonStr = *errResp.Reason
 		}
-		t.Errorf("got reason %q, want \"ninth\"", reasonStr)
+		t.Errorf("got reason %q, want \"form\"", reasonStr)
 	}
 }
 
@@ -417,24 +419,60 @@ func TestReadAttachments_GrowingFile(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 
-	// This test verifies that if a file grows between stat and read,
-	// the read limit detects the overflow and rejects it as too_large.
-	// We create a file at the limit, which will be read successfully.
-	// The key is that ReadAttachments uses io.LimitReader which will
-	// prevent reading beyond MaxAttachmentFileReadLimit bytes.
-
+	// Test 1: Static file under limit is accepted
 	maxSize := 256 * 1024
-	content := make([]byte, maxSize+1)
-	for i := range content {
-		content[i] = 'a'
+	underContent := make([]byte, maxSize-1)
+	for i := range underContent {
+		underContent[i] = 'a'
 	}
-	if err := os.WriteFile(filepath.Join(tempdir, "growing.txt"), content, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempdir, "under.txt"), underContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+	attachments, errResp := engine.ReadAttachments(c, []string{"under.txt"})
+	if errResp != nil {
+		t.Fatalf("got error for file under limit: %v", errResp)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("got %d attachments, want 1", len(attachments))
+	}
+
+	// Test 2: File that grows between stat and read is rejected
+	growingFile := filepath.Join(tempdir, "growing.txt")
+	initialSize := 256*1024 - 100 // Start under limit
+	growContent := make([]byte, initialSize)
+	for i := range growContent {
+		growContent[i] = 'b'
+	}
+	if err := os.WriteFile(growingFile, growContent, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, errResp := engine.ReadAttachments(c, []string{"growing.txt"})
+	// Set up a callback to grow the file after it's opened
+	growCalled := false
+	c.SetAfterComponent(func(i int, name string) {
+		if name == "growing.txt" && !growCalled {
+			growCalled = true
+			// Append to the file to make it exceed the limit
+			f, err := os.OpenFile(growingFile, os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				t.Logf("warning: could not open file to grow it: %v", err)
+				return
+			}
+			defer func() { _ = f.Close() }()
+			// Add 200 bytes to push it over the 256 KiB limit
+			extra := make([]byte, 200)
+			for i := range extra {
+				extra[i] = 'c'
+			}
+			if _, err := f.Write(extra); err != nil {
+				t.Logf("warning: could not grow file: %v", err)
+			}
+		}
+	})
+
+	_, errResp = engine.ReadAttachments(c, []string{"growing.txt"})
 	if errResp == nil || errResp.Code != "attachment" {
-		t.Errorf("got no error, want attachment error")
+		t.Errorf("got no error for growing file, want attachment error")
 	}
 	if errResp.Reason == nil || *errResp.Reason != "too_large" {
 		reasonStr := "(nil)"
@@ -453,16 +491,15 @@ func TestReadAttachments_Device(t *testing.T) {
 	}
 	defer func() { _ = c.Close() }()
 
-	// Try to read from a character device (not_regular)
-	// /dev/null is a character device that should be rejected
-	// We'll test with a directory instead which is reliably not regular
-	if err := os.Mkdir(filepath.Join(tempdir, "dir"), 0755); err != nil {
-		t.Fatal(err)
+	// Test FIFO (not a regular file)
+	fifoPath := filepath.Join(tempdir, "testfifo")
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
+		t.Fatalf("failed to create FIFO: %v", err)
 	}
 
-	_, errResp := engine.ReadAttachments(c, []string{"dir"})
+	_, errResp := engine.ReadAttachments(c, []string{"testfifo"})
 	if errResp == nil || errResp.Code != "attachment" {
-		t.Errorf("got no error, want attachment error")
+		t.Errorf("got no error for FIFO, want attachment error")
 	}
 	if errResp.Reason == nil || *errResp.Reason != "not_regular" {
 		reasonStr := "(nil)"

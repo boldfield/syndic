@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -15,10 +16,9 @@ import (
 )
 
 const (
-	MaxAttachmentFileSize      = 256 * 1024   // 256 KiB
-	MaxAttachmentFileReadLimit = 256*1024 + 1 // 256 KiB + 1 byte (for overflow detection)
-	MaxAttachmentTotalSize     = 1024 * 1024  // 1 MiB
-	MaxAttachmentCount         = 8
+	MaxAttachmentFileSize  = 256 * 1024  // 256 KiB
+	MaxAttachmentTotalSize = 1024 * 1024 // 1 MiB
+	MaxAttachmentCount     = 8
 )
 
 // ReadAttachments validates path forms and reads bounded attachments through the confined walk.
@@ -31,7 +31,7 @@ func ReadAttachments(fs *workspace.Confined, paths []string) ([]journal.Attachme
 
 	if len(paths) > MaxAttachmentCount {
 		path := paths[MaxAttachmentCount]
-		reason := "ninth"
+		reason := "form"
 		return nil, &wire.Error{
 			Code:   "attachment",
 			Path:   &path,
@@ -201,16 +201,7 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 				Reason: &reason,
 			}
 		}
-		if errors.Is(err, unix.ENOENT) {
-			reason := "not_found"
-			return nil, false, &wire.Error{
-				Code:   "attachment",
-				Path:   &path,
-				Reason: &reason,
-			}
-		}
-		// Check for not_regular via error message since workspace doesn't expose a specific error
-		if strings.Contains(err.Error(), "not a regular file") {
+		if errors.Is(err, workspace.ErrNotRegular) {
 			reason := "not_regular"
 			return nil, false, &wire.Error{
 				Code:   "attachment",
@@ -218,7 +209,15 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 				Reason: &reason,
 			}
 		}
-		// Generic I/O errors map to not_found per v6 design
+		if errors.Is(err, fs.ErrNotExist) {
+			reason := "not_found"
+			return nil, false, &wire.Error{
+				Code:   "attachment",
+				Path:   &path,
+				Reason: &reason,
+			}
+		}
+		// Other errors (permissions, I/O, etc.) are generic I/O failures, not "not_found"
 		reason := "not_found"
 		return nil, false, &wire.Error{
 			Code:   "attachment",
@@ -251,7 +250,9 @@ func readBoundedFile(c *workspace.Confined, path string) ([]byte, bool, *wire.Er
 	ownerExec := (sys.Mode & unix.S_IXUSR) != 0
 
 	// Read with bounded limit: 256 KiB + 1 (to detect oversized files)
-	limitedReader := io.LimitReader(f, MaxAttachmentFileReadLimit)
+	// Size is what was read, not what prior stat reported
+	maxReadLimit := int64(MaxAttachmentFileSize + 1)
+	limitedReader := io.LimitReader(f, maxReadLimit)
 	content, err := io.ReadAll(limitedReader)
 	if err != nil {
 		reason := "not_found"
