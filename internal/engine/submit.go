@@ -38,6 +38,10 @@ type openTurn struct {
 
 	reviewersBegun int
 
+	// execTurn is the turn's self-test before its first command; nil until
+	// then. Owned by Engine.mu.
+	execTurn *execTurn
+
 	// Proposal-phase state of a deliberate turn, owned by Engine.mu.
 	// proposals holds each accepted proposal's text in roster order and
 	// proposalAttempts maps each proposal attempt to its proposer.

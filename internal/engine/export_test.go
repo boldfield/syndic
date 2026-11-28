@@ -162,6 +162,21 @@ func (e *Engine) DispatchCommandReferee(turnID, caller, callID, command string) 
 	return RefereeOutcome{Allow: out.allow, Reason: out.reason, Cause: out.cause, AttemptID: out.attemptID}, err
 }
 
+// ExecOfferReason is why exec is not offered to caller outside any turn, or
+// empty when it would be.
+func (e *Engine) ExecOfferReason(caller string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.execOffReason(nil, caller)
+}
+
+// WebOfferReason is why web is not offered to the callers of an endpoint.
+func (e *Engine) WebOfferReason(endpoint string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.webOffReason(endpoint)
+}
+
 // ProjectBudget runs the submit-time budget projection for the named preset
 // over an empty history, without the submit path's deliberate refusal.
 func (e *Engine) ProjectBudget(preset, input string) (wire.SubmitReply, error) {

@@ -25,6 +25,10 @@ import (
 
 const version = "dev"
 
+// adapterHook, when set, wraps every adapter the daemon creates. It is nil
+// in the daemon and exists for tests that need to control an adapter.
+var adapterHook func(transport.Adapter) transport.Adapter
+
 func main() {
 	if isSupervise(os.Args[1:]) {
 		os.Exit(supervise(os.Stderr))
@@ -142,7 +146,11 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 			return nil, "", fmt.Errorf("participant %s: unsupported route: %s", p.ID, p.Route)
 		}
 		resolver := config.NewEnvFileResolver(*secretsDir)
-		return openai.New(ep, resolver), openai.AdapterVersion, nil
+		var a transport.Adapter = openai.New(ep, resolver)
+		if adapterHook != nil {
+			a = adapterHook(a)
+		}
+		return a, openai.AdapterVersion, nil
 	}
 
 	// The control socket opens as soon as run_opened is committed, before
@@ -158,7 +166,13 @@ func run(args []string, stdout, stderr io.Writer, signals <-chan os.Signal) int 
 	// this build supports no provider and web_search is not offered whatever
 	// [tools.web.search] configures. The operator-selected integration is
 	// injected here, as a tools.SearchProvider, when one is chosen.
+	execOpts, err := execOptions(paths.Dir)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "exec options: %v\n", err)
+		return 1
+	}
 	eng, err := engine.New(engine.Options{
+		Exec:          execOpts,
 		Store:         store,
 		Hub:           eventHub,
 		RosterPath:    rosterAbs,
