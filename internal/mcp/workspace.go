@@ -77,11 +77,16 @@ func (w *TurnWorkspace) Call(ctx context.Context, send func(ctx context.Context,
 	if w.inst != nil {
 		// Ended after a cancelled call, or the overlay moved: the old process
 		// must be confirmed gone before another reads the directory.
-		old := w.inst
-		w.inst = nil
-		if err := old.End(); err != nil {
+		// An end that is not confirmed keeps the instance here: its copy stays
+		// in place, and no call rebuilds it or starts another until it is.
+		if err := w.inst.End(); err != nil {
 			return CallReply{Kind: CallNotSent, Err: err}
 		}
+		w.inst = nil
+	}
+	// A closed gate starts nothing, and must not wipe the directory either.
+	if err := w.Instances.enter(); err != nil {
+		return CallReply{Kind: CallNotSent, Err: err}
 	}
 	view, err := w.Source.Build(w.Dir)
 	if err != nil {
@@ -105,7 +110,9 @@ func (w *TurnWorkspace) End() error {
 	if w.inst == nil {
 		return nil
 	}
-	inst := w.inst
+	if err := w.inst.End(); err != nil {
+		return err
+	}
 	w.inst = nil
-	return inst.End()
+	return nil
 }

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -88,5 +89,90 @@ func TestTurnWorkspaceRestartsOnOverlayChange(t *testing.T) {
 	}
 	if err := w.End(); err != nil || j.ends != 2 {
 		t.Fatalf("End: %v, ends=%d", err, j.ends)
+	}
+}
+
+type unconfirmedProc struct{ fakeProc }
+
+func newTestWorkspace(m *Instances, overlay *string, builds *int, buildErr error) *TurnWorkspace {
+	return &TurnWorkspace{
+		Instances: m,
+		Request:   InstanceRequest{InstanceRecord: InstanceRecord{Server: "s", Owner: "p"}},
+		Dir:       "/scratch",
+		Source: WorkspaceSource{
+			Overlay: func() (string, error) { return *overlay, nil },
+			Build: func(string) (WorkspaceView, error) {
+				*builds++
+				if buildErr != nil {
+					return WorkspaceView{}, buildErr
+				}
+				return WorkspaceView{OverlaySHA256: *overlay}, nil
+			},
+		},
+	}
+}
+
+func TestTurnWorkspaceRestartsAfterCancelledCall(t *testing.T) {
+	starts := 0
+	m := &Instances{
+		Journal:   &fakeJournal{},
+		Start:     func(context.Context, InstanceRequest) (ServerProcess, error) { starts++; return fakeProc{}, nil },
+		Terminate: func(ServerProcess) bool { return true },
+	}
+	overlay, builds := "a", 0
+	w := newTestWorkspace(m, &overlay, &builds, nil)
+	kinds := []CallKind{CallCancelled, CallResult}
+	for _, k := range kinds {
+		r := w.Call(context.Background(), func(context.Context, *Instance, WorkspaceView) CallReply { return CallReply{Kind: k} })
+		if r.Kind != k {
+			t.Fatalf("reply %v: %v", r.Kind, r.Err)
+		}
+	}
+	if starts != 2 || builds != 2 {
+		t.Fatalf("starts=%d builds=%d, want 2 and 2", starts, builds)
+	}
+}
+
+func TestTurnWorkspaceUnverifiedEndNeverRebuilds(t *testing.T) {
+	starts := 0
+	m := &Instances{
+		Journal:   &fakeJournal{},
+		Start:     func(context.Context, InstanceRequest) (ServerProcess, error) { starts++; return unconfirmedProc{}, nil },
+		Terminate: func(ServerProcess) bool { return false },
+	}
+	overlay, builds := "a", 0
+	w := newTestWorkspace(m, &overlay, &builds, nil)
+	ok := func(context.Context, *Instance, WorkspaceView) CallReply { return CallReply{Kind: CallResult} }
+	if r := w.Call(context.Background(), ok); r.Kind != CallResult {
+		t.Fatalf("first: %v", r.Err)
+	}
+	overlay = "b"
+	for i := 0; i < 3; i++ {
+		r := w.Call(context.Background(), ok)
+		if r.Kind != CallNotSent || !errors.Is(r.Err, ErrContainmentUnverified) {
+			t.Fatalf("call %d: %v %v", i, r.Kind, r.Err)
+		}
+	}
+	if starts != 1 || builds != 1 {
+		t.Fatalf("starts=%d builds=%d, want 1 and 1", starts, builds)
+	}
+}
+
+func TestTurnWorkspaceBuildErrorSendsNothing(t *testing.T) {
+	starts := 0
+	m := &Instances{
+		Journal:   &fakeJournal{},
+		Start:     func(context.Context, InstanceRequest) (ServerProcess, error) { starts++; return fakeProc{}, nil },
+		Terminate: func(ServerProcess) bool { return true },
+	}
+	overlay, builds := "a", 0
+	w := newTestWorkspace(m, &overlay, &builds, errors.New("boom"))
+	sent := false
+	r := w.Call(context.Background(), func(context.Context, *Instance, WorkspaceView) CallReply {
+		sent = true
+		return CallReply{Kind: CallResult}
+	})
+	if r.Kind != CallNotSent || r.Err == nil || sent || starts != 0 {
+		t.Fatalf("reply %v %v sent=%v starts=%d", r.Kind, r.Err, sent, starts)
 	}
 }
