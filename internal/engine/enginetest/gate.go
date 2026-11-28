@@ -54,6 +54,10 @@ func (a *gatedAdapter) Cancel(ctx context.Context, attemptID string) (transport.
 	return a.inner.Cancel(ctx, attemptID)
 }
 
+func (a *gatedAdapter) CheckModels(ctx context.Context) (transport.ModelsCheck, error) {
+	return a.inner.CheckModels(ctx)
+}
+
 func (a *gatedAdapter) Usage(ctx context.Context) (*transport.Usage, error) {
 	return a.inner.Usage(ctx)
 }

@@ -184,6 +184,10 @@ func (a *stubAdapter) Cancel(ctx context.Context, attemptID string) (transport.C
 	return transport.CancelStatus{}, transport.ErrNotImplemented
 }
 
+func (a *stubAdapter) CheckModels(ctx context.Context) (transport.ModelsCheck, error) {
+	return transport.ModelsCheck{}, transport.ErrNotImplemented
+}
+
 func (a *stubAdapter) Usage(ctx context.Context) (*transport.Usage, error) {
 	return nil, transport.ErrUsageUnavailable
 }

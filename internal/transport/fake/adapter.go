@@ -70,14 +70,16 @@ type Adapter struct {
 	blockingCancel       bool
 	ProbeUncertainStep   string
 	probeSteps           map[string]ProbeStep
+	modelsChecks         []ModelsCheckStep
 
-	mu             sync.Mutex
-	calls          []CompleteCall
-	current        int
-	cancels        []string
-	hangingAttempt map[string]context.CancelFunc
-	cancelBlocked  chan struct{} // closed to let blocking cancels proceed
-	releaseOnce    sync.Once
+	mu               sync.Mutex
+	calls            []CompleteCall
+	current          int
+	cancels          []string
+	modelsCheckCalls int
+	hangingAttempt   map[string]context.CancelFunc
+	cancelBlocked    chan struct{} // closed to let blocking cancels proceed
+	releaseOnce      sync.Once
 }
 
 // New creates a new fake adapter with the given script and options.
@@ -100,6 +102,7 @@ func New(script []Step, opts Options) *Adapter {
 		blockingCancel:       opts.BlockingCancel,
 		ProbeUncertainStep:   opts.ProbeUncertainStep,
 		probeSteps:           opts.ProbeSteps,
+		modelsChecks:         opts.ModelsChecks,
 		hangingAttempt:       make(map[string]context.CancelFunc),
 		cancelBlocked:        make(chan struct{}),
 	}
@@ -118,6 +121,21 @@ type Options struct {
 	// ProbeSteps scripts the response of a probe step by name. A step with no
 	// entry answers 200.
 	ProbeSteps map[string]ProbeStep
+	// ModelsChecks scripts the results of CheckModels, one per call in order;
+	// the last repeats. With none, a check answers 200 with no list.
+	ModelsChecks []ModelsCheckStep
+}
+
+// ModelsCheckStep scripts one CheckModels result. When HTTPStatus is set and
+// FailureClass is not, the class is derived with transport.Classify. OK and
+// Usable follow the status; Listed follows Models being non-nil.
+type ModelsCheckStep struct {
+	HTTPStatus   int
+	FailureClass transport.FailureClass
+	ServerWait   transport.ServerWait
+	NoRetry      bool
+	Models       []string
+	Err          error
 }
 
 // ProbeStep scripts the response a probe step received. When HTTPStatus is set
@@ -571,6 +589,41 @@ func cloneMap(m map[string]interface{}) map[string]interface{} {
 		out[k] = cloneValue(v)
 	}
 	return out
+}
+
+// CheckModels returns the next scripted models check and counts the call.
+func (a *Adapter) CheckModels(ctx context.Context) (transport.ModelsCheck, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := a.modelsCheckCalls
+	a.modelsCheckCalls++
+	step := ModelsCheckStep{HTTPStatus: 200}
+	if len(a.modelsChecks) > 0 {
+		if n >= len(a.modelsChecks) {
+			n = len(a.modelsChecks) - 1
+		}
+		step = a.modelsChecks[n]
+	}
+	res := transport.ModelsCheck{
+		Status:       step.HTTPStatus,
+		FailureClass: derive(step.HTTPStatus, step.FailureClass, "", step.Err),
+		ServerWait:   step.ServerWait,
+		NoRetry:      step.NoRetry,
+		OK:           step.HTTPStatus >= 200 && step.HTTPStatus < 300,
+		Usable:       step.HTTPStatus != 404 && step.HTTPStatus != 405 && step.HTTPStatus != 501,
+	}
+	if res.OK && step.Models != nil {
+		res.Listed = true
+		res.Models = append([]string(nil), step.Models...)
+	}
+	return res, step.Err
+}
+
+// ModelsCheckCalls returns how many times CheckModels was called.
+func (a *Adapter) ModelsCheckCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.modelsCheckCalls
 }
 
 // Usage returns usage information if available.

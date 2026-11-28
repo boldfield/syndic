@@ -280,8 +280,30 @@ type ProbeResponse struct {
 	NoRetry      bool
 }
 
+// ModelsCheck is the result of one CheckModels request.
+type ModelsCheck struct {
+	// Status is the HTTP status, 0 when no response was received.
+	Status int
+	// FailureClass, ServerWait and NoRetry are read as for any response.
+	FailureClass FailureClass
+	ServerWait   ServerWait
+	NoRetry      bool
+	// OK is true on a 2xx.
+	OK bool
+	// Usable is false when the route answers 404, 405 or 501.
+	Usable bool
+	// Listed is true when the 2xx body parsed as a model list within the
+	// bound and showed no further page; Models is then the listed ids.
+	Listed bool
+	Models []string
+}
+
 // Adapter is the interface that every participant route implements.
 type Adapter interface {
+	// CheckModels sends one bounded GET on the endpoint's models route. It is
+	// not inference, sends no completion request and writes no evidence.
+	CheckModels(ctx context.Context) (ModelsCheck, error)
+
 	// Probe returns the capability record for the endpoint and model.
 	// When opts.BeforeSend is provided, it is called before each probe HTTP request,
 	// allowing pre-send journaling; ErrNotSent failures are distinguished from post-send errors.
