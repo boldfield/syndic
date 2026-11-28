@@ -36,10 +36,9 @@ import (
 // refPara is the "Referee" paragraph of the v5 delta's section 8 (the
 // revision 5 test list). The paragraph's tests are named TestReferee_*.
 //
-// The clause "the transcript shows the decision under the call" is not
-// registered: the transcript lists messages and attempts only (journal
-// TranscriptPage), so the engine does not yet show a decision under its call
-// and no test can pass for it.
+// The clause "the transcript shows the decision under the call" is recorded
+// as a gap: the transcript lists messages and attempts only (journal
+// TranscriptPage), so the engine does not yet show a decision under its call.
 const refPara = "Referee"
 
 func init() {
@@ -54,6 +53,7 @@ func init() {
 	cover(refPara, "a referee dispatch that would exceed the turn budget is refused and the turn ends `budget:turn`", "TestReferee_ReservationFailureEndsBudgetTurn")
 	cover(refPara, "the referee is not consulted for a URL the deterministic checks refused", "TestReferee_NotConsultedForCheckRefusedQuery")
 	cover(refPara, "a referee decision is reserved, admitted with its full request, charged and reconciled", "TestReferee_DecisionReservedAdmittedChargedReconciled")
+	cover(refPara, "the transcript shows the decision under the call", "TestReferee_TranscriptShowsDecisionUnderCall")
 	cover(refPara, "the manifest carries the referee model and template hash per endpoint", "TestReferee_ManifestCarriesRefereeModelAndTemplateHash")
 }
 
@@ -961,4 +961,8 @@ func TestReferee_ManifestCarriesRefereeModelAndTemplateHash(t *testing.T) {
 	if rec, ok := m.RefereeProbeRecords["local"]; !ok || !strings.Contains(string(rec), "refmodel") {
 		t.Fatalf("referee probe records %v, want the record of refmodel under endpoint local", m.RefereeProbeRecords)
 	}
+}
+
+func TestReferee_TranscriptShowsDecisionUnderCall(t *testing.T) {
+	gap(t, "the transcript lists messages and attempts only (journal TranscriptPage); web_referee_decision is not shown under its tool call")
 }
