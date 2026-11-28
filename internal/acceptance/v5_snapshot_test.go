@@ -38,7 +38,8 @@ func init() {
 	cover(snapshotPara, "a reviewer's read of a path the author read returns the same bytes", "TestSnapshot_ReviewerReadsAuthorBytes")
 	cover(snapshotPara, "a path first read by a reviewer bumps `snapshot_version`, is recorded on that reviewer's verdict with the version, does not change the candidate hash, and the next round's author read of it returns the recorded bytes", "TestSnapshot_ReviewerFirstReadBumpsVersion")
 	cover(snapshotPara, "a path outside the workspace, through a symbolic link, or matching a protected pattern is refused and journaled", "TestSnapshot_ConfinedPathsRefused")
-	cover(snapshotPara, "a path swapped for a symbolic link between the check and the open is refused at open", "TestSnapshot_SwapForSymlinkRefusedAtOpen")
+	cover(snapshotPara, "a path swapped for a symbolic link between the check and the open is refused at open", "TestSnapshot_ComponentSwappedInsideWalkRefused")
+	cover(snapshotPara, "a path that is a regular file when the call is accepted and a symbolic link by the time it is opened is refused", "TestSnapshot_SwapForSymlinkRefusedAtOpen")
 }
 
 const (
@@ -530,6 +531,9 @@ func TestSnapshot_ConcurrentFirstReadsOneRecord(t *testing.T) {
 			for arrived.Load() < 2 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
+			if arrived.Load() < 2 {
+				t.Errorf("run %d: the reviewers never met at the barrier, so their first touches were not concurrent", i)
+			}
 		}
 		h, turnID := snapRun(t, snapRoster(1, "r1", "r2"), map[string][]fake.Step{
 			"author": {enginetest.Reply(snapAnswer)},
@@ -738,6 +742,9 @@ func TestSnapshot_ConfinedPathsRefused(t *testing.T) {
 	}
 }
 
+// Through the engine this is the case of a regular file when the call was
+// accepted and a link by the time it is opened; the swap inside the walk is
+// TestSnapshot_ComponentSwappedInsideWalkRefused.
 func TestSnapshot_SwapForSymlinkRefusedAtOpen(t *testing.T) {
 	const secret = "SECRET-REACHED-THROUGH-A-SWAP"
 	dir := t.TempDir()
@@ -793,5 +800,63 @@ func TestSnapshot_SwapForSymlinkRefusedAtOpen(t *testing.T) {
 		if o.Kind == journal.ObservationFile && snapContent(t, h, o.ContentSHA256) == secret {
 			t.Fatalf("%q was recorded with the secret", path)
 		}
+	}
+}
+
+// A component swapped for a link after its parent descriptor is held and
+// before the next openat is refused by the real executor's confined walk, the
+// refusal is journaled, and nothing outside the workspace is read or recorded.
+func TestSnapshot_ComponentSwappedInsideWalkRefused(t *testing.T) {
+	const secret = "SECRET-REACHED-INSIDE-THE-WALK"
+	for _, swap := range []string{"dir", "file"} {
+		t.Run(swap, func(t *testing.T) {
+			dir := t.TempDir()
+			outside := snapOutside(t, "f.txt", secret)
+			snapWrite(t, dir, "plain.txt", "plain\n")
+			snapWrite(t, dir, "d1/d2/f.txt", "regular inside\n")
+			// The sentinel sits at the exact suffix the walk requests next.
+			snapWrite(t, outside, "d2/f.txt", secret)
+
+			var swapped atomic.Int32
+			hook := func(i int, name string) {
+				var victim, target string
+				switch {
+				case swap == "dir" && name == "d1":
+					victim, target = filepath.Join(dir, "d1", "d2"), filepath.Join(outside, "d2")
+				case swap == "file" && name == "d2":
+					victim, target = filepath.Join(dir, "d1", "d2", "f.txt"), filepath.Join(outside, "f.txt")
+				default:
+					return
+				}
+				if err := os.RemoveAll(victim); err != nil {
+					t.Errorf("remove %s: %v", victim, err)
+				}
+				if err := os.Symlink(target, victim); err != nil {
+					t.Errorf("symlink %s: %v", victim, err)
+				}
+				swapped.Add(1)
+			}
+			h, turnID := snapRun(t, snapRoster(1), snapAuthorScripts(
+				snapStep(nil, snapRead("swapped", "d1/d2/f.txt"), snapRead("plain", "plain.txt")),
+			), dir, enginetest.WithAfterWalkComponent(hook))
+
+			if swapped.Load() != 1 {
+				t.Fatalf("the swap ran %d times, want once inside the walk", swapped.Load())
+			}
+			res := snapResults(t, h, turnID, "author")
+			r, ok := res["swapped"]
+			if !ok || r.Status == journal.ToolCallExecuted {
+				t.Fatalf("swapped call = %+v, want a journaled refusal", r)
+			}
+			if strings.Contains(r.Body, secret) {
+				t.Fatalf("the call read through the swapped link: %q", r.Body)
+			}
+			snapWantBody(t, res, "plain", "plain\n")
+			for path, o := range snapObservations(t, h, turnID) {
+				if o.Kind == journal.ObservationFile && snapContent(t, h, o.ContentSHA256) == secret {
+					t.Fatalf("%q was recorded with the secret", path)
+				}
+			}
+		})
 	}
 }

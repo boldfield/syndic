@@ -26,6 +26,11 @@ type Confined struct {
 	afterComponent func(i int, name string)
 }
 
+// SetAfterComponent installs a hook that runs after each opened component of a
+// walk, before the next openat. It exists for tests of a path swapped in
+// flight; the daemon never sets it.
+func (c *Confined) SetAfterComponent(f func(i int, name string)) { c.afterComponent = f }
+
 // OpenConfined opens the workspace root and returns a Confined instance for safe path operations.
 // The patterns list contains glob patterns for protected paths that cannot be read or written.
 func OpenConfined(root string, patterns []string) (*Confined, error) {
