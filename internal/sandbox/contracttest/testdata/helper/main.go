@@ -129,7 +129,7 @@ func main() {
 }
 
 func connect(network, addr string) {
-	c, err := net.DialTimeout(network, addr, time.Second)
+	c, err := net.DialTimeout(network, addr, 5*time.Second)
 	if err != nil {
 		fmt.Printf("denied %s %s: %v\n", network, addr, err)
 		return

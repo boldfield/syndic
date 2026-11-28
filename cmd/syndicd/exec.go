@@ -22,8 +22,18 @@ func execOptions(stateDir string) (engine.ExecOptions, error) {
 		return engine.ExecOptions{}, err
 	}
 	return engine.ExecOptions{
-		Supervisor: sandbox.Supervisor{Command: []string{exe, sandbox.SupervisorArg}},
-		NewBackend: platformBackend,
-		SelfTest:   sandbox.SelfTestConfig{StateDir: stateDir, Helper: exe, Network: selfTestNetwork},
+		Supervisor:   sandbox.Supervisor{Command: []string{exe, sandbox.SupervisorArg}},
+		NewBackend:   platformBackend,
+		ProxyNetwork: proxyNetwork(),
+		ProxyAddr:    fixtureProxyAddr,
+		SelfTest:     sandbox.SelfTestConfig{StateDir: stateDir, Helper: exe, Network: selfTestNetwork},
 	}, nil
+}
+
+// proxyNetwork is the network of a call's proxy listener on this platform.
+func proxyNetwork() string {
+	if fixtureUnix {
+		return "unix"
+	}
+	return "tcp"
 }
