@@ -70,7 +70,6 @@ func TestStateKeysAreDistinct(t *testing.T) {
 		turnReq("s", "reviewer", "w1"),
 		turnReq("s", "author", "w2"),
 		turnReq("t", "author", "w1"),
-		{Server: "s", Kind: ApplyInstance, State: StatePersistent, Participant: "author", WorkspaceHash: "w1"},
 		{Server: "s", Kind: RunInstance, State: StatePersistent},
 		{Server: "t", Kind: RunInstance, State: StatePersistent},
 		turnReq("ab", "c", "w1"),
@@ -92,6 +91,12 @@ func TestStateKeysAreDistinct(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = s.Release() }()
+	}
+	// An apply instance shares its staging author's turn key.
+	ta, _ := StateKey(turnReq("s", "author", "w1"))
+	aa, _ := StateKey(StateRequest{Server: "s", Kind: ApplyInstance, State: StatePersistent, Participant: "author", WorkspaceHash: "w1"})
+	if ta != aa {
+		t.Fatal("apply key differs from the author's turn key")
 	}
 	// The run instance's key ignores participant and workspace.
 	a, _ := StateKey(StateRequest{Server: "s", Kind: RunInstance, Participant: "x", WorkspaceHash: "y"})
@@ -134,16 +139,47 @@ func TestStateLockExclusive(t *testing.T) {
 func TestStateListingNeverPersistent(t *testing.T) {
 	d := &StateDirs{Root: t.TempDir()}
 	r := StateRequest{Server: "s", Kind: ListingInstance, State: StatePersistent, Participant: "p", WorkspaceHash: "w"}
-	if _, err := d.Acquire(r); !errors.Is(err, ErrStateKey) {
-		t.Fatalf("got %v", err)
-	}
-	r.State = StateFresh
 	s, err := d.Acquire(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s.Release()
+	if s.Key != "" {
+		t.Fatal("listing instance got a persistent key")
+	}
+	if err := s.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.Path); !os.IsNotExist(err) {
+		t.Fatalf("listing directory not removed: %v", err)
+	}
 	if _, err := d.Acquire(StateRequest{Server: "s", Kind: TurnInstance, State: StatePersistent}); !errors.Is(err, ErrStateKey) {
 		t.Fatalf("missing participant accepted: %v", err)
+	}
+}
+
+func TestStateOtherKeyLeavesDirectoryAlone(t *testing.T) {
+	d := &StateDirs{Root: t.TempDir()}
+	a, err := d.Acquire(turnReq("s", "p", "w1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.Path, "x"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Release()
+	b, err := d.Acquire(turnReq("s", "p", "w2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Path == a.Path {
+		t.Fatal("other key reused the directory")
+	}
+	if _, err := os.Stat(filepath.Join(b.Path, "x")); err == nil {
+		t.Fatal("other key sees the first key's state")
+	}
+	_ = b.Release()
+	got, err := os.ReadFile(filepath.Join(a.Path, "x"))
+	if err != nil || string(got) != "keep" {
+		t.Fatalf("first key's directory not kept: %q %v", got, err)
 	}
 }

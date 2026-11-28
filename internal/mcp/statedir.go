@@ -53,8 +53,10 @@ type StateRequest struct {
 // StateKey is the key a persistent directory is kept under: for a turn
 // instance the server, the participant and the workspace hash; for an apply
 // instance the server, the staging author and the workspace hash; for the run
-// instance the server alone. Different keys never collide: the kind is part
-// of the key and each field is length-prefixed. A listing instance has no key.
+// instance the server alone. The kind is not part of the key: an apply
+// instance shares the directory of its author's turn instance (the lock keeps
+// them apart in time). Different keys never collide: each field is
+// length-prefixed, and the run key has fewer fields. A listing instance has no key.
 func StateKey(req StateRequest) (string, error) {
 	if req.Server == "" {
 		return "", fmt.Errorf("%w: no server", ErrStateKey)
@@ -65,9 +67,9 @@ func StateKey(req StateRequest) (string, error) {
 		if req.Participant == "" || req.WorkspaceHash == "" {
 			return "", fmt.Errorf("%w: a %s instance needs a participant and a workspace hash", ErrStateKey, req.Kind)
 		}
-		fields = []string{req.Kind, req.Server, req.Participant, req.WorkspaceHash}
+		fields = []string{req.Server, req.Participant, req.WorkspaceHash}
 	case RunInstance:
-		fields = []string{req.Kind, req.Server}
+		fields = []string{req.Server}
 	case ListingInstance:
 		return "", fmt.Errorf("%w: a listing instance never uses a persistent directory", ErrStateKey)
 	default:
@@ -112,9 +114,11 @@ type StateDir struct {
 // empty. A persistent one is created if absent and locked exclusively; if
 // the lock is held, by this process or another, the error wraps
 // ErrStateLocked and nothing is created for the instance. A listing instance
-// asking for persistent state is refused, and one asking for fresh state gets
-// a fresh directory.
+// always gets a fresh directory, whatever State says.
 func (d *StateDirs) Acquire(req StateRequest) (*StateDir, error) {
+	if req.Kind == ListingInstance {
+		return d.fresh()
+	}
 	switch req.State {
 	case "", StateFresh:
 		return d.fresh()
