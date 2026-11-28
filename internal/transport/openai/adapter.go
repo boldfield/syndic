@@ -252,6 +252,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	probeCtx = context.WithValue(probeCtx, probeObsKey{}, &probeObs{seen: make(map[string]transport.ProbeResponse)})
 
 	var resolvedSecrets []string
 
@@ -280,7 +281,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 	rawSteps := make(map[string]any)
 
 	if err := a.probeModels(probeCtx, baseURL, &record, &resolvedSecrets, rawSteps, opts); err != nil {
-		return record, stepError(err, rawSteps, "models")
+		return record, stepError(probeCtx, err, rawSteps, "models")
 	}
 
 	step2Body, step2Latency, step2ServerVersion, step2Err := a.probeMaxTokens(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts)
@@ -288,11 +289,11 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		serverVersion = step2ServerVersion
 	}
 
-	if errors.Is(step2Err, transport.ErrNotSent) || errors.Is(step2Err, transport.ErrUncertain) || errors.Is(step2Err, transport.ErrUnreachable) || errors.Is(step2Err, transport.ErrUnauthorized) || errors.Is(step2Err, transport.ErrModelUnavailable) {
+	if errors.Is(step2Err, transport.ErrNotSent) || errors.Is(step2Err, transport.ErrUncertain) || errors.Is(step2Err, transport.ErrUnreachable) || errors.Is(step2Err, transport.ErrUnauthorized) || errors.Is(step2Err, transport.ErrModelUnavailable) || errors.Is(step2Err, transport.ErrProbeStopped) {
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, stepError(step2Err, rawSteps, "max_completion_tokens", "max_tokens")
+		return record, stepError(probeCtx, step2Err, rawSteps, "max_completion_tokens", "max_tokens")
 	}
 
 	if step2Body != nil {
@@ -326,14 +327,14 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, stepError(err, rawSteps, "system_role")
+		return record, stepError(probeCtx, err, rawSteps, "system_role")
 	}
 
 	if err := a.probeToolCalls(probeCtx, baseURL, &record, model, &resolvedSecrets, rawSteps, opts, probeFinishReasons); err != nil {
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, stepError(err, rawSteps, "tool_calls")
+		return record, stepError(probeCtx, err, rawSteps, "tool_calls")
 	}
 
 	if !opts.DisableCalibration {
@@ -341,7 +342,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, stepError(err, rawSteps, "calibration", "calibration_baseline_nonempty", "calibration_baseline")
+			return record, stepError(probeCtx, err, rawSteps, "calibration", "calibration_baseline_nonempty", "calibration_baseline")
 		}
 	}
 
@@ -350,7 +351,7 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 			if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 				return record, err
 			}
-			return record, stepError(err, rawSteps, "over_length")
+			return record, stepError(probeCtx, err, rawSteps, "over_length")
 		}
 	}
 
@@ -377,7 +378,11 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+		// The max-tokens phase found no working field or its reply named no
+		// model: report the last of its responses, so its class and wait reach
+		// the caller.
+		incomplete := fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+		return record, stepError(probeCtx, incomplete, rawSteps, "max_completion_tokens_retry", "max_completion_tokens", "max_tokens_retry", "max_tokens")
 	}
 
 	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
@@ -391,10 +396,10 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 // step's recorded HTTP status. steps lists the phase's raw-evidence step names,
 // preferred first; the first one recorded is the step reported. An error that
 // already carries a step is returned unchanged.
-func stepError(err error, rawSteps map[string]any, steps ...string) error {
+func stepError(ctx context.Context, err error, rawSteps map[string]any, steps ...string) error {
 	var pe *transport.ProbeStepError
 	if errors.As(err, &pe) {
-		return err
+		return withProbeClass(ctx, pe)
 	}
 	step := steps[0]
 	var status int
@@ -405,7 +410,106 @@ func stepError(err error, rawSteps map[string]any, steps ...string) error {
 			break
 		}
 	}
-	return &transport.ProbeStepError{Step: step, Status: status, Err: err}
+	return withProbeClass(ctx, &transport.ProbeStepError{Step: step, Status: status, Err: err})
+}
+
+// probeObsKey keys the per-probe record of what each response said.
+type probeObsKey struct{}
+
+type probeObs struct {
+	seen map[string]transport.ProbeResponse
+}
+
+// withProbeClass fills a step error's class, wait and no-retry mark from the
+// response its step received, or from its error when it received none. An
+// error that already carries a class is returned unchanged.
+func withProbeClass(ctx context.Context, pe *transport.ProbeStepError) error {
+	if pe.FailureClass != transport.FailureClassNone {
+		return pe
+	}
+	out := *pe
+	if obs, ok := ctx.Value(probeObsKey{}).(*probeObs); ok {
+		if r, ok := obs.seen[pe.Step]; ok {
+			out.FailureClass, out.ServerWait, out.NoRetry = r.FailureClass, r.ServerWait, r.NoRetry
+			if out.Status == 0 {
+				out.Status = r.Status
+			}
+			return &out
+		}
+	}
+	in := transport.ClassifyInput{Err: pe.Err}
+	if errors.Is(pe.Err, transport.ErrUnreachable) {
+		in.TransportStatus = transport.TransportStatusUnreachable
+	}
+	out.FailureClass = transport.Classify(in)
+	return &out
+}
+
+// readProbeBody reads at most limit bytes of a probe response and reports
+// whether the body ran past the limit.
+func readProbeBody(r io.Reader, limit int64) ([]byte, bool, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if int64(len(body)) > limit {
+		return body[:limit], true, err
+	}
+	return body, false, err
+}
+
+// completionUsable reports whether a 2xx body is a completion Complete could
+// use: valid JSON with at least one choice.
+func completionUsable(body []byte) bool {
+	var r ResponseBody
+	return json.Unmarshal(body, &r) == nil && len(r.Choices) > 0
+}
+
+// modelsUsable reports whether a 2xx body is a models listing with a data array.
+func modelsUsable(body []byte) bool {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return false
+	}
+	_, ok := m["data"].([]any)
+	return ok
+}
+
+// seen classes one probe response by the functions Complete uses, records it
+// for the step's error and tells opts.AfterResponse. It returns a step error
+// when the hook refuses the next request. readErr is the body read's error.
+func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step string, resp *http.Response, body []byte, over bool, usable func([]byte) bool, readErr error) error {
+	in := transport.ClassifyInput{
+		Received:              true,
+		HTTPStatus:            resp.StatusCode,
+		BadGatewayServerFault: a.profile.BadGateway == config.BadGatewayServerFault,
+	}
+	if readErr == nil && !over {
+		in.QuotaMarker = hasQuotaMarker(resp.StatusCode, body)
+	}
+	if readErr != nil {
+		in.BodyRead = transport.BodyReset
+		if isDeadlineExceededErr(readErr) {
+			in.BodyRead = transport.BodyTimeout
+		}
+	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if over {
+			in.BodyRead = transport.BodyOverLimit
+		} else if !usable(body) {
+			in.BodyRead = transport.BodyUnparsable
+		}
+	}
+	r := transport.ProbeResponse{
+		Step:         step,
+		Status:       resp.StatusCode,
+		FailureClass: transport.Classify(in),
+		ServerWait:   readServerWait(resp.StatusCode, resp.Header, time.Now()),
+		NoRetry:      readNoRetry(resp.Header),
+	}
+	if obs, ok := ctx.Value(probeObsKey{}).(*probeObs); ok {
+		obs.seen[step] = r
+	}
+	if opts.AfterResponse != nil && !opts.AfterResponse(r) {
+		return &transport.ProbeStepError{Step: step, Status: r.Status, FailureClass: r.FailureClass, ServerWait: r.ServerWait, NoRetry: r.NoRetry, Err: transport.ErrProbeStopped}
+	}
+	return nil
 }
 
 // uncertainErr marks a failure after the request was handed to the transport:
@@ -1017,8 +1121,9 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 	closeErr := httpResp.Body.Close()
+	stopErr := a.seen(ctx, opts, "models", httpResp, body, over, modelsUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		return uncertainErr(readErr)
 	}
@@ -1027,6 +1132,9 @@ func (a *Adapter) probeModels(ctx context.Context, baseURL *url.URL, record *tra
 	}
 
 	recordRawStep(rawSteps, "models", "/models", httpResp.StatusCode, httpResp.Header, body)
+	if stopErr != nil {
+		return stopErr
+	}
 
 	if httpResp.StatusCode == 404 {
 		record.ModelsEndpoint = transport.TriNo
@@ -1137,9 +1245,10 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(err)}
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 		closeErr := httpResp.Body.Close()
 		cancel()
+		stopErr := a.seen(ctx, opts, stepName, httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 		if readErr != nil {
 			return nil, nil, &transport.ProbeStepError{Step: stepName, Err: uncertainErr(readErr)}
 		}
@@ -1152,6 +1261,9 @@ func (a *Adapter) probeMaxTokens(ctx context.Context, baseURL *url.URL, record *
 
 		if serverVersion == "" && httpResp.Header.Get("Server") != "" {
 			serverVersion = httpResp.Header.Get("Server")
+		}
+		if stopErr != nil {
+			return nil, nil, stopErr
 		}
 		return httpResp, body, nil
 	}
@@ -1255,8 +1367,9 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 	closeErr := httpResp.Body.Close()
+	stopErr := a.seen(ctx, opts, "system_role", httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		return uncertainErr(readErr)
 	}
@@ -1265,6 +1378,9 @@ func (a *Adapter) probeSystemRole(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	recordRawStep(rawSteps, "system_role", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+	if stopErr != nil {
+		return stopErr
+	}
 
 	if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 		var respData ResponseBody
@@ -1500,17 +1616,17 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 			maxTokensField: limit,
 		})
 		if err != nil {
-			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
 		httpReq, err := http.NewRequestWithContext(reqCtx, "POST", endpoint.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
-			return 0, nil, &transport.ProbeStepError{Step: "tool_calls", Err: uncertainErr(err)}
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
 		if err := a.addProbeAuth(httpReq, secrets); err != nil {
-			return 0, nil, err
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: err}
 		}
 
 		if opts.BeforeSend != nil {
@@ -1519,26 +1635,30 @@ func (a *Adapter) probeToolCalls(ctx context.Context, baseURL *url.URL, record *
 				Step:    step,
 				Timeout: opts.Timeout,
 			}); err != nil {
-				return 0, nil, fmt.Errorf("%w: %w", transport.ErrNotSent, err)
+				return 0, nil, &transport.ProbeStepError{Step: step, Err: fmt.Errorf("%w: %w", transport.ErrNotSent, err)}
 			}
 		}
 
 		httpResp, err := a.doProbe(httpReq, opts, transport.ProbeRequest{Model: model, Step: step, Timeout: opts.Timeout})
 		if err != nil {
 			record.ToolCalls = transport.TriUnknown
-			return 0, nil, uncertainErr(err)
+			return 0, nil, &transport.ProbeStepError{Step: step, Err: uncertainErr(err)}
 		}
 
-		body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1*1024*1024))
+		body, over, readErr := readProbeBody(httpResp.Body, 1*1024*1024)
 		closeErr := httpResp.Body.Close()
+		stopErr := a.seen(ctx, opts, step, httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 		if readErr != nil {
-			return 0, nil, uncertainErr(readErr)
+			return 0, nil, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: uncertainErr(readErr)}
 		}
 		if closeErr != nil {
-			return 0, nil, uncertainErr(closeErr)
+			return 0, nil, &transport.ProbeStepError{Step: step, Status: httpResp.StatusCode, Err: uncertainErr(closeErr)}
 		}
 
 		recordRawStepWithRequest(rawSteps, step, "/chat/completions", httpResp.StatusCode, httpResp.Header, body, bodyBytes)
+		if stopErr != nil {
+			return 0, nil, stopErr
+		}
 		return httpResp.StatusCode, body, nil
 	}
 
@@ -1696,8 +1816,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 		return uncertainErr(err)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
+	body, over, readErr := readProbeBody(httpResp.Body, 10*1024*1024)
 	closeErr := httpResp.Body.Close()
+	stopErr := a.seen(ctx, opts, "over_length", httpResp, body, over, completionUsable, errors.Join(readErr, closeErr))
 	if readErr != nil {
 		record.OverLength = "errored"
 		return uncertainErr(readErr)
@@ -1708,6 +1829,9 @@ func (a *Adapter) probeOverLength(ctx context.Context, baseURL *url.URL, record 
 	}
 
 	recordRawStep(rawSteps, "over_length", "/chat/completions", httpResp.StatusCode, httpResp.Header, body)
+	if stopErr != nil {
+		return stopErr
+	}
 
 	// Always set the classification rule
 	record.OverLengthClassifier = overLengthClassificationRule
@@ -1758,7 +1882,8 @@ func (a *Adapter) calibrationRequest(ctx context.Context, endpoint *url.URL, mod
 		status, headers, body, reqBody, err = a.makeCalibrationRequest(ctx, endpoint, model, content, stepName, maxTokensField, probeRetryOutputLimit, opts, secrets)
 		recordRawStepWithRequest(rawSteps, stepName, "/chat/completions", status, headers, body, reqBody)
 	}
-	if err != nil {
+	var pe *transport.ProbeStepError
+	if err != nil && !errors.As(err, &pe) {
 		err = &transport.ProbeStepError{Step: stepName, Status: status, Err: err}
 	}
 	return status, headers, body, err
@@ -1775,7 +1900,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	baselineStatusCode, _, baselineBody, baselineErr := a.calibrationRequest(ctx, endpoint, model, "", "calibration_baseline", maxTokensField, opts, secrets, rawSteps)
 
 	// A pre-send failure or sent-but-uncertain failure stops the probe before the next request.
-	if baselineErr != nil && (errors.Is(baselineErr, transport.ErrNotSent) || errors.Is(baselineErr, transport.ErrUncertain)) {
+	if baselineErr != nil && (errors.Is(baselineErr, transport.ErrNotSent) || errors.Is(baselineErr, transport.ErrUncertain) || errors.Is(baselineErr, transport.ErrProbeStopped)) {
 		record.Calibration.Available = false
 		return baselineErr
 	}
@@ -1785,7 +1910,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 	baselineBytes := 0
 	if baselineErr == nil && baselineStatusCode != 0 && (baselineStatusCode < 200 || baselineStatusCode >= 300) {
 		fbStatus, _, fbBody, fbErr := a.calibrationRequest(ctx, endpoint, model, calibrationBaselineNonEmpty, "calibration_baseline_nonempty", maxTokensField, opts, secrets, rawSteps)
-		if fbErr != nil && (errors.Is(fbErr, transport.ErrNotSent) || errors.Is(fbErr, transport.ErrUncertain)) {
+		if fbErr != nil && (errors.Is(fbErr, transport.ErrNotSent) || errors.Is(fbErr, transport.ErrUncertain) || errors.Is(fbErr, transport.ErrProbeStopped)) {
 			record.Calibration.Available = false
 			return fbErr
 		}
@@ -1801,7 +1926,7 @@ func (a *Adapter) probeCalibration(ctx context.Context, baseURL *url.URL, record
 		return nil
 	}
 	if calibrationErr != nil {
-		if errors.Is(calibrationErr, transport.ErrNotSent) || errors.Is(calibrationErr, transport.ErrUncertain) {
+		if errors.Is(calibrationErr, transport.ErrNotSent) || errors.Is(calibrationErr, transport.ErrUncertain) || errors.Is(calibrationErr, transport.ErrProbeStopped) {
 			return calibrationErr
 		}
 		record.Calibration.Available = false
@@ -1893,13 +2018,17 @@ func (a *Adapter) makeCalibrationRequest(ctx context.Context, endpoint *url.URL,
 		return 0, nil, nil, nil, uncertainErr(err)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, defaultMaxBodySize))
+	respBody, over, err := readProbeBody(httpResp.Body, defaultMaxBodySize)
 	closeErr := httpResp.Body.Close()
+	stopErr := a.seen(ctx, opts, stepName, httpResp, respBody, over, completionUsable, errors.Join(err, closeErr))
 	if err != nil {
 		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(err)
 	}
 	if closeErr != nil {
 		return httpResp.StatusCode, httpResp.Header, nil, bodyBytes, uncertainErr(closeErr)
+	}
+	if stopErr != nil {
+		return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, stopErr
 	}
 
 	return httpResp.StatusCode, httpResp.Header, respBody, bodyBytes, nil

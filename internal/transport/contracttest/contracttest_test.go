@@ -45,6 +45,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusInterrupted,
 			NativeFinish:    "",
 			TransportStatus: transport.TransportStatusTimeout,
+			FailureClass:    transport.FailureClassUncertain,
 		}, nil
 
 	case MalformedBody:
@@ -58,6 +59,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusError,
 			NativeFinish:    "",
 			TransportStatus: transport.TransportStatusMalformedBody,
+			FailureClass:    transport.FailureClassBadResponse,
 		}, nil
 
 	case ConnectionReset:
@@ -71,6 +73,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusInterrupted,
 			NativeFinish:    "",
 			TransportStatus: transport.TransportStatusReset,
+			FailureClass:    transport.FailureClassUncertain,
 		}, nil
 
 	case Truncated:
@@ -110,6 +113,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusError,
 			NativeFinish:    "",
 			TransportStatus: transport.TransportStatusUnauthorized,
+			FailureClass:    transport.FailureClassRejectedConfig,
 		}, nil
 
 	case ServerError:
@@ -123,6 +127,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusError,
 			NativeFinish:    "",
 			TransportStatus: "http_500",
+			FailureClass:    transport.FailureClassServerFault,
 		}, nil
 
 	case IdentityMismatch:
@@ -150,6 +155,7 @@ func (a *stubAdapter) Complete(ctx context.Context, req transport.CompleteReques
 			Status:          transport.StatusError,
 			NativeFinish:    "",
 			TransportStatus: "http_301",
+			FailureClass:    transport.FailureClassRejectedConfig,
 		}, nil
 
 	case SecretEcho:

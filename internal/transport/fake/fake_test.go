@@ -49,8 +49,9 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 	case contracttest.DeadlineExceeded:
 		script := []Step{
 			{
-				Kind:  StepKindHang,
-				Delay: 100 * time.Millisecond,
+				Kind:         StepKindHang,
+				FailureClass: transport.FailureClassUncertain,
+				Delay:        100 * time.Millisecond,
 			},
 		}
 		adapter = New(script, Options{
@@ -65,6 +66,7 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 				RawOutput:       "Malformed response",
 				Status:          transport.StatusError,
 				TransportStatus: transport.TransportStatusMalformedBody,
+				FailureClass:    transport.FailureClassBadResponse,
 			},
 		}
 		adapter = New(script, Options{
@@ -78,6 +80,7 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 				Kind:            StepKindReply,
 				Status:          transport.StatusInterrupted,
 				TransportStatus: transport.TransportStatusReset,
+				FailureClass:    transport.FailureClassUncertain,
 			},
 		}
 		adapter = New(script, Options{
@@ -121,6 +124,7 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 				Kind:            StepKindReply,
 				Status:          transport.StatusError,
 				TransportStatus: transport.TransportStatusUnauthorized,
+				FailureClass:    transport.FailureClassRejectedConfig,
 			},
 		}
 		adapter = New(script, Options{
@@ -134,6 +138,7 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 				Kind:            StepKindReply,
 				Status:          transport.StatusError,
 				TransportStatus: "http_500",
+				HTTPStatus:      500,
 			},
 		}
 		adapter = New(script, Options{
@@ -166,6 +171,7 @@ func (b *Backend) Setup(t *testing.T, cse contracttest.Case) contracttest.Fixtur
 				Kind:            StepKindReply,
 				Status:          transport.StatusError,
 				TransportStatus: "http_301",
+				HTTPStatus:      301,
 			},
 		}
 		adapter = New(script, Options{
@@ -2157,5 +2163,43 @@ func TestRequestDeepCopyStructValues(t *testing.T) {
 	}
 	if again["ptr"].(*schemaNode).Required[0] != "b" {
 		t.Fatal("Calls result aliases history through struct pointer")
+	}
+}
+
+func TestFakeCompleteFailureCarriesClassWaitAndUsage(t *testing.T) {
+	usage := &transport.Usage{Prompt: 3, Completion: 1}
+	wait := transport.ServerWait{Kind: transport.ServerWaitDuration, Millis: 1500}
+	adapter := New([]Step{
+		{Kind: StepKindReply, Status: transport.StatusError, TransportStatus: "http_429", HTTPStatus: 429, ServerWait: wait, NoRetry: true, Usage: usage},
+		{Kind: StepKindReply, Status: transport.StatusError, TransportStatus: "http_500", HTTPStatus: 500, FailureClass: transport.FailureClassQuota},
+	}, Options{})
+
+	res, err := adapter.Complete(context.Background(), transport.CompleteRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FailureClass != transport.FailureClassThrottled || res.ServerWait != wait || !res.NoRetry || res.Usage != usage {
+		t.Errorf("got %+v", res)
+	}
+	res, _ = adapter.Complete(context.Background(), transport.CompleteRequest{})
+	if res.FailureClass != transport.FailureClassQuota {
+		t.Errorf("scripted class overridden: %q", res.FailureClass)
+	}
+}
+
+func TestFakeProbeAfterResponseRefusal(t *testing.T) {
+	wait := transport.ServerWait{Kind: transport.ServerWaitDuration, Millis: 2000}
+	adapter := New(nil, Options{ProbeSteps: map[string]ProbeStep{"models": {HTTPStatus: 429, ServerWait: wait}}})
+	var steps []string
+	_, err := adapter.Probe(context.Background(), "ep", "m", transport.ProbeOptions{
+		BeforeSend:    func(r *transport.ProbeRequest) error { steps = append(steps, r.Step); return nil },
+		AfterResponse: func(r transport.ProbeResponse) bool { return r.FailureClass == transport.FailureClassNone },
+	})
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) || pe.Step != "models" || pe.FailureClass != transport.FailureClassThrottled || pe.ServerWait != wait {
+		t.Fatalf("err %v (%+v)", err, pe)
+	}
+	if len(steps) != 1 {
+		t.Errorf("sent %v, want only models", steps)
 	}
 }

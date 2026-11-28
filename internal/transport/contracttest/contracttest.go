@@ -107,6 +107,9 @@ func Run(t *testing.T, backend Backend) {
 			if err != nil {
 				t.Errorf("assertion failed: %v", err)
 			}
+			if err := AssertClassConsistent(result); err != nil {
+				t.Errorf("assertion failed: %v", err)
+			}
 		})
 	}
 }
