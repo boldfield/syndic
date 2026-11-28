@@ -44,6 +44,9 @@ type Config struct {
 	// Spec builds what the backend starts for a request; ServerPipes is set
 	// for it. req.Args is the caller's.
 	Spec func(req mcp.InstanceRequest) sandbox.Spec
+	// Scrub is the engine's scrub list; a server's standard error is scrubbed
+	// with it before it is read. Nil scrubs nothing.
+	Scrub *mcp.ScrubList
 	// Notice receives the line for a server that runs unconfined.
 	Notice func(line string)
 }
@@ -70,7 +73,13 @@ func New(c Config) *mcp.Instances {
 			return sp, nil
 		},
 		Terminate: func(p mcp.ServerProcess) bool { return c.Sequence.Run(p, false, nil) },
-		Stderr:    func(string) io.Writer { return wire.NewStderrSink(c.StderrLimit) },
+		Stderr: func(string) io.Writer {
+			sink := wire.NewStderrSink(c.StderrLimit)
+			if c.Scrub != nil {
+				sink.SetScrub(c.Scrub.ScrubStderr)
+			}
+			return sink
+		},
 	}
 	if c.Gate != nil {
 		m.Gate = c.Gate

@@ -419,3 +419,46 @@ func TestEndRunWaitsForRunInstanceStart(t *testing.T) {
 		t.Fatalf("open after EndRun: %v", err)
 	}
 }
+
+func TestStderrScrubbed(t *testing.T) {
+	l := mcp.NewScrubList()
+	l.AddEnv(map[string]string{"API_KEY": "env-secret-9"})
+	m := New(Config{Scrub: l, Backend: sandbox.NewFake(sandbox.Required(false))})
+	w := m.Stderr("srv")
+	_, _ = w.Write([]byte("bad key env-secret-9\n"))
+	if got := string(w.(*wire.StderrSink).Bytes()); strings.Contains(got, "env-secret-9") || got == "" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+// A secret cut by the stderr bound leaves no part behind, and a whole secret
+// ending at the bound is scrubbed whole, even when its suffix begins another
+// listed value or itself.
+func TestStderrSecretAtBoundIsNotLeaked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		write string
+		limit int
+		leaks []string
+	}{
+		{"crosses bound", map[string]string{"K": "SUPERSECRETVALUE1234"}, "error: SUPERSECRETVALUE1234\n", 20, []string{"SUPER", "ECRET"}},
+		{"suffix begins another", map[string]string{"A": "abcdXYZW", "B": "XYZW1234"}, "err: abcdXYZW and more", 13, []string{"abcd", "XYZ"}},
+		{"suffix begins itself", map[string]string{"A": "S3cr3tS3cr3t"}, "err: S3cr3tS3cr3t and more", 17, []string{"S3c"}},
+		{"cut value holds another", map[string]string{"A": "abXYZcd", "B": "XYZ"}, "err: abXYZcd", 10, []string{"ab", "XYZ", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := mcp.NewScrubList()
+			l.AddEnv(tc.env)
+			m := New(Config{Scrub: l, StderrLimit: tc.limit, Backend: sandbox.NewFake(sandbox.Required(false))})
+			w := m.Stderr("srv")
+			_, _ = w.Write([]byte(tc.write))
+			got := strings.TrimPrefix(string(w.(*wire.StderrSink).Bytes()), "err")
+			for _, leak := range tc.leaks {
+				if strings.Contains(got, leak) {
+					t.Fatalf("stderr %q leaks %q", got, leak)
+				}
+			}
+		})
+	}
+}
