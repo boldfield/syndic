@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,16 +19,16 @@ var serverCaps = sandbox.Caps(sandbox.F, sandbox.N1, sandbox.N2, sandbox.P, sand
 // line from the instance's standard input and answers on standard output,
 // misbehaving for the start whose check is fail. It returns the probe line
 // each start received, once stop is closed.
-func driveServers(t *testing.T, fake *sandbox.Fake, fail sandbox.SelfTestCheck, networkList bool, stop <-chan struct{}) <-chan []string {
+func driveServers(t *testing.T, fake *sandbox.Fake, fail sandbox.SelfTestCheck, networkList bool, stop <-chan struct{}) <-chan [][]string {
 	t.Helper()
 	order := []sandbox.SelfTestCheck{sandbox.CheckTrue, sandbox.CheckReadState, sandbox.CheckWriteOutside, sandbox.CheckLoopback, sandbox.CheckDetach}
 	if networkList {
 		order = append(order, sandbox.CheckProxy, sandbox.CheckProxy)
 	}
 	order = append(order, sandbox.CheckWriteWorkspace, sandbox.CheckReadOtherState)
-	probes := make(chan []string, 1)
+	probes := make(chan [][]string, 1)
 	go func() {
-		var got []string
+		var got [][]string
 		defer func() { probes <- got }()
 		for i, c := range order {
 			var sp *sandbox.FakeServerProcess
@@ -41,7 +42,7 @@ func driveServers(t *testing.T, fake *sandbox.Fake, fail sandbox.SelfTestCheck, 
 			}
 			line, _ := bufio.NewReader(sp.ServerIn()).ReadString('\n')
 			fields := strings.Split(strings.TrimSuffix(line, "\n"), "\x1f")
-			got = append(got, fields[0])
+			got = append(got, fields)
 			reply := "selftest ok\n"
 			if c == fail && (c != sandbox.CheckProxy || i == indexOf(order, c)) {
 				reply = "misbehaved\n"
@@ -109,8 +110,34 @@ func TestServerSelfTestConformingPasses(t *testing.T) {
 				t.Errorf("%s: ran=%v, want %v", c, r.Ran, want)
 			}
 		}
-		if len(got) != len(fake.Starts()) || len(got) < 7 {
+		if len(got) != len(fake.Starts()) {
 			t.Fatalf("probes %v for %d starts", got, len(fake.Starts()))
+		}
+		want := []string{"ping", "read-denied", "write-denied", "connect-denied", "detach"}
+		if networkList {
+			want = append(want, "proxy-request", "connect-denied")
+		}
+		want = append(want, "write-denied", "read-denied")
+		var names []string
+		for _, f := range got {
+			names = append(names, f[0])
+		}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Fatalf("probes %v, want %v", names, want)
+		}
+		starts := fake.Starts()
+		wsStart, wsProbe := starts[len(starts)-2], got[len(got)-2]
+		if len(wsStart.System.ReadOnlyPaths) != 1 || !within(wsProbe[1], wsStart.System.ReadOnlyPaths[0]) {
+			t.Errorf("workspace probe %q not inside the granted copy %v", wsProbe[1], wsStart.System.ReadOnlyPaths)
+		}
+		osStart, osProbe := starts[len(starts)-1], got[len(got)-1]
+		for _, d := range append([]string{osStart.ScratchDir, osStart.TempDir}, osStart.System.ReadOnlyPaths...) {
+			if within(osProbe[1], d) {
+				t.Errorf("other-state probe %q inside granted directory %q", osProbe[1], d)
+			}
+		}
+		if filepath.Dir(filepath.Dir(osProbe[1])) != filepath.Dir(osStart.ScratchDir) {
+			t.Errorf("other-state probe %q is not under a sibling of state dir %q", osProbe[1], osStart.ScratchDir)
 		}
 		for i, s := range fake.Starts() {
 			if !s.ServerPipes {
@@ -195,9 +222,33 @@ func TestServerSelfTestUnverifiedContainmentClosesGate(t *testing.T) {
 	}
 }
 
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func TestServerHelperServe(t *testing.T) {
-	var out strings.Builder
-	if code := sandbox.SelfTestHelper([]string{"ping"}, &out); code != 0 || !strings.Contains(out.String(), "selftest ok") {
-		t.Errorf("ping: code %d, output %q", code, out.String())
+	missing := filepath.Join(t.TempDir(), "absent")
+	for _, tc := range []struct {
+		name, in string
+		code     int
+		contains string
+	}{
+		{"ping with newline", "ping\n", 0, "selftest ok"},
+		{"no trailing newline", "ping", 0, "selftest ok"},
+		{"separated args", "read-denied\x1f" + missing + "\n", -1, ""},
+		{"empty stdin", "", 1, "no probe"},
+	} {
+		var out strings.Builder
+		code := sandbox.ServerHelper(strings.NewReader(tc.in), &out)
+		if tc.code >= 0 && code != tc.code {
+			t.Errorf("%s: code %d, want %d (output %q)", tc.name, code, tc.code, out.String())
+		}
+		if !strings.Contains(out.String(), tc.contains) {
+			t.Errorf("%s: output %q lacks %q", tc.name, out.String(), tc.contains)
+		}
+		if strings.Contains(tc.in, "\x1f") && strings.Contains(out.String(), "unknown") {
+			t.Errorf("%s: args were not split: %q", tc.name, out.String())
+		}
 	}
 }

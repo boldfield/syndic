@@ -152,8 +152,7 @@ func (st *serverSelfTest) check(ctx context.Context, c SelfTestCheck) error {
 		}
 		return st.checkWriteDenied(ctx, "workspace", ws, &ws, "write into the workspace copy was not denied")
 	case CheckReadOtherState:
-		other := filepath.Join(st.root, "other-state")
-		return st.checkReadDenied(ctx, "otherstate", other, "read of a file in another key's state directory was not denied")
+		return st.checkReadOtherState(ctx)
 	}
 	return fmt.Errorf("unknown check %q", c)
 }
@@ -189,9 +188,39 @@ func (st *serverSelfTest) checkWriteDenied(ctx context.Context, name, dir string
 		return err
 	}
 	if _, statErr := os.Lstat(file); statErr == nil {
-		return errors.New("the file written outside the allowed locations exists")
+		where := "outside the allowed locations"
+		if workspace != nil {
+			where = "in the workspace copy"
+		}
+		return fmt.Errorf("the file written %s exists", where)
 	}
 	return observed(r, what)
+}
+
+// checkReadOtherState has the helper read a file in another key's state
+// directory, a sibling of the instance's own under the same parent.
+func (st *serverSelfTest) checkReadOtherState(ctx context.Context) error {
+	var file string
+	var setupErr error
+	r, err := st.callWith(ctx, "otherstate", nil, func(d serverDirs) []string {
+		other := filepath.Join(filepath.Dir(d.state), "other-key-state")
+		if setupErr = os.MkdirAll(other, 0o700); setupErr != nil {
+			return []string{"ping"}
+		}
+		file = filepath.Join(other, "secret")
+		setupErr = os.WriteFile(file, []byte("secret"), 0o600)
+		return []string{"read-denied", file}
+	})
+	if file != "" {
+		defer func() { _ = os.Remove(file) }()
+	}
+	if setupErr != nil {
+		return setupErr
+	}
+	if err != nil {
+		return err
+	}
+	return observed(r, "read of a file in another key's state directory was not denied")
 }
 
 func (st *serverSelfTest) checkServerDetach(ctx context.Context) error {
