@@ -136,3 +136,21 @@ func TestLoopbackLiteralNotExceptedWhenNotConfigured(t *testing.T) {
 		t.Fatalf("unconfigured loopback connected: %v", err)
 	}
 }
+
+func TestBareAddressAllow(t *testing.T) {
+	for _, tc := range []struct{ allow, ip string }{
+		{"192.168.1.5", "192.168.1.5"},
+		{"fd00::5", "fd00::5"},
+	} {
+		res := fakeResolver{"mcp.example.com": {netip.MustParseAddr(tc.ip)}}
+		tr, dialed := newTest(t, Config{URL: "https://mcp.example.com/", AddressAllow: []string{tc.allow}}, res, nil)
+		_, _ = get(t, tr, "https://mcp.example.com/")
+		if len(*dialed) != 1 {
+			t.Fatalf("%s: dialed %v", tc.allow, *dialed)
+		}
+	}
+	// A bare address outside the private ranges is still refused.
+	if _, err := NewTransport(Config{URL: "https://x.example.com/", AddressAllow: []string{"169.254.1.1"}}); err == nil {
+		t.Fatal("bare link-local address_allow accepted")
+	}
+}

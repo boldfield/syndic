@@ -77,7 +77,12 @@ func NewTransport(cfg Config) (*Transport, error) {
 	for _, s := range cfg.AddressAllow {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
-			return nil, fmt.Errorf("remote server: address_allow %q is not an address range", s)
+			// A bare address is a single-address range, as the roster reads it.
+			a, aerr := netip.ParseAddr(s)
+			if aerr != nil || a.Zone() != "" {
+				return nil, fmt.Errorf("remote server: address_allow %q is not an address range", s)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
 		}
 		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits())
 		if !remoteInPrivate(p) {
