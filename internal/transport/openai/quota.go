@@ -30,34 +30,30 @@ func hasQuotaMarker(status int, body []byte) bool {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return false
 	}
-	var doc struct {
-		Error *struct {
-			Code    any `json:"code"`
-			Type    any `json:"type"`
-			Message any `json:"message"`
-			Details *struct {
-				ErrorCode any `json:"error_code"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil || doc.Error == nil {
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return false
 	}
-	e := doc.Error
-	if code, ok := e.Code.(string); ok && quotaErrorCodes[code] {
+	// Map lookups are case-sensitive, unlike struct tags, so only the
+	// documented member names are read.
+	e, ok := doc["error"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if code, ok := e["code"].(string); ok && quotaErrorCodes[code] {
 		return true
 	}
-	if typ, ok := e.Type.(string); ok && typ == quotaErrorType {
+	if typ, ok := e["type"].(string); ok && typ == quotaErrorType {
 		return true
 	}
-	if e.Details != nil {
-		if code, ok := e.Details.ErrorCode.(string); ok && code == quotaDetailsErrorCode {
+	if d, ok := e["details"].(map[string]any); ok {
+		if code, ok := d["error_code"].(string); ok && code == quotaDetailsErrorCode {
 			return true
 		}
 	}
 	if status == 400 {
-		typ, _ := e.Type.(string)
-		msg, _ := e.Message.(string)
+		typ, _ := e["type"].(string)
+		msg, _ := e["message"].(string)
 		if typ == quotaSpendLimitType && strings.HasPrefix(msg, quotaSpendLimitMessage) {
 			return true
 		}

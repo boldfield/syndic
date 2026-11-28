@@ -78,3 +78,17 @@ func TestQuotaMarkerNotJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaMarkerPathsAreCaseSensitive(t *testing.T) {
+	for _, body := range []string{
+		`{"Error":{"code":"insufficient_quota"}}`,
+		`{"error":{"Code":"insufficient_quota"}}`,
+		`{"error":{"Type":"insufficient_quota"}}`,
+		`{"error":{"Details":{"error_code":"enforced_spend_limit_reached"}}}`,
+		`{"error":{"details":{"Error_Code":"enforced_spend_limit_reached"}}}`,
+	} {
+		if hasQuotaMarker(429, []byte(body)) {
+			t.Errorf("body %s: marker matched, want none", body)
+		}
+	}
+}
