@@ -194,12 +194,7 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 	}
 	attachmentBytes := attachmentRequestBytes(attachmentContent, len(standInToken))
 
-	var est int
-	if attachmentBytes > 0 {
-		est = pb.estimateWithAttachments(authorMsgs, authorDefs, attachmentBytes)
-	} else {
-		est = pb.estimate(authorMsgs, authorDefs)
-	}
+	est := pb.estimateWithAttachments(authorMsgs, authorDefs, attachmentBytes)
 	total := satAdd(est, authorMaxOut)
 	next := *t
 	next.round = t.round + 1
@@ -223,23 +218,13 @@ func (e *Engine) roundProjection(tx *journal.Tx, t *openTurn, authorMsgs []trans
 		if err != nil {
 			return 0, err
 		}
-		var reviewEst int
-		if attachmentBytes > 0 {
-			reviewEst = rb.estimateWithAttachments(msgs, defs, attachmentBytes)
-		} else {
-			reviewEst = rb.estimate(msgs, defs)
-		}
+		reviewEst := rb.estimateWithAttachments(msgs, defs, attachmentBytes)
 		total = satAdd(total, satAdd(reviewEst, maxOut))
 		repair, err := next.repairMessages(standInToken, standInToken, blocks, rb.standIn(maxOut), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		var repairEst int
-		if attachmentBytes > 0 {
-			repairEst = rb.estimateWithAttachments(repair, nil, attachmentBytes)
-		} else {
-			repairEst = rb.estimate(repair, nil)
-		}
+		repairEst := rb.estimateWithAttachments(repair, nil, attachmentBytes)
 		total = satAdd(total, satAdd(repairEst, maxOut))
 	}
 	return total, nil

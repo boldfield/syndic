@@ -181,15 +181,20 @@ func (pb partBudget) admission(msgs []transport.Message, defs []transport.Tool) 
 }
 
 // admissionWithAttachments is the admission bound including attachment bytes,
-// calculated by adding the attachment bytes to the message set.
+// accounting for them arithmetically as part of an additional message.
 func (pb partBudget) admissionWithAttachments(msgs []transport.Message, defs []transport.Tool, attachmentBytes int) int {
 	if attachmentBytes == 0 {
 		return pb.admission(msgs, defs)
 	}
-	extendedMsgs := make([]transport.Message, len(msgs), len(msgs)+1)
-	copy(extendedMsgs, msgs)
-	extendedMsgs = append(extendedMsgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
-	return pb.admission(extendedMsgs, defs)
+	// Add a user message with attachment content and calculate its token cost.
+	extendedMsgs := append(slices.Clone(msgs), transport.Message{
+		Role:    "user",
+		Content: "", // empty content, we'll account for bytes separately
+	})
+	base := budget.RequestEstimateTokens(extendedMsgs, defs, pb.bytesPerToken, pb.overheads)
+	// Now add the byte cost of attachments (integer ceiling division for bytes->tokens).
+	tokensFromBytes := (attachmentBytes + int(pb.bytesPerToken) - 1) / int(pb.bytesPerToken)
+	return satAdd(base, tokensFromBytes)
 }
 
 // estimate is the estimate of a request carrying msgs and the tool
@@ -199,15 +204,20 @@ func (pb partBudget) estimate(msgs []transport.Message, defs []transport.Tool) i
 }
 
 // estimateWithAttachments is the estimate including attachment bytes,
-// calculated by adding the attachment bytes to the message set.
+// accounting for them arithmetically as part of an additional message.
 func (pb partBudget) estimateWithAttachments(msgs []transport.Message, defs []transport.Tool, attachmentBytes int) int {
 	if attachmentBytes == 0 {
 		return pb.estimate(msgs, defs)
 	}
-	extendedMsgs := make([]transport.Message, len(msgs), len(msgs)+1)
-	copy(extendedMsgs, msgs)
-	extendedMsgs = append(extendedMsgs, transport.Message{Role: "user", Content: strings.Repeat("x", attachmentBytes)})
-	return pb.estimate(extendedMsgs, defs)
+	// Add a user message with attachment content and calculate its token cost.
+	extendedMsgs := append(slices.Clone(msgs), transport.Message{
+		Role:    "user",
+		Content: "", // empty content, we'll account for bytes separately
+	})
+	base := budget.RequestEstimateTokens(extendedMsgs, defs, pb.bytesPerToken, pb.overheads)
+	// Now add the byte cost of attachments (integer ceiling division for bytes->tokens).
+	tokensFromBytes := (attachmentBytes + int(pb.bytesPerToken) - 1) / int(pb.bytesPerToken)
+	return satAdd(base, tokensFromBytes)
 }
 
 // maxOutput is the MaxOutputTokens a request of this participant carries.
@@ -339,7 +349,7 @@ func (e *Engine) projectBudget(eff config.Effective, input string, doc *history.
 	// estimate and output bound to the aggregate, including attachment bytes.
 	fits := func(pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int, includeAttachments bool) error {
 		var adm, est int
-		if includeAttachments && attachmentBytes > 0 {
+		if includeAttachments {
 			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
 			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
 		} else {
@@ -511,12 +521,7 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs 
 	if err != nil {
 		return 0, err
 	}
-	var est int
-	if attachmentBytes > 0 {
-		est = author.estimateWithAttachments(msgs, defs.author, attachmentBytes)
-	} else {
-		est = author.estimate(msgs, defs.author)
-	}
+	est := author.estimateWithAttachments(msgs, defs.author, attachmentBytes)
 	total := satAdd(est, authorOut)
 
 	for _, id := range eff.Preset.RequiredReviewers {
@@ -545,23 +550,13 @@ func revisionRoundCost(eff config.Effective, consts map[string]partBudget, defs 
 		if err != nil {
 			return 0, err
 		}
-		var reviewEst int
-		if attachmentBytes > 0 {
-			reviewEst = rv.estimateWithAttachments(review, defs.reviewer, attachmentBytes)
-		} else {
-			reviewEst = rv.estimate(review, defs.reviewer)
-		}
+		reviewEst := rv.estimateWithAttachments(review, defs.reviewer, attachmentBytes)
 		total = satAdd(total, satAdd(reviewEst, out))
 		repair, err := prompt.RepairRevision(in, rv.standIn(out), standInToken)
 		if err != nil {
 			return 0, err
 		}
-		var repairEst int
-		if attachmentBytes > 0 {
-			repairEst = rv.estimateWithAttachments(repair, nil, attachmentBytes)
-		} else {
-			repairEst = rv.estimate(repair, nil)
-		}
+		repairEst := rv.estimateWithAttachments(repair, nil, attachmentBytes)
 		total = satAdd(total, satAdd(repairEst, out))
 	}
 	return total, nil
@@ -778,7 +773,7 @@ func (e *Engine) projectDeliberate(eff config.Effective, input string, doc *hist
 	fits := func(phase string, pb partBudget, msgs []transport.Message, toolDefs []transport.Tool, maxOut int) error {
 		includeAttachments := phase == phaseProposal || phase == phaseCritique || phase == phaseIntegration || phase == phaseIntegrationRepair || phase == phaseReview || phase == phaseReviewRepair
 		var adm, est int
-		if includeAttachments && attachmentBytes > 0 {
+		if includeAttachments {
 			adm = pb.admissionWithAttachments(msgs, toolDefs, attachmentBytes)
 			est = pb.estimateWithAttachments(msgs, toolDefs, attachmentBytes)
 		} else {
