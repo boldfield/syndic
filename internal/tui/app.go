@@ -764,9 +764,11 @@ func (a *App) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "tab":
-		return a, a.setTab((a.tab + 1) % numTabs)
+		maxT := int(a.maxTab()) + 1
+		return a, a.setTab(tab((int(a.tab) + 1) % maxT))
 	case "shift+tab":
-		return a, a.setTab((a.tab + numTabs - 1) % numTabs)
+		maxT := int(a.maxTab()) + 1
+		return a, a.setTab(tab((int(a.tab) + maxT - 1) % maxT))
 	case "enter":
 		return a, a.enter()
 	}
@@ -1519,12 +1521,39 @@ func (a *App) scrollAnswer(delta int) {
 // tabGap separates the tab names in the tab bar.
 const tabGap = "  "
 
-// tabNames are the tabs' names, in tab order.
-func tabNames() []string { return []string{"chat", "transcript", "participants", "changes"} }
+// isReviewMode reports whether the current turn is in review mode with tools support (E mode).
+// The changes tab is only available when tools are enabled, which is indicated by a non-nil ChangeSet.
+func (a *App) isReviewMode() bool {
+	if a.state.CurrentTurn == "" {
+		return false
+	}
+	ti, ok := a.state.Turns[a.state.CurrentTurn]
+	if !ok {
+		return false
+	}
+	return ti.Mode == "review" && ti.ChangeSet != nil
+}
+
+// maxTab returns the highest available tab index.
+func (a *App) maxTab() tab {
+	if a.isReviewMode() {
+		return tabChanges
+	}
+	return tabParticipants
+}
+
+// tabNames are the tabs' names, in tab order. E-only tabs are excluded in solo mode.
+func (a *App) tabNames() []string {
+	names := []string{"chat", "transcript", "participants"}
+	if a.isReviewMode() {
+		names = append(names, "changes")
+	}
+	return names
+}
 
 // tabBar names the tabs, the active one in brackets.
 func (a *App) tabBar() string {
-	names := tabNames()
+	names := a.tabNames()
 	parts := make([]string, len(names))
 	for i, n := range names {
 		if tab(i) == a.tab {

@@ -30,7 +30,7 @@ func chatApp(t *testing.T) *App {
 
 // addTurn puts a finished turn into the chat; its candidate text is loaded.
 func addTurn(a *App, id string, seq int64, state, input, candidate string) {
-	ti := TurnInfo{ID: id, State: state, Preset: "review", SubmitSeq: seq, SubmittedAt: chatNow.Add(-time.Duration(100-seq) * time.Minute)}
+	ti := TurnInfo{ID: id, State: state, Preset: "review", Mode: "review", SubmitSeq: seq, SubmittedAt: chatNow.Add(-time.Duration(100-seq) * time.Minute)}
 	if candidate != "" {
 		hash := "abcdef1234567890" + id
 		ti.CandidateHash = &hash

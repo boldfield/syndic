@@ -85,7 +85,8 @@ type TurnInfo struct {
 	State           string
 	Preset          string
 	QuickProfile    *string
-	ModeOverride    bool // true if /mode set the preset for this turn
+	ModeOverride    bool   // true if /mode set the preset for this turn
+	Mode            string // "solo" or "review"
 	SubmittedAt     time.Time
 	SubmitSeq       int64         // journal seq of turn_submitted; orders turns submitted within one second
 	TurnDeadline    *time.Time    // submit time plus DeadlineDur
@@ -830,6 +831,9 @@ func MergeTurn(s State, turnID string, turn *wire.TurnReply, now time.Time) Stat
 		if ti.CandidateHash == nil {
 			ti.CandidateHash = turn.CandidateHash
 		}
+	}
+	if ti.Mode == "" {
+		ti.Mode = turn.Mode
 	}
 	// The reply's figure sums the attempts it holds, while turn_submitted
 	// carries the whole-turn projection. A terminal reply is authoritative; an
