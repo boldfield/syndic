@@ -37,6 +37,10 @@ type openTurn struct {
 
 	reviewersBegun int
 
+	// execTurn is the turn's self-test before its first command; nil until
+	// then. Owned by Engine.mu.
+	execTurn *execTurn
+
 	// Review state, owned by Engine.mu.
 	required      []string
 	candidate     string
