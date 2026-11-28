@@ -182,6 +182,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 		if ok {
 			reply.EstimatedTokens = int64(stored.Projected)
 			reply.WorstCaseEstimatedTokens = int64(stored.WorstCaseProjected)
+			reply.Phases = stored.Phases
 		}
 		if prior.QuickProfile != "" {
 			reply.QuickProfile = strPtr(prior.QuickProfile)

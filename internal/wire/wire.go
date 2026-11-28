@@ -512,6 +512,8 @@ type BudgetRecord struct {
 	Charged            *int64 `json:"charged,omitempty"`
 	Limit              *int64 `json:"limit,omitempty"`
 	Exhausted          bool   `json:"exhausted"`
+	// Phases is the first-round projection of a deliberate turn, per phase.
+	Phases []PhaseEstimate `json:"phases,omitempty"`
 }
 
 type TurnReply struct {
