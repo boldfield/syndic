@@ -197,8 +197,8 @@ type Options struct {
 	Exec ExecOptions
 
 	// MCP is the engine's seam to MCP servers: how a server is listed. The
-	// daemon injects none yet, so every MCP tool stays unoffered in
-	// production and the participants reply says so; tests inject fakes.
+	// daemon lists remote servers; a server with no listing stays unoffered
+	// and the participants reply says so. Tests inject fakes.
 	MCP MCPOptions
 }
 

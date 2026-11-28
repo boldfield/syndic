@@ -108,6 +108,10 @@ func mcpListOptions(roster *config.Roster) mcp.ListOptions {
 // listing for it.
 var errMCPNoTransport = errors.New(mcpOffNoTransport)
 
+// ErrMCPNoTransport is what a List returns for a server whose transport it
+// does not have.
+var ErrMCPNoTransport = errMCPNoTransport
+
 // mcpListResult is one server's listing or why there is none.
 type mcpListResult struct {
 	listed MCPListed
