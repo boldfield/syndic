@@ -433,7 +433,7 @@ func (e *Engine) roleToolDefs(t *openTurn, groups []string, caller string, remai
 			offered = append(offered, g)
 		case g == tools.GroupWeb && e.searchOffered() && e.groupOffered(g, caller):
 			offered = append(offered, g)
-		case g == tools.GroupExec && caller == t.author && t.workspace != "" && e.execOffReason(t, caller) == "":
+		case g == tools.GroupExec && t.workspace != "" && (caller == t.author || t.candidateID != "") && e.execOffReason(t, caller) == "":
 			offered = append(offered, g)
 		}
 	}
