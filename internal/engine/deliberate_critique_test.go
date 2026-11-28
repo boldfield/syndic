@@ -52,7 +52,7 @@ func TestDeliberateCritiquesCompleteOnFirstReply(t *testing.T) {
 			t.Fatalf("%s's critique: tools %d, bound %d", id, len(c.Request.Tools), c.Request.MaxOutputTokens)
 		}
 		u := lastUser(c)
-		if !strings.Contains(u, "author proposal") || !strings.Contains(u, "reviewer proposal") || strings.Contains(u, "critique") && strings.Contains(u, "author critique") {
+		if !strings.Contains(u, "author proposal") || !strings.Contains(u, "reviewer proposal") || strings.Contains(u, "author critique") {
 			t.Fatalf("%s's critique prompt: %s", id, u)
 		}
 		own := "YOUR PROPOSAL"
@@ -107,7 +107,7 @@ func TestDeliberateLateCritiqueEndsTurn(t *testing.T) {
 	}
 	h.Clock.Advance(24 * time.Hour)
 	row := waitEnded(t, h, turnID)
-	if row.TerminalState != engine.StateIncomplete || !strings.HasPrefix(row.TerminalReason, "critique_failed:") {
+	if row.TerminalState != engine.StateIncomplete || row.TerminalReason != "critique_failed:reviewer" {
 		t.Fatalf("turn ended %q %q", row.TerminalState, row.TerminalReason)
 	}
 	if eventCount(h, journal.EventCritiquesComplete) != 0 {
@@ -125,24 +125,37 @@ func TestDeliberateCritiqueOverContextEndsTurn(t *testing.T) {
 	})
 	turnID := submitDeliberate(t, h)
 	wantEnd(t, h, turnID, engine.StateIncomplete, "budget:context:author")
-	if eventCount(h, journal.EventCritiquesComplete) != 0 {
-		t.Fatal("critiques completed")
-	}
+	wantCritiqueDispatchRefused(t, h)
 }
 
-// A proposal that reports more usage than the turn total exhausts the budget,
-// so the critique reservation that follows would pass it and ends the turn
-// budget:turn although its prompt fits the recipient.
+// The last proposal reports more usage than the turn total, so both proposals
+// are accepted and the critique reservation that follows would pass the total:
+// the turn ends budget:turn although the prompt fits its recipient.
 func TestDeliberateCritiqueOverTurnTotalEndsTurn(t *testing.T) {
-	heavy := enginetest.Reply("p1")
+	heavy := enginetest.Reply("p2")
 	heavy.Usage = &transport.Usage{Prompt: 10, Completion: 300000}
 	h := enginetest.New(t, deliberateRoster(""), map[string][]fake.Step{
-		"author":   {heavy, enginetest.Reply("c1")},
-		"reviewer": {enginetest.Reply("p2"), enginetest.Reply("c2")},
+		"author":   {enginetest.Reply("p1"), enginetest.Reply("c1")},
+		"reviewer": {heavy, enginetest.Reply("c2")},
 	})
 	turnID := submitDeliberate(t, h)
 	wantEnd(t, h, turnID, engine.StateIncomplete, "budget:turn")
+	wantCritiqueDispatchRefused(t, h)
+}
+
+// wantCritiqueDispatchRefused checks that the proposal phase completed, the
+// critique dispatch was journaled, and no critique reached an adapter.
+func wantCritiqueDispatchRefused(t *testing.T, h *enginetest.Harness) {
+	t.Helper()
+	if eventCount(h, journal.EventProposalsComplete) != 1 || eventCount(h, journal.EventCritiquesDispatched) != 1 {
+		t.Fatal("the refusal did not come from the critique dispatch")
+	}
 	if eventCount(h, journal.EventCritiquesComplete) != 0 {
 		t.Fatal("critiques completed")
+	}
+	for id, a := range h.Adapters {
+		if n := len(a.Calls()); n != 1 {
+			t.Fatalf("%s: %d calls, want only its proposal", id, n)
+		}
 	}
 }
