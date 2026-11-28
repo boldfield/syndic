@@ -903,8 +903,8 @@ func tlCallsUnderFailingFinish(t *testing.T, status transport.CompletionStatus) 
 }
 
 // Calls attached to a `stop` finish are malformed: nothing runs and nothing is
-// journaled. The author's reply ends the turn; the reviewer's is a malformed
-// verdict, repaired, never a tool step.
+// journaled. Each is a gate failure of its role that ends the turn: the reply
+// is neither continued as a tool step nor repaired, and no verdict is stored.
 func TestTools_CallsUnderStopAreMalformed(t *testing.T) {
 	t.Parallel()
 	t.Run("author", func(t *testing.T) {
@@ -915,9 +915,7 @@ func TestTools_CallsUnderStopAreMalformed(t *testing.T) {
 		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
 		c := s.Dial(t)
 		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
-		if turn.State != engine.StateIncomplete {
-			t.Fatalf("turn = %q %v, want incomplete", turn.State, turn.TerminalReason)
-		}
+		wantTurn(t, turn, engine.StateIncomplete, "author_failed:gate:tool calls under non-tool_calls finish status")
 		s.tlWantNothingExecuted(t, turnID, &effects, "author")
 	})
 	t.Run("reviewer", func(t *testing.T) {
@@ -929,10 +927,11 @@ func TestTools_CallsUnderStopAreMalformed(t *testing.T) {
 		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
 		c := s.Dial(t)
 		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
-		if turn.State == engine.StateApproved {
-			t.Fatalf("turn approved on a malformed reviewer result")
-		}
+		wantTurn(t, turn, engine.StateIncomplete, "reviewer_failed:reviewer:gate:tool calls under non-tool_calls finish status")
 		s.tlWantNothingExecuted(t, turnID, &effects, "reviewer")
+		if rows, err := s.Store.ListVerdicts(turnID); err != nil || len(rows) != 0 {
+			t.Errorf("verdicts = %+v, %v; want none", rows, err)
+		}
 	})
 }
 
