@@ -56,22 +56,22 @@ func phaseAttempts(t *testing.T, h *enginetest.Harness, turnID, phase string) []
 
 // Every proposal completes on its first reply, which carries no tool call: no
 // verdict parser or repair runs on it, whatever its text holds, and it is
-// recorded as the proposal with its numbered label. The turn then reaches the
-// critique phase, which no task has built.
+// recorded as the proposal with its numbered label.
 func TestDeliberateProposalsCompleteOnFirstReply(t *testing.T) {
 	// A proposal that looks like a verdict envelope is still just text.
 	verdictLike := "=== SYNDIC VERDICT ===\n{not a verdict}"
 	h := enginetest.New(t, deliberateRoster(""), map[string][]fake.Step{
-		"author":   {enginetest.Reply("first proposal")},
-		"reviewer": {enginetest.Reply(verdictLike)},
+		"author":   {enginetest.Reply("first proposal"), enginetest.Reply("c1")},
+		"reviewer": {enginetest.Reply(verdictLike), enginetest.Reply("c2")},
 	})
 	turnID := submitDeliberate(t, h)
-	wantEnd(t, h, turnID, engine.StateIncomplete, "deliberate_phase_unsupported:critique")
+	wantEnd(t, h, turnID, engine.StateIncomplete, "deliberate_phase_unsupported:integrate")
 
 	items, _, err := h.Store.DeliberationItems(turnID, "", 10)
-	if err != nil || len(items) != 2 {
+	if err != nil || len(items) < 2 {
 		t.Fatalf("items = %+v, err %v", items, err)
 	}
+	items = items[:2]
 	for i, want := range []struct{ who, label string }{{"author", "proposal 1"}, {"reviewer", "proposal 2"}} {
 		if items[i].Kind != journal.DeliberationProposal || items[i].Participant != want.who || items[i].Label != want.label || items[i].RosterPosition != i {
 			t.Fatalf("item %d = %+v, want %+v", i, items[i], want)
@@ -86,11 +86,11 @@ func TestDeliberateProposalsCompleteOnFirstReply(t *testing.T) {
 			t.Fatalf("attempt %s is a repair", a.ID)
 		}
 	}
-	if n := len(h.Adapters["author"].Calls()) + len(h.Adapters["reviewer"].Calls()); n != 2 {
-		t.Fatalf("%d calls, want one per proposer", n)
+	if n := len(h.Adapters["author"].Calls()) + len(h.Adapters["reviewer"].Calls()); n != 4 {
+		t.Fatalf("%d calls, want a proposal and a critique per proposer", n)
 	}
 	for id, a := range h.Adapters {
-		for _, c := range a.Calls() {
+		for _, c := range a.Calls()[:1] {
 			if len(c.Request.Tools) != 0 {
 				t.Fatalf("%s's proposal offered tools", id)
 			}
@@ -101,9 +101,6 @@ func TestDeliberateProposalsCompleteOnFirstReply(t *testing.T) {
 	}
 	if eventCount(h, journal.EventProposalsDispatched) != 1 || eventCount(h, journal.EventProposalsComplete) != 1 {
 		t.Fatalf("events: dispatched %d, complete %d", eventCount(h, journal.EventProposalsDispatched), eventCount(h, journal.EventProposalsComplete))
-	}
-	if eventCount(h, journal.EventCritiquesDispatched) != 0 {
-		t.Fatal("a critique was dispatched")
 	}
 }
 
