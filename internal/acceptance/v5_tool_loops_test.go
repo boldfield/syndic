@@ -38,7 +38,12 @@ func init() {
 	cover(toolsPara, "a call over the bound is answered `call_limit` and the next author attempt carries no tool definitions and is the last", "TestTools_AuthorBoundFinalNoToolAttempt")
 	cover(toolsPara, "a tool step in reply to the final tool-free author attempt ends the turn `tool_limit` and nothing more is dispatched", "TestTools_AuthorToolStepAtBoundEndsToolLimit")
 	cover(toolsPara, "a tool step that arrives after the turn was cancelled is quarantined and runs nothing", "TestTools_LateToolStepQuarantined")
-	cover(toolsPara, "a cancel during a tool step abandons the rest of its calls and executes nothing more", "TestTools_CancelDuringStepAbandonsRest")
+	cover(toolsPara, "a call naming a tool the role does not have is answered with a tool error and the other calls in the step still run", "TestTools_RoleGateAnswersCallAndRunsTheRest")
+	cover(toolsPara, "a result with calls under finish `length` fails acceptance and executes nothing", "TestTools_CallsUnderLengthFailAcceptance")
+	cover(toolsPara, "a result with calls under finish `stop` is malformed", "TestTools_CallsUnderStopAreMalformed")
+	cover(toolsPara, "a result with calls under a content-filter finish fails acceptance and executes nothing", "TestTools_CallsUnderContentFilterFailAcceptance")
+	cover(toolsPara, "the reviewer's request contains every author tool result verbatim", "TestTools_ReviewerRequestCarriesAuthorResultsVerbatim")
+	cover(toolsPara, "the adapter executes no tool", "TestTools_AdapterExecutesNoTool")
 
 	cover(reviewerToolsPara, "`reviewer_tools` naming `write` is invalid at roster load", "TestReviewer_WriteToolInvalidAtLoad")
 	cover(reviewerToolsPara, "a reviewer without `tool_calls: yes` is refused when the preset sets `reviewer_tools`", "TestReviewer_WithoutToolCallsRefused")
@@ -48,6 +53,8 @@ func init() {
 	cover(reviewerToolsPara, "the verdict record lists the reviewer's tool result ids", "TestReviewer_VerdictRecordListsResultIDs")
 	cover(reviewerToolsPara, "two candidates with identical author output and different reviewer lookups have the same candidate hash", "TestReviewer_CandidateHashIgnoresLookups")
 	cover(reviewerToolsPara, "a repair request carries no tool definitions", "TestReviewer_RepairCarriesNoDefinitions")
+	cover(reviewerToolsPara, "a preset with author `read` and reviewer `web` is accepted by default, and refused with `tools.allow_web_with_read = false`", "TestReviewer_WebWithReadAcceptedByDefaultRefusedWhenOff")
+	cover(reviewerToolsPara, "a preset with only reviewer `web` is accepted under either value, and under `false` a submit with it to a tainted conversation is refused `egress` with route `history`", "TestReviewer_WebOnlyAcceptedAndRefusedWhenTainted")
 }
 
 const (
@@ -419,11 +426,13 @@ func TestTools_LateToolStepQuarantined(t *testing.T) {
 	}
 }
 
-// A cancel that lands while a step is executing abandons the rest of its
+// (Not a §7 clause, so not registered: the referee-await abandonment is
+// E-35's. This test is the loop's own check that a cancel during a step
+// abandons its unrun calls.) A cancel that lands while a step is executing abandons the rest of its
 // calls: the call that was running is journaled executed, the others
 // abandoned without result bytes, no further effect runs, and the results of
 // the ended step are never dispatched to the model.
-func TestTools_CancelDuringStepAbandonsRest(t *testing.T) {
+func TestToolLoop_CancelDuringStepAbandonsRest(t *testing.T) {
 	t.Parallel()
 	var s *suite
 	var effects atomic.Int32
@@ -764,4 +773,357 @@ func TestReviewer_RepairCarriesNoDefinitions(t *testing.T) {
 		t.Errorf("the repair lacks the reviewer's own result: %+v", repair.Messages)
 	}
 	tlWantCalls(t, s.tlCalls(t, turnID, "reviewer"), [2]string{journal.ToolCallExecuted, ""})
+}
+
+// A call naming a tool the role does not have is answered with a tool error
+// and journaled; the other calls of the step still run. The author holds only
+// `read`, the reviewer only `read`, and each names write_file beside a read.
+func TestTools_RoleGateAnswersCallAndRunsTheRest(t *testing.T) {
+	t.Parallel()
+	var effects atomic.Int32
+	write := tlCall("w", tools.NameWriteFile, `{"path":"new.txt","content":"x"}`)
+	s := newSuite(t, tlRoster(0, 3, 3, `"read"`, `"read"`), map[string][]fake.Step{
+		"author": tlAcks(
+			tlStep(tlNote, write, tlRead("ar", "a.txt")),
+			enginetest.Reply(tlAnswer),
+		),
+		"reviewer": tlAcks(
+			tlStep(tlNote, write, tlRead("rr", "b.txt")),
+			tlApprove(),
+		),
+	}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+	dir := tlWorkspace(t)
+	c := s.Dial(t)
+	turnID, turn := s.tlRun(t, c, "s1", dir)
+	wantTurn(t, turn, engine.StateApproved, "all_approved")
+	for _, who := range []string{"author", "reviewer"} {
+		tlWantCalls(t, s.tlCalls(t, turnID, who),
+			[2]string{journal.ToolCallError, "not_offered"},
+			[2]string{journal.ToolCallExecuted, ""},
+		)
+	}
+	if n := effects.Load(); n != 2 {
+		t.Fatalf("%d effects ran, want 2: only the two reads", n)
+	}
+	for who, id := range map[string]string{"author": "ar", "reviewer": "rr"} {
+		reqs := s.tlRequests(who)
+		if len(reqs) < 2 {
+			t.Fatalf("%s: %d requests, want a continuation", who, len(reqs))
+		}
+		if m := tlToolMessage(reqs[1], "w"); m == nil || strings.Contains(m.Content, "new.txt written") {
+			t.Errorf("%s: the refused call was not answered with an error: %+v", who, m)
+		}
+		want := tlFileA
+		if who == "reviewer" {
+			want = tlFileB
+		}
+		if m := tlToolMessage(reqs[1], id); m == nil || !strings.Contains(m.Content, want) {
+			t.Errorf("%s: the read beside the refused call was not delivered: %+v", who, m)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the refused write touched the workspace: %v", err)
+	}
+}
+
+// tlBadFinishStep is a result carrying a call under a finish status that is
+// not the dialect's tool-call finish.
+func tlBadFinishStep(status transport.CompletionStatus) fake.Step {
+	step := tlStep(tlNote, tlRead("c1", "a.txt"))
+	step.Status = status
+	return step
+}
+
+// tlWantNothingExecuted checks that no effect ran, no call was journaled for
+// anyone, and the participant was sent no continuation.
+func (s *suite) tlWantNothingExecuted(t *testing.T, turnID string, effects *atomic.Int32, who string) {
+	t.Helper()
+	if n := effects.Load(); n != 0 {
+		t.Errorf("%d tool effects ran, want 0", n)
+	}
+	for _, p := range []string{"author", "reviewer"} {
+		if calls := s.tlCalls(t, turnID, p); len(calls) != 0 {
+			t.Errorf("%s: %d calls journaled, want 0: %+v", p, len(calls), calls)
+		}
+	}
+	if n := len(s.tlRequests(who)); n != 1 {
+		t.Errorf("%s received %d requests, want 1: the result was continued", who, n)
+	}
+}
+
+// Calls under `length`, or under a content-filter (refusal) finish, are not a
+// tool step: the result fails acceptance as a truncated or refused one does
+// today, nothing runs and nothing is journaled, in an author's reply and in a
+// reviewer's.
+func TestTools_CallsUnderLengthFailAcceptance(t *testing.T) {
+	t.Parallel()
+	tlCallsUnderFailingFinish(t, transport.StatusTruncated)
+}
+
+func TestTools_CallsUnderContentFilterFailAcceptance(t *testing.T) {
+	t.Parallel()
+	tlCallsUnderFailingFinish(t, transport.StatusRefused)
+}
+
+func tlCallsUnderFailingFinish(t *testing.T, status transport.CompletionStatus) {
+	t.Helper()
+	t.Run("author", func(t *testing.T) {
+		t.Parallel()
+		var effects atomic.Int32
+		s := newSuite(t, tlRoster(0, 3, 3, `"read"`, ""), map[string][]fake.Step{
+			"author": tlAcks(tlBadFinishStep(status), enginetest.Reply("never sent")),
+		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+		c := s.Dial(t)
+		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
+		if turn.State != engine.StateIncomplete {
+			t.Fatalf("turn = %q %v, want incomplete", turn.State, turn.TerminalReason)
+		}
+		s.tlWantNothingExecuted(t, turnID, &effects, "author")
+		if n := len(s.tlRequests("reviewer")); n != 0 {
+			t.Errorf("%d reviewer requests, want 0: nothing was frozen", n)
+		}
+	})
+	t.Run("reviewer", func(t *testing.T) {
+		t.Parallel()
+		var effects atomic.Int32
+		s := newSuite(t, tlRoster(0, 3, 3, "", `"read"`), map[string][]fake.Step{
+			"author":   tlAcks(enginetest.Reply(tlAnswer)),
+			"reviewer": tlAcks(tlBadFinishStep(status), tlApprove()),
+		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+		c := s.Dial(t)
+		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
+		if turn.State == engine.StateApproved {
+			t.Fatalf("turn approved on a reviewer result that failed acceptance")
+		}
+		s.tlWantNothingExecuted(t, turnID, &effects, "reviewer")
+		if rows, err := s.Store.ListVerdicts(turnID); err != nil || len(rows) != 0 {
+			t.Errorf("verdicts = %+v, %v; want none", rows, err)
+		}
+	})
+}
+
+// Calls attached to a `stop` finish are malformed: nothing runs and nothing is
+// journaled. The author's reply ends the turn; the reviewer's is a malformed
+// verdict, repaired, never a tool step.
+func TestTools_CallsUnderStopAreMalformed(t *testing.T) {
+	t.Parallel()
+	t.Run("author", func(t *testing.T) {
+		t.Parallel()
+		var effects atomic.Int32
+		s := newSuite(t, tlRoster(0, 3, 3, `"read"`, ""), map[string][]fake.Step{
+			"author": tlAcks(tlBadFinishStep(transport.StatusComplete), enginetest.Reply("never sent")),
+		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+		c := s.Dial(t)
+		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
+		if turn.State != engine.StateIncomplete {
+			t.Fatalf("turn = %q %v, want incomplete", turn.State, turn.TerminalReason)
+		}
+		s.tlWantNothingExecuted(t, turnID, &effects, "author")
+	})
+	t.Run("reviewer", func(t *testing.T) {
+		t.Parallel()
+		var effects atomic.Int32
+		s := newSuite(t, tlRoster(0, 3, 3, "", `"read"`), map[string][]fake.Step{
+			"author":   tlAcks(enginetest.Reply(tlAnswer)),
+			"reviewer": tlAcks(tlBadFinishStep(transport.StatusComplete), tlApprove()),
+		}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+		c := s.Dial(t)
+		turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
+		if turn.State == engine.StateApproved {
+			t.Fatalf("turn approved on a malformed reviewer result")
+		}
+		s.tlWantNothingExecuted(t, turnID, &effects, "reviewer")
+	})
+}
+
+// The reviewer's request carries every author tool result verbatim, the
+// same bytes the author itself was given.
+func TestTools_ReviewerRequestCarriesAuthorResultsVerbatim(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, tlRoster(0, 3, 3, `"read"`, ""), map[string][]fake.Step{
+		"author": tlAcks(
+			tlStep(tlNote, tlRead("a1", "a.txt"), tlRead("a2", "b.txt")),
+			enginetest.Reply(tlAnswer),
+		),
+		"reviewer": tlAcks(tlApprove()),
+	})
+	c := s.Dial(t)
+	turnID, turn := s.tlRun(t, c, "s1", tlWorkspace(t))
+	wantTurn(t, turn, engine.StateApproved, "all_approved")
+	tlWantCalls(t, s.tlCalls(t, turnID, "author"),
+		[2]string{journal.ToolCallExecuted, ""}, [2]string{journal.ToolCallExecuted, ""})
+	author := s.tlRequests("author")
+	reviewer := s.tlRequests("reviewer")
+	if len(author) != 2 || len(reviewer) != 1 {
+		t.Fatalf("%d author and %d reviewer requests, want 2 and 1", len(author), len(reviewer))
+	}
+	seen := tlText(reviewer[0])
+	for _, id := range []string{"a1", "a2"} {
+		if m := tlToolMessage(author[1], id); m == nil || m.Content == "" {
+			t.Fatalf("the author's continuation lacks result %s", id)
+		}
+	}
+	if !strings.Contains(seen, tools.NameReadFile) {
+		t.Error("the reviewer's request does not name the author's calls")
+	}
+	for _, body := range []string{tlFileA + "\n", tlFileB + "\n"} {
+		if !strings.Contains(seen, body) {
+			t.Errorf("the reviewer's request lacks the author result %q verbatim", body)
+		}
+	}
+}
+
+// The adapter executes no tool: every effect that ran passed the engine's
+// executor, one per executed call, and the fake adapter, which only returned
+// the scripted step, left the workspace untouched even for a write call.
+func TestTools_AdapterExecutesNoTool(t *testing.T) {
+	t.Parallel()
+	var effects atomic.Int32
+	s := newSuite(t, tlRoster(0, 3, 3, `"read"`, ""), map[string][]fake.Step{
+		"author": tlAcks(
+			tlStep(tlNote, tlRead("a1", "a.txt"), tlCall("w", tools.NameWriteFile, `{"path":"new.txt","content":"x"}`)),
+			enginetest.Reply(tlAnswer),
+		),
+		"reviewer": tlAcks(tlApprove()),
+	}, enginetest.WithBeforeToolEffect(func(_, _, _ string) { effects.Add(1) }))
+	dir := tlWorkspace(t)
+	c := s.Dial(t)
+	turnID, turn := s.tlRun(t, c, "s1", dir)
+	wantTurn(t, turn, engine.StateApproved, "all_approved")
+	executed := 0
+	for _, call := range s.tlCalls(t, turnID, "author") {
+		if call.Status == journal.ToolCallExecuted {
+			executed++
+		}
+	}
+	if int(effects.Load()) != executed || executed != 1 {
+		t.Fatalf("%d effects and %d executed calls, want one of each", effects.Load(), executed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("a call outside the role ran: %v", err)
+	}
+}
+
+// tlWebRoster is the review roster with a referee model on the endpoint and
+// the presets "webread" (author read, reviewer web, left out when withWebRead
+// is false: under allow_web_with_read = false the roster would not load),
+// "webonly" (reviewer web only) and "reader" (a solo author that reads).
+// webWithRead, when not empty, sets tools.allow_web_with_read for the roster.
+func tlWebRoster(webWithRead string, withWebRead bool) string {
+	r := enginetest.RosterTOML
+	r = strings.Replace(r, `models = ["llama2", "llama3"]`, `models = ["llama2", "llama3", "refmodel"]`, 1)
+	r = strings.Replace(r, "tokens_per_byte_max = 1.0", "tokens_per_byte_max = 1.0\nreferee_model = \"refmodel\"", 1)
+	if withWebRead {
+		r += `
+[presets.webread]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+tools = ["read"]
+reviewer_tools = ["web"]
+`
+	}
+	r += `
+[presets.webonly]
+mode = "review"
+author = "author"
+required_reviewers = ["reviewer"]
+reviewer_tools = ["web"]
+
+[presets.reader]
+mode = "solo"
+author = "author"
+required_reviewers = []
+tools = ["read"]
+`
+	if webWithRead != "" {
+		r += "\n[tools]\nallow_web_with_read = " + webWithRead + "\n"
+	}
+	return r
+}
+
+func (s *suite) tlSubmitPreset(c *client.Client, id, preset, dir string, conv *string) (wire.SubmitReply, error) {
+	return c.Submit(s.ctx(), wire.SubmitRequest{SubmissionID: id, Input: "q " + id, Preset: &preset, Workspace: dir, ConversationID: conv})
+}
+
+// A preset with author `read` and reviewer `web` is accepted by default and
+// runs to approval, and the roster that sets `tools.allow_web_with_read =
+// false` is refused at load naming the reviewer given web and the author whose
+// file content would reach it. (The participants reply and start log that name
+// the exposed reviewers are not asserted: the engine has no such surface at
+// this commit, and §7's egress paragraph is E-33's.)
+func TestReviewer_WebWithReadAcceptedByDefaultRefusedWhenOff(t *testing.T) {
+	t.Parallel()
+	s := newSuite(t, tlWebRoster("", true), map[string][]fake.Step{
+		"author":   tlAcks(enginetest.Reply(tlAnswer)),
+		"reviewer": tlAcks(tlApprove()),
+	}, enginetest.WithModelToolCalls("local", "refmodel", transport.TriYes))
+	c := s.Dial(t)
+	reply, err := s.tlSubmitPreset(c, "s1", "webread", tlWorkspace(t), nil)
+	if err != nil {
+		t.Fatalf("submit under author read and reviewer web: %v", err)
+	}
+	s.WaitTerminal(reply.TurnID)
+	wantTurn(t, s.Turn(t, c, reply.TurnID), engine.StateApproved, "all_approved")
+
+	h := enginetest.New(t, tlWebRoster("false", true), map[string][]fake.Step{}, enginetest.NoStart(),
+		enginetest.WithModelToolCalls("local", "refmodel", transport.TriYes))
+	err = h.Engine.Start()
+	var re *engine.RosterError
+	if !errors.As(err, &re) {
+		t.Fatalf("Start = %v, want a roster refusal", err)
+	}
+	for _, want := range []string{"webread", "allow_web_with_read=false", "reviewer", "author"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// A preset whose only tool anywhere is a reviewer's `web` is accepted under
+// either value of the setting; under `false`, a submit with it to a
+// conversation that a read made tainted is refused `egress` with route
+// `history`, naming the reviewer, and records nothing.
+func TestReviewer_WebOnlyAcceptedAndRefusedWhenTainted(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			s := newSuite(t, tlWebRoster(value, false), map[string][]fake.Step{
+				"author":   tlAcks(enginetest.Reply(tlAnswer), enginetest.Reply(tlAnswer), enginetest.Reply(tlAnswer)),
+				"reviewer": tlAcks(tlApprove()),
+			}, enginetest.WithModelToolCalls("local", "refmodel", transport.TriYes))
+			c := s.Dial(t)
+			fresh, err := s.tlSubmitPreset(c, "fresh", "webonly", "", nil)
+			if err != nil {
+				t.Fatalf("web-only preset, allow_web_with_read = %s: %v", value, err)
+			}
+			s.WaitTerminal(fresh.TurnID)
+			wantTurn(t, s.Turn(t, c, fresh.TurnID), engine.StateApproved, "all_approved")
+
+			read, err := s.tlSubmitPreset(c, "read", "reader", tlWorkspace(t), nil)
+			if err != nil {
+				t.Fatalf("reader submit: %v", err)
+			}
+			s.WaitTerminal(read.TurnID)
+			wantTurn(t, s.Turn(t, c, read.TurnID), engine.StateSoloComplete, "solo_ok")
+			conv := read.ConversationID
+
+			before := s.journalCount(t, `SELECT COUNT(*) FROM turns`)
+			_, err = s.tlSubmitPreset(c, "tainted", "webonly", "", &conv)
+			if value == "true" {
+				if err != nil {
+					t.Fatalf("web-only submit to a tainted conversation under true: %v", err)
+				}
+				return
+			}
+			we := wantRefusal(t, err, wire.ErrorCodeEgress)
+			if we.Participant == nil || *we.Participant != "reviewer" || we.Route == nil || *we.Route != "history" {
+				t.Fatalf("refusal = %+v, want participant reviewer, route history", we)
+			}
+			if n := s.journalCount(t, `SELECT COUNT(*) FROM turns`); n != before {
+				t.Fatalf("the refused submit created %d turns", n-before)
+			}
+		})
+	}
 }
