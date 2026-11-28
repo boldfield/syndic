@@ -148,9 +148,10 @@ func (r *Roster) grantsMCPWeb(set []string) bool {
 	return slices.ContainsFunc(r.mcpToolsOf(set), r.mcpToolIsWeb)
 }
 
-// webParticipants returns the participants given web, counting a web MCP tool
-// as web, author first.
-func (r *Roster) webParticipants(p Preset) []string {
+// WebParticipants returns the participants given web, counting both the literal
+// "web" tool and any web MCP grants (HTTP servers, or stdio servers with
+// network_allow), author first.
+func (r *Roster) WebParticipants(p Preset) []string {
 	return p.participantsWhere(func(set []string) bool {
 		return slices.Contains(set, "web") || r.grantsMCPWeb(set)
 	})
@@ -343,7 +344,7 @@ func (r *Roster) WebWithFileViolation(p Preset, tainted bool) []string {
 	if r.AllowWebWithFile(p) || (!tainted && !p.GrantsFileTools()) {
 		return nil
 	}
-	return r.webParticipants(p)
+	return r.WebParticipants(p)
 }
 
 // deliberateEgressView maps a deliberate preset onto the author-and-reviewers

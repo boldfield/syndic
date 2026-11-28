@@ -16,6 +16,7 @@ import (
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
+	wsmod "github.com/boldfield/syndic/internal/workspace"
 )
 
 // openTurn is the in-memory cache of the one turn that is not yet terminal.
@@ -405,7 +406,7 @@ func (e *Engine) Submit(req wire.SubmitRequest) (wire.SubmitReply, error) {
 			if e.roster != nil && e.roster.Tools != nil {
 				patterns = e.roster.Tools.ProtectedPaths
 			}
-			confined, err1 := e.openWorkspace(workspace, patterns)
+			confined, err1 := wsmod.OpenConfined(workspace, patterns)
 			if err1 != nil {
 				return err1
 			}

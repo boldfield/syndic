@@ -22,23 +22,46 @@ func attachmentEgressRefusal(r *config.Roster, eff config.Effective) *wire.Error
 
 	// Check destinations: every participant in the preset must be allowed for file egress.
 	// This is broader than the history rules - it applies to ALL participants, not just
-	// those reaching the turn through file content routes.
-	participants := make(map[string]bool)
-	participants[eff.Preset.Author] = true
-	for _, id := range eff.Preset.RequiredReviewers {
-		participants[id] = true
-	}
-	if eff.Preset.Mode == config.ModeDeliberate {
-		for _, id := range eff.Preset.Proposers {
-			participants[id] = true
-		}
-		for _, id := range eff.Preset.EffectiveRequiredReviewers() {
-			participants[id] = true
-		}
-		participants[eff.Preset.Integrator] = true
+	// those reaching the turn through file content routes. Collect participants in a
+	// consistent order: author first, then reviewers as listed, then deliberate roles.
+	var participants []string
+	seen := make(map[string]bool)
+
+	// Author first
+	if !seen[eff.Preset.Author] {
+		participants = append(participants, eff.Preset.Author)
+		seen[eff.Preset.Author] = true
 	}
 
-	for id := range participants {
+	// Then required reviewers
+	for _, id := range eff.Preset.RequiredReviewers {
+		if !seen[id] {
+			participants = append(participants, id)
+			seen[id] = true
+		}
+	}
+
+	// Deliberate-specific roles
+	if eff.Preset.Mode == config.ModeDeliberate {
+		for _, id := range eff.Preset.Proposers {
+			if !seen[id] {
+				participants = append(participants, id)
+				seen[id] = true
+			}
+		}
+		for _, id := range eff.Preset.EffectiveRequiredReviewers() {
+			if !seen[id] {
+				participants = append(participants, id)
+				seen[id] = true
+			}
+		}
+		if !seen[eff.Preset.Integrator] {
+			participants = append(participants, eff.Preset.Integrator)
+			seen[eff.Preset.Integrator] = true
+		}
+	}
+
+	for _, id := range participants {
 		if !r.FileEgressAllowed(id) {
 			return refuse(id)
 		}
@@ -46,9 +69,10 @@ func attachmentEgressRefusal(r *config.Roster, eff config.Effective) *wire.Error
 
 	// Check web with file: when allow_web_with_read is false, no participant with web is allowed.
 	// This applies regardless of whether the conversation was tainted or whether the preset
-	// grants read/write, because attachments are always file content.
+	// grants read/write, because attachments are always file content. This includes both
+	// the literal "web" tool and web MCP grants (HTTP servers, or stdio with network_allow).
 	if !r.AllowWebWithFile(eff.Preset) {
-		for _, id := range eff.Preset.WebParticipants() {
+		for _, id := range r.WebParticipants(eff.Preset) {
 			return refuse(id)
 		}
 	}

@@ -140,48 +140,51 @@ protected_paths = [".env*"]
 	}
 
 	preset := "solo"
-	// First, try to submit with a protected file (should fail).
+	// First, create a clean conversation without attachments.
 	req := wire.SubmitRequest{
 		SubmissionID: "s1",
 		Input:        "first question",
 		Preset:       &preset,
 		Workspace:    workspace,
-		Attachments:  []string{".env"},
+		Attachments:  nil,
 	}
-	_, err := h.Engine.Submit(req)
+	reply, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
+	conv := reply.ConversationID
+
+	// Now try to submit with a protected attachment to the same conversation (should fail).
+	// This tests that the refused submit doesn't create a turn or add taint to the conversation.
+	req.SubmissionID = "s2"
+	req.Input = "second question with attachment"
+	req.ConversationID = &conv
+	req.Attachments = []string{".env"}
+	_, err = h.Engine.Submit(req)
 	we := wantRefusal(t, err, wire.ErrorCodeAttachment)
 	if we.Reason == nil || *we.Reason != "protected" {
 		t.Fatalf("protected file should refuse: %+v", we)
 	}
 
-	// Now submit without attachments to create first turn.
-	req.SubmissionID = "s2"
-	req.Attachments = nil
-	reply, err := h.Engine.Submit(req)
-	if err != nil {
-		t.Fatalf("second submit: %v", err)
-	}
-	wantEnd(t, h, reply.TurnID, engine.StateSoloComplete, "solo_ok")
-	conv := reply.ConversationID
-
-	// Now submit another turn in the same conversation - should not be tainted by the failed attachment submit.
+	// Now submit another turn without attachments to the same conversation.
 	// This verifies that the failed submit did not add taint to the conversation.
 	req.SubmissionID = "s3"
 	req.Input = "third question"
-	req.ConversationID = &conv
+	req.Attachments = nil
 	reply2, err := h.Engine.Submit(req)
 	if err != nil {
-		t.Fatalf("third submit in same conversation: %v", err)
+		t.Fatalf("third submit: %v", err)
 	}
 	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
 
-	// A refused submit should create no turn, so only two turns should exist.
+	// Verify that only 2 turns were created (s2 was refused, so it didn't create a turn).
 	turns, err := h.Store.GetConversationTurns(conv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 2 {
-		t.Fatalf("turns = %d, expected 2 (failed submit creates no turn)", len(turns))
+		t.Fatalf("turns = %d, expected 2 (failed attachment submit creates no turn)", len(turns))
 	}
 }
 
@@ -405,4 +408,83 @@ func TestAttachmentHashBackwardCompatibility(t *testing.T) {
 	if row.SubmissionHash != wantHash {
 		t.Fatalf("hash = %q, want %q", row.SubmissionHash, wantHash)
 	}
+}
+
+func TestAttachmentUnauthorizedDestinationUnopenableFile(t *testing.T) {
+	rosterTOML := createUnauthorizedRoster()
+	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
+		"author":                {enginetest.Reply("answer one")},
+		"reviewer-unauthorized": {approveStep()},
+	})
+
+	workspace := t.TempDir()
+	// Create a directory instead of a file to make it unopenable
+	if err := os.Mkdir(filepath.Join(workspace, "data.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	preset := "review"
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "question",
+		Preset:       &preset,
+		Workspace:    workspace,
+		Attachments:  []string{"data.txt"},
+	}
+	_, err := h.Engine.Submit(req)
+	// Should be refused at policy step (egress/attachment) before trying to open the file
+	we := wantRefusal(t, err, wire.ErrorCodeEgress)
+	if we.Route == nil || *we.Route != "attachment" {
+		t.Fatalf("want egress/route attachment, got %+v", we)
+	}
+}
+
+func TestAttachmentLaterHistoryWebRuleAfterAttachment(t *testing.T) {
+	rosterTOML := createWebOnlyRoster()
+	h := enginetest.New(t, rosterTOML, map[string][]fake.Step{
+		"author":   {enginetest.Reply("answer one"), enginetest.Reply("answer two"), enginetest.Reply("answer three")},
+		"reviewer": {approveStep(), approveStep()},
+	})
+
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "data.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preset := "solo"
+	// First turn with an attachment (tool-free preset).
+	req := wire.SubmitRequest{
+		SubmissionID: "s1",
+		Input:        "first question",
+		Preset:       &preset,
+		Workspace:    workspace,
+		Attachments:  []string{"data.txt"},
+	}
+	reply1, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("first submit with attachment: %v", err)
+	}
+	wantEnd(t, h, reply1.TurnID, engine.StateSoloComplete, "solo_ok")
+	conv := reply1.ConversationID
+
+	// Second turn without attachment, to establish history
+	req.SubmissionID = "s2"
+	req.Input = "second question"
+	req.ConversationID = &conv
+	req.Attachments = nil
+	reply2, err := h.Engine.Submit(req)
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	wantEnd(t, h, reply2.TurnID, engine.StateSoloComplete, "solo_ok")
+
+	// Now try a webreview turn (web tool with allow_web_with_read=false)
+	// This should be refused because the conversation is tainted by the attachment
+	// and the preset grants web but allow_web_with_read is false
+	presetWeb := "webreview"
+	req.SubmissionID = "s3"
+	req.Input = "third question"
+	req.Preset = &presetWeb
+	_, err = h.Engine.Submit(req)
+	wantEgressRefusal(t, err, "reviewer", "history")
 }

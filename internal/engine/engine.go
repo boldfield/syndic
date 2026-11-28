@@ -22,7 +22,6 @@ import (
 	"github.com/boldfield/syndic/internal/tools"
 	"github.com/boldfield/syndic/internal/transport"
 	"github.com/boldfield/syndic/internal/wire"
-	"github.com/boldfield/syndic/internal/workspace"
 )
 
 // Turn modes, as written in a preset.
@@ -1141,9 +1140,4 @@ func (e *Engine) extractParticipantInfoFromManifest(raw json.RawMessage, partici
 		return group[i].Model < group[j].Model
 	})
 	return group, poolID, endpoint, model, nil
-}
-
-// openWorkspace opens a confined workspace with the given protected-path patterns.
-func (e *Engine) openWorkspace(root string, patterns []string) (*workspace.Confined, error) {
-	return workspace.OpenConfined(root, patterns)
 }
