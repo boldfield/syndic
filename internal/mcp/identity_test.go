@@ -19,9 +19,24 @@ func localInputs() IdentityInputs {
 	return IdentityInputs{EnvGenerations: map[string]string{"TOKEN": "g1"}, PolicyHash: "p1"}
 }
 
+// withServer fills the table-derived inputs from a loaded server table.
+func withServer(s config.MCPServer, in IdentityInputs) IdentityInputs {
+	in.Table = s
+	in.Local = s.Transport == config.MCPTransportStdio
+	in.EnvNames = nil
+	for n := range s.Env {
+		in.EnvNames = append(in.EnvNames, n)
+	}
+	in.AuthName = ""
+	if s.Auth != nil {
+		in.AuthName = s.Auth.Name
+	}
+	return in
+}
+
 func mustID(t *testing.T, s config.MCPServer, in IdentityInputs) string {
 	t.Helper()
-	id, err := ServerIdentity(s, in)
+	id, err := ServerIdentity(withServer(s, in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,13 +110,13 @@ func TestServerIdentityStableAcrossRefresh(t *testing.T) {
 }
 
 func TestServerIdentityMissingGeneration(t *testing.T) {
-	if _, err := ServerIdentity(localServer(), IdentityInputs{PolicyHash: "p"}); err == nil {
+	if _, err := ServerIdentity(withServer(localServer(), IdentityInputs{PolicyHash: "p"})); err == nil {
 		t.Error("missing env generation accepted")
 	}
-	if _, err := ServerIdentity(localServer(), IdentityInputs{EnvGenerations: map[string]string{"TOKEN": "g"}}); err == nil {
+	if _, err := ServerIdentity(withServer(localServer(), IdentityInputs{EnvGenerations: map[string]string{"TOKEN": "g"}})); err == nil {
 		t.Error("missing policy hash accepted")
 	}
-	if _, err := ServerIdentity(remoteServer(), IdentityInputs{}); err == nil {
+	if _, err := ServerIdentity(withServer(remoteServer(), IdentityInputs{})); err == nil {
 		t.Error("missing auth generation accepted")
 	}
 }
