@@ -47,7 +47,8 @@ func init() {
 	cover(presendPara, "`*.example.com` does not match the apex and `**.example.com` does", "TestPresend_AllowlistWildcards")
 	cover(presendPara, "an IP literal is refused when an allowlist is set", "TestPresend_AllowlistIPLiteral")
 	cover(presendPara, "a `web_search` query is checked by the canary and refereed, and the provider host is not resolved for a refused query", "TestPresend_SearchCheckedRefereedUnresolved")
-	cover(presendPara, "every refusal is journaled with the rule and the URL", "TestPresend_RefusalsJournaled")
+	cover(presendPara, "every web_search refusal is journaled with the rule and the query", "TestPresend_RefusalsJournaled")
+	cover(presendPara, "every web_fetch refusal, including a refused same-host redirect target, is journaled with the rule and the full URL", "TestPresend_FetchRefusalsJournaled")
 }
 
 // presendTrace is the ordered record of every effect of a fetch or a search:
@@ -293,10 +294,11 @@ func TestPresend_CanaryEncodingsSourcesPositions(t *testing.T) {
 					v := s.Screen(pos.url(enc.enc(src.secret)))
 					if enc.name == "percent" && pos.name == "hostname" {
 						// A percent escape is not a valid hostname byte: the
-						// URL does not parse, which is refused before the
-						// canary could look at it. Either way it is refused.
-						if v.Allowed {
-							t.Fatalf("verdict %+v, want refused", v)
+						// URL does not parse, which is refused by the shape
+						// rule before the canary could look at it.
+						presendWantRule(t, v, tools.RuleShape)
+						if !strings.Contains(v.Reason, "does not parse") {
+							t.Fatalf("reason %q, want the parse failure", v.Reason)
 						}
 						return
 					}
@@ -963,4 +965,11 @@ func TestPresend_RefusalsJournaled(t *testing.T) {
 			}
 		})
 	}
+}
+
+// web_fetch is not wired into the engine (engine/websearch.go strips it), so a
+// fetch refusal reaches no journal, and a refused same-host redirect target is
+// recorded nowhere: the call's arguments hold only the original URL.
+func TestPresend_FetchRefusalsJournaled(t *testing.T) {
+	gap(t, "web_fetch is not wired into the engine, so its refusals, and a refused redirect target's full URL, are not journaled")
 }
