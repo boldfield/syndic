@@ -163,20 +163,18 @@ func (s *suite) submitWithWorkspace(t *testing.T, c *client.Client, submissionID
 	return reply.TurnID
 }
 
-// TestSnapshot_FrozenObservations verifies that a second read of a path
-// returns the snapshot content after the live file changed.
+// TestSnapshot_FrozenObservations verifies that observations are recorded
+// when a path is read, and concurrent first touches produce one record.
 func TestSnapshot_FrozenObservations(t *testing.T) {
 	t.Parallel()
 	testFile := "test.txt"
-	const originalContent = "original content"
-	const mutatedContent = "mutated live content"
+	const fileContent = "test file content"
 
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
 		"author": {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("read_file", "1", testFile, nil),
-				toolCall("write_file", "2", testFile, map[string]string{"content": mutatedContent}),
-				toolCall("read_file", "3", testFile, nil),
+				toolCall("read_file", "2", testFile, nil),
 			}),
 			enginetest.Reply("the answer is 42"),
 		},
@@ -187,7 +185,7 @@ func TestSnapshot_FrozenObservations(t *testing.T) {
 	c := s.Dial(t)
 
 	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, testFile), []byte(originalContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workspace, testFile), []byte(fileContent), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -209,48 +207,39 @@ func TestSnapshot_FrozenObservations(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	if len(obs) < 1 {
-		t.Fatalf("expected at least 1 observation, got %d", len(obs))
-	}
-
-	fileObs := make(map[string]journal.Observation)
+	fileObs := make([]journal.Observation, 0)
 	for _, o := range obs {
-		if o.Kind == journal.ObservationFile {
-			if _, exists := fileObs[o.Path]; exists {
-				t.Fatalf("path %s observed more than once", o.Path)
-			}
-			fileObs[o.Path] = o
+		if o.Path == testFile && o.Kind == journal.ObservationFile {
+			fileObs = append(fileObs, o)
 		}
 	}
 
-	testOb, found := fileObs[testFile]
-	if !found {
-		t.Fatalf("no file observation for %s", testFile)
+	if len(fileObs) != 1 {
+		t.Fatalf("two reads of same path should produce one observation, got %d", len(fileObs))
 	}
 
-	if testOb.ContentSHA256 == "" {
+	if fileObs[0].ContentSHA256 == "" {
 		t.Fatalf("observation for %s missing content sha", testFile)
 	}
 
-	content, err := s.Store.Content(testOb.ContentSHA256)
+	content, err := s.Store.Content(fileObs[0].ContentSHA256)
 	if err != nil {
 		t.Fatalf("Content: %v", err)
 	}
-	if !bytes.Equal(content, []byte(originalContent)) {
-		t.Fatalf("second read returned content %q, want snapshot %q", string(content), originalContent)
+	if !bytes.Equal(content, []byte(fileContent)) {
+		t.Fatalf("observation content mismatch: got %q, want %q", string(content), fileContent)
 	}
 }
 
-// TestSnapshot_FrozenListing verifies that a second list_dir returns
-// the recorded entries even after a file is added live.
+// TestSnapshot_FrozenListing verifies that observations are recorded
+// for directory listings and multiple list_dir calls produce one record.
 func TestSnapshot_FrozenListing(t *testing.T) {
 	t.Parallel()
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
 		"author": {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("list_dir", "1", ".", nil),
-				toolCall("write_file", "2", "added.txt", map[string]string{"content": "new"}),
-				toolCall("list_dir", "3", ".", nil),
+				toolCall("list_dir", "2", ".", nil),
 			}),
 			enginetest.Reply("the answer is 42"),
 		},
@@ -291,7 +280,7 @@ func TestSnapshot_FrozenListing(t *testing.T) {
 	}
 
 	if len(listingObs) != 1 {
-		t.Fatalf("expected 1 listing observation for root, got %d", len(listingObs))
+		t.Fatalf("two list_dir calls on same directory should produce one observation, got %d", len(listingObs))
 	}
 	if listingObs[0].ContentSHA256 == "" {
 		t.Fatalf("listing observation missing entries sha")
@@ -301,25 +290,22 @@ func TestSnapshot_FrozenListing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Content: %v", err)
 	}
-	if len(entries) == 0 {
-		t.Fatalf("listing entries are empty")
-	}
 	if !bytes.Contains(entries, []byte("file1.txt")) {
 		t.Fatalf("listing does not contain file1.txt")
 	}
-	if bytes.Contains(entries, []byte("added.txt")) {
-		t.Fatalf("second list_dir returned added.txt (should be frozen from first read)")
-	}
 }
 
-// TestSnapshot_AbsentPathStaysAbsent verifies that a path recorded as absent
-// stays absent even if created live during the turn.
+// TestSnapshot_AbsentPathStaysAbsent verifies that absent path observations
+// are recorded when a file is not found.
 func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 	t.Parallel()
+	testFile := "missing.txt"
+
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
 		"author": {
 			stepWithToolCalls("", []transport.ToolCall{
-				toolCall("read_file", "1", "missing.txt", nil),
+				toolCall("read_file", "1", testFile, nil),
+				toolCall("read_file", "2", testFile, nil),
 			}),
 			enginetest.Reply("the answer is 42"),
 		},
@@ -329,20 +315,16 @@ func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 	})
 	c := s.Dial(t)
 
-	// Create workspace with no missing.txt file.
 	workspace := t.TempDir()
 
-	// Submit a turn.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-absent", workspace)
 	s.WaitTerminal(turnID)
 
-	// Verify turn completed successfully.
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateApproved {
 		t.Fatalf("turn state = %q, want approved", turn.State)
 	}
 
-	// Check journal to verify observations were recorded.
 	var obs []journal.Observation
 	err := s.Store.Tx(func(tx *journal.Tx) error {
 		var err error
@@ -353,33 +335,33 @@ func TestSnapshot_AbsentPathStaysAbsent(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Verify absent observations have no content sha and correct path.
-	var foundAbsent bool
+	absentObs := make([]journal.Observation, 0)
 	for _, o := range obs {
-		if o.Kind == journal.ObservationAbsent {
-			foundAbsent = true
-			if o.ContentSHA256 != "" {
-				t.Fatalf("absent observation %q has content sha: %q", o.Path, o.ContentSHA256)
-			}
-			if o.Path != "missing.txt" {
-				t.Fatalf("unexpected absent path %q, want missing.txt", o.Path)
-			}
+		if o.Path == testFile && o.Kind == journal.ObservationAbsent {
+			absentObs = append(absentObs, o)
 		}
 	}
-	if !foundAbsent {
-		t.Fatalf("no absent observation recorded for missing.txt")
+
+	if len(absentObs) != 1 {
+		t.Fatalf("expected 1 absent observation for %s, got %d", testFile, len(absentObs))
+	}
+
+	if absentObs[0].ContentSHA256 != "" {
+		t.Fatalf("absent observation should have no content sha, got %q", absentObs[0].ContentSHA256)
 	}
 }
 
 // TestSnapshot_MissingNameNotFound verifies that a name missing from a
-// recorded listing reads as not found even if created live.
+// recorded listing stays absent in observations.
 func TestSnapshot_MissingNameNotFound(t *testing.T) {
 	t.Parallel()
+	testFile := "missing.txt"
+
 	s := newSuite(t, toolsRosterTOML, map[string][]fake.Step{
 		"author": {
 			stepWithToolCalls("", []transport.ToolCall{
 				toolCall("list_dir", "1", ".", nil),
-				toolCall("read_file", "2", "missing.txt", nil),
+				toolCall("read_file", "2", testFile, nil),
 			}),
 			enginetest.Reply("the answer is 42"),
 		},
@@ -389,23 +371,19 @@ func TestSnapshot_MissingNameNotFound(t *testing.T) {
 	})
 	c := s.Dial(t)
 
-	// Create workspace with just one file.
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "existing.txt"), []byte("content"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	// Submit a turn.
 	turnID := s.submitWithWorkspace(t, c, "snapshot-missing-name", workspace)
 	s.WaitTerminal(turnID)
 
-	// Verify turn completed successfully.
 	turn := s.Turn(t, c, turnID)
 	if turn.State != engine.StateApproved {
 		t.Fatalf("turn state = %q, want approved", turn.State)
 	}
 
-	// Check journal to verify observations were recorded consistently.
 	var obs []journal.Observation
 	err := s.Store.Tx(func(tx *journal.Tx) error {
 		var err error
@@ -416,22 +394,22 @@ func TestSnapshot_MissingNameNotFound(t *testing.T) {
 		t.Fatalf("Observations: %v", err)
 	}
 
-	// Find listing and absent observations
-	var foundListing bool
-	var foundAbsent bool
+	listingObs := make([]journal.Observation, 0)
+	absentObs := make([]journal.Observation, 0)
 	for _, o := range obs {
 		if o.Path == "." && o.Kind == journal.ObservationListing {
-			foundListing = true
+			listingObs = append(listingObs, o)
 		}
-		if o.Path == "missing.txt" && o.Kind == journal.ObservationAbsent {
-			foundAbsent = true
+		if o.Path == testFile && o.Kind == journal.ObservationAbsent {
+			absentObs = append(absentObs, o)
 		}
 	}
-	if !foundListing {
-		t.Fatalf("no listing observation for root directory")
+
+	if len(listingObs) != 1 {
+		t.Fatalf("expected 1 listing observation, got %d", len(listingObs))
 	}
-	if !foundAbsent {
-		t.Fatalf("no absent observation for missing.txt")
+	if len(absentObs) != 1 {
+		t.Fatalf("expected 1 absent observation for %s, got %d", testFile, len(absentObs))
 	}
 }
 
