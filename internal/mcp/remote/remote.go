@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/boldfield/syndic/internal/mcp"
 	"github.com/boldfield/syndic/internal/tools"
 )
 
@@ -46,6 +47,9 @@ type Config struct {
 	// AuthOrigins are origins the login may use; each has the server's own
 	// exceptions and no others.
 	AuthOrigins []string
+	// Credential is the server's static credential; nil sends none. It is
+	// attached to requests to the configured origin only.
+	Credential *mcp.Credential
 }
 
 // Transport is the http.RoundTripper for one remote server. Unlike a
@@ -55,6 +59,7 @@ type Transport struct {
 	// own holds the hosts the roster names: the url's and each auth origin's.
 	own   map[string]bool
 	allow []netip.Prefix
+	cred  *mcp.Credential
 
 	// Test seams; unexported so production code cannot weaken the rules.
 	resolver  tools.Resolver
@@ -66,7 +71,7 @@ type Transport struct {
 // transport. An address_allow range outside RFC 1918 and the unique-local
 // range is refused, as the load rule refuses it.
 func NewTransport(cfg Config) (*Transport, error) {
-	t := &Transport{own: map[string]bool{}, resolver: net.DefaultResolver}
+	t := &Transport{own: map[string]bool{}, resolver: net.DefaultResolver, cred: cfg.Credential}
 	for _, raw := range append([]string{cfg.URL}, cfg.AuthOrigins...) {
 		u, err := url.Parse(raw)
 		if err != nil || u.Hostname() == "" {
@@ -126,6 +131,20 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if req.URL.User != nil {
 		return nil, refuseRemote("destination carries credentials in its URL")
+	}
+	if t.cred != nil {
+		req = req.Clone(req.Context())
+		// Drop any credential-bearing header the caller set, then attach the
+		// credential only when the destination is the configured origin.
+		// The headers are dropped on every request, auth origins included;
+		// that holds because static auth and login are not configured
+		// together for one server.
+		for k := range t.cred.HeaderFor(t.cred.Origin()) {
+			req.Header.Del(k)
+		}
+		for k, v := range t.cred.HeaderFor(req.URL.String()) {
+			req.Header[http.CanonicalHeaderKey(k)] = v
+		}
 	}
 	addrs, err := t.resolve(req.Context(), host)
 	if err != nil {

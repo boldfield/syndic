@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/boldfield/syndic/internal/mcp"
 	"github.com/boldfield/syndic/internal/tools"
 )
 
@@ -152,5 +153,40 @@ func TestBareAddressAllow(t *testing.T) {
 	// A bare address outside the private ranges is still refused.
 	if _, err := NewTransport(Config{URL: "https://x.example.com/", AddressAllow: []string{"169.254.1.1"}}); err == nil {
 		t.Fatal("bare link-local address_allow accepted")
+	}
+}
+
+func TestCredentialSentToConfiguredOriginOnly(t *testing.T) {
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	cred, err := mcp.ParseStaticCredential(srv.URL, "tok-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := newTest(t, Config{URL: srv.URL, Credential: cred}, nil, srv.Listener)
+	resp, err := get(t, tr, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got.Load() != "Bearer tok-123" {
+		t.Fatalf("configured origin got %q", got.Load())
+	}
+
+	// Another origin, which the test listener also serves, gets nothing, and a
+	// caller-set credential header is dropped.
+	got.Store("unset")
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/x", nil)
+	req.Header.Set("Authorization", "Bearer smuggled")
+	resp2, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	if got.Load() != "" {
+		t.Fatalf("other origin got Authorization %q", got.Load())
 	}
 }
