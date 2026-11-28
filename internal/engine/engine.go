@@ -162,6 +162,10 @@ type Options struct {
 	// wait inside an effect. It exists for tests of a cancel that lands while
 	// a call is executing; the daemon never sets it.
 	BeforeToolEffect func(turnID, attemptID, name string)
+	// BeforeApply, when set, is called once an apply is open, with the engine
+	// unlocked, before it classifies or writes anything. It exists for tests
+	// of what a request made during an apply sees; the daemon never sets it.
+	BeforeApply func(turnID string)
 
 	// SearchProviders are the web_search provider implementations this build
 	// supports; [tools.web.search].provider names one by tools.SearchProvider
@@ -200,6 +204,7 @@ type Engine struct {
 	newAdapter      func(p config.Participant, ep config.EndpointProfile) (transport.Adapter, string, error)
 	changeLines     func(transport.CompleteResult) []string // nil means authorChangeLines
 	beforeEffect    func(turnID, attemptID, name string)    // nil means no wait inside an effect
+	beforeApply     func(turnID string)                     // nil means no wait before an apply
 	searchProviders map[string]tools.SearchProvider         // injected web_search providers by name; see Options.SearchProviders
 	searchNet       *tools.SearchNetwork                    // nil means the system resolver and dialer
 	secrets         config.SecretResolver
@@ -231,6 +236,7 @@ type Engine struct {
 	runFirstSeq   int64
 	startedAt     time.Time
 	open          *openTurn
+	applying      string // the turn whose change set an apply is writing, or empty
 	running       map[string]bool
 	inflight      map[string]int // dispatches holding a pool slot, per participant
 	queued        map[string]bool
@@ -291,6 +297,7 @@ func New(o Options) (*Engine, error) {
 		newAdapter:      o.NewAdapter,
 		changeLines:     o.AuthorChangeLines,
 		beforeEffect:    o.BeforeToolEffect,
+		beforeApply:     o.BeforeApply,
 		searchProviders: make(map[string]tools.SearchProvider, len(o.SearchProviders)),
 		searchNet:       o.SearchNetwork,
 		secrets:         o.Secrets,
@@ -692,6 +699,11 @@ func (e *Engine) Start() error {
 	err = e.loadHoldsIntoMemory()
 	if err != nil {
 		return fmt.Errorf("engine: load holds: %w", err)
+	}
+
+	// Classify applies a crash left unfinished; this writes no workspace file.
+	if err := e.recoverApplies(); err != nil {
+		return fmt.Errorf("engine: recover applies: %w", err)
 	}
 
 	e.started = true
