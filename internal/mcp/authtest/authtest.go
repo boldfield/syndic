@@ -59,6 +59,9 @@ type Config struct {
 	// protected-resource metadata lists.
 	Issuer    string
 	PRMIssuer string
+	// ASMetaIssuer, when set, overrides only the issuer field the
+	// authorization-server metadata document carries.
+	ASMetaIssuer string
 	// IssuerPath is appended to the server's URL for the default issuer.
 	IssuerPath string
 	// ChallengeMetadata makes a 401 carry resource_metadata.
@@ -391,8 +394,12 @@ func (s *Server) serveASMeta(w http.ResponseWriter) {
 	if !s.cfg.NoS256 {
 		methods = []string{"S256", "plain"}
 	}
+	metaIssuer := s.issuerLocked()
+	if s.cfg.ASMetaIssuer != "" {
+		metaIssuer = s.cfg.ASMetaIssuer
+	}
 	doc := map[string]any{
-		"issuer":                                         s.issuerLocked(),
+		"issuer":                                         metaIssuer,
 		"authorization_endpoint":                         baseOr(s.cfg.AuthorizationBase, s.URL) + AuthorizePath,
 		"token_endpoint":                                 baseOr(s.cfg.TokenBase, s.URL) + TokenPath,
 		"response_types_supported":                       []string{"code"},
