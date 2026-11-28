@@ -843,24 +843,6 @@ func TestStatusSurfacesRetryCommand(t *testing.T) {
 	}
 }
 
-func TestDeliberatePresetRefusedAtSubmit(t *testing.T) {
-	toml := strings.ReplaceAll(enginetest.RosterTOML, `eligible_roles = ["author"]`, `eligible_roles = ["author", "reviewer"]`)
-	toml = strings.ReplaceAll(toml, `eligible_roles = ["reviewer"]`, `eligible_roles = ["author", "reviewer"]`)
-	toml += `
-[presets.deliberate]
-mode = "deliberate"
-proposers = ["author", "reviewer"]
-integrator = "author"
-`
-	h := enginetest.New(t, toml, nil)
-	name := "deliberate"
-	_, err := h.Engine.Submit(wire.SubmitRequest{SubmissionID: "s1", Input: "q", Preset: &name})
-	we := wantRefusal(t, err, wire.ErrorCodePresetInvalid)
-	if we.Detail == nil || *we.Detail != "deliberate_mode_unsupported" {
-		t.Fatalf("detail = %v", we.Detail)
-	}
-}
-
 // A deliberate preset whose routes the routing policy forbids is refused when
 // the engine reads the roster, and nothing is dispatched for it.
 func TestDeliberateRoutingViolationRefusedBeforeDispatch(t *testing.T) {
