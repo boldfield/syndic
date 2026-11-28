@@ -87,3 +87,12 @@ func TestReadNoRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestReadServerWaitDateSubMillisecondPast(t *testing.T) {
+	date := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	h := hdr("Retry-After", date.Format(http.TimeFormat))
+	got := readServerWait(503, h, date.Add(500*time.Microsecond))
+	if got != (transport.ServerWait{}) {
+		t.Fatalf("date past by 500µs: got %+v, want absent", got)
+	}
+}

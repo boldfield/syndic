@@ -72,6 +72,9 @@ func parseRetryAfter(v string, now time.Time) transport.ServerWait {
 	if err != nil {
 		return transport.ServerWait{}
 	}
+	if t.Before(now) {
+		return transport.ServerWait{}
+	}
 	// A date has a four-digit year, so the millisecond difference cannot overflow.
 	ms := t.UnixMilli() - now.UnixMilli()
 	if ms < 0 {
