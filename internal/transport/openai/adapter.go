@@ -378,7 +378,13 @@ func (a *Adapter) ProbeWithOptions(ctx context.Context, endpoint, model string, 
 		if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
 			return record, err
 		}
-		return record, fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+		incomplete := fmt.Errorf("%w: missing ReportedModel or MaxTokensField", transport.ErrIncompleteProbe)
+		if record.MaxTokensField == "" {
+			// The max-tokens phase received responses and none worked: report
+			// the last of them, so its class and wait reach the caller.
+			return record, stepError(probeCtx, incomplete, rawSteps, "max_completion_tokens_retry", "max_completion_tokens", "max_tokens_retry", "max_tokens")
+		}
+		return record, incomplete
 	}
 
 	if err := scrubAndStore(&record, rawSteps, resolvedSecrets); err != nil {
@@ -453,6 +459,8 @@ func (a *Adapter) seen(ctx context.Context, opts transport.ProbeOptions, step st
 	}
 	if readErr != nil {
 		in.BodyRead = transport.BodyReset
+	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(body) {
+		in.BodyRead = transport.BodyUnparsable
 	}
 	r := transport.ProbeResponse{Step: step, Status: resp.StatusCode, FailureClass: transport.Classify(in)}
 	if r.FailureClass != transport.FailureClassNone {

@@ -79,3 +79,58 @@ func TestProbeStepErrorCarriesResponseClass(t *testing.T) {
 		t.Errorf("got class %q noRetry %v status %d", pe.FailureClass, pe.NoRetry, pe.Status)
 	}
 }
+
+func TestProbeIncompleteReportsLastMaxTokensResponseClass(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	adapter := New(config.EndpointProfile{Name: "test", BaseURL: server.URL}, &mockResolver{secret: "test"})
+	_, err := adapter.ProbeWithOptions(context.Background(), "test", "gpt-4", transport.ProbeOptions{Timeout: 10 * time.Second})
+
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a ProbeStepError", err)
+	}
+	if !errors.Is(err, transport.ErrIncompleteProbe) {
+		t.Errorf("error %v is not ErrIncompleteProbe", err)
+	}
+	if pe.FailureClass != transport.FailureClassThrottled {
+		t.Errorf("class %q, want throttled", pe.FailureClass)
+	}
+	if want := (transport.ServerWait{Kind: transport.ServerWaitDuration, Millis: 3000}); pe.ServerWait != want {
+		t.Errorf("wait %+v, want %+v", pe.ServerWait, want)
+	}
+}
+
+func TestProbeUnparsableSuccessBodyIsBadResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer server.Close()
+
+	adapter := New(config.EndpointProfile{Name: "test", BaseURL: server.URL}, &mockResolver{secret: "test"})
+	var first transport.ProbeResponse
+	opts := transport.ProbeOptions{
+		Timeout: 10 * time.Second,
+		AfterResponse: func(r transport.ProbeResponse) bool {
+			first = r
+			return false
+		},
+	}
+	_, err := adapter.ProbeWithOptions(context.Background(), "test", "gpt-4", opts)
+
+	var pe *transport.ProbeStepError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error %v is not a ProbeStepError", err)
+	}
+	if first.FailureClass != transport.FailureClassBadResponse || pe.FailureClass != transport.FailureClassBadResponse {
+		t.Errorf("hook class %q, error class %q, want bad_response", first.FailureClass, pe.FailureClass)
+	}
+}
