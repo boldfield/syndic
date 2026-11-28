@@ -265,6 +265,19 @@ type ProbeOptions struct {
 	// It allows the engine to journal the probe request before dispatch and distinguish
 	// ErrNotSent (pre-send failures) from other errors.
 	BeforeSend func(*ProbeRequest) error
+	// AfterResponse is an optional callback the adapter calls after each probe
+	// response and before the next probe request. It returns false to refuse
+	// the next request; the probe then stops with that step's error.
+	AfterResponse func(ProbeResponse) bool
+}
+
+// ProbeResponse is what AfterResponse is told of one probe response.
+type ProbeResponse struct {
+	Step         string
+	Status       int
+	FailureClass FailureClass
+	ServerWait   ServerWait
+	NoRetry      bool
 }
 
 // Adapter is the interface that every participant route implements.
