@@ -430,3 +430,16 @@ func TestStderrScrubbed(t *testing.T) {
 		t.Fatalf("stderr = %q", got)
 	}
 }
+
+// A secret split by the stderr bound leaves no prefix behind.
+func TestStderrSecretCrossingBoundIsNotLeaked(t *testing.T) {
+	l := mcp.NewScrubList()
+	l.AddEnv(map[string]string{"K": "SUPERSECRETVALUE1234"})
+	s := wire.NewStderrSink(20)
+	s.SetScrub(func(b []byte) []byte { out, _ := l.ScrubBytes(b); return out })
+	s.SetTailGuard(l.PartialTail)
+	_, _ = s.Write([]byte("error: SUPERSECRETVALUE1234\n"))
+	if got := string(s.Bytes()); strings.Contains(got, "SUPER") {
+		t.Fatalf("leaked a partial secret: %q", got)
+	}
+}

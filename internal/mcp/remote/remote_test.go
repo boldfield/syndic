@@ -176,15 +176,17 @@ func TestCredentialSentToConfiguredOriginOnly(t *testing.T) {
 		t.Fatalf("configured origin got %q", got.Load())
 	}
 
-	// Another origin gets nothing, and a caller-set credential header is dropped.
+	// Another origin, which the test listener also serves, gets nothing, and a
+	// caller-set credential header is dropped.
 	got.Store("unset")
-	req, _ := http.NewRequest(http.MethodGet, "http://localhost:1/x", nil)
+	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/x", nil)
 	req.Header.Set("Authorization", "Bearer smuggled")
-	tr2, _ := newTest(t, Config{URL: srv.URL, Credential: cred}, nil, srv.Listener)
-	if resp, err := tr2.RoundTrip(req); err == nil {
-		_ = resp.Body.Close()
+	resp2, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got.Load() == "Bearer tok-123" {
-		t.Fatal("credential reached another origin")
+	_ = resp2.Body.Close()
+	if got.Load() != "" {
+		t.Fatalf("other origin got Authorization %q", got.Load())
 	}
 }

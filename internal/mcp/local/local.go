@@ -77,6 +77,7 @@ func New(c Config) *mcp.Instances {
 			sink := wire.NewStderrSink(c.StderrLimit)
 			if c.Scrub != nil {
 				sink.SetScrub(func(b []byte) []byte { out, _ := c.Scrub.ScrubBytes(b); return out })
+				sink.SetTailGuard(c.Scrub.PartialTail)
 			}
 			return sink
 		},

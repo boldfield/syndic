@@ -210,5 +210,23 @@ func (l *ScrubList) ScrubBytes(b []byte) ([]byte, int) {
 	return []byte(s), n
 }
 
+// PartialTail returns the length of the longest suffix of b that is a proper
+// prefix of a listed value. Output cut at a bound can end in such a prefix,
+// which no longer matches and so would survive Scrub.
+func (l *ScrubList) PartialTail(b []byte) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	best := 0
+	for v := range l.values {
+		for n := len(v) - 1; n > best; n-- {
+			if n <= len(b) && string(b[len(b)-n:]) == v[:n] {
+				best = n
+				break
+			}
+		}
+	}
+	return best
+}
+
 // Origin returns the configured origin the credential is scoped to.
 func (c *Credential) Origin() string { return c.origin }

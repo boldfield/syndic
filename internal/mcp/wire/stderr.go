@@ -12,6 +12,7 @@ type StderrSink struct {
 	kept    []byte
 	dropped int64
 	scrub   func([]byte) []byte
+	tail    func([]byte) int
 }
 
 // NewStderrSink returns a sink that keeps at most limit bytes; a limit of zero
@@ -44,14 +45,28 @@ func (s *StderrSink) SetScrub(f func([]byte) []byte) {
 	s.scrub = f
 }
 
+// SetTailGuard sets a function that reports how many trailing bytes of its
+// argument begin a value the scrub would remove. When output was dropped at the
+// bound, Bytes cuts that many bytes, so a value split by the bound leaves no
+// prefix behind.
+func (s *StderrSink) SetTailGuard(f func([]byte) int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tail = f
+}
+
 // Bytes returns a copy of what was kept, scrubbed when a scrub is set.
 func (s *StderrSink) Bytes() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.scrub != nil {
-		return s.scrub(append([]byte(nil), s.kept...))
+	out := append([]byte(nil), s.kept...)
+	if s.tail != nil && s.dropped > 0 {
+		out = out[:len(out)-s.tail(out)]
 	}
-	return append([]byte(nil), s.kept...)
+	if s.scrub != nil {
+		return s.scrub(out)
+	}
+	return out
 }
 
 // Dropped returns how many bytes were dropped past the bound.
